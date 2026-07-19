@@ -1,0 +1,53 @@
+# Markdown linting rules
+# Reference: https://github.com/DavidAnson/markdownlint/blob/main/schema/.markdownlint.yaml
+
+# Default state for all rules
+default: true
+
+# Rules that are disabled by default
+MD013: false  # line-length
+MD024: false  # multiple headings with same content
+MD033: false  # inline-html
+MD041: false  # first-line-heading
+MD060: false  # table-column-style (repo uses compact |---|---| tables throughout)
+
+# Enable specific rules
+MD002: true   # first-heading-h1
+MD003: true   # heading-style
+MD004: true   # unordered-list-style
+MD005: true   # list-indent
+MD006: true   # ul-start-left
+MD007: true   # ul-indent
+MD009: true   # trailing-spaces
+MD010: true   # hard-tabs
+MD011: true   # reversed-link-syntax
+MD012: true   # multiple-blanks
+MD014: true   # commands-show-output
+MD018: true   # no-missing-space-atx
+MD019: true   # no-multiple-space-atx
+MD020: true   # no-missing-space-closed-atx
+MD021: true   # no-multiple-space-closed-atx
+MD022: true   # blanks-around-headings
+MD023: true   # heading-start-left
+MD025: true   # single-h1
+MD026: true   # no-trailing-punctuation
+MD027: true   # no-multiple-space-blockquote
+MD028: true   # blank-line-closed
+MD029: true   # ol-prefix
+MD030: true   # spaces-after-list-marker
+MD031: true   # blanks-around-fences
+MD032: true   # blanks-around-lists
+MD034: true   # no-bare-urls
+MD035: true   # hr-style
+MD036: true   # no-emphasis-as-heading
+MD037: true   # no-space-in-emphasis
+MD038: true   # no-space-in-code
+MD039: true   # no-space-in-links
+MD040: true   # fenced-code-language
+MD042: true   # no-empty-links
+MD043: true   # required-headings
+MD044: true   # no-invalid-url
+MD045: true   # no-alt-text
+MD046: true   # fenced-code-language
+MD047: true   # single-trailing-newline
+MD048: true   # code-fence-style

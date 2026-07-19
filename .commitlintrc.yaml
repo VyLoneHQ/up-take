@@ -1,0 +1,19 @@
+# Commitlint configuration for conventional commits
+# Reference: https://commitlint.js.org/#/reference-configuration
+
+extends:
+  - '@commitlint/config-conventional'
+
+rules:
+  body-max-line-length:
+    - 2
+    - always
+    - 100
+  footer-max-line-length:
+    - 2
+    - always
+    - 100
+  header-max-length:
+    - 2
+    - always
+    - 100
