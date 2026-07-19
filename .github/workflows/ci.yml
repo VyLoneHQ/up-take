@@ -1,0 +1,169 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A new push to a branch makes the in-flight run obsolete. Windows Tauri builds
+# are slow enough that queueing them up serially is a real cost.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Frontend: lint, type-check, unit tests. Runs on Linux — no Windows APIs are
+  # involved and the runner is several times faster.
+  # ---------------------------------------------------------------------------
+  web:
+    name: Web (lint, types, tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Biome (format + lint)
+        run: pnpm lint
+
+      - name: Type-check (svelte-check)
+        run: pnpm check
+
+      - name: Unit tests
+        run: pnpm test
+
+  # ---------------------------------------------------------------------------
+  # Rust: format, lint, test. Windows because uptake-capture and the window
+  # layer are Windows-only — checking on Linux would not compile the code that
+  # actually ships.
+  # ---------------------------------------------------------------------------
+  rust:
+    name: Rust (fmt, clippy, test)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # The toolchain version comes from rust-toolchain.toml; rustup honours it
+      # automatically. Components (clippy, rustfmt) are declared there too.
+      - name: Show toolchain
+        run: rustc --version && cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: cargo fmt
+        working-directory: src-tauri
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        working-directory: src-tauri
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: cargo test
+        working-directory: src-tauri
+        run: cargo test --all-features
+
+  # ---------------------------------------------------------------------------
+  # Supply chain: licence policy and security advisories.
+  #
+  # This is the job that keeps UP-TAKE distributable under GPL-3.0. deny.toml
+  # is an allow-list, so any dependency introducing an incompatible licence —
+  # AGPL-3.0 in particular — fails here. See MASTER-PLAN R-3.
+  # ---------------------------------------------------------------------------
+  supply-chain:
+    name: Supply chain (deny, audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny,cargo-audit
+
+      - name: cargo deny (licences, advisories, bans, sources)
+        run: cargo deny --manifest-path src-tauri/Cargo.toml --config deny.toml check
+
+      - name: cargo audit
+        run: cargo audit --file src-tauri/Cargo.lock
+
+  # ---------------------------------------------------------------------------
+  # Build the installer and publish an SBOM. Unsigned for now — code signing
+  # lands in Phase 3 once SignPath approval is in place.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build (Windows, unsigned)
+    runs-on: windows-latest
+    needs: [web, rust, supply-chain]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build application
+        run: pnpm tauri build
+
+      # cargo-sbom publishes no Windows binary, so it is compiled here and
+      # cached on its pinned version.
+      - name: Cache cargo-sbom
+        id: cache-sbom
+        uses: actions/cache@v6
+        with:
+          path: ~/.cargo/bin/cargo-sbom.exe
+          key: cargo-sbom-0.10.0-${{ runner.os }}
+
+      - name: Install cargo-sbom
+        if: steps.cache-sbom.outputs.cache-hit != 'true'
+        run: cargo install --locked cargo-sbom@0.10.0
+
+      # bash, not pwsh: PowerShell redirection can re-encode stdout, and the
+      # SBOM has to stay valid UTF-8 JSON.
+      - name: Generate SBOM (CycloneDX)
+        working-directory: src-tauri
+        shell: bash
+        run: cargo sbom --output-format cyclone_dx_json_1_6 > ../up-take-sbom.cdx.json
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v7
+        with:
+          name: sbom-cyclonedx
+          path: up-take-sbom.cdx.json
+          if-no-files-found: error
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v7
+        with:
+          name: up-take-windows-unsigned
+          path: |
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
