@@ -1,0 +1,84 @@
+# cargo-deny configuration — supply-chain and licence policy.
+#
+# UP-TAKE ships under GPL-3.0-or-later. Every dependency must therefore carry a
+# licence that is compatible with distributing the combined work under GPL-3.
+# The allow-list below is exhaustive: any licence not named here fails CI.
+#
+# In particular this blocks AGPL-3.0, whose network-use clause would propagate
+# to UP-TAKE itself. See MASTER-PLAN R-3.
+#
+# Run locally with: cargo deny check
+
+[graph]
+# UP-TAKE is a Windows-only application. Checking other targets would flag
+# dependencies that are never compiled into a shipped artifact.
+targets = ["x86_64-pc-windows-msvc"]
+all-features = false
+
+# ---------------------------------------------------------------------------
+
+[advisories]
+# Fail on any crate with a security advisory or that has been yanked.
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+
+# "unmaintained" advisories are only a hard failure for crates we depend on
+# directly. As of 2026-07-19 the rust-unic family (RUSTSEC-2025-0098) is
+# flagged unmaintained and reaches us transitively via tauri-utils ->
+# urlpattern, with no upgrade available. Failing CI on a dependency we cannot
+# fix trains people to ignore the check. Vulnerability advisories remain a hard
+# failure at any depth.
+unmaintained = "workspace"
+
+# Advisories consciously accepted go here, each with a reason and a date.
+ignore = []
+
+# ---------------------------------------------------------------------------
+
+[licenses]
+# GPL-3-compatible licences only.
+allow = [
+  # Our own crates
+  "GPL-3.0",
+  "GPL-3.0-or-later",
+  # Permissive — unambiguously GPL-compatible
+  "MIT",
+  "MIT-0",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "BSL-1.0",
+  "CC0-1.0",
+  "Unlicense",
+  "0BSD",
+  # Unicode data licences used by the ICU crates
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  # Weak/file-level copyleft — GPL-compatible when combined
+  "MPL-2.0",
+]
+
+# A licence must be identified with high confidence; a fuzzy match is treated
+# as unknown and therefore fails.
+confidence-threshold = 0.93
+
+# Per-crate exceptions. Keep this list empty if at all possible — every entry
+# is a licence obligation someone has to remember at release time.
+exceptions = []
+
+# ---------------------------------------------------------------------------
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+# ---------------------------------------------------------------------------
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
