@@ -1,0 +1,77 @@
+name: Bug report
+description: Something in UP-TAKE isn't working as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. The overlay behaves differently depending on your
+        monitor setup, DPI scaling, and GPU — those three fields below explain most overlay bugs, so
+        please fill them in even if they seem unrelated to what you're seeing.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: A clear description of the bug. What did you expect instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Numbered steps, as minimal as you can make them.
+      placeholder: |
+        1. Press Win+Shift+U
+        2. Drag a region over ...
+        3. ...
+    validations:
+      required: true
+
+  - type: input
+    id: build
+    attributes:
+      label: UP-TAKE version / build
+      description: Version number, or commit hash if built from source.
+    validations:
+      required: true
+
+  - type: input
+    id: monitor-setup
+    attributes:
+      label: Monitor setup
+      description: Number of monitors, resolutions, and arrangement (e.g. "2 monitors, 1920x1080 + 3840x2160, side by side").
+    validations:
+      required: true
+
+  - type: input
+    id: dpi-scaling
+    attributes:
+      label: DPI scaling
+      description: Windows display scaling percentage per monitor (e.g. "100% primary, 150% secondary").
+    validations:
+      required: true
+
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU
+      description: Graphics card / integrated GPU (e.g. "NVIDIA RTX 4070", "Intel Iris Xe").
+    validations:
+      required: true
+
+  - type: input
+    id: windows-version
+    attributes:
+      label: Windows version
+      description: e.g. Windows 11 23H2, build 22631.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: Contents of the local log file, if the bug produced anything there.
+      render: shell
