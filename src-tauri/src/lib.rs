@@ -1,8 +1,4 @@
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
+mod overlay;
 
 /// Builds and runs the Tauri application.
 ///
@@ -21,6 +17,17 @@ fn greet(name: &str) -> String {
 pub fn run() -> tauri::Result<()> {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet])
+        .invoke_handler(tauri::generate_handler![
+            overlay::overlay_show,
+            overlay::overlay_hide
+        ])
+        .setup(|_app| {
+            // Until the global hotkey lands (task 1.4) a release build has no
+            // way to summon the overlay; in dev it shows at startup so
+            // `pnpm tauri dev` demonstrates it. Esc hides it again.
+            #[cfg(debug_assertions)]
+            overlay::show(_app.handle())?;
+            Ok(())
+        })
         .run(tauri::generate_context!())
 }

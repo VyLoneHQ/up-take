@@ -21,9 +21,11 @@
 //! function. Every multi-monitor bug in this project will trace back to a
 //! violation of this rule.
 //!
-//! The geometry types themselves land with roadmap task 1.1. They belong here,
-//! and they get property tests — coordinate math is the number-one bug source
-//! and pure functions are cheap to test exhaustively.
+//! The geometry types live in [`geometry`], together with the one sanctioned
+//! conversion function. They carry property tests — coordinate math is the
+//! number-one bug source and pure functions are cheap to test exhaustively.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
+
+pub mod geometry;
