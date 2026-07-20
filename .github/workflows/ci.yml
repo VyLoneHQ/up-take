@@ -66,19 +66,17 @@ jobs:
         run: rustc --version && cargo --version
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
 
+      # Run from the repository root: the Cargo workspace lives there now, so
+      # --all/--all-targets covers src-tauri and every crates/ member. Running
+      # inside src-tauri would silently check only one member.
       - name: cargo fmt
-        working-directory: src-tauri
         run: cargo fmt --all --check
 
       - name: cargo clippy
-        working-directory: src-tauri
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: cargo test
-        working-directory: src-tauri
         run: cargo test --all-features
 
   # ---------------------------------------------------------------------------
@@ -98,11 +96,14 @@ jobs:
         with:
           tool: cargo-deny,cargo-audit
 
+      # Both tools now resolve the whole workspace from the root manifest and
+      # the root Cargo.lock, so a licence-incompatible dependency pulled in by
+      # any member fails here — not just one introduced by src-tauri.
       - name: cargo deny (licences, advisories, bans, sources)
-        run: cargo deny --manifest-path src-tauri/Cargo.toml --config deny.toml check
+        run: cargo deny --config deny.toml check
 
       - name: cargo audit
-        run: cargo audit --file src-tauri/Cargo.lock
+        run: cargo audit
 
   # ---------------------------------------------------------------------------
   # Build the installer and publish an SBOM. Unsigned for now — code signing
@@ -123,8 +124,6 @@ jobs:
           cache: pnpm
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -163,7 +162,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: up-take-windows-unsigned
+          # A workspace shares one target directory at the root, so the bundles
+          # are no longer under src-tauri/.
           path: |
-            src-tauri/target/release/bundle/msi/*.msi
-            src-tauri/target/release/bundle/nsis/*.exe
+            target/release/bundle/msi/*.msi
+            target/release/bundle/nsis/*.exe
           if-no-files-found: error

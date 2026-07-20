@@ -3,6 +3,10 @@ node_modules
 /build
 /.svelte-kit
 /package
+
+# Cargo build output. Now at the workspace root rather than under src-tauri/,
+# because a workspace shares one target directory across all members.
+/target
 .env
 .env.*
 !.env.example
