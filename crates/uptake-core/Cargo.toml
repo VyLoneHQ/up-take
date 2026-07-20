@@ -8,11 +8,16 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
-# Intentionally dependency-free for now. `thiserror` is declared in the
-# workspace manifest and gets wired in here when the first error type lands
-# (architecture.md §5: thiserror in libraries, anyhow at the application
-# boundary).
+# `thiserror` is declared in the workspace manifest and gets wired in here when
+# the first error type lands (architecture.md §5: thiserror in libraries, anyhow
+# at the application boundary).
 [dependencies]
+serde = { workspace = true }
+
+# Coordinate math is the project's #1 bug source; quality-bars.md §2 mandates
+# property tests on it.
+[dev-dependencies]
+proptest = { workspace = true }
 
 [lints]
 workspace = true

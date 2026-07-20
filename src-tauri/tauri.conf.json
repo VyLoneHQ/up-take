@@ -12,9 +12,19 @@
   "app": {
     "windows": [
       {
+        "label": "overlay",
         "title": "UP-TAKE",
         "width": 800,
-        "height": 600
+        "height": 600,
+        "visible": false,
+        "transparent": true,
+        "decorations": false,
+        "shadow": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "maximizable": false,
+        "minimizable": false
       }
     ],
     "security": {
