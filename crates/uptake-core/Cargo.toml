@@ -7,6 +7,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+publish.workspace = true
 
 # `thiserror` is declared in the workspace manifest and gets wired in here when
 # the first error type lands (architecture.md §5: thiserror in libraries, anyhow

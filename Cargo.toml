@@ -19,6 +19,11 @@ members = ["src-tauri", "crates/*"]
 
 [workspace.package]
 version = "0.1.0"
+# Nothing in this workspace is published to crates.io — the app ships as an
+# installer. This also lets cargo-deny's allow-wildcard-paths accept the
+# version-less `path = ...` dependencies between members (it refuses them for
+# publishable crates, since crates.io disallows path dependencies).
+publish = false
 authors = ["VyLone"]
 edition = "2024"
 license = "GPL-3.0-or-later"
