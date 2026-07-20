@@ -1,0 +1,18 @@
+[package]
+name = "uptake-core"
+description = "Domain types, errors and configuration shared across UP-TAKE. Depends on no sibling crate."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# Intentionally dependency-free for now. `thiserror` is declared in the
+# workspace manifest and gets wired in here when the first error type lands
+# (architecture.md §5: thiserror in libraries, anyhow at the application
+# boundary).
+[dependencies]
+
+[lints]
+workspace = true

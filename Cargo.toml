@@ -1,0 +1,65 @@
+# Cargo workspace root.
+#
+# Layout follows SPECS/architecture.md §2 (in the private planning repo). The
+# reason for crates rather than modules: uptake-ocr and uptake-store are
+# platform-independent and testable without a window, and keeping the
+# Windows-specific surface confined to uptake-capture and src-tauri is what
+# makes the stated macOS/Linux ambition survivable rather than aspirational.
+#
+# Dependency rule: core <- everything. Nothing depends on src-tauri. No crate
+# depends on a sibling except through core types.
+#
+# Crates are created when the phase that needs them arrives, not up front —
+# uptake-capture, uptake-ocr, uptake-store and uptake-ingest are still to come.
+# Empty placeholder crates would only add build time and review noise.
+
+[workspace]
+resolver = "3"
+members = ["src-tauri", "crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+authors = ["VyLone"]
+edition = "2024"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/VyLoneHQ/up-take"
+rust-version = "1.96"
+
+# Single source of truth for shared versions. A crate opts in with
+# `foo = { workspace = true }` so two crates can never drift onto different
+# versions of the same dependency.
+[workspace.dependencies]
+uptake-core = { path = "crates/uptake-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+# ---------------------------------------------------------------------------
+# Lints, applied to every member via `[lints] workspace = true`.
+#
+# architecture.md §5: "No unwrap() outside tests. Clippy-enforced. A panic in an
+# always-on tray app is a lost session."
+#
+# These are `restriction` lints and allow-by-default, so they take effect only
+# because they are named here. Test code opts back out with
+# `#![allow(clippy::unwrap_used)]` inside the test module — asserting on a panic
+# is legitimate there.
+#
+# Deliberately NOT enabled yet:
+#   clippy::panic  — Tauri's generate_context!/generate_handler! expand inside
+#                    our crate, so a deny would fire on generated code we do
+#                    not own.
+#   missing_docs   — src-tauri is scaffold and undocumented; with CI running
+#                    `-D warnings` this would fail the build today. uptake-core
+#                    sets it crate-locally instead, where we control every item.
+# ---------------------------------------------------------------------------
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
+# No [profile.release] tuning here on purpose. The obvious knob, opt-level = "s",
+# would trade OCR inference speed for binary size — and the budgets in
+# quality-bars.md §1 are tight on latency (< 1.5 s OCR) while the installer is
+# currently 3 MB against a 25 MB ceiling. Size is not the constraint; revisit
+# only if it becomes one.
