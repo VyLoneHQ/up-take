@@ -1,7 +1,9 @@
 version: 2
 updates:
+  # Root of the Cargo workspace: manifest and Cargo.lock moved here in the
+  # F-4 restructure (066942f); scanning /src-tauri would miss the lockfile.
   - package-ecosystem: "cargo"
-    directory: "/src-tauri"
+    directory: "/"
     schedule:
       interval: "weekly"
     groups:
@@ -13,6 +15,13 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # pnpm 11 quarantines package versions younger than 24h
+    # (minimumReleaseAge, supply-chain defence), so a Dependabot PR proposing
+    # a fresher version fails CI on `pnpm install --frozen-lockfile` until the
+    # version ages out. Two days rather than one so a PR is never opened at
+    # the exact edge of the pnpm cutoff.
+    cooldown:
+      default-days: 2
     groups:
       npm-dependencies:
         patterns:
