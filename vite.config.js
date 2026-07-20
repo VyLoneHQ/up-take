@@ -25,8 +25,16 @@ export default defineConfig(async () => ({
         }
       : undefined,
     watch: {
-      // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ['**/src-tauri/**'],
+      // 3. tell Vite to ignore watching Rust sources and build output.
+      //
+      // `**/target/**` is not optional and not redundant: the Cargo build
+      // directory sits at the repo root (workspace layout, architecture.md
+      // §2), so it is NOT covered by the `src-tauri` pattern the Tauri
+      // scaffold ships. Without it Vite watches `target/debug/deps/*.dll`,
+      // which cargo holds a link lock on, and `tauri dev` dies at startup
+      // with `EBUSY: resource busy or locked`. Only `tauri dev` is affected —
+      // `tauri build` runs no watcher, so CI cannot catch a regression here.
+      ignored: ['**/src-tauri/**', '**/target/**'],
     },
   },
 
