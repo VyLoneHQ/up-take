@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window",
-  "windows": ["main"],
+  "description": "Capability for the overlay window. The label must match the window declared in tauri.conf.json — a capability naming a window that does not exist grants nothing, and the resulting failure is a generic 'not allowed by ACL' at the first plugin command.",
+  "windows": ["overlay"],
   "permissions": [
     "core:default",
     "opener:default"

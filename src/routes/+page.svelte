@@ -4,8 +4,15 @@ import { invoke } from '@tauri-apps/api/core';
 // Presentation only (architecture §1): the frontend renders state and emits
 // intents. Esc emits the hide intent; the decision happens in Rust.
 async function onKeydown(event: KeyboardEvent) {
-  if (event.key === 'Escape') {
+  if (event.key !== 'Escape') return;
+  try {
     await invoke('overlay_hide');
+  } catch (error) {
+    // Esc is currently the only dismiss path, and the overlay covers every
+    // monitor without click-through, so an unhandled rejection here strands
+    // the user behind a window they cannot click past. Logging is the floor;
+    // user-facing error reporting lands with task 1.15.
+    console.error('Failed to hide the overlay:', error);
   }
 }
 </script>

@@ -152,14 +152,10 @@ impl Rect {
     }
 }
 
-/// A physical monitor as reported by the OS.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct Monitor {
-    /// The monitor's bounds in physical pixels, virtual-desktop space.
-    pub bounds: Rect,
-    /// The monitor's scale factor (`1.0` = 100 %, `1.5` = 150 %, …).
-    pub scale_factor: f64,
-}
+// A per-monitor type carrying `scale_factor` alongside `bounds` will be needed
+// by task 1.3 (per-monitor-DPI correctness). It is deliberately absent until
+// then: nothing constructs it today, and an unused type invites callers to
+// reach for a scale factor outside the single sanctioned conversion below.
 
 /// The bounding rectangle of the whole virtual desktop: the union of all
 /// monitor bounds. `None` when no monitor is reported — callers must surface
@@ -180,8 +176,9 @@ where
 /// window's top-left in physical virtual-desktop coordinates; `scale_factor`
 /// is the window's current scale factor as reported by the OS.
 ///
-/// Results are clamped to the `i32` range; non-finite inputs clamp rather than
-/// panic.
+/// Results are clamped to the `i32` range. Infinities clamp to the range ends;
+/// a `NaN` input (which cannot be clamped meaningfully) yields `window_origin`,
+/// i.e. a zero offset. Neither panics.
 #[must_use]
 pub fn css_to_physical(css_x: f64, css_y: f64, scale_factor: f64, window_origin: Point) -> Point {
     Point::new(
@@ -202,9 +199,16 @@ pub fn physical_to_css(point: Point, scale_factor: f64, window_origin: Point) ->
 }
 
 /// `origin + round(css × scale)`, clamped into `i32`.
+///
+/// `NaN` is handled before the clamp because `f64::clamp` propagates it, and
+/// `NaN as i32` saturates to `0` — which would silently relocate the point to
+/// the virtual-desktop origin rather than leaving it at `origin`.
 #[allow(clippy::cast_possible_truncation)] // truncation is impossible after the clamp
 fn add_scaled(origin: i32, css: f64, scale: f64) -> i32 {
     let value = f64::from(origin) + (css * scale).round();
+    if value.is_nan() {
+        return origin;
+    }
     value.clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
 }
 
@@ -251,6 +255,24 @@ mod tests {
         );
         // CSS (0, 0) is exactly the window origin at any scale.
         assert_eq!(css_to_physical(0.0, 0.0, 1.5, origin), origin);
+    }
+
+    #[test]
+    fn non_finite_conversion_inputs_degrade_predictably() {
+        let origin = Point::new(-2560, 40);
+        // A NaN axis yields a zero offset on *that axis only*, not a jump to
+        // (0, 0) — `NaN as i32` saturates to 0 and would do exactly that.
+        assert_eq!(
+            css_to_physical(f64::NAN, 10.0, 1.5, origin),
+            Point::new(-2560, 55)
+        );
+        // A NaN scale factor poisons both axes, so both hold at the origin.
+        assert_eq!(css_to_physical(10.0, 10.0, f64::NAN, origin), origin);
+        // Infinities clamp to the range ends rather than wrapping.
+        assert_eq!(
+            css_to_physical(f64::INFINITY, f64::NEG_INFINITY, 1.0, origin),
+            Point::new(i32::MAX, i32::MIN)
+        );
     }
 
     #[test]
