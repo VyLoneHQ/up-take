@@ -48,6 +48,14 @@ pub struct ClickThrough {
     /// a stale 16 ms sleep.
     active: Mutex<bool>,
     signal: Condvar,
+    /// The last state pushed to the OS, or `None` when that is unknown and the
+    /// next tick must push unconditionally.
+    ///
+    /// This lives on the state rather than the poll thread's stack because
+    /// [`activate`] has to invalidate it: `overlay::show` resets the window to
+    /// interactive underneath a running poll, so a cached `Some(true)` would
+    /// suppress the very push that restores click-through.
+    applied: Mutex<Option<bool>>,
 }
 
 impl ClickThrough {
@@ -57,13 +65,22 @@ impl ClickThrough {
             regions: Mutex::new(Vec::new()),
             active: Mutex::new(false),
             signal: Condvar::new(),
+            applied: Mutex::new(None),
         }
     }
 }
 
 /// Starts the poll. Called by `overlay::show` after the window is visible.
+///
+/// Invalidates the applied-state cache first, because `show` has just reset the
+/// window to interactive. Showing an *already visible* overlay — which the
+/// global hotkey (task 1.4) makes reachable — would otherwise leave the poll
+/// believing it had already applied click-through, so it would skip the push
+/// and the overlay would swallow clicks across the whole virtual desktop until
+/// the cursor next crossed a region boundary.
 pub fn activate(app: &AppHandle) {
     let state = app.state::<ClickThrough>();
+    *lock(&state.applied) = None;
     *lock(&state.active) = true;
     state.signal.notify_all();
 }
@@ -98,11 +115,8 @@ fn poll_loop(app: &AppHandle) -> ! {
                 .unwrap_or_else(PoisonError::into_inner),
         );
 
-        // `None` forces the first tick after every wake to push a real state
-        // to the OS rather than trusting whatever a previous show left behind.
-        let mut applied: Option<bool> = None;
         loop {
-            tick(app, &state, &mut applied);
+            tick(app, &state);
 
             // Pace to FRAME, but let deactivate cut the sleep short.
             let guard = lock(&state.active);
@@ -131,16 +145,21 @@ fn poll_loop(app: &AppHandle) -> ! {
 /// One poll step: read the cursor, decide, and push the decision to the OS
 /// only when it differs from what is already applied — `WS_EX_TRANSPARENT`
 /// does not need refreshing 60 times a second.
-fn tick(app: &AppHandle, state: &ClickThrough, applied: &mut Option<bool>) {
+fn tick(app: &AppHandle, state: &ClickThrough) {
     let desired = desired_ignore(app, state);
+    let mut applied = lock(&state.applied);
     if *applied == Some(desired) {
         return;
     }
     let Ok(window) = overlay_window(app) else {
         return;
     };
+    // Honest about what this records: on Windows tao posts the flag change to
+    // the event-loop thread and returns `Ok` unconditionally, so `applied` is a
+    // *requested* state, not a confirmed one, and the `Err` arm is unreachable.
+    // It is kept for the platforms where the call is fallible; there, leaving
+    // `applied` unchanged makes the next tick retry.
     match window.set_ignore_cursor_events(desired) {
-        // Leave `applied` unchanged on failure so the next tick retries.
         Ok(()) => *applied = Some(desired),
         Err(error) => eprintln!("click-through: could not apply state: {error}"),
     }
@@ -184,8 +203,13 @@ pub fn overlay_set_interactive_regions(
     let scale_factor = window
         .scale_factor()
         .map_err(|e| format!("Could not read the overlay scale factor: {e}"))?;
+    // Inner, not outer: CSS coordinates are relative to the *client* area, so
+    // the origin they are offset by must be the client area's. The two are
+    // equal today only because the overlay is `decorations: false`; using
+    // `outer_position` would silently offset every region by the title-bar
+    // height the moment that changed.
     let position = window
-        .outer_position()
+        .inner_position()
         .map_err(|e| format!("Could not read the overlay position: {e}"))?;
     let origin = Point::new(position.x, position.y);
     let physical: Vec<Rect> = regions
