@@ -450,10 +450,16 @@ mod tests {
         assert!(!point_in_any(&[], Point::new(0, 0)));
     }
 
-    /// The 4-monitor dev rig, exactly as task 1.1 measured it on hardware:
-    /// 2560×1440 @ 125 % primary, 1920×1080 @ 100 % right of it, another above
-    /// it, and a 1080×1920 portrait left of it. `GetWindowRect` on the shown
-    /// overlay returned (−1080, −1080) 5560×2733.
+    /// The 4-monitor dev rig: 2560×1440 @ 125 % primary, 1920×1080 @ 100 %
+    /// right of it, another above it, and a 1080×1920 portrait left of it.
+    ///
+    /// What task 1.1 *measured* on hardware is the union — `GetWindowRect` on
+    /// the shown overlay returned (−1080, −1080) 5560×2733, which is what
+    /// `dev_rig_bounds_match_the_hardware_measurement` pins. The portrait
+    /// monitor's y-offset of −267 was **inferred**: it is a value that
+    /// reproduces that union, not a per-monitor figure read off the OS.
+    /// Re-derive it before treating this rig as ground truth for anything
+    /// beyond the union.
     fn dev_rig() -> Vec<Monitor> {
         vec![
             Monitor::new(Rect::new(0, 0, 2560, 1440), 1.25),

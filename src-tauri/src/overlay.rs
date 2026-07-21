@@ -42,6 +42,16 @@ pub fn show(app: &AppHandle) -> Result<(), String> {
     window
         .set_focus()
         .map_err(|e| format!("Could not focus the overlay: {e}"))?;
+    // Re-anchor the stored regions to the origin just applied. [`sync_bounds`]
+    // cannot do this for us: it returns early while the overlay is hidden, and
+    // the reposition above happens *before* `show()`, so the `Moved` event it
+    // raises finds an invisible window and does nothing.
+    //
+    // Without this, a display change between a hide and the next show leaves
+    // every region anchored to the old origin. The frontend does not rescue it
+    // — it re-reports on resize only, and a rearrangement that moves the
+    // virtual-desktop origin without changing its size resizes nothing.
+    click_through::reconvert_regions(app);
     click_through::activate(app);
     Ok(())
 }
@@ -85,11 +95,22 @@ pub fn sync_bounds(app: &AppHandle) -> Result<(), String> {
         return Ok(());
     }
     let desired = desired_bounds(&window)?;
-    if current_bounds(&window)? != desired {
+    if needs_write(current_bounds(&window)?, desired) {
         apply_bounds(&window, desired)?;
     }
     click_through::reconvert_regions(app);
     Ok(())
+}
+
+/// Whether [`sync_bounds`] must write the window's bounds.
+///
+/// Extracted and test-pinned because the whole sync ↔ window-event cycle
+/// terminates on this returning `false` once the bounds agree: `apply_bounds`
+/// raises `Moved`/`Resized`, which route straight back into `sync_bounds`. A
+/// version of this that ever answers `true` for equal rectangles is not a
+/// cosmetic bug — it is an unbounded `SetWindowPos` loop.
+fn needs_write(current: Rect, desired: Rect) -> bool {
+    current != desired
 }
 
 /// The rectangle the overlay must occupy: the whole virtual desktop.
@@ -99,8 +120,18 @@ fn desired_bounds(window: &WebviewWindow) -> Result<Rect, String> {
 }
 
 /// The window's current rectangle. Inner, not outer, to match the origin the
-/// click-through regions are anchored to; the two coincide while the overlay
-/// is `decorations: false`.
+/// click-through regions are anchored to.
+///
+/// The two coincide only while the overlay is **both** `decorations: false`
+/// **and** `shadow: false` in `tauri.conf.json`. Both halves matter: tao treats
+/// an undecorated window *with* shadows as having hidden offsets and inflates
+/// `set_inner_size` by the window/client delta (`window_state.rs`
+/// `undecorated_with_shadows`, applied in `window.rs` `set_inner_size`). Turn
+/// shadows on and this function's rectangle can never equal the one
+/// [`apply_bounds`] writes, so [`needs_write`] answers `true` forever and every
+/// correction raises the event that triggers the next one — a self-sustaining
+/// `SetWindowPos` loop, not a few pixels of drift. Compare against the same
+/// coordinate family the writes use before changing either flag.
 fn current_bounds(window: &WebviewWindow) -> Result<Rect, String> {
     let position = window
         .inner_position()
@@ -166,4 +197,35 @@ pub fn overlay_show(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub fn overlay_hide(app: AppHandle) -> Result<(), String> {
     hide(&app)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The termination property of the sync ↔ window-event cycle. Everything
+    /// else in this module needs a real window; this one decision does not, and
+    /// it is the one whose failure mode is an infinite loop.
+    #[test]
+    fn matching_bounds_are_never_rewritten() {
+        let bounds = Rect::new(-1080, -1080, 5560, 2733);
+        assert!(!needs_write(bounds, bounds));
+    }
+
+    #[test]
+    fn a_moved_origin_is_rewritten_even_when_the_size_is_unchanged() {
+        // The rearrangement case: same virtual-desktop size, new origin. No
+        // resize event fires anywhere, so this comparison is the only thing
+        // that notices.
+        let before = Rect::new(-1080, -1080, 5560, 2733);
+        let after = Rect::new(0, -1080, 5560, 2733);
+        assert!(needs_write(before, after));
+    }
+
+    #[test]
+    fn a_resized_desktop_is_rewritten() {
+        let before = Rect::new(0, 0, 2560, 1440);
+        let after = Rect::new(0, 0, 4480, 1440);
+        assert!(needs_write(before, after));
+    }
 }

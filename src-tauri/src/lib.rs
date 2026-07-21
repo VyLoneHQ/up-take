@@ -55,8 +55,20 @@ pub fn run() -> tauri::Result<()> {
             // Display-configuration changes reach a *visible* overlay only
             // through WM_DISPLAYCHANGE, which tao does not surface — the
             // native hook is the M-6 subscription (task 1.3).
+            //
+            // Logged rather than propagated: `?` here would refuse to start the
+            // whole app over a degraded subscription. What is actually lost is
+            // narrow — `show` still re-fits the overlay, and the Moved/Resized/
+            // ScaleFactorChanged hook above still drives `sync_bounds`; only a
+            // display change arriving while the overlay is already visible goes
+            // unnoticed. Architecture §5 class 3: log with context, keep the app
+            // alive.
             #[cfg(windows)]
-            display_watch::install(app.handle())?;
+            if let Err(error) = display_watch::install(app.handle()) {
+                eprintln!(
+                    "display-watch: display changes while the overlay is visible will not be tracked: {error}"
+                );
+            }
             // Until the global hotkey lands (task 1.4) a release build has no
             // way to summon the overlay; in dev it shows at startup so
             // `pnpm tauri dev` demonstrates it. Esc hides it again.
