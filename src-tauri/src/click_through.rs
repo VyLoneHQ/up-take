@@ -31,18 +31,28 @@ use crate::overlay::overlay_window;
 /// worst-case ~30 Hz tick keeps the transition under 35 ms.
 const FRAME: Duration = Duration::from_millis(16);
 
+/// The interactive regions in both coordinate spaces, kept under one lock so
+/// a reader can never see a CSS set paired with someone else's conversion.
+struct RegionSet {
+    /// What the frontend last reported, verbatim. Kept because it stays valid
+    /// across window moves and DPI changes (the WebView layout did not change)
+    /// while the physical conversion goes stale — see [`reconvert_regions`].
+    css: Vec<CssRect>,
+    /// The physical virtual-desktop conversion the poll hit-tests against.
+    physical: Vec<Rect>,
+}
+
 /// Shared click-through state, managed via `app.manage`.
 pub struct ClickThrough {
-    /// Interactive regions in physical virtual-desktop pixels. While the poll
-    /// is active, the window takes input inside them and ignores cursor events
-    /// everywhere else.
+    /// Interactive regions. While the poll is active, the window takes input
+    /// inside them and ignores cursor events everywhere else.
     ///
     /// **Empty means "keep the whole window interactive"**, not "everything
     /// passes through": until the frontend has successfully reported its
     /// regions, click-through would strand the user — a click anywhere would
     /// fall through, focus the app underneath, and take Esc (the dismiss path)
     /// with it. Fail interactive, never fail click-through.
-    regions: Mutex<Vec<Rect>>,
+    regions: Mutex<RegionSet>,
     /// Whether the poll should run. Guarded by `signal` so `activate` /
     /// `deactivate` can wake the poll thread promptly instead of leaving it in
     /// a stale 16 ms sleep.
@@ -62,7 +72,10 @@ impl ClickThrough {
     /// Creates the state with no regions and the poll inactive.
     pub fn new() -> Self {
         Self {
-            regions: Mutex::new(Vec::new()),
+            regions: Mutex::new(RegionSet {
+                css: Vec::new(),
+                physical: Vec::new(),
+            }),
             active: Mutex::new(false),
             signal: Condvar::new(),
             applied: Mutex::new(None),
@@ -180,10 +193,10 @@ fn desired_ignore(app: &AppHandle, state: &ClickThrough) -> bool {
         return false;
     };
     let regions = lock(&state.regions);
-    if regions.is_empty() {
+    if regions.physical.is_empty() {
         return false;
     }
-    !point_in_any(&regions, cursor)
+    !point_in_any(&regions.physical, cursor)
 }
 
 /// Replaces the set of interactive regions.
@@ -191,15 +204,64 @@ fn desired_ignore(app: &AppHandle, state: &ClickThrough) -> bool {
 /// Regions arrive in CSS pixels relative to the overlay's viewport (what
 /// `getBoundingClientRect` reports) and are converted to physical
 /// virtual-desktop pixels here, at the IPC boundary, through the sanctioned
-/// conversion (architecture §3.1). The scale factor and window origin are read
-/// at call time, so a report that races a monitor-layout change is stale for
-/// at most one report cycle — the frontend re-reports on every window resize.
+/// conversion (architecture §3.1). The frontend re-reports whenever its layout
+/// changes (window resize); conversions invalidated *without* a layout change
+/// — the window moved or changed scale factor — are refreshed Rust-side by
+/// [`reconvert_regions`], because no WebView event fires for those.
 #[tauri::command]
 pub fn overlay_set_interactive_regions(
     window: WebviewWindow,
     state: State<'_, ClickThrough>,
     regions: Vec<CssRect>,
 ) -> Result<(), String> {
+    let physical = convert_regions(&window, &regions)?;
+    *lock(&state.regions) = RegionSet {
+        css: regions,
+        physical,
+    };
+    Ok(())
+}
+
+/// Re-derives the physical regions from the stored CSS regions with the
+/// window's *current* scale factor and origin.
+///
+/// This is the stale-origin fix (M-6 family): rearranging monitors can move
+/// the virtual-desktop origin without resizing anything, so no resize event
+/// reaches the frontend and it never re-reports — yet every stored physical
+/// rect is anchored to the old origin. The CSS rects are still valid (the
+/// WebView layout did not change), so re-running the conversion with fresh
+/// inputs is exact. After a *resize*, the CSS rects themselves may be stale
+/// for a frame or two until the frontend's resize listener re-reports; the
+/// interim conversion is wrong-but-bounded, and the report that follows
+/// replaces it wholesale.
+///
+/// Called on the main thread (window events, `overlay::sync_bounds`). The
+/// lock is held across the window getters deliberately: they are direct Win32
+/// reads, and dropping the lock would let a fresh frontend report interleave
+/// and be overwritten with a conversion of older CSS data.
+pub fn reconvert_regions(app: &AppHandle) {
+    let Ok(window) = overlay_window(app) else {
+        return;
+    };
+    let state = app.state::<ClickThrough>();
+    let mut regions = lock(&state.regions);
+    if regions.css.is_empty() {
+        return;
+    }
+    match convert_regions(&window, &regions.css) {
+        Ok(physical) => regions.physical = physical,
+        Err(error) => {
+            // Fail interactive: an empty set keeps the whole window taking
+            // input, so the dismiss paths survive an unreadable window state.
+            regions.physical.clear();
+            eprintln!("click-through: could not re-convert regions: {error}");
+        }
+    }
+}
+
+/// Converts frontend-reported CSS rects into physical virtual-desktop rects
+/// using the window's scale factor and origin as they are *right now*.
+fn convert_regions(window: &WebviewWindow, regions: &[CssRect]) -> Result<Vec<Rect>, String> {
     let scale_factor = window
         .scale_factor()
         .map_err(|e| format!("Could not read the overlay scale factor: {e}"))?;
@@ -212,12 +274,10 @@ pub fn overlay_set_interactive_regions(
         .inner_position()
         .map_err(|e| format!("Could not read the overlay position: {e}"))?;
     let origin = Point::new(position.x, position.y);
-    let physical: Vec<Rect> = regions
-        .into_iter()
+    Ok(regions
+        .iter()
         .map(|region| region.to_physical(scale_factor, origin))
-        .collect();
-    *lock(&state.regions) = physical;
-    Ok(())
+        .collect())
 }
 
 /// Locks a mutex, treating poisoning as recoverable: the data under these
