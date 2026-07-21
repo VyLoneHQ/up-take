@@ -1,7 +1,14 @@
 # Normalize line endings for all text files
 * text=auto
 
-# Force LF line endings for specific file types
+# Force LF line endings for specific file types.
+#
+# The languages this project is actually written in — .ts, .svelte, .rs — were
+# missing here (the list came from the scaffold), so with core.autocrlf=true on
+# a Windows clone they checked out CRLF while `biome ci` and `cargo fmt` both
+# expect LF. Local checks then failed on every file regardless of its content,
+# which makes them useless as a pre-push signal; CI stayed green because the
+# runner checks out LF. Added 2026-07-21.
 *.md text eol=lf
 *.txt text eol=lf
 *.json text eol=lf
@@ -12,6 +19,13 @@
 *.html text eol=lf
 *.css text eol=lf
 *.js text eol=lf
+*.mjs text eol=lf
+*.cjs text eol=lf
+*.ts text eol=lf
+*.svelte text eol=lf
+*.rs text eol=lf
+*.lock text eol=lf
+*.sh text eol=lf
 *.py text eol=lf
 
 # Binary files - no line ending conversion

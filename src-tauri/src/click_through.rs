@@ -38,10 +38,11 @@ struct RegionSet {
     /// window *move*: the WebView does not reflow, so the CSS rects stay valid
     /// while their physical conversion goes stale — see [`reconvert_regions`].
     ///
-    /// It does **not** survive a scale change: that resizes the CSS viewport,
-    /// so a centred element's CSS coordinates genuinely move. The frontend
-    /// re-reports in that case (a scale change fires `resize`), and this set is
-    /// replaced wholesale.
+    /// It does **not** survive a scale change: the CSS viewport is resized, so
+    /// a centred element's CSS coordinates genuinely move and only a fresh
+    /// report can fix them. That report does arrive — but by a longer route
+    /// than it looks; see [`reconvert_regions`] for the actual chain, which is
+    /// load-bearing and not obvious.
     css: Vec<CssRect>,
     /// The scale factor `css` was measured in, as reported by the WebView's
     /// `devicePixelRatio`. Stored rather than re-read from the window, because
@@ -49,6 +50,21 @@ struct RegionSet {
     scale: f64,
     /// The physical virtual-desktop conversion the poll hit-tests against.
     physical: Vec<Rect>,
+}
+
+impl RegionSet {
+    /// The fail-safe set: no regions, so the whole window takes input.
+    ///
+    /// The starting state, and the state to fall back to whenever a report
+    /// cannot be trusted — see [`ClickThrough::regions`] for why empty means
+    /// interactive rather than fully click-through.
+    fn empty() -> Self {
+        Self {
+            css: Vec::new(),
+            scale: 1.0,
+            physical: Vec::new(),
+        }
+    }
 }
 
 /// Shared click-through state, managed via `app.manage`.
@@ -81,11 +97,7 @@ impl ClickThrough {
     /// Creates the state with no regions and the poll inactive.
     pub fn new() -> Self {
         Self {
-            regions: Mutex::new(RegionSet {
-                css: Vec::new(),
-                scale: 1.0,
-                physical: Vec::new(),
-            }),
+            regions: Mutex::new(RegionSet::empty()),
             active: Mutex::new(false),
             signal: Condvar::new(),
             applied: Mutex::new(None),
@@ -238,9 +250,24 @@ pub fn overlay_set_interactive_regions(
     regions: Vec<CssRect>,
     scale: f64,
 ) -> Result<(), String> {
-    let scale = checked_scale(scale)?;
+    let scale = match checked_scale(scale) {
+        Ok(scale) => scale,
+        Err(error) => {
+            // Fail interactive, per this module's standing rule. Returning the
+            // error while leaving the old set in place would keep the overlay
+            // hit-testing stale boxes, and nothing retries — the frontend logs
+            // the rejection and the next report only comes on a `resize`.
+            *lock(&state.regions) = RegionSet::empty();
+            return Err(error);
+        }
+    };
     if let Ok(window_scale) = window.scale_factor()
-        && (window_scale - scale).abs() > f64::EPSILON
+        // Exact inequality on purpose: both sides are display scale factors off
+        // Windows' ladder (1.0, 1.25, 1.5, …), all exactly representable, and
+        // this only decides whether to log. A tolerance here would be a
+        // tolerance in name only — `f64::EPSILON` in particular is an absolute
+        // threshold sized for values near 1.0, not a scale-invariant one.
+        && window_scale != scale
     {
         // Not an error: the WebView's value is the authoritative one here. It
         // is logged because a persistent disagreement is the fingerprint of the
@@ -264,7 +291,12 @@ pub fn overlay_set_interactive_regions(
 /// and this value is now load-bearing for every hit test. A non-finite or
 /// non-positive scale would send every region to the virtual-desktop origin;
 /// `f64::clamp` propagates `NaN`, so the geometry layer cannot catch it either.
-/// Rejecting leaves the previous set in place and the window interactive.
+///
+/// The caller clears the region set on rejection rather than keeping the
+/// previous one. Keeping it sounds conservative and is not: a non-empty set
+/// leaves the window click-through everywhere outside boxes that may already be
+/// stale, which is the one failure this module refuses to allow — a click falls
+/// through, focuses the app underneath, and takes the Esc dismiss path with it.
 fn checked_scale(scale: f64) -> Result<f64, String> {
     if scale.is_finite() && scale > 0.0 && scale <= 16.0 {
         Ok(scale)
@@ -294,8 +326,26 @@ fn checked_scale(scale: f64) -> Result<f64, String> {
 /// Re-converts with the **stored** scale, not the window's current one. The
 /// stored scale is the one `css` was measured in, so the pair stays
 /// self-consistent; if the scale has genuinely changed, the CSS rects are stale
-/// too and only a fresh frontend report can fix them — which a scale change
-/// triggers, because it resizes the CSS viewport.
+/// too and only a fresh frontend report can fix them.
+///
+/// **How that fresh report actually arrives — verified against tao, because the
+/// obvious answer is wrong.** A DPI change does *not* by itself resize the CSS
+/// viewport: tao's `WM_DPICHANGED` handler rescales the window's physical size
+/// to preserve its *logical* size (`tao-0.35.3`
+/// `platform_impl/windows/event_loop.rs`, `old.to_logical(old_sf).to_physical(new_sf)`),
+/// so physical size and `devicePixelRatio` move by the same ratio, CSS size is
+/// unchanged, and the WebView fires no `resize`. What produces the re-report is
+/// the correction *after* it: `ScaleFactorChanged` routes to
+/// [`crate::overlay::sync_bounds`] (see the hook in `lib.rs`), which writes the
+/// overlay back to the full virtual desktop — and *that* changes the CSS size
+/// and fires `resize`.
+///
+/// So the precondition for this function's stored-scale strategy is not "a
+/// scale change fires resize" but **"the overlay is always re-fitted to a
+/// display-derived rect after a scale change"**. If overlay UI ever stops being
+/// sized to the virtual desktop — task 1.6 is expected to move it per-monitor
+/// (friction F-13) — check that a scale change still ends in a frontend report,
+/// or the scale-mismatch bug returns with these comments still denying it.
 pub fn reconvert_regions(app: &AppHandle) {
     let Ok(window) = overlay_window(app) else {
         return;
@@ -383,5 +433,17 @@ mod tests {
         for scale in [0.0, -1.0, -1.25, 16.001, 1e9] {
             assert!(checked_scale(scale).is_err());
         }
+    }
+
+    #[test]
+    fn the_empty_set_is_the_fail_safe_one() {
+        // Pins what the rejection path in `overlay_set_interactive_regions`
+        // relies on: `RegionSet::empty` must leave nothing to hit-test, because
+        // `desired_ignore` reads an empty `physical` as "stay interactive". A
+        // future field that defaulted to something non-empty would silently
+        // turn the fail-safe into a fail-click-through.
+        let empty = RegionSet::empty();
+        assert!(empty.physical.is_empty());
+        assert!(empty.css.is_empty());
     }
 }
