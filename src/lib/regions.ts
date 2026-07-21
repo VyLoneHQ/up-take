@@ -79,17 +79,24 @@ export function measure(
  * escaped here would be an unhandled rejection, and the Rust side treats "no
  * regions reported" as *keep the whole window interactive*, so a lost report
  * costs click-through and never the dismiss path.
+ *
+ * **A mount race is not reported.** If elements were passed but every one was
+ * unbound, `measure` returns nothing — and sending that empty set would replace
+ * a good region set with one meaning *the whole window takes input*, so the
+ * overlay would swallow every click across the virtual desktop until some later
+ * `resize` happened to re-report. Skipping is strictly better: the previous set
+ * survives, and the report that follows the mount replaces it. Reporting
+ * genuinely zero regions is still possible — pass no elements at all.
  */
 export async function reportInteractiveRegions(
   invoke: Invoke,
   elements: readonly (Measurable | null | undefined)[],
   scale: number,
 ): Promise<boolean> {
+  const regions = measure(elements);
+  if (regions.length === 0 && elements.length > 0) return false;
   try {
-    await invoke('overlay_set_interactive_regions', {
-      regions: measure(elements),
-      scale,
-    });
+    await invoke('overlay_set_interactive_regions', { regions, scale });
     return true;
   } catch (error) {
     console.error('Failed to report interactive regions:', error);
