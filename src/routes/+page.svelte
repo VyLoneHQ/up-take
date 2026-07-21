@@ -26,9 +26,14 @@ function onKeydown(event: KeyboardEvent) {
 // WebView laid out in, which silently offsets every region. See the
 // `reportInteractiveRegions` docs.
 //
-// `resize` covers both re-measurement triggers: the overlay is resized to the
-// virtual desktop on every show (which recentres the pill), and a scale change
-// resizes the CSS viewport even when the physical size is unchanged.
+// `resize` is the only re-measurement trigger, and it covers a DPI change only
+// indirectly — which is worth knowing before trusting it. Windows sends the
+// window `WM_DPICHANGED`; tao responds by rescaling its physical size to
+// preserve its *logical* size, so `devicePixelRatio` and the physical size move
+// together, the CSS viewport is unchanged, and no `resize` fires here. The
+// event that does fire is the one raised by the Rust side re-fitting the
+// overlay to the full virtual desktop afterwards. See `reconvert_regions` in
+// `click_through.rs` for the chain and for what breaks it.
 function report() {
   void regions.reportInteractiveRegions(
     invoke,

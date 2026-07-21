@@ -73,6 +73,40 @@ describe('reportInteractiveRegions', () => {
       reportInteractiveRegions(invoke, [stub(PILL)], 1),
     ).resolves.toBe(true);
   });
+
+  it('sends nothing when every element is still unbound', async () => {
+    // A mount race must not overwrite a good region set with an empty one:
+    // empty means "the whole window takes input" on the Rust side, so the
+    // overlay would swallow every click desktop-wide until the next resize.
+    const invoke = vi.fn<Invoke>().mockResolvedValue(undefined);
+
+    await expect(reportInteractiveRegions(invoke, [null], 1)).resolves.toBe(
+      false,
+    );
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it('still reports a genuinely empty region set', async () => {
+    // Distinguished from the race above by the caller passing no elements:
+    // that is a deliberate "nothing is interactive", not a missed measurement.
+    const invoke = vi.fn<Invoke>().mockResolvedValue(undefined);
+
+    await expect(reportInteractiveRegions(invoke, [], 1)).resolves.toBe(true);
+    expect(invoke).toHaveBeenCalledWith('overlay_set_interactive_regions', {
+      regions: [],
+      scale: 1,
+    });
+  });
+
+  it('reports the elements that are bound when only some are', async () => {
+    // The partial case task 1.6c makes ordinary: some areas mounted, some not.
+    const invoke = vi.fn<Invoke>().mockResolvedValue(undefined);
+
+    await reportInteractiveRegions(invoke, [null, stub(PILL)], 1);
+
+    const [, args] = invoke.mock.calls[0];
+    expect(args?.regions).toEqual([PILL]);
+  });
 });
 
 describe('hideOverlay', () => {
