@@ -97,13 +97,29 @@ fn build(app: &AppHandle) -> Result<(), String> {
         // platform's menu gesture) still opens the menu regardless of this
         // setting — it only governs the left button.
         .show_menu_on_left_click(false)
+        // Each arm announces itself in debug builds. None of these actions
+        // left a trace on success before, which made a clean exit
+        // indistinguishable from any other way the process could end — a
+        // verification run was lost to exactly that ambiguity. The Show
+        // arms are separated for the same reason: the menu item and a left
+        // click reach the same `overlay::show` through different tauri
+        // callbacks, so one line is what tells you which one fired.
         .on_menu_event(|app, event| match event.id.as_ref() {
             SHOW_ID => {
+                #[cfg(debug_assertions)]
+                eprintln!("tray: Show chosen from the menu");
                 if let Err(error) = overlay::show(app) {
                     eprintln!("tray: could not show the overlay: {error}");
                 }
             }
-            QUIT_ID => app.exit(0),
+            QUIT_ID => {
+                // The last line the app prints. `app.exit(0)` unwinds through
+                // `RunEvent::Exit`, so anything logged after this would be a
+                // lie about the order.
+                #[cfg(debug_assertions)]
+                eprintln!("tray: Quit chosen — exiting");
+                app.exit(0);
+            }
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
@@ -116,6 +132,8 @@ fn build(app: &AppHandle) -> Result<(), String> {
             } = event
             {
                 let app = tray.app_handle();
+                #[cfg(debug_assertions)]
+                eprintln!("tray: left click on the icon");
                 if let Err(error) = overlay::show(app) {
                     eprintln!("tray: could not show the overlay: {error}");
                 }
