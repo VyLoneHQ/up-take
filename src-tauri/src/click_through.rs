@@ -34,10 +34,19 @@ const FRAME: Duration = Duration::from_millis(16);
 /// The interactive regions in both coordinate spaces, kept under one lock so
 /// a reader can never see a CSS set paired with someone else's conversion.
 struct RegionSet {
-    /// What the frontend last reported, verbatim. Kept because it stays valid
-    /// across window moves and DPI changes (the WebView layout did not change)
-    /// while the physical conversion goes stale — see [`reconvert_regions`].
+    /// What the frontend last reported, verbatim. Kept because it survives a
+    /// window *move*: the WebView does not reflow, so the CSS rects stay valid
+    /// while their physical conversion goes stale — see [`reconvert_regions`].
+    ///
+    /// It does **not** survive a scale change: that resizes the CSS viewport,
+    /// so a centred element's CSS coordinates genuinely move. The frontend
+    /// re-reports in that case (a scale change fires `resize`), and this set is
+    /// replaced wholesale.
     css: Vec<CssRect>,
+    /// The scale factor `css` was measured in, as reported by the WebView's
+    /// `devicePixelRatio`. Stored rather than re-read from the window, because
+    /// these two can disagree — see [`overlay_set_interactive_regions`].
+    scale: f64,
     /// The physical virtual-desktop conversion the poll hit-tests against.
     physical: Vec<Rect>,
 }
@@ -74,6 +83,7 @@ impl ClickThrough {
         Self {
             regions: Mutex::new(RegionSet {
                 css: Vec::new(),
+                scale: 1.0,
                 physical: Vec::new(),
             }),
             active: Mutex::new(false),
@@ -204,22 +214,63 @@ fn desired_ignore(app: &AppHandle, state: &ClickThrough) -> bool {
 /// Regions arrive in CSS pixels relative to the overlay's viewport (what
 /// `getBoundingClientRect` reports) and are converted to physical
 /// virtual-desktop pixels here, at the IPC boundary, through the sanctioned
-/// conversion (architecture §3.1). The frontend re-reports whenever its layout
-/// changes (window resize); conversions invalidated *without* a layout change
-/// — the window moved or changed scale factor — are refreshed Rust-side by
-/// [`reconvert_regions`], because no WebView event fires for those.
+/// conversion (architecture §3.1).
+///
+/// **`scale` is supplied by the caller and is not optional.** It used to be
+/// read from the window via `WebviewWindow::scale_factor`, on the assumption
+/// that tao's per-window scale factor equals the one the WebView laid out in.
+/// That assumption is false in a case the overlay hits routinely: the window is
+/// created on the primary monitor, then resized to span a virtual desktop where
+/// Windows assigns it a different DPI, and the two values diverge with nothing
+/// detecting it. Measured on the dev rig with a 100 %-scaled primary and a
+/// 125 % secondary — the WebView reported a pill at CSS x 2085.06 (a viewport
+/// of 4448 = 5560/1.25) while the window reported scale 1.0, converting it to
+/// physical x 724 instead of 1245. The hint pill was drawn 556 px from its own
+/// hit box and could not be clicked.
+///
+/// The WebView's `devicePixelRatio` is by definition the factor its rects were
+/// measured in, so travelling together makes the pair self-consistent. The
+/// window's own value is now only a cross-check, logged on disagreement.
 #[tauri::command]
 pub fn overlay_set_interactive_regions(
     window: WebviewWindow,
     state: State<'_, ClickThrough>,
     regions: Vec<CssRect>,
+    scale: f64,
 ) -> Result<(), String> {
-    let physical = convert_regions(&window, &regions)?;
+    let scale = checked_scale(scale)?;
+    if let Ok(window_scale) = window.scale_factor()
+        && (window_scale - scale).abs() > f64::EPSILON
+    {
+        // Not an error: the WebView's value is the authoritative one here. It
+        // is logged because a persistent disagreement is the fingerprint of the
+        // bug above, and silence is how it went unnoticed the first time.
+        eprintln!(
+            "click-through: WebView scale {scale} disagrees with the window's {window_scale}; using the WebView's"
+        );
+    }
+    let physical = convert_regions(&window, &regions, scale)?;
     *lock(&state.regions) = RegionSet {
         css: regions,
+        scale,
         physical,
     };
     Ok(())
+}
+
+/// Rejects a scale factor that cannot describe a real display.
+///
+/// The WebView is the least-trusted component in the process (architecture §4),
+/// and this value is now load-bearing for every hit test. A non-finite or
+/// non-positive scale would send every region to the virtual-desktop origin;
+/// `f64::clamp` propagates `NaN`, so the geometry layer cannot catch it either.
+/// Rejecting leaves the previous set in place and the window interactive.
+fn checked_scale(scale: f64) -> Result<f64, String> {
+    if scale.is_finite() && scale > 0.0 && scale <= 16.0 {
+        Ok(scale)
+    } else {
+        Err(format!("Implausible scale factor reported: {scale}"))
+    }
 }
 
 /// Re-derives the physical regions from the stored CSS regions with the
@@ -236,9 +287,15 @@ pub fn overlay_set_interactive_regions(
 /// replaces it wholesale.
 ///
 /// Called on the main thread (window events, `overlay::sync_bounds`). The
-/// lock is held across the window getters deliberately: they are direct Win32
-/// reads, and dropping the lock would let a fresh frontend report interleave
+/// lock is held across the window getter deliberately: it is a direct Win32
+/// read, and dropping the lock would let a fresh frontend report interleave
 /// and be overwritten with a conversion of older CSS data.
+///
+/// Re-converts with the **stored** scale, not the window's current one. The
+/// stored scale is the one `css` was measured in, so the pair stays
+/// self-consistent; if the scale has genuinely changed, the CSS rects are stale
+/// too and only a fresh frontend report can fix them — which a scale change
+/// triggers, because it resizes the CSS viewport.
 pub fn reconvert_regions(app: &AppHandle) {
     let Ok(window) = overlay_window(app) else {
         return;
@@ -248,7 +305,7 @@ pub fn reconvert_regions(app: &AppHandle) {
     if regions.css.is_empty() {
         return;
     }
-    match convert_regions(&window, &regions.css) {
+    match convert_regions(&window, &regions.css, regions.scale) {
         Ok(physical) => regions.physical = physical,
         Err(error) => {
             // Fail interactive: an empty set keeps the whole window taking
@@ -260,11 +317,16 @@ pub fn reconvert_regions(app: &AppHandle) {
 }
 
 /// Converts frontend-reported CSS rects into physical virtual-desktop rects
-/// using the window's scale factor and origin as they are *right now*.
-fn convert_regions(window: &WebviewWindow, regions: &[CssRect]) -> Result<Vec<Rect>, String> {
-    let scale_factor = window
-        .scale_factor()
-        .map_err(|e| format!("Could not read the overlay scale factor: {e}"))?;
+/// using the supplied scale and the window's origin as it is *right now*.
+///
+/// The origin is read here rather than passed in because it is genuinely the
+/// window's property and the frontend cannot know it — unlike the scale, which
+/// the frontend is the authority on.
+fn convert_regions(
+    window: &WebviewWindow,
+    regions: &[CssRect],
+    scale_factor: f64,
+) -> Result<Vec<Rect>, String> {
     // Inner, not outer: CSS coordinates are relative to the *client* area, so
     // the origin they are offset by must be the client area's. The two are
     // equal today only because the overlay is `decorations: false`; using
@@ -285,4 +347,34 @@ fn convert_regions(window: &WebviewWindow, regions: &[CssRect]) -> Result<Vec<Re
 /// them, and the no-panic rule (architecture §5) forbids unwrap here anyway.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn real_display_scales_are_accepted() {
+        // 100 %, 125 %, 150 %, 175 %, 200 %, 350 % — Windows' own ladder.
+        for scale in [1.0, 1.25, 1.5, 1.75, 2.0, 3.5] {
+            assert_eq!(checked_scale(scale), Ok(scale));
+        }
+    }
+
+    #[test]
+    fn non_finite_scales_are_rejected() {
+        // The one that matters: `f64::clamp` propagates NaN and `NaN as i32`
+        // saturates to 0, so a NaN reaching the geometry layer would silently
+        // move every region to the virtual-desktop origin.
+        for scale in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(checked_scale(scale).is_err());
+        }
+    }
+
+    #[test]
+    fn non_positive_and_absurd_scales_are_rejected() {
+        for scale in [0.0, -1.0, -1.25, 16.001, 1e9] {
+            assert!(checked_scale(scale).is_err());
+        }
+    }
 }
