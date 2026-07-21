@@ -386,6 +386,13 @@ fn convert_regions(
         .inner_position()
         .map_err(|e| format!("Could not read the overlay position: {e}"))?;
     let origin = Point::new(position.x, position.y);
+    // Both sides of the IPC boundary printing their own numbers is what made
+    // the scale mismatch visible; neither is wrong alone. Off unless the
+    // harness is enabled — see dev_harness.rs.
+    #[cfg(debug_assertions)]
+    if let Ok(size) = window.inner_size() {
+        crate::dev_harness::log_conversion(scale_factor, origin.x, origin.y, size.width);
+    }
     Ok(regions
         .iter()
         .map(|region| region.to_physical(scale_factor, origin))
