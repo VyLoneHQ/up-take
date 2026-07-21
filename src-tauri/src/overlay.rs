@@ -12,6 +12,8 @@
 use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
 use uptake_core::geometry::{Point, Rect, Size, virtual_desktop_bounds};
 
+use crate::click_through;
+
 /// Label of the overlay window as declared in `tauri.conf.json`.
 pub const WINDOW_LABEL: &str = "overlay";
 
@@ -34,6 +36,12 @@ pub fn show(app: &AppHandle) -> Result<(), String> {
     window
         .set_size(PhysicalSize::new(bounds.size.width, bounds.size.height))
         .map_err(|e| format!("Could not size the overlay: {e}"))?;
+    // Known baseline before anything is visible: interactive everywhere, so
+    // Esc works from the first frame even if the click-through poll has not
+    // ticked yet. The poll refines this within one frame.
+    window
+        .set_ignore_cursor_events(false)
+        .map_err(|e| format!("Could not reset overlay click-through: {e}"))?;
     window
         .show()
         .map_err(|e| format!("Could not show the overlay: {e}"))?;
@@ -41,11 +49,17 @@ pub fn show(app: &AppHandle) -> Result<(), String> {
     // reaches the overlay immediately.
     window
         .set_focus()
-        .map_err(|e| format!("Could not focus the overlay: {e}"))
+        .map_err(|e| format!("Could not focus the overlay: {e}"))?;
+    click_through::activate(app);
+    Ok(())
 }
 
 /// Hides the overlay. The window stays alive so the next `show` is instant.
 pub fn hide(app: &AppHandle) -> Result<(), String> {
+    // Stop the poll first: quality-bars.md §1 requires zero poll activity
+    // while the overlay is hidden. The poll thread resets the window to
+    // interactive as it parks.
+    click_through::deactivate(app);
     overlay_window(app)?
         .hide()
         .map_err(|e| format!("Could not hide the overlay: {e}"))
@@ -65,7 +79,7 @@ fn monitor_bounds(monitor: &tauri::Monitor) -> Rect {
     }
 }
 
-fn overlay_window(app: &AppHandle) -> Result<WebviewWindow, String> {
+pub(crate) fn overlay_window(app: &AppHandle) -> Result<WebviewWindow, String> {
     app.get_webview_window(WINDOW_LABEL)
         .ok_or_else(|| format!("Window '{WINDOW_LABEL}' does not exist — check tauri.conf.json."))
 }

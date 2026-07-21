@@ -1,4 +1,7 @@
+mod click_through;
 mod overlay;
+
+use tauri::Manager;
 
 /// Builds and runs the Tauri application.
 ///
@@ -19,14 +22,19 @@ pub fn run() -> tauri::Result<()> {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             overlay::overlay_show,
-            overlay::overlay_hide
+            overlay::overlay_hide,
+            click_through::overlay_set_interactive_regions
         ])
-        .setup(|_app| {
+        .setup(|app| {
+            // State must be managed and the poll thread parked before the
+            // first `overlay::show`, which activates the poll.
+            app.manage(click_through::ClickThrough::new());
+            click_through::spawn_poll_thread(app.handle().clone());
             // Until the global hotkey lands (task 1.4) a release build has no
             // way to summon the overlay; in dev it shows at startup so
             // `pnpm tauri dev` demonstrates it. Esc hides it again.
             #[cfg(debug_assertions)]
-            overlay::show(_app.handle())?;
+            overlay::show(app.handle())?;
             Ok(())
         })
         .run(tauri::generate_context!())
