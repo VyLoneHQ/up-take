@@ -1,58 +1,49 @@
 <script lang="ts">
 import { invoke } from '@tauri-apps/api/core';
 import { onMount } from 'svelte';
+import * as regions from '$lib/regions';
 
 // Presentation only (architecture §1): the frontend renders state and emits
-// intents. Esc and the pill's click emit the hide intent; measurement of the
-// interactive regions is reported in CSS pixels and converted (and hit-tested)
-// on the Rust side.
+// intents. The logic lives in `$lib/regions` so it can be tested without a DOM
+// harness — see `regions.test.ts`.
 let pill: HTMLButtonElement;
 
-async function hideOverlay() {
-  try {
-    await invoke('overlay_hide');
-  } catch (error) {
-    // Esc and the pill are the only dismiss paths; logging is the floor,
-    // user-facing error reporting lands with task 1.15.
-    console.error('Failed to hide the overlay:', error);
-  }
+function dismiss() {
+  void regions.hideOverlay(invoke);
 }
 
 function onKeydown(event: KeyboardEvent) {
-  if (event.key !== 'Escape') return;
-  void hideOverlay();
+  if (!regions.isDismissKey(event.key)) return;
+  dismiss();
 }
 
-// The pill is the only interactive region for now (task 1.2): while the
-// overlay is visible, the window takes input inside reported regions and lets
-// clicks fall through everywhere else. Re-measured on every window resize —
-// the overlay is resized to the virtual desktop on every show, which recenters
-// the pill.
-async function reportInteractiveRegions() {
-  const rect = pill.getBoundingClientRect();
-  try {
-    await invoke('overlay_set_interactive_regions', {
-      regions: [
-        { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
-      ],
-    });
-  } catch (error) {
-    // Fail-safe by design: until a report succeeds the Rust side keeps the
-    // whole window interactive, so a lost report costs click-through, never
-    // the dismiss path.
-    console.error('Failed to report interactive regions:', error);
-  }
+// The pill is the only interactive region for now (task 1.2): while the overlay
+// is visible, the window takes input inside reported regions and lets clicks
+// fall through everywhere else.
+//
+// `devicePixelRatio` travels with the measurement because Rust cannot derive
+// it reliably — tao's per-window scale factor can disagree with the one the
+// WebView laid out in, which silently offsets every region. See the
+// `reportInteractiveRegions` docs.
+//
+// `resize` covers both re-measurement triggers: the overlay is resized to the
+// virtual desktop on every show (which recentres the pill), and a scale change
+// resizes the CSS viewport even when the physical size is unchanged.
+function report() {
+  void regions.reportInteractiveRegions(
+    invoke,
+    [pill],
+    window.devicePixelRatio,
+  );
 }
 
-onMount(() => {
-  void reportInteractiveRegions();
-});
+onMount(report);
 </script>
 
-<svelte:window onkeydown={onKeydown} onresize={reportInteractiveRegions} />
+<svelte:window onkeydown={onKeydown} onresize={report} />
 
 <main class="overlay">
-  <button type="button" class="hint" bind:this={pill} onclick={hideOverlay}>
+  <button type="button" class="hint" bind:this={pill} onclick={dismiss}>
     UP-TAKE — Esc or click here to dismiss
   </button>
 </main>
