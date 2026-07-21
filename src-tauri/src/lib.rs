@@ -1,6 +1,9 @@
 mod click_through;
+#[cfg(debug_assertions)]
+mod dev_harness;
 #[cfg(windows)]
 mod display_watch;
+mod hotkey;
 mod overlay;
 
 use tauri::{Manager, WindowEvent};
@@ -22,6 +25,11 @@ use tauri::{Manager, WindowEvent};
 pub fn run() -> tauri::Result<()> {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        // Used only from Rust, and only to report a failed hotkey registration
+        // (architecture §4). No frontend capability grants it, so the WebView
+        // cannot open dialogs.
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             overlay::overlay_show,
             overlay::overlay_hide,
@@ -48,6 +56,10 @@ pub fn run() -> tauri::Result<()> {
             }
         })
         .setup(|app| {
+            // Recorded here because `setup` runs on the event-loop thread, so
+            // this is the identity every later summon is compared against.
+            #[cfg(debug_assertions)]
+            dev_harness::record_main_thread();
             // State must be managed and the poll thread parked before the
             // first `overlay::show`, which activates the poll.
             app.manage(click_through::ClickThrough::new());
@@ -69,9 +81,14 @@ pub fn run() -> tauri::Result<()> {
                     "display-watch: display changes while the overlay is visible will not be tracked: {error}"
                 );
             }
-            // Until the global hotkey lands (task 1.4) a release build has no
-            // way to summon the overlay; in dev it shows at startup so
-            // `pnpm tauri dev` demonstrates it. Esc hides it again.
+            // The only way to summon the overlay until the tray lands (task
+            // 1.5), which is why a failed registration is reported to the user
+            // rather than logged. Never fatal — see `hotkey::install`.
+            hotkey::install(app.handle());
+            // Dev builds still show the overlay at startup so `pnpm tauri dev`
+            // demonstrates something without a keypress, and because CI never
+            // exercises the dev path (friction F-7). Esc hides it; the hotkey
+            // brings it back.
             #[cfg(debug_assertions)]
             overlay::show(app.handle())?;
             Ok(())

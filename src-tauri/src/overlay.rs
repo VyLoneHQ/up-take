@@ -64,7 +64,13 @@ pub fn hide(app: &AppHandle) -> Result<(), String> {
     click_through::deactivate(app);
     overlay_window(app)?
         .hide()
-        .map_err(|e| format!("Could not hide the overlay: {e}"))
+        .map_err(|e| format!("Could not hide the overlay: {e}"))?;
+    // Opt-in, debug-only, off unless UPTAKE_DEV_RESHOW is set: brings the
+    // overlay back from a spawned thread so a display change can be made in
+    // between. See dev_harness.rs for why that thread is the point.
+    #[cfg(debug_assertions)]
+    crate::dev_harness::schedule_reshow(app);
+    Ok(())
 }
 
 /// Re-fits a *visible* overlay to the virtual desktop and refreshes the
@@ -143,6 +149,16 @@ fn current_bounds(window: &WebviewWindow) -> Result<Rect, String> {
         origin: Point::new(position.x, position.y),
         size: Size::new(size.width, size.height),
     })
+}
+
+/// The overlay's current origin, for debug instrumentation only.
+///
+/// `None` rather than an error when the window cannot be read: a diagnostic
+/// that can fail a caller is a diagnostic that changes behaviour.
+#[cfg(debug_assertions)]
+pub fn current_origin(app: &AppHandle) -> Option<(i32, i32)> {
+    let position = overlay_window(app).ok()?.inner_position().ok()?;
+    Some((position.x, position.y))
 }
 
 fn apply_bounds(window: &WebviewWindow, bounds: Rect) -> Result<(), String> {
