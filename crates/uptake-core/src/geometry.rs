@@ -225,10 +225,48 @@ pub fn point_in_any(regions: &[Rect], point: Point) -> bool {
     regions.iter().any(|region| region.contains(point))
 }
 
-// A per-monitor type carrying `scale_factor` alongside `bounds` will be needed
-// by task 1.3 (per-monitor-DPI correctness). It is deliberately absent until
-// then: nothing constructs it today, and an unused type invites callers to
-// reach for a scale factor outside the single sanctioned conversion below.
+/// A monitor: its bounds in physical virtual-desktop pixels and the scale
+/// factor Windows assigns it under per-monitor-DPI v2.
+///
+/// Constructed at the Tauri boundary only (`overlay::monitors` in the app
+/// crate), so downstream code always works with core types. The scale factor
+/// is **not** a conversion licence: CSS↔physical conversion happens exactly
+/// once, with the *window's* scale factor, in [`css_to_physical`]. This factor
+/// exists for decisions that are per-monitor by nature — which monitor a
+/// capture targets (task 1.7) and how an area straddling two mixed-DPI
+/// monitors is treated (M-15).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Monitor {
+    /// The monitor's rectangle in physical virtual-desktop pixels.
+    pub bounds: Rect,
+    /// The monitor's scale factor (1.0 = 96 DPI; 1.25, 1.5, …).
+    pub scale_factor: f64,
+}
+
+impl Monitor {
+    /// Creates a monitor from its bounds and scale factor.
+    #[must_use]
+    pub const fn new(bounds: Rect, scale_factor: f64) -> Self {
+        Self {
+            bounds,
+            scale_factor,
+        }
+    }
+}
+
+/// The monitor containing `point`, or `None` when the point lies on no
+/// monitor — the virtual desktop's bounding rectangle can include dead zones
+/// when differently-sized monitors are arranged unevenly.
+///
+/// Half-open edges (like [`Rect::contains`]) mean a point on a shared edge
+/// belongs to exactly one of two adjacent monitors. Should monitors ever
+/// overlap (Windows does not normally report that), the first match wins.
+#[must_use]
+pub fn monitor_at(monitors: &[Monitor], point: Point) -> Option<&Monitor> {
+    monitors
+        .iter()
+        .find(|monitor| monitor.bounds.contains(point))
+}
 
 /// The bounding rectangle of the whole virtual desktop: the union of all
 /// monitor bounds. `None` when no monitor is reported — callers must surface
@@ -412,6 +450,63 @@ mod tests {
         assert!(!point_in_any(&[], Point::new(0, 0)));
     }
 
+    /// The 4-monitor dev rig: 2560×1440 @ 125 % primary, 1920×1080 @ 100 %
+    /// right of it, another above it, and a 1080×1920 portrait left of it.
+    ///
+    /// What task 1.1 *measured* on hardware is the union — `GetWindowRect` on
+    /// the shown overlay returned (−1080, −1080) 5560×2733, which is what
+    /// `dev_rig_bounds_match_the_hardware_measurement` pins. The portrait
+    /// monitor's y-offset of −267 was **inferred**: it is a value that
+    /// reproduces that union, not a per-monitor figure read off the OS.
+    /// Re-derive it before treating this rig as ground truth for anything
+    /// beyond the union.
+    fn dev_rig() -> Vec<Monitor> {
+        vec![
+            Monitor::new(Rect::new(0, 0, 2560, 1440), 1.25),
+            Monitor::new(Rect::new(2560, 0, 1920, 1080), 1.0),
+            Monitor::new(Rect::new(0, -1080, 1920, 1080), 1.0),
+            Monitor::new(Rect::new(-1080, -267, 1080, 1920), 1.0),
+        ]
+    }
+
+    #[test]
+    fn dev_rig_bounds_match_the_hardware_measurement() {
+        let bounds = virtual_desktop_bounds(dev_rig().iter().map(|m| m.bounds)).unwrap();
+        assert_eq!(bounds, Rect::new(-1080, -1080, 5560, 2733));
+    }
+
+    #[test]
+    fn monitor_at_selects_by_position_across_mixed_dpi() {
+        let rig = dev_rig();
+        // Centre of the primary → its 1.25 factor, not a neighbour's 1.0.
+        let primary = monitor_at(&rig, Point::new(1280, 720)).unwrap();
+        assert_eq!(primary.scale_factor, 1.25);
+        // Negative-coordinate monitors resolve too (M-4 territory).
+        let above = monitor_at(&rig, Point::new(960, -540)).unwrap();
+        assert_eq!(above.bounds, Rect::new(0, -1080, 1920, 1080));
+    }
+
+    #[test]
+    fn monitor_at_gives_shared_edges_to_exactly_one_monitor() {
+        let rig = dev_rig();
+        // x = 2560 is the primary's exclusive right edge and the right-hand
+        // monitor's inclusive left edge.
+        let owner = monitor_at(&rig, Point::new(2560, 500)).unwrap();
+        assert_eq!(owner.bounds.origin, Point::new(2560, 0));
+    }
+
+    #[test]
+    fn monitor_at_reports_dead_zones_and_empty_lists_as_none() {
+        let rig = dev_rig();
+        // Inside the bounding rectangle but on no monitor: above the portrait
+        // monitor, left of the one above the primary.
+        let bounds = virtual_desktop_bounds(rig.iter().map(|m| m.bounds)).unwrap();
+        let dead = Point::new(-500, -1000);
+        assert!(bounds.contains(dead));
+        assert!(monitor_at(&rig, dead).is_none());
+        assert!(monitor_at(&[], Point::new(0, 0)).is_none());
+    }
+
     #[test]
     fn monitors_above_the_primary_extend_bounds_upward() {
         let above = Rect::new(0, -1080, 1920, 1080);
@@ -488,6 +583,19 @@ mod tests {
         #[test]
         fn intersection_is_commutative(a in win_rect(), b in win_rect()) {
             prop_assert_eq!(a.intersection(b), b.intersection(a));
+        }
+
+        #[test]
+        fn monitor_at_agrees_with_point_in_any(
+            rects in proptest::collection::vec(win_rect(), 0..6),
+            p in win_point(),
+        ) {
+            let monitors: Vec<Monitor> =
+                rects.iter().map(|&r| Monitor::new(r, 1.0)).collect();
+            match monitor_at(&monitors, p) {
+                Some(m) => prop_assert!(m.bounds.contains(p)),
+                None => prop_assert!(!point_in_any(&rects, p)),
+            }
         }
 
         #[test]

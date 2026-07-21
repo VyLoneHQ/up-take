@@ -29,5 +29,15 @@ tauri-plugin-opener = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+[target."cfg(windows)".dependencies]
+# Display-change subscription (display_watch.rs): comctl32 window subclassing
+# plus the WM_* constants. tao already pulls windows-sys transitively; this
+# makes the usage explicit and feature-gated to exactly what we call.
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
 [lints]
 workspace = true
