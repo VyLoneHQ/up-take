@@ -32,6 +32,28 @@ impl Point {
     pub const fn new(x: i32, y: i32) -> Self {
         Self { x, y }
     }
+
+    /// Converts an `f64` physical-pixel coordinate pair (as APIs like Tauri's
+    /// `cursor_position` report) into a `Point` in the same space.
+    ///
+    /// This is **not** a coordinate-space conversion — input and output are
+    /// both physical virtual-desktop pixels — just a numeric narrowing:
+    /// coordinates are rounded to the nearest pixel and clamped to the `i32`
+    /// range. A non-finite coordinate yields `None`: there is no meaningful
+    /// pixel it could name, and callers (the click-through poll) must treat
+    /// "cursor position unknown" explicitly rather than receive a made-up
+    /// point.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)] // truncation is impossible after the clamp
+    pub fn from_physical_f64(x: f64, y: f64) -> Option<Self> {
+        if !x.is_finite() || !y.is_finite() {
+            return None;
+        }
+        Some(Self::new(
+            x.round().clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32,
+            y.round().clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32,
+        ))
+    }
 }
 
 /// A size in physical pixels.
@@ -150,6 +172,57 @@ impl Rect {
             ),
         })
     }
+}
+
+/// A rectangle in **WebView CSS pixels**, relative to the overlay window's
+/// viewport — exactly what `Element::getBoundingClientRect` reports.
+///
+/// This type exists only at the IPC boundary: the frontend measures its
+/// interactive elements and sends them here, and [`CssRect::to_physical`] is
+/// the one place they enter virtual-desktop space. Nothing else in the Rust
+/// side may hold CSS-space geometry.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CssRect {
+    /// Left edge in CSS pixels from the viewport's left.
+    pub x: f64,
+    /// Top edge in CSS pixels from the viewport's top.
+    pub y: f64,
+    /// Width in CSS pixels.
+    pub width: f64,
+    /// Height in CSS pixels.
+    pub height: f64,
+}
+
+impl CssRect {
+    /// Converts this CSS-space rectangle to physical virtual-desktop pixels.
+    ///
+    /// Both corners go through [`css_to_physical`] — the single sanctioned
+    /// conversion point (architecture §3.1) — and the result is normalized via
+    /// [`Rect::from_corner_points`], so a rectangle whose corners collapse or
+    /// invert under non-finite inputs still comes out well-formed (possibly
+    /// zero-sized), never panicking.
+    #[must_use]
+    pub fn to_physical(self, scale_factor: f64, window_origin: Point) -> Rect {
+        let top_left = css_to_physical(self.x, self.y, scale_factor, window_origin);
+        let bottom_right = css_to_physical(
+            self.x + self.width,
+            self.y + self.height,
+            scale_factor,
+            window_origin,
+        );
+        Rect::from_corner_points(top_left, bottom_right)
+    }
+}
+
+/// True when `point` lies inside at least one of `regions` (half-open edges,
+/// like [`Rect::contains`]).
+///
+/// An empty slice contains nothing — callers deciding click-through must treat
+/// "no regions reported" as its own case rather than letting it mean
+/// "everything passes through".
+#[must_use]
+pub fn point_in_any(regions: &[Rect], point: Point) -> bool {
+    regions.iter().any(|region| region.contains(point))
 }
 
 // A per-monitor type carrying `scale_factor` alongside `bounds` will be needed
@@ -276,6 +349,70 @@ mod tests {
     }
 
     #[test]
+    fn css_rect_converts_with_scaled_window_and_negative_origin() {
+        // Same M-3 setup as the point conversion above: window origin on a
+        // monitor left of the primary, scale factor 1.5.
+        let origin = Point::new(-2560, 0);
+        let css = CssRect {
+            x: 100.0,
+            y: 50.0,
+            width: 200.0,
+            height: 100.0,
+        };
+        assert_eq!(css.to_physical(1.5, origin), Rect::new(-2410, 75, 300, 150));
+        // At scale 1 with a zero origin the mapping is the identity.
+        assert_eq!(
+            css.to_physical(1.0, Point::new(0, 0)),
+            Rect::new(100, 50, 200, 100)
+        );
+    }
+
+    #[test]
+    fn css_rect_with_non_finite_input_degrades_to_a_well_formed_rect() {
+        // A NaN width poisons the bottom-right corner's x, which falls back to
+        // the window origin per css_to_physical's NaN rule; from_corner_points
+        // then normalizes. The result is wrong-but-bounded — and never a panic.
+        let css = CssRect {
+            x: 100.0,
+            y: 50.0,
+            width: f64::NAN,
+            height: 100.0,
+        };
+        assert_eq!(
+            css.to_physical(1.0, Point::new(0, 0)),
+            Rect::new(0, 50, 100, 100)
+        );
+    }
+
+    #[test]
+    fn physical_f64_narrowing_rounds_clamps_and_rejects_non_finite() {
+        assert_eq!(
+            Point::from_physical_f64(1699.6, -1021.4),
+            Some(Point::new(1700, -1021))
+        );
+        // Values beyond i32 clamp instead of wrapping.
+        assert_eq!(
+            Point::from_physical_f64(1e12, -1e12),
+            Some(Point::new(i32::MAX, i32::MIN))
+        );
+        // Non-finite coordinates have no pixel to name.
+        assert_eq!(Point::from_physical_f64(f64::NAN, 0.0), None);
+        assert_eq!(Point::from_physical_f64(0.0, f64::INFINITY), None);
+    }
+
+    #[test]
+    fn point_in_any_respects_half_open_edges_and_empty_sets() {
+        let regions = [Rect::new(0, 0, 100, 100), Rect::new(-2560, 0, 100, 50)];
+        assert!(point_in_any(&regions, Point::new(0, 0)));
+        assert!(point_in_any(&regions, Point::new(-2500, 25)));
+        // Right/bottom edges are exclusive.
+        assert!(!point_in_any(&regions, Point::new(100, 50)));
+        assert!(!point_in_any(&regions, Point::new(0, 100)));
+        // No regions contain nothing.
+        assert!(!point_in_any(&[], Point::new(0, 0)));
+    }
+
+    #[test]
     fn monitors_above_the_primary_extend_bounds_upward() {
         let above = Rect::new(0, -1080, 1920, 1080);
         let primary = Rect::new(0, 0, 1920, 1080);
@@ -378,6 +515,24 @@ mod tests {
             let _ = r.intersection(r);
             let _ = r.contains(b);
             let _ = css_to_physical(css, css, scale, a);
+            let _ = CssRect { x: css, y: css, width: css, height: css }
+                .to_physical(scale, a);
+            let _ = Point::from_physical_f64(css, scale);
+        }
+
+        #[test]
+        fn css_rect_conversion_matches_cornerwise_conversion(
+            x in -8192.0f64..8192.0, y in -8192.0f64..8192.0,
+            w in 0.0f64..4096.0, h in 0.0f64..4096.0,
+            scale in 0.5f64..4.0,
+            origin in win_point(),
+        ) {
+            let rect = CssRect { x, y, width: w, height: h }.to_physical(scale, origin);
+            let a = css_to_physical(x, y, scale, origin);
+            let b = css_to_physical(x + w, y + h, scale, origin);
+            prop_assert_eq!(rect, Rect::from_corner_points(a, b));
+            // With non-negative CSS sizes the top-left corner is the origin.
+            prop_assert_eq!(rect.origin, a);
         }
     }
 }
