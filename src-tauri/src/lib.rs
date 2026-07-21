@@ -13,12 +13,20 @@ use tauri::{Manager, WindowEvent};
 ///
 /// Returns the startup error rather than handling it here, so the caller
 /// decides how to exit. This matters: `std::process::exit` terminates without
-/// unwinding, so no `Drop` implementation runs. The single-instance guard
-/// (task 1.5) is exactly why this still matters: on the surviving instance its
-/// OS mutex is released by an `on_event(RunEvent::Exit)` hook, which only fires
-/// if the event loop gets to shut down normally — `.run()` below is what drives
-/// that, so nothing in this function may short-circuit past it. A *second*
-/// instance is a different story: the guard's own setup hook calls
+/// unwinding, so no `Drop` implementation runs — and this app owns things whose
+/// cleanup lives in destructors and in `RunEvent::Exit` hooks, reached only by
+/// letting `.run()` below shut the event loop down normally.
+///
+/// **What this is *not* protecting against, so nobody re-derives it wrongly:**
+/// the single-instance guard's OS mutex is safe either way. It is a named
+/// kernel object, the system closes every handle when a process terminates, and
+/// the object dies with its last handle — so the next launch's `CreateMutexW`
+/// cannot see `ERROR_ALREADY_EXISTS` no matter how this one ended. The guard's
+/// `on_event(RunEvent::Exit)` release is tidiness, not a correctness
+/// requirement, and a stale lock blocking a relaunch is not a reachable state.
+/// Do not write recovery code for it.
+///
+/// A *second* instance never gets here anyway: the guard's own setup hook calls
 /// `std::process::exit(0)` itself, deliberately, before this crate's `setup`
 /// closure — and therefore before `ClickThrough`, the hotkey or the tray exist
 /// — so there is nothing of ours left unreleased at that point.
@@ -129,12 +137,13 @@ pub fn run() -> tauri::Result<()> {
             // Never fatal — see `hotkey::install`.
             hotkey::install(app.handle());
             // The tray is now the only quit path (PRODUCT-VISION §4.3) as well
-            // as a second way to summon the overlay. Never fatal, same class
-            // as display-watch above: a missing icon is a bundling problem,
-            // not a reason to refuse to start with a working hotkey.
-            if let Err(error) = tray::install(app.handle()) {
-                eprintln!("tray: could not create the tray icon: {error}");
-            }
+            // as a second way to summon the overlay. Never fatal — but not
+            // silent either: losing the tray in a release build leaves a
+            // process with no window, no taskbar entry and no way to quit, so
+            // `tray::install` reports its own failure to the user the way
+            // `hotkey::install` does rather than logging into a void. See the
+            // `tray` module docs.
+            tray::install(app.handle());
             // Dev builds still show the overlay at startup so `pnpm tauri dev`
             // demonstrates something without a keypress, and because CI never
             // exercises the dev path (friction F-7). Esc hides it; the hotkey

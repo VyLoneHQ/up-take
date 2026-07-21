@@ -1,12 +1,14 @@
 //! Global hotkey registration (roadmap task 1.4).
 //!
-//! `Win+Shift+U` summons the overlay. Until the tray lands (task 1.5) this is
-//! the *only* way a release build can show it, which is why a failed
-//! registration is surfaced to the user rather than logged: architecture §4
-//! lists "shadowing another app's hotkey" as a threat whose mitigation is
-//! "detect registration failure and tell the user rather than silently doing
-//! nothing", and a silent failure here leaves a running process with no visible
-//! effect and no way to reach it.
+//! `Win+Shift+U` summons the overlay. Task 1.5's tray can summon it too, so
+//! this is no longer the only way in — but a failed registration is still
+//! surfaced to the user rather than logged: architecture §4 lists "shadowing
+//! another app's hotkey" as a threat whose mitigation is "detect registration
+//! failure and tell the user rather than silently doing nothing". The tray
+//! does not discharge that. A user who presses the combination and sees
+//! nothing has no way to tell a shadowed hotkey from a broken app, and the
+//! fix — closing or rebinding the other application — is one only they can
+//! make and only if told.
 //!
 //! ## Which thread the handler runs on
 //!
@@ -89,9 +91,14 @@ pub fn install(app: &AppHandle) {
 
 /// Tells the user the hotkey is unavailable, and what to do about it.
 ///
-/// Shown as a dialog rather than logged because there is nowhere else for it to
-/// go: no tray until task 1.5, no settings window until 1.14, and stderr is
-/// invisible in an installed build. Non-blocking — during `setup` the event
+/// Shown as a dialog rather than logged because there is still nowhere else for
+/// it to go. Task 1.5's tray is *not* that place: it can summon the overlay,
+/// but it cannot tell the user that a combination they are already pressing
+/// belongs to another application — a tray icon says nothing until it is
+/// clicked, and the user with a shadowed hotkey has no reason to click it.
+/// Until the settings window lands (task 1.14) there is no surface that could
+/// hold this, and stderr is invisible in an installed build. Non-blocking —
+/// during `setup` the event
 /// loop has not started, so a blocking dialog would deadlock the startup it is
 /// reporting on.
 fn report_failure(app: &AppHandle, error: &str) {
@@ -152,8 +159,10 @@ mod tests {
     #[test]
     fn the_conflict_case_is_recognised() {
         // Copied verbatim from a real conflict on the dev rig — a second
-        // UP-TAKE instance started while the first held the shortcut, which is
-        // reproducible until task 1.5 adds the single-instance guard. Pinning
+        // UP-TAKE instance started while the first held the shortcut. Task
+        // 1.5's single-instance guard now exits that second instance before it
+        // reaches registration, so reproducing it again needs
+        // `UPTAKE_DEV_ALLOW_MULTIPLE=1` (see `dev_harness`). Pinning
         // the *observed* string rather than a plausible one is the point: a
         // dependency bump that reworded it fails here, instead of silently
         // downgrading every conflict to the generic message.
