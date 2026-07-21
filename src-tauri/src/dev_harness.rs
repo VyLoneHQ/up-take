@@ -32,6 +32,19 @@
 //!
 //! Combined with a display change made *during* the wait, this reproduces the
 //! full hide → rearrange → show sequence with no hands on the keyboard.
+//!
+//! ## `UPTAKE_DEV_ALLOW_MULTIPLE`
+//!
+//! Task 1.5's single-instance guard exits a second launch before it reaches
+//! `hotkey::install`, which was the only way M-9 (another app already holding
+//! `Win+Shift+U`) had been reproduced — a second UP-TAKE instance standing in
+//! for the "other app". This variable skips registering the guard so two dev
+//! instances can run side by side again, one holding the hotkey for the other
+//! to collide with, exactly as before 1.5.
+//!
+//! ```text
+//! UPTAKE_DEV_ALLOW_MULTIPLE=1 pnpm tauri dev
+//! ```
 
 use std::env;
 use std::sync::OnceLock;
@@ -42,6 +55,15 @@ use tauri::AppHandle;
 
 /// Environment variable holding the re-show delay, in seconds.
 const RESHOW_VAR: &str = "UPTAKE_DEV_RESHOW";
+
+/// Environment variable that, when set, skips registering the single-instance
+/// guard so M-9 can still be reproduced with two dev instances.
+const ALLOW_MULTIPLE_VAR: &str = "UPTAKE_DEV_ALLOW_MULTIPLE";
+
+/// Whether the single-instance guard should be skipped this run.
+pub fn single_instance_disabled() -> bool {
+    env::var(ALLOW_MULTIPLE_VAR).is_ok()
+}
 
 /// The thread that ran `setup`, i.e. the event-loop thread.
 static MAIN_THREAD: OnceLock<ThreadId> = OnceLock::new();
