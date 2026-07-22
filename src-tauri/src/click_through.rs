@@ -208,6 +208,13 @@ fn tick(app: &AppHandle, state: &ClickThrough) {
 /// click fall through, hand focus to the app underneath, and take the Esc
 /// dismiss path with it.
 fn desired_ignore(app: &AppHandle, state: &ClickThrough) -> bool {
+    // Investigation toggle (dev only): force click-through even in Placement, to
+    // test whether a click-through overlay degrades hardware video underneath it
+    // the way the interactive one does. See `dev_harness::force_click_through`.
+    #[cfg(debug_assertions)]
+    if crate::dev_harness::force_click_through() {
+        return true;
+    }
     let Ok(position) = app.cursor_position() else {
         return false;
     };
