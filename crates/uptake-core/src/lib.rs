@@ -24,8 +24,16 @@
 //! The geometry types live in [`geometry`], together with the one sanctioned
 //! conversion function. They carry property tests — coordinate math is the
 //! number-one bug source and pure functions are cheap to test exhaustively.
+//!
+//! # The area model
+//!
+//! [`area`] holds the product's central noun — a rectangle of screen the user
+//! has claimed, its three orthogonal properties, and the z-ordered store that
+//! owns area identity and stacking. It is built on [`geometry`] and, like it,
+//! is pure: no window, no capture, no OS.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod area;
 pub mod geometry;
