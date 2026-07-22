@@ -60,9 +60,25 @@ const RESHOW_VAR: &str = "UPTAKE_DEV_RESHOW";
 /// guard so M-9 can still be reproduced with two dev instances.
 const ALLOW_MULTIPLE_VAR: &str = "UPTAKE_DEV_ALLOW_MULTIPLE";
 
+/// Environment variable that forces the overlay click-through even where an
+/// interactive area would otherwise take input.
+const FORCE_CLICKTHROUGH_VAR: &str = "UPTAKE_DEV_FORCE_CLICKTHROUGH";
+
 /// Whether the single-instance guard should be skipped this run.
 pub fn single_instance_disabled() -> bool {
     env::var(ALLOW_MULTIPLE_VAR).is_ok()
+}
+
+/// Whether to force the overlay click-through even over interactive areas.
+///
+/// The investigation it began — does a *click-through* overlay avoid the
+/// hardware-video degradation an *interactive* one causes? — is settled and
+/// recorded in ADR-0014 (yes; the overlay is now click-through whenever
+/// visible). The toggle is kept as a testing aid for task 1.6c, which adds the
+/// per-area carve-outs where the window does take input: setting this forces
+/// click-through anyway, to compare video quality with and without them.
+pub fn force_click_through() -> bool {
+    env::var(FORCE_CLICKTHROUGH_VAR).is_ok()
 }
 
 /// The thread that ran `setup`, i.e. the event-loop thread.
@@ -115,10 +131,10 @@ pub fn schedule_reshow(app: &AppHandle) {
         std::thread::sleep(delay);
         log_summon("dev-harness timer", crate::overlay::current_origin(&app));
         // Deliberately *not* `run_on_main_thread`: calling from this thread is
-        // the entire point. See the module docs.
-        if let Err(error) = crate::overlay::show(&app) {
-            eprintln!("dev-harness: re-show failed: {error}");
-        }
+        // the entire point (it exercises `show`'s off-event-loop `reconvert_regions`
+        // path). `summon` reaches `show` through the state machine and logs its
+        // own failures. See the module docs.
+        crate::overlay::summon(&app);
     });
 }
 

@@ -104,21 +104,6 @@ export async function reportInteractiveRegions(
   }
 }
 
-/**
- * Emits the hide intent. Never throws, for the same reason as above: this is
- * one of only two dismiss paths, and an unhandled rejection here would strand
- * the user behind a full-desktop overlay.
- */
-export async function hideOverlay(invoke: Invoke): Promise<boolean> {
-  try {
-    await invoke('overlay_hide');
-    return true;
-  } catch (error) {
-    console.error('Failed to hide the overlay:', error);
-    return false;
-  }
-}
-
 /** Whether a key press should dismiss the overlay (M-11 keyboard-only). */
 export function isDismissKey(key: string): boolean {
   return key === 'Escape';

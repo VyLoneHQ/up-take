@@ -53,11 +53,12 @@ struct RegionSet {
 }
 
 impl RegionSet {
-    /// The fail-safe set: no regions, so the whole window takes input.
+    /// The empty set: no interactive regions, so the whole window is
+    /// click-through.
     ///
     /// The starting state, and the state to fall back to whenever a report
-    /// cannot be trusted — see [`ClickThrough::regions`] for why empty means
-    /// interactive rather than fully click-through.
+    /// cannot be trusted — see [`ClickThrough::regions`] for why empty now means
+    /// fully click-through (ADR-0014) rather than interactive.
     fn empty() -> Self {
         Self {
             css: Vec::new(),
@@ -72,11 +73,14 @@ pub struct ClickThrough {
     /// Interactive regions. While the poll is active, the window takes input
     /// inside them and ignores cursor events everywhere else.
     ///
-    /// **Empty means "keep the whole window interactive"**, not "everything
-    /// passes through": until the frontend has successfully reported its
-    /// regions, click-through would strand the user — a click anywhere would
-    /// fall through, focus the app underneath, and take Esc (the dismiss path)
-    /// with it. Fail interactive, never fail click-through.
+    /// **Empty means "the whole window is click-through"** (ADR-0014): with no
+    /// interactive area under the cursor, every click belongs to the app
+    /// underneath, and the overlay must never degrade the live content it sits
+    /// over. This is the resting `Living` shape, and the `Placement` shape too —
+    /// there the mouse hook (`crate::placement`) supplies the drag, not this
+    /// poll. Interactive areas (task 1.6c) add carve-outs where the window takes
+    /// input; until one is reported there are none, so the overlay is fully
+    /// click-through whenever it is visible.
     regions: Mutex<RegionSet>,
     /// Whether the poll should run. Guarded by `signal` so `activate` /
     /// `deactivate` can wake the poll thread promptly instead of leaving it in
@@ -150,8 +154,16 @@ fn poll_loop(app: &AppHandle) -> ! {
                 .unwrap_or_else(PoisonError::into_inner),
         );
 
+        // Reset per show cycle: makes the drag→idle clearing emit in
+        // `pump_selection` fire once when a placement drag ends, not every tick.
+        let mut was_dragging = false;
         loop {
             tick(app, &state);
+            // Publish the live placement selection rectangle at the poll's
+            // cadence. The mouse hook only writes atomics, so pacing the emit
+            // here caps it at ~60 Hz however fast the mouse reports — see
+            // `placement::pump_selection`.
+            crate::placement::pump_selection(app, &mut was_dragging);
 
             // Pace to FRAME, but let deactivate cut the sleep short.
             let guard = lock(&state.active);
@@ -167,10 +179,10 @@ fn poll_loop(app: &AppHandle) -> ! {
             }
         }
 
-        // Deactivated: leave the (now hidden) window interactive so the next
-        // show starts from the known fail-safe state.
+        // Deactivated: the overlay is hidden. Leave the window click-through,
+        // the visible baseline (ADR-0014), so nothing ever observes it interactive.
         if let Ok(window) = overlay_window(app)
-            && let Err(error) = window.set_ignore_cursor_events(false)
+            && let Err(error) = window.set_ignore_cursor_events(true)
         {
             eprintln!("click-through: could not reset on hide: {error}");
         }
@@ -202,22 +214,34 @@ fn tick(app: &AppHandle, state: &ClickThrough) {
 
 /// Whether the window should currently ignore cursor events.
 ///
-/// Fail safe throughout: an unreadable cursor position, a non-finite
-/// coordinate, or an empty region set all answer "no" — a wrongly-interactive
-/// overlay still dismisses with Esc, while a wrongly click-through one lets a
-/// click fall through, hand focus to the app underneath, and take the Esc
-/// dismiss path with it.
+/// ADR-0014 inverts the old fail-safe: the overlay is **click-through whenever
+/// visible** and takes input only where an interactive area sits under the
+/// cursor. So the answer is "yes, ignore" (click-through) unless the cursor is
+/// provably inside a reported region. Every unresolved case — no regions, an
+/// unreadable cursor, a non-finite coordinate — fails toward click-through: a
+/// lost click reaches the app underneath, which is the safe direction here, and
+/// `Esc` still works from the overlay's keyboard focus regardless.
 fn desired_ignore(app: &AppHandle, state: &ClickThrough) -> bool {
+    // Investigation toggle (dev only): force click-through even where an
+    // interactive area would otherwise take input. Redundant while no regions
+    // are reported (the default is already click-through), but kept for testing
+    // the per-area routing task 1.6c adds. See `dev_harness::force_click_through`.
+    #[cfg(debug_assertions)]
+    if crate::dev_harness::force_click_through() {
+        return true;
+    }
+    let regions = lock(&state.regions);
+    // The common case this session: no interactive areas, so fully click-through
+    // — and it costs no cursor read.
+    if regions.physical.is_empty() {
+        return true;
+    }
     let Ok(position) = app.cursor_position() else {
-        return false;
+        return true;
     };
     let Some(cursor) = Point::from_physical_f64(position.x, position.y) else {
-        return false;
+        return true;
     };
-    let regions = lock(&state.regions);
-    if regions.physical.is_empty() {
-        return false;
-    }
     !point_in_any(&regions.physical, cursor)
 }
 
@@ -253,10 +277,11 @@ pub fn overlay_set_interactive_regions(
     let scale = match checked_scale(scale) {
         Ok(scale) => scale,
         Err(error) => {
-            // Fail interactive, per this module's standing rule. Returning the
-            // error while leaving the old set in place would keep the overlay
-            // hit-testing stale boxes, and nothing retries — the frontend logs
-            // the rejection and the next report only comes on a `resize`.
+            // Clear to the empty (fully click-through) set rather than keep a
+            // stale one: a bad scale means the stored boxes may be wrong, and
+            // hit-testing wrong boxes would take input where it should pass
+            // through. Nothing retries — the frontend logs the rejection and the
+            // next report only comes on a `resize`.
             *lock(&state.regions) = RegionSet::empty();
             return Err(error);
         }
@@ -293,10 +318,10 @@ pub fn overlay_set_interactive_regions(
 /// `f64::clamp` propagates `NaN`, so the geometry layer cannot catch it either.
 ///
 /// The caller clears the region set on rejection rather than keeping the
-/// previous one. Keeping it sounds conservative and is not: a non-empty set
-/// leaves the window click-through everywhere outside boxes that may already be
-/// stale, which is the one failure this module refuses to allow — a click falls
-/// through, focuses the app underneath, and takes the Esc dismiss path with it.
+/// previous one. A stale set would leave the window taking input over boxes that
+/// may no longer be where the areas are, capturing clicks the user meant for the
+/// app underneath. Clearing to empty makes the overlay fully click-through until
+/// a good report arrives — the safe direction under ADR-0014.
 fn checked_scale(scale: f64) -> Result<f64, String> {
     if scale.is_finite() && scale > 0.0 && scale <= 16.0 {
         Ok(scale)
@@ -358,8 +383,9 @@ pub fn reconvert_regions(app: &AppHandle) {
     match convert_regions(&window, &regions.css, regions.scale) {
         Ok(physical) => regions.physical = physical,
         Err(error) => {
-            // Fail interactive: an empty set keeps the whole window taking
-            // input, so the dismiss paths survive an unreadable window state.
+            // Fail click-through: clearing the physical set passes every click
+            // to the app underneath rather than hit-testing boxes it could not
+            // rebuild (ADR-0014).
             regions.physical.clear();
             eprintln!("click-through: could not re-convert regions: {error}");
         }
@@ -436,12 +462,13 @@ mod tests {
     }
 
     #[test]
-    fn the_empty_set_is_the_fail_safe_one() {
+    fn the_empty_set_means_fully_click_through() {
         // Pins what the rejection path in `overlay_set_interactive_regions`
         // relies on: `RegionSet::empty` must leave nothing to hit-test, because
-        // `desired_ignore` reads an empty `physical` as "stay interactive". A
-        // future field that defaulted to something non-empty would silently
-        // turn the fail-safe into a fail-click-through.
+        // `desired_ignore` reads an empty `physical` as "click-through
+        // everywhere" (ADR-0014). A future field that defaulted to something
+        // non-empty would silently make the overlay take input with no area to
+        // justify it.
         let empty = RegionSet::empty();
         assert!(empty.physical.is_empty());
         assert!(empty.css.is_empty());
