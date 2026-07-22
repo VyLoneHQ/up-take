@@ -33,11 +33,16 @@ tauri-plugin-dialog = "2.7.2"
 tauri-plugin-single-instance = "2"
 
 [target."cfg(windows)".dependencies]
-# Display-change subscription (display_watch.rs): comctl32 window subclassing
-# plus the WM_* constants. tao already pulls windows-sys transitively; this
-# makes the usage explicit and feature-gated to exactly what we call.
+# Windows APIs called directly:
+#   - display_watch.rs: comctl32 window subclassing (Win32_UI_Shell) for
+#     WM_DISPLAYCHANGE.
+#   - placement.rs: the WH_MOUSE_LL hook, SetSystemCursor, and GetModuleHandleW
+#     (Win32_System_LibraryLoader) for live-placement input (ADR-0014).
+# tao already pulls windows-sys transitively; this makes the usage explicit and
+# feature-gated to exactly what we call.
 windows-sys = { workspace = true, features = [
   "Win32_Foundation",
+  "Win32_System_LibraryLoader",
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
 ] }

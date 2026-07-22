@@ -4,6 +4,8 @@ import {
   escapeOverlay,
   monitorFramesCss,
   type PhysRect,
+  physRectsToCss,
+  physRectToCss,
   showsTint,
 } from './overlay-state';
 import type { Invoke } from './regions';
@@ -37,6 +39,46 @@ describe('monitorFramesCss', () => {
 
   it('reports nothing when there are no monitors', () => {
     expect(monitorFramesCss([], [0, 0], 1)).toEqual([]);
+  });
+});
+
+describe('physRectsToCss', () => {
+  it('offsets by the origin and divides by dpr, like the monitor frames', () => {
+    // An area at physical (100, 200) on a desktop whose origin is (-1080, -1080),
+    // viewed at 125%: it sits 1180/1.25 = 944 px right of the overlay top-left.
+    expect(
+      physRectsToCss([[100, 200, 800, 600]], [-1080, -1080], 1.25),
+    ).toEqual([{ x: 944, y: 1024, width: 640, height: 480 }]);
+  });
+
+  it('returns nothing for a non-finite or non-positive dpr', () => {
+    for (const dpr of [Number.NaN, 0, -2, Number.POSITIVE_INFINITY]) {
+      expect(physRectsToCss([[0, 0, 10, 10]], [0, 0], dpr)).toEqual([]);
+    }
+  });
+
+  it('maps an empty list to an empty list', () => {
+    expect(physRectsToCss([], [0, 0], 1)).toEqual([]);
+  });
+});
+
+describe('physRectToCss', () => {
+  it('converts a single physical rect', () => {
+    expect(physRectToCss([100, 200, 800, 600], [0, 0], 2)).toEqual({
+      x: 50,
+      y: 100,
+      width: 400,
+      height: 300,
+    });
+  });
+
+  it('passes null through as null — nothing to draw', () => {
+    expect(physRectToCss(null, [0, 0], 1)).toBeNull();
+  });
+
+  it('returns null for an unusable dpr rather than a NaN-positioned box', () => {
+    expect(physRectToCss([0, 0, 10, 10], [0, 0], 0)).toBeNull();
+    expect(physRectToCss([0, 0, 10, 10], [0, 0], Number.NaN)).toBeNull();
   });
 });
 

@@ -14,10 +14,12 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
+use uptake_core::area::{AreaStore, AreaType};
 use uptake_core::geometry::{Monitor, Point, Rect, Size, virtual_desktop_bounds};
 
 use crate::click_through;
 use crate::overlay_state::{Event, OverlayState, next};
+use crate::placement;
 
 /// Label of the overlay window as declared in `tauri.conf.json`.
 pub const WINDOW_LABEL: &str = "overlay";
@@ -32,17 +34,25 @@ pub const WINDOW_LABEL: &str = "overlay";
 pub fn show(app: &AppHandle) -> Result<(), String> {
     let window = overlay_window(app)?;
     apply_bounds(&window, desired_bounds(&window)?)?;
-    // Known baseline before anything is visible: interactive everywhere, so
-    // Esc works from the first frame even if the click-through poll has not
-    // ticked yet. The poll refines this within one frame.
+    // Known baseline before anything is visible: **click-through** (ADR-0014).
+    // The overlay must never degrade the live content it sits over, so it
+    // ignores the cursor whenever it is visible — in `Placement` the mouse hook
+    // (`placement`) supplies the drag, and in `Living` clicks belong to the apps
+    // underneath. The poll re-asserts this within one frame; setting it here too
+    // means the first visible frame is already click-through rather than
+    // stealing a click before the poll's first tick.
     window
-        .set_ignore_cursor_events(false)
-        .map_err(|e| format!("Could not reset overlay click-through: {e}"))?;
+        .set_ignore_cursor_events(true)
+        .map_err(|e| format!("Could not set overlay click-through: {e}"))?;
     window
         .show()
         .map_err(|e| format!("Could not show the overlay: {e}"))?;
-    // Focus so keyboard input (Esc to dismiss — M-11 keyboard-only operation)
-    // reaches the overlay immediately.
+    // Focus so keyboard input reaches the overlay even though it is
+    // click-through: `WS_EX_TRANSPARENT` affects only mouse hit-testing, so a
+    // focused click-through window still receives `Esc` (M-11 keyboard-only).
+    // The hook swallows placement clicks, so focus is not stolen mid-placement;
+    // and the global hotkey re-focuses from anywhere (F-13) as the guaranteed
+    // fallback if it ever is.
     window
         .set_focus()
         .map_err(|e| format!("Could not focus the overlay: {e}"))?;
@@ -258,10 +268,17 @@ pub fn toggle(app: &AppHandle) {
 
 /// Handles `Esc` from the overlay.
 ///
-/// `mid_drag` is wired in slice 2 (the drag lifecycle); today no placement drag
-/// exists, so this always backs out of Placement rather than cancelling a drag.
+/// A drag in progress is cancelled first and the state is left unchanged
+/// (ADR-0012: mid-drag `Esc` = cancel); otherwise `Esc` backs out of Placement.
+/// The distinction is read from the placement hook rather than tracked here,
+/// because the hook is the only thing that knows a drag is live.
 pub fn escape(app: &AppHandle) {
-    drive(app, Event::Escape { mid_drag: false });
+    if placement::is_dragging() {
+        placement::cancel_drag();
+        drive(app, Event::Escape { mid_drag: true });
+    } else {
+        drive(app, Event::Escape { mid_drag: false });
+    }
 }
 
 /// Applies an event to the current state and performs the resulting effect.
@@ -283,17 +300,32 @@ fn drive(app: &AppHandle, event: Event) {
 }
 
 /// Performs a state's effect: show or hide the window (which also (de)activates
-/// the click-through poll), then emit the new state to the frontend.
+/// the click-through poll), toggle the placement input layer, and emit the new
+/// state and area set to the frontend.
+///
+/// `placement::enter`/`exit` own the mouse hook and the crosshair cursor, which
+/// belong to Placement alone. `exit` is called on the way into Living and Hidden
+/// (and is idempotent) so the hook and the global cursor override never outlive
+/// the one state that uses them.
 fn apply(app: &AppHandle, state: OverlayState) -> Result<(), String> {
     match state {
         OverlayState::Hidden => {
             // Emit first so the frontend clears its indicator, then hide.
             emit_state(app, state)?;
+            placement::exit(app);
             hide(app)
         }
-        OverlayState::Placement | OverlayState::Living => {
+        OverlayState::Placement => {
             show(app)?;
-            emit_state(app, state)
+            placement::enter(app);
+            emit_state(app, state)?;
+            emit_areas(app)
+        }
+        OverlayState::Living => {
+            show(app)?;
+            placement::exit(app);
+            emit_state(app, state)?;
+            emit_areas(app)
         }
     }
 }
@@ -334,13 +366,67 @@ fn emit_state(app: &AppHandle, state: OverlayState) -> Result<(), String> {
         .map_err(|e| format!("Could not emit overlay state: {e}"))
 }
 
-/// Whether any areas exist.
+/// Whether any areas exist — read from the managed [`AreaStore`]. When it is
+/// empty, `Living` collapses to `Hidden` (overlay_state), because a
+/// click-through overlay with nothing on it is indistinguishable from hidden.
+fn has_areas(app: &AppHandle) -> bool {
+    let store = app.state::<Mutex<AreaStore>>();
+    !lock(&store).is_empty()
+}
+
+/// The Tauri event carrying the current areas to the frontend, which draws each
+/// as a persistent border. Physical rects; the frontend converts with its own
+/// origin and `devicePixelRatio` (ADR-0011), exactly as it does the monitor
+/// frames and the selection box.
+const AREAS_EVENT: &str = "overlay://areas";
+
+/// The area rectangles sent to the frontend.
+#[derive(Serialize, Clone)]
+struct AreasPayload {
+    /// Each area's bounds in physical virtual-desktop px, bottom-first (paint
+    /// order — later areas draw over earlier ones).
+    areas: Vec<(i32, i32, u32, u32)>,
+}
+
+/// Emits the current area set. Called on entering a visible state, on the
+/// frontend's mount request, and by the placement hook after it creates one.
+pub(crate) fn emit_areas(app: &AppHandle) -> Result<(), String> {
+    let store = app.state::<Mutex<AreaStore>>();
+    let areas = lock(&store)
+        .iter()
+        .map(|area| {
+            (
+                area.bounds.origin.x,
+                area.bounds.origin.y,
+                area.bounds.size.width,
+                area.bounds.size.height,
+            )
+        })
+        .collect();
+    app.emit(AREAS_EVENT, AreasPayload { areas })
+        .map_err(|e| format!("Could not emit overlay areas: {e}"))
+}
+
+/// Creates a `Default` area at the given physical bounds, returning whether one
+/// was created. `Default` is the only type task 1.6 ships (R-17); an empty
+/// rectangle — a click or a drag that never moved — creates nothing, which
+/// `AreaStore::create` enforces.
 ///
-/// Slice 2 (drag-to-create) manages an `AreaStore` and reads it here; until
-/// then there are none, so `Living` always collapses to `Hidden` — a
-/// click-through overlay with nothing on it is just hidden.
-fn has_areas(_app: &AppHandle) -> bool {
-    false
+/// The placement hook calls this from the event-loop thread; it takes the store
+/// lock only for the push.
+pub(crate) fn create_default_area(
+    app: &AppHandle,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+) -> bool {
+    let bounds = Rect {
+        origin: Point::new(x, y),
+        size: Size::new(width, height),
+    };
+    let store = app.state::<Mutex<AreaStore>>();
+    lock(&store).create(AreaType::Default, bounds).is_some()
 }
 
 /// Locks a mutex, treating poisoning as recoverable — the state under it is a
@@ -358,13 +444,15 @@ pub fn overlay_escape(app: AppHandle) {
 /// IPC surface: the frontend requests the current state on mount.
 ///
 /// A webview that loaded *after* the last transition — the debug startup show,
-/// or a dev reload — would otherwise render no indicator until the next change.
-/// This re-emits the current state so the indicator is correct immediately.
+/// or a dev reload — would otherwise render no indicator and no areas until the
+/// next change. This re-emits both the current state and the area set so the
+/// overlay is correct immediately.
 #[tauri::command]
 pub fn overlay_request_state(app: AppHandle) -> Result<(), String> {
     let cell = app.state::<Mutex<OverlayState>>();
     let state = *lock(&cell);
-    emit_state(&app, state)
+    emit_state(&app, state)?;
+    emit_areas(&app)
 }
 
 #[cfg(test)]

@@ -60,8 +60,8 @@ const RESHOW_VAR: &str = "UPTAKE_DEV_RESHOW";
 /// guard so M-9 can still be reproduced with two dev instances.
 const ALLOW_MULTIPLE_VAR: &str = "UPTAKE_DEV_ALLOW_MULTIPLE";
 
-/// Environment variable that forces the overlay click-through even in
-/// Placement — an investigation toggle for the capture-and-render work.
+/// Environment variable that forces the overlay click-through even where an
+/// interactive area would otherwise take input.
 const FORCE_CLICKTHROUGH_VAR: &str = "UPTAKE_DEV_FORCE_CLICKTHROUGH";
 
 /// Whether the single-instance guard should be skipped this run.
@@ -69,14 +69,14 @@ pub fn single_instance_disabled() -> bool {
     env::var(ALLOW_MULTIPLE_VAR).is_ok()
 }
 
-/// Whether to force the overlay click-through regardless of state.
+/// Whether to force the overlay click-through even over interactive areas.
 ///
-/// The question it answers: an *interactive* overlay (Placement) degrades
-/// hardware video underneath it (the browser falls back off its crisp overlay
-/// path). Does a *click-through* overlay — which Chromium's occlusion tracker
-/// treats specially — avoid that? If so, the LIVING state is unaffected and the
-/// problem is confined to Placement, which is solved by a pre-capture freeze
-/// frame. Set it and summon the overlay over a playing video to see.
+/// The investigation it began — does a *click-through* overlay avoid the
+/// hardware-video degradation an *interactive* one causes? — is settled and
+/// recorded in ADR-0014 (yes; the overlay is now click-through whenever
+/// visible). The toggle is kept as a testing aid for task 1.6c, which adds the
+/// per-area carve-outs where the window does take input: setting this forces
+/// click-through anyway, to compare video quality with and without them.
 pub fn force_click_through() -> bool {
     env::var(FORCE_CLICKTHROUGH_VAR).is_ok()
 }

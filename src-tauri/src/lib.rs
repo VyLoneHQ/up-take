@@ -6,11 +6,13 @@ mod display_watch;
 mod hotkey;
 mod overlay;
 mod overlay_state;
+mod placement;
 mod tray;
 
 use std::sync::Mutex;
 
-use tauri::{Manager, WindowEvent};
+use tauri::{Manager, RunEvent, WindowEvent};
+use uptake_core::area::AreaStore;
 
 /// Builds and runs the Tauri application.
 ///
@@ -117,6 +119,14 @@ pub fn run() -> tauri::Result<()> {
             // The overlay's interaction state (ADR-0012), managed before the
             // first summon so `drive` always has it to read.
             app.manage(Mutex::new(overlay_state::OverlayState::Hidden));
+            // The area store (ADR-0009, task 1.6b), managed before the first
+            // summon: `has_areas` reads it to decide whether Living is real, and
+            // the placement hook writes it when a drag creates one.
+            app.manage(Mutex::new(AreaStore::new()));
+            // Chain a system-cursor restore onto the panic hook before anything
+            // can override the cursor, so a panic while placing does not leave
+            // every app showing the crosshair. See `placement`.
+            placement::install_panic_guard();
             // Display-configuration changes reach a *visible* overlay only
             // through WM_DISPLAYCHANGE, which tao does not surface — the
             // native hook is the M-6 subscription (task 1.3).
@@ -156,5 +166,15 @@ pub fn run() -> tauri::Result<()> {
             overlay::summon(app.handle());
             Ok(())
         })
-        .run(tauri::generate_context!())
+        // `build` + `run` rather than `run(context)` alone, to reach
+        // `RunEvent::Exit`: a graceful shutdown (the tray Quit) must restore the
+        // system cursors the placement layer may have overridden. A *hard* kill
+        // runs none of this — see the `placement` module docs.
+        .build(tauri::generate_context!())?
+        .run(|_app, event| {
+            if let RunEvent::Exit = event {
+                placement::teardown();
+            }
+        });
+    Ok(())
 }

@@ -27,34 +27,73 @@ export interface StatePayload {
   monitors: PhysRect[];
 }
 
+/** The payload of the `overlay://areas` event: every area, bottom-first. */
+export interface AreasPayload {
+  areas: PhysRect[];
+}
+
 /**
- * Converts each monitor's physical rect into a CSS rect in the overlay's
- * viewport, for drawing the per-monitor focus frame.
+ * The payload of the `placement://selection` event: the live drag rectangle, or
+ * `null` when nothing is being dragged.
+ */
+export interface SelectionPayload {
+  rect: PhysRect | null;
+}
+
+/**
+ * Converts physical virtual-desktop rects into CSS rects in the overlay's
+ * viewport. The one conversion shared by every physical rect the overlay draws
+ * — the per-monitor focus frames, the persistent area borders, and the live
+ * placement selection box.
  *
- * The conversion uses **the WebView's own `devicePixelRatio`**, not a value
- * from Rust: the WebView is the authority on the scale it laid out in
- * (ADR-0011), and deriving it anywhere else reintroduces the scale-mismatch bug
- * that ADR exists to prevent. CSS `(0, 0)` is the overlay's top-left, which is
- * the virtual-desktop origin, so a monitor at physical `(mx, my)` sits at
- * `((mx − ox) / dpr, (my − oy) / dpr)`.
+ * It uses **the WebView's own `devicePixelRatio`**, not a value from Rust: the
+ * WebView is the authority on the scale it laid out in (ADR-0011), and deriving
+ * it anywhere else reintroduces the scale-mismatch bug that ADR exists to
+ * prevent. CSS `(0, 0)` is the overlay's top-left, which is the virtual-desktop
+ * origin, so a rect at physical `(x, y)` sits at `((x − ox) / dpr, (y − oy) / dpr)`.
  *
- * Returns no frames for a non-finite or non-positive `dpr` rather than emitting
+ * Returns nothing for a non-finite or non-positive `dpr` rather than emitting
  * `NaN`-positioned rectangles — the same fail-safe posture the Rust scale check
- * takes. Better no indicator than a garbage one.
+ * takes. Better nothing drawn than a garbage rectangle.
+ */
+export function physRectsToCss(
+  rects: readonly PhysRect[],
+  origin: Origin,
+  dpr: number,
+): CssRect[] {
+  if (!Number.isFinite(dpr) || dpr <= 0) return [];
+  const [ox, oy] = origin;
+  return rects.map(([x, y, width, height]) => ({
+    x: (x - ox) / dpr,
+    y: (y - oy) / dpr,
+    width: width / dpr,
+    height: height / dpr,
+  }));
+}
+
+/**
+ * Converts the monitor rects into the per-monitor focus frames (Placement).
+ * A thin wrapper over {@link physRectsToCss} kept for the component's clarity.
  */
 export function monitorFramesCss(
   monitors: readonly PhysRect[],
   origin: Origin,
   dpr: number,
 ): CssRect[] {
-  if (!Number.isFinite(dpr) || dpr <= 0) return [];
-  const [ox, oy] = origin;
-  return monitors.map(([x, y, width, height]) => ({
-    x: (x - ox) / dpr,
-    y: (y - oy) / dpr,
-    width: width / dpr,
-    height: height / dpr,
-  }));
+  return physRectsToCss(monitors, origin, dpr);
+}
+
+/**
+ * Converts a single physical rect (the live selection box) into a CSS rect, or
+ * `null` when there is nothing to draw or the `dpr` is unusable.
+ */
+export function physRectToCss(
+  rect: PhysRect | null,
+  origin: Origin,
+  dpr: number,
+): CssRect | null {
+  if (rect === null) return null;
+  return physRectsToCss([rect], origin, dpr)[0] ?? null;
 }
 
 /** Whether this state dims the screen and shows the focus frames (Placement). */
