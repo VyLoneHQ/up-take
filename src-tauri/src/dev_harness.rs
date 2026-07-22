@@ -115,10 +115,10 @@ pub fn schedule_reshow(app: &AppHandle) {
         std::thread::sleep(delay);
         log_summon("dev-harness timer", crate::overlay::current_origin(&app));
         // Deliberately *not* `run_on_main_thread`: calling from this thread is
-        // the entire point. See the module docs.
-        if let Err(error) = crate::overlay::show(&app) {
-            eprintln!("dev-harness: re-show failed: {error}");
-        }
+        // the entire point (it exercises `show`'s off-event-loop `reconvert_regions`
+        // path). `summon` reaches `show` through the state machine and logs its
+        // own failures. See the module docs.
+        crate::overlay::summon(&app);
     });
 }
 

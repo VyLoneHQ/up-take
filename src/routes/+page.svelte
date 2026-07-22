@@ -1,56 +1,59 @@
 <script lang="ts">
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { onMount } from 'svelte';
-import * as regions from '$lib/regions';
+import {
+  escapeOverlay,
+  monitorFramesCss,
+  type OverlayStateName,
+  type StatePayload,
+  showsTint,
+} from '$lib/overlay-state';
+import { type CssRect, isDismissKey } from '$lib/regions';
 
-// Presentation only (architecture §1): the frontend renders state and emits
-// intents. The logic lives in `$lib/regions` so it can be tested without a DOM
-// harness — see `regions.test.ts`.
-let pill: HTMLButtonElement;
-
-function dismiss() {
-  void regions.hideOverlay(invoke);
-}
+// Presentation only (architecture §1): the Rust side owns the state machine
+// (ADR-0012) and emits the current state; this component renders the focus
+// indicator for it and emits the Esc intent. No decision is made here.
+let overlayState: OverlayStateName = $state('hidden');
+let frames: CssRect[] = $state([]);
 
 function onKeydown(event: KeyboardEvent) {
-  if (!regions.isDismissKey(event.key)) return;
-  dismiss();
+  if (!isDismissKey(event.key)) return;
+  void escapeOverlay(invoke);
 }
 
-// The pill is the only interactive region for now (task 1.2): while the overlay
-// is visible, the window takes input inside reported regions and lets clicks
-// fall through everywhere else.
-//
-// `devicePixelRatio` travels with the measurement because Rust cannot derive
-// it reliably — tao's per-window scale factor can disagree with the one the
-// WebView laid out in, which silently offsets every region. See the
-// `reportInteractiveRegions` docs.
-//
-// `resize` is the only re-measurement trigger, and it covers a DPI change only
-// indirectly — which is worth knowing before trusting it. Windows sends the
-// window `WM_DPICHANGED`; tao responds by rescaling its physical size to
-// preserve its *logical* size, so `devicePixelRatio` and the physical size move
-// together, the CSS viewport is unchanged, and no `resize` fires here. The
-// event that does fire is the one raised by the Rust side re-fitting the
-// overlay to the full virtual desktop afterwards. See `reconvert_regions` in
-// `click_through.rs` for the chain and for what breaks it.
-function report() {
-  void regions.reportInteractiveRegions(
-    invoke,
-    [pill],
-    window.devicePixelRatio,
-  );
-}
-
-onMount(report);
+onMount(() => {
+  // Attach the listener first, then ask Rust for the current state — a webview
+  // that mounted *after* the startup summon (or a dev reload) would otherwise
+  // show no indicator until the next transition.
+  const unlisten = listen<StatePayload>('overlay://state', (event) => {
+    overlayState = event.payload.state;
+    // `devicePixelRatio` is read here, not sent by Rust: the WebView owns its
+    // scale (ADR-0011).
+    frames = monitorFramesCss(
+      event.payload.monitors,
+      event.payload.origin,
+      window.devicePixelRatio,
+    );
+  });
+  void invoke('overlay_request_state');
+  return () => {
+    void unlisten.then((un) => un());
+  };
+});
 </script>
 
-<svelte:window onkeydown={onKeydown} onresize={report} />
+<svelte:window onkeydown={onKeydown} />
 
-<main class="overlay">
-  <button type="button" class="hint" bind:this={pill} onclick={dismiss}>
-    UP-TAKE — Esc or click here to dismiss
-  </button>
+<main class="overlay" class:active={showsTint(overlayState)}>
+  {#if showsTint(overlayState)}
+    {#each frames as frame (`${frame.x},${frame.y},${frame.width},${frame.height}`)}
+      <div
+        class="monitor-frame"
+        style="left: {frame.x}px; top: {frame.y}px; width: {frame.width}px; height: {frame.height}px"
+      ></div>
+    {/each}
+  {/if}
 </main>
 
 <style>
@@ -65,25 +68,30 @@ onMount(report);
 .overlay {
   position: fixed;
   inset: 0;
-  /* Faint tint so a shown overlay is visibly present; the drag-to-select UI
-     (task 1.6) replaces this surface. */
-  background: rgba(0, 0, 0, 0.25);
-  cursor: crosshair;
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
   user-select: none;
+  cursor: default;
 }
 
-.hint {
-  margin-top: 2rem;
-  padding: 0.4rem 1rem;
-  border: none;
-  border-radius: 999px;
-  background: rgba(0, 0, 0, 0.6);
-  color: #fff;
-  font-family: system-ui, sans-serif;
-  font-size: 0.9rem;
-  cursor: pointer;
+/* PLACEMENT: UP-TAKE has input focus (ADR-0012). A *light* tint — lighter than
+   a modal capture veil — so the user can still see the screen content they are
+   placing areas over. The crosshair marks the surface as draggable (slice 2). */
+.overlay.active {
+  background: rgba(0, 0, 0, 0.12);
+  cursor: crosshair;
+}
+
+/* The per-monitor "UP-TAKE has control" signal: a thin accent frame with a very
+   subtle glow (§2.1 design language). Drawn per monitor rather than around the
+   whole desktop so it never lands in a dead zone between monitors (F-13).
+   Purely an indicator — never intercepts input. */
+.monitor-frame {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1.5px solid rgba(120, 180, 255, 0.55);
+  border-radius: 6px;
+  box-shadow:
+    0 0 8px rgba(120, 180, 255, 0.35),
+    inset 0 0 8px rgba(120, 180, 255, 0.15);
+  pointer-events: none;
 }
 </style>

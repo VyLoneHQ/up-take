@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   type CssRect,
-  hideOverlay,
   type Invoke,
   isDismissKey,
   type Measurable,
@@ -106,21 +105,6 @@ describe('reportInteractiveRegions', () => {
 
     const [, args] = invoke.mock.calls[0];
     expect(args?.regions).toEqual([PILL]);
-  });
-});
-
-describe('hideOverlay', () => {
-  it('emits the hide intent', async () => {
-    const invoke = vi.fn<Invoke>().mockResolvedValue(undefined);
-
-    await expect(hideOverlay(invoke)).resolves.toBe(true);
-    expect(invoke).toHaveBeenCalledWith('overlay_hide');
-  });
-
-  it('resolves false instead of throwing when the intent fails', async () => {
-    const invoke = vi.fn<Invoke>().mockRejectedValue(new Error('no window'));
-
-    await expect(hideOverlay(invoke)).resolves.toBe(false);
   });
 });
 

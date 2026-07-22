@@ -8,7 +8,8 @@
 //! logged. The overlay window is `visible: false`, `skipTaskbar: true` and
 //! `decorations: false`, and the startup `overlay::show` is debug-only — so a
 //! release build whose tray did not come up has no tray, no taskbar entry, no
-//! window and no quit command. `eprintln!` reaches nobody there (`main.rs`
+//! window and no quit command (the startup `overlay::summon` is debug-only).
+//! `eprintln!` reaches nobody there (`main.rs`
 //! sets `windows_subsystem = "windows"`), which would leave that user with a
 //! process they cannot close and no idea why. Same reasoning as
 //! [`crate::hotkey::install`], and stronger: a hotkey conflict is
@@ -52,7 +53,7 @@ fn report_failure(app: &AppHandle, error: &str) {
     eprintln!("tray: could not create the tray icon: {error}");
     let detail = format!(
         "UP-TAKE has no tray icon, so it has no menu and no Quit command.\n\n\
-         {} still summons the overlay and Esc still hides it, so the app is usable. \
+         {} still summons and dismisses the overlay, so the app is usable. \
          To close it, end `up-take.exe` from Task Manager.\n\n\
          Restarting UP-TAKE usually clears this. If it persists, please report it \
          with the details below.\n\n{error}",
@@ -102,15 +103,14 @@ fn build(app: &AppHandle) -> Result<(), String> {
         // indistinguishable from any other way the process could end — a
         // verification run was lost to exactly that ambiguity. The Show
         // arms are separated for the same reason: the menu item and a left
-        // click reach the same `overlay::show` through different tauri
+        // click reach the same `overlay::summon` through different tauri
         // callbacks, so one line is what tells you which one fired.
         .on_menu_event(|app, event| match event.id.as_ref() {
             SHOW_ID => {
                 #[cfg(debug_assertions)]
                 eprintln!("tray: Show chosen from the menu");
-                if let Err(error) = overlay::show(app) {
-                    eprintln!("tray: could not show the overlay: {error}");
-                }
+                // Summon into Placement (ADR-0012), the same as a relaunch.
+                overlay::summon(app);
             }
             QUIT_ID => {
                 // The last line the app prints. `app.exit(0)` unwinds through
@@ -134,9 +134,7 @@ fn build(app: &AppHandle) -> Result<(), String> {
                 let app = tray.app_handle();
                 #[cfg(debug_assertions)]
                 eprintln!("tray: left click on the icon");
-                if let Err(error) = overlay::show(app) {
-                    eprintln!("tray: could not show the overlay: {error}");
-                }
+                overlay::summon(app);
             }
         })
         .build(app)

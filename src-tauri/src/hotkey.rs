@@ -1,7 +1,9 @@
 //! Global hotkey registration (roadmap task 1.4).
 //!
-//! `Win+Shift+U` summons the overlay. Task 1.5's tray can summon it too, so
-//! this is no longer the only way in — but a failed registration is still
+//! `Win+Shift+U` toggles input focus between UP-TAKE and the real screen
+//! (ADR-0012) — the first press summons the overlay into Placement. Task 1.5's
+//! tray can summon it too, so this is no longer the only way in — but a failed
+//! registration is still
 //! surfaced to the user rather than logged: architecture §4 lists "shadowing
 //! another app's hotkey" as a threat whose mitigation is "detect registration
 //! failure and tell the user rather than silently doing nothing". The tray
@@ -79,9 +81,9 @@ pub fn install(app: &AppHandle) {
             }
             #[cfg(debug_assertions)]
             crate::dev_harness::log_summon("hotkey", overlay::current_origin(&handler_app));
-            if let Err(error) = overlay::show(&handler_app) {
-                eprintln!("hotkey: could not show the overlay: {error}");
-            }
+            // The hotkey toggles input focus between UP-TAKE and the real
+            // screen (ADR-0012), rather than only ever showing.
+            overlay::toggle(&handler_app);
         });
 
     if let Err(error) = outcome {

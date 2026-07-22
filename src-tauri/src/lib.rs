@@ -5,7 +5,10 @@ mod dev_harness;
 mod display_watch;
 mod hotkey;
 mod overlay;
+mod overlay_state;
 mod tray;
+
+use std::sync::Mutex;
 
 use tauri::{Manager, WindowEvent};
 
@@ -66,9 +69,7 @@ pub fn run() -> tauri::Result<()> {
             // the second process exits before it can log anything of its own.
             #[cfg(debug_assertions)]
             eprintln!("single-instance: relaunch detected, summoning the overlay");
-            if let Err(error) = overlay::show(app) {
-                eprintln!("single-instance: could not show the overlay: {error}");
-            }
+            overlay::summon(app);
         }));
     }
 
@@ -80,8 +81,8 @@ pub fn run() -> tauri::Result<()> {
         // cannot open dialogs.
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
-            overlay::overlay_show,
-            overlay::overlay_hide,
+            overlay::overlay_escape,
+            overlay::overlay_request_state,
             click_through::overlay_set_interactive_regions
         ])
         .on_window_event(|window, event| {
@@ -113,6 +114,9 @@ pub fn run() -> tauri::Result<()> {
             // first `overlay::show`, which activates the poll.
             app.manage(click_through::ClickThrough::new());
             click_through::spawn_poll_thread(app.handle().clone());
+            // The overlay's interaction state (ADR-0012), managed before the
+            // first summon so `drive` always has it to read.
+            app.manage(Mutex::new(overlay_state::OverlayState::Hidden));
             // Display-configuration changes reach a *visible* overlay only
             // through WM_DISPLAYCHANGE, which tao does not surface — the
             // native hook is the M-6 subscription (task 1.3).
@@ -144,12 +148,12 @@ pub fn run() -> tauri::Result<()> {
             // `hotkey::install` does rather than logging into a void. See the
             // `tray` module docs.
             tray::install(app.handle());
-            // Dev builds still show the overlay at startup so `pnpm tauri dev`
+            // Dev builds still summon the overlay at startup so `pnpm tauri dev`
             // demonstrates something without a keypress, and because CI never
-            // exercises the dev path (friction F-7). Esc hides it; the hotkey
-            // and the tray both bring it back.
+            // exercises the dev path (friction F-7). This lands in Placement;
+            // Esc/the hotkey hand control back, the tray and hotkey bring it up.
             #[cfg(debug_assertions)]
-            overlay::show(app.handle())?;
+            overlay::summon(app.handle());
             Ok(())
         })
         .run(tauri::generate_context!())

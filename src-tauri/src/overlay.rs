@@ -10,10 +10,14 @@
 //! Geometry decisions live in `uptake_core::geometry`; this module only maps
 //! Tauri's monitor reports into core types and talks to the OS.
 
-use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
+use std::sync::{Mutex, MutexGuard, PoisonError};
+
+use serde::Serialize;
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
 use uptake_core::geometry::{Monitor, Point, Rect, Size, virtual_desktop_bounds};
 
 use crate::click_through;
+use crate::overlay_state::{Event, OverlayState, next};
 
 /// Label of the overlay window as declared in `tauri.conf.json`.
 pub const WINDOW_LABEL: &str = "overlay";
@@ -202,17 +206,165 @@ pub(crate) fn overlay_window(app: &AppHandle) -> Result<WebviewWindow, String> {
         .ok_or_else(|| format!("Window '{WINDOW_LABEL}' does not exist — check tauri.conf.json."))
 }
 
-/// IPC surface for the frontend; the global hotkey (task 1.4) will call
-/// [`show`] directly.
-#[tauri::command]
-pub fn overlay_show(app: AppHandle) -> Result<(), String> {
-    show(&app)
+// ---------------------------------------------------------------------------
+// The three-state interaction model (ADR-0012).
+//
+// `overlay_state` decides *what* the next state is (pure, tested there); this
+// section performs the effect — showing or hiding the window, driving the
+// click-through poll through `show`/`hide`, and emitting the state to the
+// frontend so it can render the focus indicator.
+// ---------------------------------------------------------------------------
+
+/// The Tauri event the overlay frontend listens on for state changes.
+const STATE_EVENT: &str = "overlay://state";
+
+/// The focus-indicator geometry sent to the frontend.
+///
+/// Monitor rects are **physical virtual-desktop pixels**; the frontend converts
+/// them to CSS with its own `devicePixelRatio` (ADR-0011 — the WebView is the
+/// authority on its scale) and the `origin` reported here. Rust deliberately
+/// does not pre-convert: doing so would reintroduce the scale-mismatch bug
+/// ADR-0011 exists to prevent.
+#[derive(Serialize, Clone)]
+struct StatePayload {
+    /// `"hidden"`, `"placement"`, or `"living"`.
+    state: &'static str,
+    /// The overlay's virtual-desktop origin (its inner top-left), physical px.
+    origin: (i32, i32),
+    /// Each monitor's bounds in physical virtual-desktop px. Empty unless the
+    /// state draws per-monitor chrome (Placement).
+    monitors: Vec<(i32, i32, u32, u32)>,
 }
 
-/// IPC surface for the frontend (Esc key emits this intent).
+const fn state_name(state: OverlayState) -> &'static str {
+    match state {
+        OverlayState::Hidden => "hidden",
+        OverlayState::Placement => "placement",
+        OverlayState::Living => "living",
+    }
+}
+
+/// Summons the overlay into Placement — the tray, a single-instance relaunch,
+/// and the debug startup all enter here. Idempotent: summoning an
+/// already-visible overlay re-shows and re-focuses it.
+pub fn summon(app: &AppHandle) {
+    drive(app, Event::Summon);
+}
+
+/// Toggles input focus between UP-TAKE and the real screen — the global hotkey.
+pub fn toggle(app: &AppHandle) {
+    drive(app, Event::Toggle);
+}
+
+/// Handles `Esc` from the overlay.
+///
+/// `mid_drag` is wired in slice 2 (the drag lifecycle); today no placement drag
+/// exists, so this always backs out of Placement rather than cancelling a drag.
+pub fn escape(app: &AppHandle) {
+    drive(app, Event::Escape { mid_drag: false });
+}
+
+/// Applies an event to the current state and performs the resulting effect.
+///
+/// The state lock is held only long enough to read-and-update it, then dropped
+/// before the window/IPC work in [`apply`], which does not need it — holding a
+/// mutex across a Win32 call would widen the critical section for nothing.
+fn drive(app: &AppHandle, event: Event) {
+    let target = {
+        let cell = app.state::<Mutex<OverlayState>>();
+        let mut guard = lock(&cell);
+        let target = next(*guard, event, has_areas(app));
+        *guard = target;
+        target
+    };
+    if let Err(error) = apply(app, target) {
+        eprintln!("overlay: could not apply state {target:?}: {error}");
+    }
+}
+
+/// Performs a state's effect: show or hide the window (which also (de)activates
+/// the click-through poll), then emit the new state to the frontend.
+fn apply(app: &AppHandle, state: OverlayState) -> Result<(), String> {
+    match state {
+        OverlayState::Hidden => {
+            // Emit first so the frontend clears its indicator, then hide.
+            emit_state(app, state)?;
+            hide(app)
+        }
+        OverlayState::Placement | OverlayState::Living => {
+            show(app)?;
+            emit_state(app, state)
+        }
+    }
+}
+
+/// Emits the current state to the overlay frontend, with the monitor geometry
+/// the focus indicator needs in Placement.
+fn emit_state(app: &AppHandle, state: OverlayState) -> Result<(), String> {
+    let payload = match state {
+        OverlayState::Placement => {
+            let window = overlay_window(app)?;
+            let position = window
+                .inner_position()
+                .map_err(|e| format!("Could not read the overlay position: {e}"))?;
+            let monitors = monitors(&window)?
+                .iter()
+                .map(|m| {
+                    (
+                        m.bounds.origin.x,
+                        m.bounds.origin.y,
+                        m.bounds.size.width,
+                        m.bounds.size.height,
+                    )
+                })
+                .collect();
+            StatePayload {
+                state: state_name(state),
+                origin: (position.x, position.y),
+                monitors,
+            }
+        }
+        OverlayState::Hidden | OverlayState::Living => StatePayload {
+            state: state_name(state),
+            origin: (0, 0),
+            monitors: Vec::new(),
+        },
+    };
+    app.emit(STATE_EVENT, payload)
+        .map_err(|e| format!("Could not emit overlay state: {e}"))
+}
+
+/// Whether any areas exist.
+///
+/// Slice 2 (drag-to-create) manages an `AreaStore` and reads it here; until
+/// then there are none, so `Living` always collapses to `Hidden` — a
+/// click-through overlay with nothing on it is just hidden.
+fn has_areas(_app: &AppHandle) -> bool {
+    false
+}
+
+/// Locks a mutex, treating poisoning as recoverable — the state under it is a
+/// plain enum, valid after any panic, and architecture §5 forbids `unwrap`.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// IPC surface: `Esc` from the overlay emits this intent.
 #[tauri::command]
-pub fn overlay_hide(app: AppHandle) -> Result<(), String> {
-    hide(&app)
+pub fn overlay_escape(app: AppHandle) {
+    escape(&app);
+}
+
+/// IPC surface: the frontend requests the current state on mount.
+///
+/// A webview that loaded *after* the last transition — the debug startup show,
+/// or a dev reload — would otherwise render no indicator until the next change.
+/// This re-emits the current state so the indicator is correct immediately.
+#[tauri::command]
+pub fn overlay_request_state(app: AppHandle) -> Result<(), String> {
+    let cell = app.state::<Mutex<OverlayState>>();
+    let state = *lock(&cell);
+    emit_state(&app, state)
 }
 
 #[cfg(test)]
