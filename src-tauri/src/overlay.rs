@@ -333,37 +333,41 @@ fn apply(app: &AppHandle, state: OverlayState) -> Result<(), String> {
 /// Emits the current state to the overlay frontend, with the monitor geometry
 /// the focus indicator needs in Placement.
 fn emit_state(app: &AppHandle, state: OverlayState) -> Result<(), String> {
-    let payload = match state {
-        OverlayState::Placement => {
-            let window = overlay_window(app)?;
-            let position = window
-                .inner_position()
-                .map_err(|e| format!("Could not read the overlay position: {e}"))?;
-            let monitors = monitors(&window)?
-                .iter()
-                .map(|m| {
-                    (
-                        m.bounds.origin.x,
-                        m.bounds.origin.y,
-                        m.bounds.size.width,
-                        m.bounds.size.height,
-                    )
-                })
-                .collect();
-            StatePayload {
-                state: state_name(state),
-                origin: (position.x, position.y),
-                monitors,
-            }
-        }
-        OverlayState::Hidden | OverlayState::Living => StatePayload {
-            state: state_name(state),
-            origin: (0, 0),
-            monitors: Vec::new(),
-        },
+    let window = overlay_window(app)?;
+    // The real virtual-desktop origin travels with **every** state, not just
+    // Placement. Living draws the persistent area borders and converts them to
+    // CSS against this origin (ADR-0011); sending (0, 0) for Living was what made
+    // the areas jump by the origin the moment Placement handed off to Living.
+    let position = window
+        .inner_position()
+        .map_err(|e| format!("Could not read the overlay position: {e}"))?;
+    let origin = (position.x, position.y);
+    // The per-monitor focus frames are a Placement-only indicator; every other
+    // state sends none.
+    let monitors = if matches!(state, OverlayState::Placement) {
+        monitors(&window)?
+            .iter()
+            .map(|m| {
+                (
+                    m.bounds.origin.x,
+                    m.bounds.origin.y,
+                    m.bounds.size.width,
+                    m.bounds.size.height,
+                )
+            })
+            .collect()
+    } else {
+        Vec::new()
     };
-    app.emit(STATE_EVENT, payload)
-        .map_err(|e| format!("Could not emit overlay state: {e}"))
+    app.emit(
+        STATE_EVENT,
+        StatePayload {
+            state: state_name(state),
+            origin,
+            monitors,
+        },
+    )
+    .map_err(|e| format!("Could not emit overlay state: {e}"))
 }
 
 /// Whether any areas exist — read from the managed [`AreaStore`]. When it is

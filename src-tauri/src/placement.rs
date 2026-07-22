@@ -356,20 +356,13 @@ fn finish_drag() {
         return;
     };
     let (x, y, width, height) = current_rect();
-    // The one thing the spikes could not settle: the spike ran without Tauri's
-    // per-monitor-v2 DPI manifest, so whether `MSLLHOOKSTRUCT.pt` lands in the
-    // same physical space as `cursor_position()` — the space the area store and
-    // click-through regions use — is an assumption until seen. Print both at the
-    // drag's end so a mismatch is an observation, not a mystery about why a
-    // border sits off from where it was drawn (the F-15 lesson from the scale
-    // bug). Debug-only.
+    // The area's physical bounds, logged so a placement problem is an
+    // observation rather than a guess (the F-15 lesson). The coordinate space
+    // itself is settled: hardware testing confirmed `MSLLHOOKSTRUCT.pt` matches
+    // `cursor_position` — the space the store and click-through regions use —
+    // across every monitor, the 125% primary included.
     #[cfg(debug_assertions)]
-    if let Ok(position) = app.cursor_position() {
-        eprintln!(
-            "placement: drag end — hook pt ({x}, {y}) vs cursor_position ({:.1}, {:.1}); area {width}x{height} at ({x}, {y})",
-            position.x, position.y
-        );
-    }
+    eprintln!("placement: created area {width}x{height} at ({x}, {y})");
     if overlay::create_default_area(app, x, y, width, height)
         && let Err(error) = overlay::emit_areas(app)
     {
