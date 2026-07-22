@@ -34,11 +34,28 @@
 //! fresh [`CopyIcon`] of the crosshair, and the restore
 //! ([`SystemParametersInfoW`] with `SPI_SETCURSORS`) reloads every cursor from
 //! the registry. It is called on every exit path this process controls: leaving
-//! `Placement` ([`exit`]), a graceful shutdown ([`teardown`] from
-//! `RunEvent::Exit`), and a panic ([`install_panic_guard`]). What it cannot
-//! cover is a **hard kill** (Task Manager) mid-placement, which runs none of our
-//! code and leaves the crosshair set until the user's next cursor-scheme reload
-//! — a limitation ADR-0014 accepts explicitly.
+//! `Placement` ([`exit`], subject to the deferral below), a graceful shutdown
+//! ([`teardown`] from `RunEvent::Exit`), and a panic ([`install_panic_guard`]).
+//! What it cannot cover is a **hard kill** (Task Manager) mid-placement, which
+//! runs none of our code and leaves the crosshair set until the user's next
+//! cursor-scheme reload — a limitation ADR-0014 accepts explicitly.
+//!
+//! # Abandoned gestures: a swallowed button-down obliges us to the button-up
+//!
+//! Two things can end `Placement` while a mouse button is still physically
+//! held down: cancelling mid-drag (`Esc`, [`cancel_drag`]) and toggling away
+//! (the hotkey) before releasing. In both cases the button's *down* was already
+//! swallowed — nothing underneath ever saw it — so letting its eventual *up*
+//! pass through would hand the app under the cursor at release time a lone
+//! button-up with no matching down, which is exactly the leak this module
+//! exists to prevent. [`LEFT_PENDING`]/[`RIGHT_PENDING`] track "a down was
+//! swallowed and its up has not been seen yet" independently of [`DRAGGING`]
+//! (the *visual* drag, which a cancel or a toggle-away clears immediately); the
+//! hook keeps swallowing until the pending flag clears, regardless of whether
+//! [`ACTIVE`] says placement itself is still current. [`exit`] defers the actual
+//! hook uninstall and cursor restore ([`WANT_TEARDOWN`]) until that happens —
+//! removing the hook early would take away the only thing left to catch the
+//! outstanding release.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
@@ -64,14 +81,44 @@ use crate::overlay;
 const SELECTION_EVENT: &str = "placement://selection";
 
 /// The installed hook, as an `HHOOK` cast to `isize`; `0` means "no hook". Only
-/// [`install_on_main_thread`] / [`remove_on_main_thread`] touch it, and both run
-/// on the event-loop thread, but it is atomic so [`is_dragging`] and friends can
-/// read process-wide state without a lock.
+/// [`install_on_main_thread`] / [`teardown_now`] touch it, and both run on the
+/// event-loop thread, but it is atomic so [`is_dragging`] and friends can read
+/// process-wide state without a lock.
 static HOOK: AtomicIsize = AtomicIsize::new(0);
 
-/// Whether a placement drag is in progress. Written by the hook (button
-/// down/up) and by [`cancel_drag`]; read by the poll and by [`is_dragging`].
+/// Whether placement is the current overlay state. Gates whether a fresh
+/// `WM_LBUTTONDOWN`/`WM_RBUTTONDOWN` starts a new swallowed gesture — set by
+/// [`enter`], cleared by [`exit`] the instant the state machine leaves
+/// `Placement`, independent of whether the hook itself is still installed
+/// (see [`WANT_TEARDOWN`] and the module docs on abandoned gestures).
+static ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Whether a placement drag is visually in progress — drives the on-screen
+/// selection box and [`is_dragging`]. **Not** the same thing as "a button is
+/// down we still owe an up for" ([`LEFT_PENDING`]): the two diverge exactly
+/// when a drag is cancelled ([`cancel_drag`]) or abandoned (toggled away)
+/// while the button is still physically held, which is the case the module
+/// docs on abandoned gestures exist to cover.
 static DRAGGING: AtomicBool = AtomicBool::new(false);
+
+/// Whether the hook has swallowed a `WM_LBUTTONDOWN` it has not yet seen the
+/// balancing `WM_LBUTTONUP` for. Stays `true` across a cancelled or abandoned
+/// drag so the eventual physical release is still swallowed rather than
+/// leaking to whatever window is under the cursor when the button finally
+/// comes up.
+static LEFT_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// The same bookkeeping as [`LEFT_PENDING`], for the right button (swallowed
+/// during placement so a stray right-click cannot pop a context menu
+/// underneath or steal focus).
+static RIGHT_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// Set by [`exit`] when it runs while a button is still pending: the hook and
+/// cursor override are kept alive past the state transition until the pending
+/// release is observed, at which point [`maybe_finish_teardown`] performs the
+/// deferred uninstall. Tearing the hook down immediately instead would remove
+/// the only thing left that could swallow the outstanding release.
+static WANT_TEARDOWN: AtomicBool = AtomicBool::new(false);
 
 /// The drag's anchor and current corner, in physical virtual-desktop pixels —
 /// the same space [`crate::overlay`] and `uptake_core` use. `MSLLHOOKSTRUCT.pt`
@@ -128,20 +175,24 @@ pub fn enter(app: &AppHandle) {
     }
 }
 
-/// Leaves placement: uninstall the hook and restore the cursor, on the
-/// event-loop thread. Idempotent.
+/// Leaves placement: marks it inactive and either uninstalls the hook and
+/// restores the cursor immediately, or — if a button it swallowed is still
+/// physically held — defers that until the pending release is seen (see the
+/// module docs on abandoned gestures). Runs on the event-loop thread.
+/// Idempotent.
 pub fn exit(app: &AppHandle) {
-    if let Err(error) = app.run_on_main_thread(remove_on_main_thread) {
-        eprintln!("placement: could not schedule hook removal on the main thread: {error}");
+    if let Err(error) = app.run_on_main_thread(leave_on_main_thread) {
+        eprintln!("placement: could not schedule placement exit on the main thread: {error}");
     }
 }
 
-/// Restores the system cursors unconditionally — the graceful-shutdown path,
-/// called from `RunEvent::Exit`. Also removes the hook if one is somehow still
-/// installed. Safe to call when placement was never entered: reloading the
-/// registry cursors over the identical ones is a no-op.
+/// Restores the system cursors and removes the hook unconditionally — the
+/// graceful-shutdown path, called from `RunEvent::Exit`. The process is
+/// exiting either way, so an outstanding pending release no longer matters.
+/// Safe to call when placement was never entered: reloading the registry
+/// cursors over the identical ones is a no-op.
 pub fn teardown() {
-    remove_on_main_thread();
+    teardown_now();
 }
 
 /// Chains a system-cursor restore onto the panic hook, so a panic while the
@@ -166,6 +217,13 @@ pub fn is_dragging() -> bool {
 
 /// Cancels an in-progress drag without creating an area (mid-drag `Esc`). The
 /// poll clears the on-screen box on its next tick.
+///
+/// Deliberately does **not** touch [`LEFT_PENDING`]: the button that started
+/// this drag is still physically down, and its eventual release must still be
+/// swallowed rather than leaked to the app underneath (see the module docs on
+/// abandoned gestures). Clearing only the visual [`DRAGGING`] flag is what
+/// makes `WM_LBUTTONUP` discard the release instead of finishing it into an
+/// area.
 pub fn cancel_drag() {
     DRAGGING.store(false, Ordering::SeqCst);
 }
@@ -212,8 +270,14 @@ fn current_rect() -> (i32, i32, u32, u32) {
     )
 }
 
-/// Installs the low-level mouse hook (once) and asserts the crosshair. Runs on
-/// the event-loop thread — see the module docs on why that is mandatory.
+/// Installs the low-level mouse hook (once), marks placement active, and
+/// asserts the crosshair. Runs on the event-loop thread — see the module docs
+/// on why that is mandatory.
+///
+/// Clearing [`WANT_TEARDOWN`] here matters for the case where placement is
+/// re-entered before a previously deferred teardown fired (see [`exit`] and
+/// [`maybe_finish_teardown`]): re-entering cancels the pending uninstall rather
+/// than racing it.
 fn install_on_main_thread() {
     if HOOK.load(Ordering::SeqCst) == 0 {
         // The current module handle, as the spike used. `dwThreadId = 0` makes
@@ -232,21 +296,60 @@ fn install_on_main_thread() {
             HOOK.store(hook as isize, Ordering::SeqCst);
         }
     }
+    ACTIVE.store(true, Ordering::SeqCst);
+    WANT_TEARDOWN.store(false, Ordering::SeqCst);
     override_system_cursors();
 }
 
+/// Marks placement inactive and clears the visual drag, then either tears the
+/// hook down immediately or defers it. Runs on the event-loop thread.
+///
+/// The defer condition is exactly "a button we swallowed the down of has not
+/// yet come back up": tearing the hook down anyway would remove the only thing
+/// that can still catch that release, turning an abandoned gesture into
+/// exactly the leak this module exists to prevent (see the module docs).
+fn leave_on_main_thread() {
+    ACTIVE.store(false, Ordering::SeqCst);
+    DRAGGING.store(false, Ordering::SeqCst);
+    if LEFT_PENDING.load(Ordering::SeqCst) || RIGHT_PENDING.load(Ordering::SeqCst) {
+        WANT_TEARDOWN.store(true, Ordering::SeqCst);
+    } else {
+        teardown_now();
+    }
+}
+
 /// Uninstalls the hook (if any) and restores the system cursors. Runs on the
-/// event-loop thread; `UnhookWindowsHookEx` must be called from the thread that
-/// installed the hook, which [`install_on_main_thread`] guarantees.
-fn remove_on_main_thread() {
+/// event-loop thread: either directly, from [`leave_on_main_thread`] /
+/// [`teardown`] (both already marshalled there), or from within the hook
+/// callback itself via [`maybe_finish_teardown`] — which already runs on the
+/// event-loop thread, since that is a `WH_MOUSE_LL` callback's only thread.
+/// `UnhookWindowsHookEx` requires the thread that installed the hook, which
+/// all three callers satisfy.
+fn teardown_now() {
     let hook = HOOK.swap(0, Ordering::SeqCst);
     if hook != 0 {
         unsafe {
             UnhookWindowsHookEx(hook as HHOOK);
         }
     }
+    WANT_TEARDOWN.store(false, Ordering::SeqCst);
+    LEFT_PENDING.store(false, Ordering::SeqCst);
+    RIGHT_PENDING.store(false, Ordering::SeqCst);
     DRAGGING.store(false, Ordering::SeqCst);
     restore_system_cursors();
+}
+
+/// Performs the deferred uninstall from [`leave_on_main_thread`] once nothing
+/// is pending any more. Called after the hook clears a pending button; a no-op
+/// unless [`exit`] actually deferred ([`WANT_TEARDOWN`]) and every pending
+/// button has now been released.
+fn maybe_finish_teardown() {
+    if WANT_TEARDOWN.load(Ordering::SeqCst)
+        && !LEFT_PENDING.load(Ordering::SeqCst)
+        && !RIGHT_PENDING.load(Ordering::SeqCst)
+    {
+        teardown_now();
+    }
 }
 
 /// Points every common system cursor at the crosshair. Each `SetSystemCursor`
@@ -306,12 +409,22 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
 /// The hook's actual logic, split out so it can be `catch_unwind`-wrapped.
 /// Returns whether to swallow the event.
 ///
-/// Left button down/up **and** right button down/up are swallowed: the left
-/// pair is the drag itself; the right pair is swallowed so a stray right-click
-/// during placement neither pops a context menu underneath nor steals focus
-/// (which would take the `Esc` dismiss path with it). Moves are **not**
-/// swallowed — blocking `WM_MOUSEMOVE` in a low-level hook does not stop the
-/// cursor moving, and a passing hover under the crosshair is harmless.
+/// Left button down/up **and** right button down/up are swallowed while
+/// placement is [`ACTIVE`]: the left pair is the drag itself; the right pair is
+/// swallowed so a stray right-click during placement neither pops a context
+/// menu underneath nor steals focus (which would take the `Esc` dismiss path
+/// with it). Moves are **not** swallowed — blocking `WM_MOUSEMOVE` in a
+/// low-level hook does not stop the cursor moving, and a passing hover under
+/// the crosshair is harmless.
+///
+/// A button-down is only ever swallowed while [`ACTIVE`]; its balancing
+/// button-up is swallowed **regardless** of whether placement is still active
+/// by then, as long as [`LEFT_PENDING`]/[`RIGHT_PENDING`] says that down was
+/// ours — otherwise a drag cancelled or abandoned mid-gesture would leak its
+/// eventual release to whatever window ends up under the cursor (see the
+/// module docs on abandoned gestures). A release completes into an area only
+/// if [`DRAGGING`] is *also* still set — a cancelled or abandoned drag cleared
+/// it already, so that release is swallowed and discarded, not finished.
 fn handle_mouse(wparam: WPARAM, lparam: LPARAM) -> bool {
     // Safe: for a mouse hook Windows passes an `MSLLHOOKSTRUCT` here, valid for
     // the duration of the call.
@@ -319,11 +432,19 @@ fn handle_mouse(wparam: WPARAM, lparam: LPARAM) -> bool {
     let (x, y) = (info.pt.x, info.pt.y);
     match wparam as u32 {
         WM_LBUTTONDOWN => {
+            if !ACTIVE.load(Ordering::SeqCst) {
+                // Placement has already been left (most likely: the brief
+                // deferred-teardown window from an earlier abandoned drag).
+                // A fresh press here belongs to whatever the user is doing
+                // now, not to a drag we should start.
+                return false;
+            }
             START_X.store(x, Ordering::SeqCst);
             START_Y.store(y, Ordering::SeqCst);
             CUR_X.store(x, Ordering::SeqCst);
             CUR_Y.store(y, Ordering::SeqCst);
             DRAGGING.store(true, Ordering::SeqCst);
+            LEFT_PENDING.store(true, Ordering::SeqCst);
             true
         }
         WM_MOUSEMOVE => {
@@ -334,16 +455,29 @@ fn handle_mouse(wparam: WPARAM, lparam: LPARAM) -> bool {
             false
         }
         WM_LBUTTONUP => {
-            if DRAGGING.swap(false, Ordering::SeqCst) {
-                CUR_X.store(x, Ordering::SeqCst);
-                CUR_Y.store(y, Ordering::SeqCst);
-                finish_drag();
+            if LEFT_PENDING.swap(false, Ordering::SeqCst) {
+                if DRAGGING.swap(false, Ordering::SeqCst) {
+                    CUR_X.store(x, Ordering::SeqCst);
+                    CUR_Y.store(y, Ordering::SeqCst);
+                    finish_drag();
+                }
+                maybe_finish_teardown();
                 true
             } else {
                 false
             }
         }
-        WM_RBUTTONDOWN | WM_RBUTTONUP => true,
+        WM_RBUTTONDOWN => {
+            if !ACTIVE.load(Ordering::SeqCst) {
+                return false;
+            }
+            RIGHT_PENDING.store(true, Ordering::SeqCst);
+            true
+        }
+        WM_RBUTTONUP if RIGHT_PENDING.swap(false, Ordering::SeqCst) => {
+            maybe_finish_teardown();
+            true
+        }
         _ => false,
     }
 }

@@ -304,9 +304,12 @@ fn drive(app: &AppHandle, event: Event) {
 /// state and area set to the frontend.
 ///
 /// `placement::enter`/`exit` own the mouse hook and the crosshair cursor, which
-/// belong to Placement alone. `exit` is called on the way into Living and Hidden
-/// (and is idempotent) so the hook and the global cursor override never outlive
-/// the one state that uses them.
+/// belong to Placement alone. `exit` is called on the way into Living and
+/// Hidden (and is idempotent) so they are torn down as soon as this state
+/// transition allows — the one exception being a button still physically held
+/// from an abandoned drag, which `placement::exit` briefly outlives on purpose
+/// rather than leak that button's eventual release to the app underneath (see
+/// the `placement` module docs).
 fn apply(app: &AppHandle, state: OverlayState) -> Result<(), String> {
     match state {
         OverlayState::Hidden => {
