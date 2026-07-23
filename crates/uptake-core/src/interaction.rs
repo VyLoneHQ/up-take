@@ -362,66 +362,248 @@ pub fn snap_resize(bounds: Rect, resize: Resize, monitors: &[Rect]) -> Rect {
     )
 }
 
-/// Pushes an area back until it is reachable again, and returns it unchanged if
-/// it already is.
+/// Whether every pixel of `rect` is covered by some monitor.
 ///
-/// # The guarantee
+/// Not "does it touch a monitor" and not "is it inside one": an area straddling
+/// the seam between two adjacent monitors is wholly on the desktop even though
+/// no single monitor contains it, and that case is ordinary rather than
+/// exceptional on a multi-monitor rig.
 ///
-/// **An area can never be left somewhere the user cannot get to it.** An area
-/// dragged past the edge of the screen, or into the gap between two mismatched
-/// monitors, is not merely awkward: it still costs memory and compositing, it
-/// cannot be moved back, and it cannot be dismissed — so it is permanent for the
-/// session. That is a defect, not a rough edge, which is why this is enforced on
-/// every commit rather than offered as a snapping nicety.
+/// Exact rather than approximate. The monitors' own edges are projected onto
+/// `rect` to cut it into a grid of cells whose interiors are each either wholly
+/// covered or wholly uncovered, and every cell is tested. Testing a handful of
+/// sample points instead would pass an area draped over a gap whose corners
+/// happen to land on screens — which is precisely the case worth catching.
+#[must_use]
+pub fn is_on_desktop(rect: Rect, monitors: &[Rect]) -> bool {
+    if rect.size.is_empty() {
+        return true;
+    }
+    let (left, right) = (i64::from(rect.origin.x), rect.right());
+    let (top, bottom) = (i64::from(rect.origin.y), rect.bottom());
+
+    let mut xs = vec![left, right];
+    let mut ys = vec![top, bottom];
+    for monitor in monitors {
+        for edge in [i64::from(monitor.origin.x), monitor.right()] {
+            if edge > left && edge < right {
+                xs.push(edge);
+            }
+        }
+        for edge in [i64::from(monitor.origin.y), monitor.bottom()] {
+            if edge > top && edge < bottom {
+                ys.push(edge);
+            }
+        }
+    }
+    xs.sort_unstable();
+    xs.dedup();
+    ys.sort_unstable();
+    ys.dedup();
+
+    for pair_x in xs.windows(2) {
+        for pair_y in ys.windows(2) {
+            // The cell's midpoint stands for the whole cell: no monitor edge
+            // falls strictly inside a cell, so the cell cannot be part covered.
+            let cx = (pair_x[0] + pair_x[1]) / 2;
+            let cy = (pair_y[0] + pair_y[1]) / 2;
+            let centre = Point::new(clamp_to_i32(cx), clamp_to_i32(cy));
+            if !monitors.iter().any(|monitor| monitor.contains(centre)) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Pushes an area back until it sits on real desktop, and returns it unchanged
+/// if it already does.
 ///
-/// Two conditions, both against the area's host monitor:
+/// # The rule
 ///
-/// 1. **The close control is fully on the monitor.** This is the load-bearing
-///    one: it is what makes "always dismissable" true, and it implies the top
-///    edge is on screen, which is also what Windows guarantees for a title bar.
-/// 2. **At least [`MIN_VISIBLE_SPAN`] of the area is on the monitor on each
-///    axis** (or all of it, for an area smaller than that). Condition 1 alone
-///    would allow an area reduced to a sliver of its right-hand edge — reachable
-///    in principle, useless in practice.
+/// **An area may not cross a monitor edge that does not continue into another
+/// monitor.** Spanning the seam between two adjacent monitors is fine — that is
+/// a boundary the desktop continues across. Hanging off the outer edge of the
+/// arrangement, or into the dead space beside a shorter monitor, is not.
+///
+/// # Why this is a correctness rule and not a nicety
+///
+/// An area left in that dead space cannot be moved back and cannot be dismissed,
+/// while still costing memory and compositing — so it is permanent for the
+/// session. An earlier version of this function guaranteed something weaker,
+/// that the *close control* stayed on a monitor, and the weakness was visible on
+/// hardware: because the control sits at the top-right, dragging an area right
+/// or up stopped where you would expect, while dragging it left or down let it
+/// sail almost entirely off the screen before anything objected.
 ///
 /// The area is only ever *translated*, never resized: a resize would silently
 /// change something the user set.
 #[must_use]
 pub fn contain(bounds: Rect, monitors: &[Rect]) -> Rect {
-    let Some(monitor) = host_monitor(bounds, monitors) else {
+    if monitors.is_empty() || is_on_desktop(bounds, monitors) {
+        return bounds;
+    }
+    let Some(host) = host_monitor(bounds, monitors) else {
         return bounds;
     };
-    // Visible-span first, then the close control, so that where the two
-    // disagree — an area larger than the monitor — dismissability wins.
+    // Push in only from the sides whose overhang is genuinely off the desktop,
+    // so an area deliberately spanning a seam is not dragged back off it.
+    let pushed = move_by(
+        bounds,
+        clamp_to_i32(uncovered_push_x(bounds, host, monitors)),
+        clamp_to_i32(uncovered_push_y(bounds, host, monitors)),
+    );
+    if is_on_desktop(pushed, monitors) {
+        return pushed;
+    }
+    // One directional push cannot always land an L-shaped overhang on covered
+    // ground — a corner can be pulled off one edge and straight onto another.
+    // Sitting wholly inside a single monitor always can, and it is a result the
+    // user can predict.
+    //
+    // The monitor is chosen from those large enough to *hold* the area, not from
+    // all of them. The host is merely whichever the area overlaps most, and may
+    // be the smallest one on the rig; clamping into a monitor too small to
+    // contain the area leaves it overhanging exactly as before. That was a real
+    // bug here, found by the property test rather than by reading the code.
+    let roomy: Vec<Rect> = monitors
+        .iter()
+        .copied()
+        .filter(|monitor| holds(*monitor, bounds))
+        .collect();
+    if let Some(target) = host_monitor(bounds, &roomy) {
+        let inside = clamp_into(bounds, target);
+        if is_on_desktop(inside, monitors) {
+            return inside;
+        }
+    }
+    // Larger than any monitor, so full coverage is unreachable. Fall back to the
+    // weaker promise that still matters: it can be grabbed and dismissed.
+    keep_reachable(bounds, host)
+}
+
+/// The horizontal shift that pulls `bounds` off any uncovered overhang.
+fn uncovered_push_x(bounds: Rect, host: Rect, monitors: &[Rect]) -> i64 {
+    let (left, right) = (i64::from(bounds.origin.x), bounds.right());
+    let (host_left, host_right) = (i64::from(host.origin.x), host.right());
+    let over_left = left < host_left
+        && !is_on_desktop(
+            span(left, host_left, i64::from(bounds.origin.y), bounds.bottom()),
+            monitors,
+        );
+    let over_right = right > host_right
+        && !is_on_desktop(
+            span(
+                host_right,
+                right,
+                i64::from(bounds.origin.y),
+                bounds.bottom(),
+            ),
+            monitors,
+        );
+    match (over_left, over_right) {
+        // Wider than the host with nowhere to spill: align the left edge, the
+        // same choice a window manager makes for an oversized window.
+        (true, _) => host_left - left,
+        (false, true) => host_right - right,
+        (false, false) => 0,
+    }
+}
+
+/// The vertical shift that pulls `bounds` off any uncovered overhang.
+fn uncovered_push_y(bounds: Rect, host: Rect, monitors: &[Rect]) -> i64 {
+    let (top, bottom) = (i64::from(bounds.origin.y), bounds.bottom());
+    let (host_top, host_bottom) = (i64::from(host.origin.y), host.bottom());
+    let over_top = top < host_top
+        && !is_on_desktop(
+            span(i64::from(bounds.origin.x), bounds.right(), top, host_top),
+            monitors,
+        );
+    let over_bottom = bottom > host_bottom
+        && !is_on_desktop(
+            span(
+                i64::from(bounds.origin.x),
+                bounds.right(),
+                host_bottom,
+                bottom,
+            ),
+            monitors,
+        );
+    match (over_top, over_bottom) {
+        (true, _) => host_top - top,
+        (false, true) => host_bottom - bottom,
+        (false, false) => 0,
+    }
+}
+
+/// The rectangle between two x and two y bounds, empty if either pair is
+/// inverted.
+fn span(left: i64, right: i64, top: i64, bottom: i64) -> Rect {
+    Rect::new(
+        clamp_to_i32(left),
+        clamp_to_i32(top),
+        clamp_to_u32(right - left),
+        clamp_to_u32(bottom - top),
+    )
+}
+
+/// Whether a monitor is large enough to contain an area at all.
+fn holds(monitor: Rect, bounds: Rect) -> bool {
+    monitor.size.width >= bounds.size.width && monitor.size.height >= bounds.size.height
+}
+
+/// Translates `bounds` so it lies wholly inside `host`, aligning to the
+/// top-left when it is too large to fit.
+fn clamp_into(bounds: Rect, host: Rect) -> Rect {
+    let dx = axis_contain(
+        i64::from(bounds.origin.x),
+        bounds.right(),
+        i64::from(host.origin.x),
+        host.right(),
+    );
+    let dy = axis_contain(
+        i64::from(bounds.origin.y),
+        bounds.bottom(),
+        i64::from(host.origin.y),
+        host.bottom(),
+    );
+    move_by(bounds, clamp_to_i32(dx), clamp_to_i32(dy))
+}
+
+/// The last-resort guarantee for an area too large to place on the desktop at
+/// all: keep its close control on the host monitor, and keep enough of its body
+/// there to grab.
+fn keep_reachable(bounds: Rect, host: Rect) -> Rect {
     let visible_x = i64::from(MIN_VISIBLE_SPAN.min(bounds.size.width));
     let visible_y = i64::from(MIN_VISIBLE_SPAN.min(bounds.size.height));
     let mut dx = axis_push(
         i64::from(bounds.origin.x),
         bounds.right(),
-        i64::from(monitor.origin.x),
-        monitor.right(),
+        i64::from(host.origin.x),
+        host.right(),
         visible_x,
     );
     let mut dy = axis_push(
         i64::from(bounds.origin.y),
         bounds.bottom(),
-        i64::from(monitor.origin.y),
-        monitor.bottom(),
+        i64::from(host.origin.y),
+        host.bottom(),
         visible_y,
     );
-
+    // The close control decides ties: an area that can be reached but not closed
+    // is still permanent.
     let control = close_control(bounds);
     dx += axis_contain(
         i64::from(control.origin.x) + dx,
         control.right() + dx,
-        i64::from(monitor.origin.x),
-        monitor.right(),
+        i64::from(host.origin.x),
+        host.right(),
     );
     dy += axis_contain(
         i64::from(control.origin.y) + dy,
         control.bottom() + dy,
-        i64::from(monitor.origin.y),
-        monitor.bottom(),
+        i64::from(host.origin.y),
+        host.bottom(),
     );
     move_by(bounds, clamp_to_i32(dx), clamp_to_i32(dy))
 }
@@ -688,21 +870,36 @@ mod tests {
         ]
     }
 
-    /// Whether an area is reachable: its close control is fully on some monitor
-    /// and enough of its body is visible to grab.
+    /// Whether an area is reachable: written independently of `contain` so the
+    /// properties below check the *guarantee* rather than restating the code.
     ///
-    /// Written independently of `contain` rather than by calling it, so the
-    /// property below checks the *guarantee* instead of restating the code.
+    /// Every pixel on real desktop is the rule, so this is just full coverage.
     fn is_reachable(bounds: Rect, monitors: &[Rect]) -> bool {
+        is_on_desktop(bounds, monitors)
+    }
+
+    /// Whether some single monitor is large enough to hold the area.
+    ///
+    /// The precondition for full coverage being achievable at all: when it
+    /// holds, `contain` can always fall back to placing the area inside that
+    /// monitor. A resize can exceed it — nothing caps an area at the size of the
+    /// desktop — and the guarantee degrades to [`is_grabbable`] there.
+    fn fits_anywhere(bounds: Rect, monitors: &[Rect]) -> bool {
+        monitors
+            .iter()
+            .any(|m| m.size.width >= bounds.size.width && m.size.height >= bounds.size.height)
+    }
+
+    /// The weaker promise for an area too large to place: it can still be
+    /// grabbed and, above all, closed.
+    fn is_grabbable(bounds: Rect, monitors: &[Rect]) -> bool {
         let control = close_control(bounds);
         monitors.iter().any(|monitor| {
-            let control_inside = monitor.intersection(control) == Some(control);
-            let visible = monitor.intersection(bounds);
-            let enough = visible.is_some_and(|overlap| {
-                overlap.size.width >= MIN_VISIBLE_SPAN.min(bounds.size.width)
-                    && overlap.size.height >= MIN_VISIBLE_SPAN.min(bounds.size.height)
-            });
-            control_inside && enough
+            monitor.intersection(control) == Some(control)
+                && monitor.intersection(bounds).is_some_and(|overlap| {
+                    overlap.size.width >= MIN_VISIBLE_SPAN.min(bounds.size.width)
+                        && overlap.size.height >= MIN_VISIBLE_SPAN.min(bounds.size.height)
+                })
         })
     }
 
@@ -710,6 +907,53 @@ mod tests {
     fn an_area_already_on_screen_is_left_exactly_where_it_is() {
         let bounds = Rect::new(500, 400, 300, 200);
         assert_eq!(contain(bounds, &rig()), bounds);
+    }
+
+    #[test]
+    fn an_area_spanning_the_seam_between_two_adjacent_monitors_is_left_alone() {
+        // The case the rule must NOT break. The primary and the monitor to its
+        // right both cover y = 400, so an area straddling x = 2560 is wholly on
+        // desktop even though no single monitor contains it. An implementation
+        // that clamped to one monitor would yank it back for no reason.
+        let straddling = Rect::new(2400, 400, 400, 300);
+        assert!(is_on_desktop(straddling, &rig()));
+        assert_eq!(contain(straddling, &rig()), straddling);
+    }
+
+    #[test]
+    fn an_area_hanging_past_a_shorter_neighbour_is_pushed_back() {
+        // The monitor right of the primary is 1080 tall against the primary's
+        // 1440, so x > 2560 below y = 1080 is dead space. An area draped across
+        // that corner has its corners on real screens and its middle nowhere —
+        // the case sampling a few points would wave through.
+        let draped = Rect::new(2400, 950, 400, 300);
+        assert!(!is_on_desktop(draped, &rig()));
+        let settled = contain(draped, &rig());
+        assert!(is_on_desktop(settled, &rig()));
+        assert_eq!(settled.size, draped.size);
+    }
+
+    #[test]
+    fn an_area_dragged_off_the_left_edge_is_pushed_back() {
+        // The asymmetry hardware testing exposed: the close control sits at the
+        // top-right, so a rule anchored on it stopped rightward and upward drags
+        // while letting leftward and downward ones sail off the screen.
+        let monitors = vec![Rect::new(0, 0, 1920, 1080)];
+        let lost = Rect::new(-280, 500, 300, 200);
+        assert!(!is_on_desktop(lost, &monitors));
+        let settled = contain(lost, &monitors);
+        assert!(is_on_desktop(settled, &monitors));
+        assert_eq!(settled.origin.x, 0);
+    }
+
+    #[test]
+    fn an_area_dragged_off_the_bottom_edge_is_pushed_back() {
+        let monitors = vec![Rect::new(0, 0, 1920, 1080)];
+        let lost = Rect::new(500, 1000, 300, 200);
+        assert!(!is_on_desktop(lost, &monitors));
+        let settled = contain(lost, &monitors);
+        assert!(is_on_desktop(settled, &monitors));
+        assert_eq!(settled.bottom(), 1080);
     }
 
     #[test]
@@ -940,13 +1184,26 @@ mod tests {
             dx in -8000i32..8000,
             dy in -8000i32..8000,
         ) {
+            // Two tiers, because a resize is the one gesture that can produce an
+            // area larger than any monitor — the deltas here are deliberately
+            // wider than a real drag, whose reach is bounded by the cursor.
+            // Where full coverage is possible it is required; where it is
+            // arithmetically impossible, the area must still be closable.
             let monitors = rig();
             let settled = settle_resize(resize_by(bounds, resize, dx, dy), resize, &monitors);
-            prop_assert!(
-                is_reachable(settled, &monitors),
-                "unreachable after settling: {:?}",
-                settled
-            );
+            if fits_anywhere(settled, &monitors) {
+                prop_assert!(
+                    is_reachable(settled, &monitors),
+                    "not fully on desktop despite fitting: {:?}",
+                    settled
+                );
+            } else {
+                prop_assert!(
+                    is_grabbable(settled, &monitors),
+                    "too large to place and not even grabbable: {:?}",
+                    settled
+                );
+            }
             prop_assert!(settled.size.width >= MIN_AREA_SPAN);
             prop_assert!(settled.size.height >= MIN_AREA_SPAN);
         }

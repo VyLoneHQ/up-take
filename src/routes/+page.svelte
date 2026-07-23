@@ -149,18 +149,19 @@ onMount(() => {
 
   {#if overlayState !== 'hidden'}
     {#each areaFrames as area (area.id)}
-      <div
-        class="area"
-        class:hovered={area.hovered}
-        class:source={area.source}
-        class:pinned={area.layer !== 'auto'}
-        style="left: {area.rect.x}px; top: {area.rect.y}px; width: {area.rect
-          .width}px; height: {area.rect.height}px"
-      >
-        {#if area.layer !== 'auto'}
-          <span class="layer-badge">{area.layer === 'front' ? '▲' : '▼'}</span>
-        {/if}
-      </div>
+      {#if !area.source}
+        <div
+          class="area"
+          class:hovered={area.hovered}
+          class:pinned={area.layer !== 'auto'}
+          style="left: {area.rect.x}px; top: {area.rect.y}px; width: {area.rect
+            .width}px; height: {area.rect.height}px"
+        >
+          {#if area.layer !== 'auto'}
+            <span class="layer-badge">{area.layer === 'front' ? '▲' : '▼'}</span>
+          {/if}
+        </div>
+      {/if}
       {#if area.hovered}
         <div
           class="close"
@@ -261,17 +262,12 @@ onMount(() => {
   pointer-events: none;
 }
 
-/* The area a move or resize started from, while the drag is live. Drawn as a
-   faint grey outline with no fill so it reads as "this is where it is coming
-   from" rather than as a second area — a solid copy left behind is the thing
-   that made a move look like a duplication. Purely derived from the live
-   gesture, so a cancelled or interrupted drag restores the normal appearance
-   with no undo path of its own. */
-.area.source {
-  border: 1.5px dashed rgba(190, 195, 205, 0.5);
-  background: transparent;
-  box-shadow: none;
-}
+/* An area being moved or resized is not drawn at its old position at all — the
+   dashed preview *is* the area for the duration of the gesture, so there is
+   exactly one rectangle on screen per area at every moment. A leftover outline
+   was tried first and still read as a second thing to look at. Nothing is
+   stored to undo: the source is derived from the live gesture, so cancelling or
+   interrupting a drag brings the area straight back where it was. */
 
 /* The hovered area in Placement: brighter, so which area a drag will grab is
    visible before the button goes down. The cursor shape says *what* the drag
