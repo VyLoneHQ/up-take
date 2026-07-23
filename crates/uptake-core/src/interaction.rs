@@ -229,6 +229,250 @@ pub fn is_placeable(bounds: Rect) -> bool {
     bounds.size.width >= MIN_AREA_SPAN && bounds.size.height >= MIN_AREA_SPAN
 }
 
+/// How close to a monitor edge an area's own edge must come before it snaps
+/// flush, in physical pixels.
+///
+/// Small enough that deliberate placement a few pixels off an edge is still
+/// possible, large enough that "put it against the edge" needs no precision.
+pub const SNAP_DISTANCE: u32 = 12;
+
+/// How much of an area must stay on a monitor, in physical pixels per axis.
+pub const MIN_VISIBLE_SPAN: u32 = 48;
+
+/// The monitor an area belongs to: the one it overlaps most, or — when it
+/// overlaps none, which is what happens in the gap between mismatched monitors —
+/// the one whose centre is nearest.
+///
+/// Never `None` for a non-empty monitor list, because every caller here needs
+/// *some* monitor to reason against and "no answer" would mean leaving an area
+/// wherever it landed.
+fn host_monitor(bounds: Rect, monitors: &[Rect]) -> Option<Rect> {
+    let overlapping = monitors
+        .iter()
+        .filter_map(|monitor| {
+            let overlap = bounds.intersection(*monitor)?;
+            Some((
+                u64::from(overlap.size.width) * u64::from(overlap.size.height),
+                *monitor,
+            ))
+        })
+        .max_by_key(|(area, _)| *area);
+    if let Some((_, monitor)) = overlapping {
+        return Some(monitor);
+    }
+    monitors
+        .iter()
+        .min_by_key(|monitor| centre_distance_squared(bounds, **monitor))
+        .copied()
+}
+
+/// Squared distance between two rectangles' centres, in i128 so that two
+/// far-apart virtual-desktop coordinates cannot overflow the comparison.
+fn centre_distance_squared(a: Rect, b: Rect) -> i128 {
+    let ax = i128::from(a.origin.x) * 2 + i128::from(a.size.width);
+    let ay = i128::from(a.origin.y) * 2 + i128::from(a.size.height);
+    let bx = i128::from(b.origin.x) * 2 + i128::from(b.size.width);
+    let by = i128::from(b.origin.y) * 2 + i128::from(b.size.height);
+    (ax - bx).pow(2) + (ay - by).pow(2)
+}
+
+/// Snaps a moved area flush to its monitor's edges when it comes within
+/// [`SNAP_DISTANCE`], preserving its size exactly.
+///
+/// Each axis snaps independently and to at most one edge — the nearer of the
+/// two, so an area narrower than the monitor cannot be pulled toward both.
+#[must_use]
+pub fn snap_move(bounds: Rect, monitors: &[Rect]) -> Rect {
+    let Some(monitor) = host_monitor(bounds, monitors) else {
+        return bounds;
+    };
+    let snap = i64::from(SNAP_DISTANCE);
+    let dx = nearest_snap(
+        i64::from(bounds.origin.x) - i64::from(monitor.origin.x),
+        bounds.right() - monitor.right(),
+        snap,
+    );
+    let dy = nearest_snap(
+        i64::from(bounds.origin.y) - i64::from(monitor.origin.y),
+        bounds.bottom() - monitor.bottom(),
+        snap,
+    );
+    Rect::new(
+        clamp_to_i32(i64::from(bounds.origin.x) - dx),
+        clamp_to_i32(i64::from(bounds.origin.y) - dy),
+        bounds.size.width,
+        bounds.size.height,
+    )
+}
+
+/// The smaller of two edge offsets, if either is within `snap`; `0` otherwise.
+fn nearest_snap(near: i64, far: i64, snap: i64) -> i64 {
+    let near_hit = near.abs() <= snap;
+    let far_hit = far.abs() <= snap;
+    match (near_hit, far_hit) {
+        (true, true) => {
+            if near.abs() <= far.abs() {
+                near
+            } else {
+                far
+            }
+        }
+        (true, false) => near,
+        (false, true) => far,
+        (false, false) => 0,
+    }
+}
+
+/// Snaps the edges a resize actually moved flush to the monitor, leaving the
+/// fixed edges alone.
+///
+/// A snap that would take the area below [`MIN_AREA_SPAN`] is dropped rather
+/// than clamped: clamping would move the edge somewhere the user did not drag it
+/// *and* somewhere it is not flush, which is the worst of both.
+#[must_use]
+pub fn snap_resize(bounds: Rect, resize: Resize, monitors: &[Rect]) -> Rect {
+    let Some(monitor) = host_monitor(bounds, monitors) else {
+        return bounds;
+    };
+    let snap = i64::from(SNAP_DISTANCE);
+    let (mut left, mut top) = (i64::from(bounds.origin.x), i64::from(bounds.origin.y));
+    let (mut right, mut bottom) = (bounds.right(), bounds.bottom());
+
+    if resize.moves_west() && (left - i64::from(monitor.origin.x)).abs() <= snap {
+        left = i64::from(monitor.origin.x);
+    }
+    if resize.moves_east() && (right - monitor.right()).abs() <= snap {
+        right = monitor.right();
+    }
+    if resize.moves_north() && (top - i64::from(monitor.origin.y)).abs() <= snap {
+        top = i64::from(monitor.origin.y);
+    }
+    if resize.moves_south() && (bottom - monitor.bottom()).abs() <= snap {
+        bottom = monitor.bottom();
+    }
+    let min = i64::from(MIN_AREA_SPAN);
+    if right - left < min || bottom - top < min {
+        return bounds;
+    }
+    Rect::new(
+        clamp_to_i32(left),
+        clamp_to_i32(top),
+        clamp_to_u32(right - left),
+        clamp_to_u32(bottom - top),
+    )
+}
+
+/// Pushes an area back until it is reachable again, and returns it unchanged if
+/// it already is.
+///
+/// # The guarantee
+///
+/// **An area can never be left somewhere the user cannot get to it.** An area
+/// dragged past the edge of the screen, or into the gap between two mismatched
+/// monitors, is not merely awkward: it still costs memory and compositing, it
+/// cannot be moved back, and it cannot be dismissed — so it is permanent for the
+/// session. That is a defect, not a rough edge, which is why this is enforced on
+/// every commit rather than offered as a snapping nicety.
+///
+/// Two conditions, both against the area's host monitor:
+///
+/// 1. **The close control is fully on the monitor.** This is the load-bearing
+///    one: it is what makes "always dismissable" true, and it implies the top
+///    edge is on screen, which is also what Windows guarantees for a title bar.
+/// 2. **At least [`MIN_VISIBLE_SPAN`] of the area is on the monitor on each
+///    axis** (or all of it, for an area smaller than that). Condition 1 alone
+///    would allow an area reduced to a sliver of its right-hand edge — reachable
+///    in principle, useless in practice.
+///
+/// The area is only ever *translated*, never resized: a resize would silently
+/// change something the user set.
+#[must_use]
+pub fn contain(bounds: Rect, monitors: &[Rect]) -> Rect {
+    let Some(monitor) = host_monitor(bounds, monitors) else {
+        return bounds;
+    };
+    // Visible-span first, then the close control, so that where the two
+    // disagree — an area larger than the monitor — dismissability wins.
+    let visible_x = i64::from(MIN_VISIBLE_SPAN.min(bounds.size.width));
+    let visible_y = i64::from(MIN_VISIBLE_SPAN.min(bounds.size.height));
+    let mut dx = axis_push(
+        i64::from(bounds.origin.x),
+        bounds.right(),
+        i64::from(monitor.origin.x),
+        monitor.right(),
+        visible_x,
+    );
+    let mut dy = axis_push(
+        i64::from(bounds.origin.y),
+        bounds.bottom(),
+        i64::from(monitor.origin.y),
+        monitor.bottom(),
+        visible_y,
+    );
+
+    let control = close_control(bounds);
+    dx += axis_contain(
+        i64::from(control.origin.x) + dx,
+        control.right() + dx,
+        i64::from(monitor.origin.x),
+        monitor.right(),
+    );
+    dy += axis_contain(
+        i64::from(control.origin.y) + dy,
+        control.bottom() + dy,
+        i64::from(monitor.origin.y),
+        monitor.bottom(),
+    );
+    move_by(bounds, clamp_to_i32(dx), clamp_to_i32(dy))
+}
+
+/// The shift needed so at least `visible` of `[low, high)` overlaps
+/// `[bound_low, bound_high)`. Zero when it already does.
+fn axis_push(low: i64, high: i64, bound_low: i64, bound_high: i64, visible: i64) -> i64 {
+    if high < bound_low + visible {
+        return bound_low + visible - high;
+    }
+    if low > bound_high - visible {
+        return bound_high - visible - low;
+    }
+    0
+}
+
+/// The shift needed so `[low, high)` lies wholly inside `[bound_low, bound_high)`.
+/// Zero when it already does. When it cannot fit, the low edge wins — for the
+/// close control that keeps its clickable corner on screen.
+fn axis_contain(low: i64, high: i64, bound_low: i64, bound_high: i64) -> i64 {
+    if high > bound_high {
+        let shifted = bound_high - high;
+        if low + shifted < bound_low {
+            return bound_low - low;
+        }
+        return shifted;
+    }
+    if low < bound_low {
+        return bound_low - low;
+    }
+    0
+}
+
+/// Everything a committed move or resize must satisfy: snap to the edges, then
+/// guarantee reachability.
+///
+/// Snapping runs first on purpose. Doing it the other way round would let a snap
+/// pull an area back off the edge that [`contain`] had just rescued it from,
+/// which would make the guarantee conditional on the order two features happened
+/// to run in.
+#[must_use]
+pub fn settle_move(bounds: Rect, monitors: &[Rect]) -> Rect {
+    contain(snap_move(bounds, monitors), monitors)
+}
+
+/// [`settle_move`] for a resize: the snap follows the dragged edges.
+#[must_use]
+pub fn settle_resize(bounds: Rect, resize: Resize, monitors: &[Rect]) -> Rect {
+    contain(snap_resize(bounds, resize, monitors), monitors)
+}
+
 /// Height of one area-menu row, physical pixels.
 pub const MENU_ITEM_HEIGHT: u32 = 28;
 
@@ -433,6 +677,126 @@ mod tests {
         assert!(!is_placeable(Rect::new(0, 0, 0, 0)));
     }
 
+    /// The dev rig: a 2560×1440 primary, two 1920×1080, and a portrait monitor
+    /// left of the primary at negative coordinates.
+    fn rig() -> Vec<Rect> {
+        vec![
+            Rect::new(0, 0, 2560, 1440),
+            Rect::new(2560, 0, 1920, 1080),
+            Rect::new(0, -1080, 1920, 1080),
+            Rect::new(-1080, -267, 1080, 1920),
+        ]
+    }
+
+    /// Whether an area is reachable: its close control is fully on some monitor
+    /// and enough of its body is visible to grab.
+    ///
+    /// Written independently of `contain` rather than by calling it, so the
+    /// property below checks the *guarantee* instead of restating the code.
+    fn is_reachable(bounds: Rect, monitors: &[Rect]) -> bool {
+        let control = close_control(bounds);
+        monitors.iter().any(|monitor| {
+            let control_inside = monitor.intersection(control) == Some(control);
+            let visible = monitor.intersection(bounds);
+            let enough = visible.is_some_and(|overlap| {
+                overlap.size.width >= MIN_VISIBLE_SPAN.min(bounds.size.width)
+                    && overlap.size.height >= MIN_VISIBLE_SPAN.min(bounds.size.height)
+            });
+            control_inside && enough
+        })
+    }
+
+    #[test]
+    fn an_area_already_on_screen_is_left_exactly_where_it_is() {
+        let bounds = Rect::new(500, 400, 300, 200);
+        assert_eq!(contain(bounds, &rig()), bounds);
+    }
+
+    #[test]
+    fn an_area_dragged_off_the_right_edge_is_pushed_back_into_reach() {
+        // The failure the containment rule exists for: past the edge, the close
+        // control goes with it and the area can never be dismissed again.
+        let monitors = vec![Rect::new(0, 0, 1920, 1080)];
+        let lost = Rect::new(1900, 500, 300, 200);
+        assert!(!is_reachable(lost, &monitors));
+        let settled = contain(lost, &monitors);
+        assert!(is_reachable(settled, &monitors));
+        assert_eq!(settled.size, lost.size, "containment must never resize");
+    }
+
+    #[test]
+    fn an_area_dragged_above_the_top_edge_comes_back_down() {
+        // The close control sits along the top edge, so "above the screen" is
+        // the direction that loses it first — the same reason Windows will not
+        // let a title bar go above the desktop.
+        let monitors = vec![Rect::new(0, 0, 1920, 1080)];
+        let lost = Rect::new(600, -190, 300, 200);
+        assert!(!is_reachable(lost, &monitors));
+        assert!(is_reachable(contain(lost, &monitors), &monitors));
+    }
+
+    #[test]
+    fn an_area_left_in_the_gap_between_monitors_is_pulled_onto_one() {
+        // The dev rig's portrait monitor spans y −267..1653 while the monitor
+        // above the primary spans y −1080..0, so x < 0 above y = −267 is desktop
+        // that no monitor covers. F-13 is the same class of dead zone.
+        let stranded = Rect::new(-700, -800, 300, 200);
+        assert!(!is_reachable(stranded, &rig()));
+        assert!(is_reachable(contain(stranded, &rig()), &rig()));
+    }
+
+    #[test]
+    fn an_area_near_a_monitor_edge_snaps_flush_to_it() {
+        let monitors = vec![Rect::new(0, 0, 1920, 1080)];
+        let near = Rect::new(7, 500, 300, 200);
+        assert_eq!(snap_move(near, &monitors).origin.x, 0);
+        // And the far edge snaps too, without changing the size.
+        let near_right = Rect::new(1615, 500, 300, 200);
+        let snapped = snap_move(near_right, &monitors);
+        assert_eq!(snapped.right(), 1920);
+        assert_eq!(snapped.size, near_right.size);
+    }
+
+    #[test]
+    fn an_area_clear_of_every_edge_does_not_snap() {
+        let monitors = vec![Rect::new(0, 0, 1920, 1080)];
+        let free = Rect::new(400, 400, 300, 200);
+        assert_eq!(snap_move(free, &monitors), free);
+    }
+
+    #[test]
+    fn snapping_works_on_a_monitor_at_negative_coordinates() {
+        // The portrait monitor starts at (−1080, −267): an implementation that
+        // reasoned in absolute values or assumed a zero origin would snap to the
+        // wrong screen entirely.
+        let near = Rect::new(-1074, 200, 300, 200);
+        assert_eq!(snap_move(near, &rig()).origin.x, -1080);
+    }
+
+    #[test]
+    fn a_resize_snaps_only_the_edge_it_dragged() {
+        let monitors = vec![Rect::new(0, 0, 1920, 1080)];
+        // The west edge is near x = 0 and is the one being dragged.
+        let bounds = Rect::new(6, 500, 300, 200);
+        let snapped = snap_resize(bounds, Resize::West, &monitors);
+        assert_eq!(snapped.origin.x, 0);
+        assert_eq!(snapped.right(), bounds.right(), "the east edge is fixed");
+        // Dragging the east edge leaves the near west edge alone.
+        assert_eq!(
+            snap_resize(bounds, Resize::East, &monitors).origin.x,
+            bounds.origin.x
+        );
+    }
+
+    #[test]
+    fn a_snap_that_would_shrink_an_area_below_the_minimum_is_dropped() {
+        let monitors = vec![Rect::new(0, 0, 1920, 1080)];
+        // 26 px wide, its west edge 8 px from the monitor edge: snapping flush
+        // would leave 18 px, under MIN_AREA_SPAN.
+        let narrow = Rect::new(8, 500, 26, 200);
+        assert_eq!(snap_resize(narrow, Resize::East, &monitors), narrow);
+    }
+
     #[test]
     fn a_menu_with_room_opens_down_and_right_from_the_anchor() {
         let monitor = Rect::new(0, 0, 1920, 1080);
@@ -546,6 +910,61 @@ mod tests {
             if !resize.moves_south() {
                 prop_assert_eq!(resized.bottom(), bounds.bottom());
             }
+        }
+
+        #[test]
+        fn a_settled_move_can_always_be_reached_again(
+            bounds in any_area(),
+            dx in -8000i32..8000,
+            dy in -8000i32..8000,
+        ) {
+            // The guarantee, as a property rather than as four hand-picked
+            // cases: **however violently an area is dragged, it lands somewhere
+            // the user can still grab and dismiss it.** An area that fails this
+            // is permanent for the session — it cannot be moved back and it
+            // cannot be closed, while still costing memory and compositing.
+            let monitors = rig();
+            let settled = settle_move(move_by(bounds, dx, dy), &monitors);
+            prop_assert!(
+                is_reachable(settled, &monitors),
+                "unreachable after settling: {:?}",
+                settled
+            );
+            prop_assert_eq!(settled.size, bounds.size, "a move must never resize");
+        }
+
+        #[test]
+        fn a_settled_resize_can_always_be_reached_again(
+            bounds in any_area(),
+            resize in any_resize(),
+            dx in -8000i32..8000,
+            dy in -8000i32..8000,
+        ) {
+            let monitors = rig();
+            let settled = settle_resize(resize_by(bounds, resize, dx, dy), resize, &monitors);
+            prop_assert!(
+                is_reachable(settled, &monitors),
+                "unreachable after settling: {:?}",
+                settled
+            );
+            prop_assert!(settled.size.width >= MIN_AREA_SPAN);
+            prop_assert!(settled.size.height >= MIN_AREA_SPAN);
+        }
+
+        #[test]
+        fn settling_an_already_reachable_area_leaves_it_alone(
+            x in 200i32..2000,
+            y in 200i32..1000,
+            width in 100u32..400,
+            height in 100u32..300,
+        ) {
+            // Well inside the primary monitor and clear of every edge, so
+            // neither the snap nor the containment has anything to do. Without
+            // this, a `contain` that always recentred would pass the property
+            // above while making the feature unusable.
+            let monitors = rig();
+            let bounds = Rect::new(x, y, width, height);
+            prop_assert_eq!(settle_move(bounds, &monitors), bounds);
         }
 
         #[test]

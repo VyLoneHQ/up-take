@@ -80,6 +80,9 @@ export interface AreaFrame {
   close: CssRect;
   layer: LayerName;
   hovered: boolean;
+  /** This area is the source of a live move or resize: draw it as where the
+   * area is coming *from*, not as a second area. */
+  source: boolean;
 }
 
 /** The open menu ready to draw. */
@@ -100,6 +103,7 @@ export function areaFramesCss(
   origin: Origin,
   dpr: number,
   hoveredId: number | null,
+  draggedId: number | null = null,
 ): AreaFrame[] {
   const rects = physRectsToCss(
     areas.map((area) => area.rect),
@@ -120,7 +124,11 @@ export function areaFramesCss(
     rect: rects[index] as CssRect,
     close: closes[index] as CssRect,
     layer: area.layer,
-    hovered: area.id === hoveredId,
+    // A dragged area is not also "hovered": the hover chrome invites a gesture
+    // that is already under way, and its close control would sit at the source
+    // position while the cursor is somewhere else entirely.
+    hovered: area.id === hoveredId && area.id !== draggedId,
+    source: area.id === draggedId,
   }));
 }
 
@@ -156,6 +164,12 @@ export function menuFrameCss(
  */
 export interface SelectionPayload {
   rect: PhysRect | null;
+  /**
+   * The area being moved or resized, if any. It is drawn as the drag's *source*
+   * — where the area is coming from — rather than as a normal area, so a move
+   * does not look like two areas existing at once.
+   */
+  source: number | null;
 }
 
 /**

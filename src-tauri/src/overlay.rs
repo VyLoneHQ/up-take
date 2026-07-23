@@ -35,6 +35,10 @@ pub const WINDOW_LABEL: &str = "overlay";
 pub fn show(app: &AppHandle) -> Result<(), String> {
     let window = overlay_window(app)?;
     apply_bounds(&window, desired_bounds(&window)?)?;
+    // The same enumeration `desired_bounds` just did, kept for the placement
+    // poll — see `MONITOR_CACHE`. Refreshed here because `show` is the path a
+    // display change taken while the overlay was hidden arrives by.
+    refresh_monitor_cache(&window);
     // Known baseline before anything is visible: **click-through** (ADR-0014).
     // The overlay must never degrade the live content it sits over, so it
     // ignores the cursor whenever it is visible — in `Placement` the mouse hook
@@ -119,6 +123,11 @@ pub fn sync_bounds(app: &AppHandle) -> Result<(), String> {
     if needs_write(current_bounds(&window)?, desired) {
         apply_bounds(&window, desired)?;
     }
+    // A display change is exactly when the cached monitor list goes stale, and
+    // this is the function every display change routes through while visible.
+    // An area snapped to a monitor that no longer exists would be contained
+    // against a rectangle that is no longer there.
+    refresh_monitor_cache(&window);
     click_through::reconvert_regions(app);
     Ok(())
 }
@@ -492,6 +501,28 @@ pub(crate) fn dismiss_area(app: &AppHandle, id: AreaId) -> bool {
 pub(crate) fn set_area_layer(app: &AppHandle, id: AreaId, layer: Layer) -> bool {
     let store = app.state::<Mutex<AreaStore>>();
     lock(&store).set_layer(id, layer)
+}
+
+/// The monitor rectangles, cached.
+///
+/// Enumerating monitors is a Win32 round trip that allocates, and the placement
+/// poll needs this list on **every tick** to snap and contain a dragged area —
+/// 60 times a second, for a list that changes only when the user replugs a
+/// display. So it is refreshed where the display configuration is already being
+/// read ([`show`] and [`sync_bounds`], the two paths a display change reaches)
+/// rather than polled.
+static MONITOR_CACHE: Mutex<Vec<Rect>> = Mutex::new(Vec::new());
+
+/// Refreshes [`MONITOR_CACHE`] from the window's current monitor list.
+fn refresh_monitor_cache(window: &WebviewWindow) {
+    if let Ok(list) = monitors(window) {
+        *lock(&MONITOR_CACHE) = list.iter().map(|monitor| monitor.bounds).collect();
+    }
+}
+
+/// The cached monitor rectangles, for snapping and containment.
+pub(crate) fn monitor_rects() -> Vec<Rect> {
+    lock(&MONITOR_CACHE).clone()
 }
 
 /// The bounds of the monitor containing `point`, for positioning per-monitor

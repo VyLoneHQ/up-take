@@ -284,6 +284,20 @@ enum CursorShape {
 }
 
 impl CursorShape {
+    /// This shape's slot in [`CURSOR_SNAPSHOT`]. Kept in step with
+    /// [`ALL_SHAPES`], which the snapshot iterates in the same order.
+    const fn index(self) -> usize {
+        match self {
+            Self::Cross => 0,
+            Self::Move => 1,
+            Self::SizeNS => 2,
+            Self::SizeWE => 3,
+            Self::SizeNWSE => 4,
+            Self::SizeNESW => 5,
+            Self::Hand => 6,
+        }
+    }
+
     /// The `IDC_*` cursor this shape maps to.
     const fn idc(self) -> *const u16 {
         match self {
@@ -340,6 +354,10 @@ const OVERRIDDEN_CURSORS: [u32; 13] = [
 struct SelectionPayload {
     /// `(x, y, width, height)` or `None` to clear the box.
     rect: Option<(i32, i32, u32, u32)>,
+    /// The id of the area this gesture is moving or resizing, so the frontend
+    /// can draw it as the *source* of the drag instead of as a second area
+    /// sitting where the first one used to be. `None` while creating.
+    source: Option<u64>,
 }
 
 /// The open area menu as the frontend draws it, or `None`.
@@ -473,10 +491,26 @@ pub fn pump(app: &AppHandle, state: &mut PumpState) {
 /// ends.
 fn pump_gesture(app: &AppHandle, state: &mut PumpState) {
     if let Some(rect) = pending_rect() {
-        let _ = app.emit(SELECTION_EVENT, SelectionPayload { rect: Some(rect) });
+        let _ = app.emit(
+            SELECTION_EVENT,
+            SelectionPayload {
+                rect: Some(rect),
+                source: dragged_area(),
+            },
+        );
         state.was_dragging = true;
     } else if state.was_dragging {
-        let _ = app.emit(SELECTION_EVENT, SelectionPayload { rect: None });
+        // Clearing both together is what restores the source area to its normal
+        // appearance, so a cancelled or interrupted drag needs no separate undo
+        // path — the styling was never stored, only derived from the live
+        // gesture.
+        let _ = app.emit(
+            SELECTION_EVENT,
+            SelectionPayload {
+                rect: None,
+                source: None,
+            },
+        );
         state.was_dragging = false;
     }
 }
@@ -567,22 +601,21 @@ fn pending_rect() -> Option<(i32, i32, u32, u32)> {
         return None;
     }
     let gesture = (*lock(&GESTURE))?;
-    let anchor = Point::new(
-        START_X.load(Ordering::SeqCst),
-        START_Y.load(Ordering::SeqCst),
-    );
     let current = Point::new(CUR_X.load(Ordering::SeqCst), CUR_Y.load(Ordering::SeqCst));
-    // Saturating: the operands are screen coordinates, so a difference cannot
-    // realistically overflow, but a wrapped delta would teleport an area.
-    let dx = current.x.saturating_sub(anchor.x);
-    let dy = current.y.saturating_sub(anchor.y);
-    let rect = match gesture {
-        Gesture::Create => Rect::from_corner_points(anchor, current),
-        Gesture::Move { start, .. } => interaction::move_by(start, dx, dy),
-        Gesture::Resize { start, resize, .. } => interaction::resize_by(start, resize, dx, dy),
-        Gesture::Close { .. } | Gesture::MenuItem { .. } | Gesture::Inert => return None,
-    };
-    Some(overlay::as_tuple(rect))
+    gesture_rect(gesture, current)
+}
+
+/// The area a live gesture is moving or resizing, so the frontend can show it as
+/// the *source* of the drag rather than as a second area sitting where the first
+/// one used to be.
+fn dragged_area() -> Option<u64> {
+    if !is_dragging() {
+        return None;
+    }
+    match (*lock(&GESTURE))? {
+        Gesture::Move { id, .. } | Gesture::Resize { id, .. } => Some(id.get()),
+        Gesture::Create | Gesture::Close { .. } | Gesture::MenuItem { .. } | Gesture::Inert => None,
+    }
 }
 
 /// Installs the low-level mouse hook (once), marks placement active, and
@@ -694,10 +727,63 @@ fn set_cursor(shape: CursorShape) {
     *applied = Some(shape);
 }
 
+/// Private copies of the real system cursors, taken **before** the first
+/// override and reused for every shape after it.
+///
+/// This indirection is not decoration; without it the cursor can only ever be
+/// set once. [`SetSystemCursor`] replaces a cursor *globally*, and
+/// [`LoadCursorW`] reads that same global table — so once `OCR_SIZEALL` has been
+/// pointed at the crosshair, `LoadCursorW(IDC_SIZEALL)` hands back **the
+/// crosshair**, and every later shape resolves to whatever is already showing.
+/// Loading from the live table is self-defeating in the worst way: every call
+/// succeeds, nothing logs, and the pointer simply never changes.
+///
+/// Stored as `isize` because a raw pointer is not `Sync`; `0` means that shape
+/// failed to load and leaves the cursor alone. These handles are only ever
+/// `CopyIcon`d, never passed to `SetSystemCursor` directly — the system destroys
+/// what it is given, and destroying the snapshot would leave nothing to copy.
+static CURSOR_SNAPSHOT: OnceLock<[isize; 7]> = OnceLock::new();
+
+/// Every shape, in [`CursorShape::index`] order.
+const ALL_SHAPES: [CursorShape; 7] = [
+    CursorShape::Cross,
+    CursorShape::Move,
+    CursorShape::SizeNS,
+    CursorShape::SizeWE,
+    CursorShape::SizeNWSE,
+    CursorShape::SizeNESW,
+    CursorShape::Hand,
+];
+
+/// The real cursor for a shape, loading the whole set on first use.
+///
+/// First use is necessarily the first [`apply_cursor`], which runs before any
+/// override is installed — so what is captured is the user's genuine cursor
+/// scheme. (The exception is a previous run hard-killed mid-placement, which
+/// leaves the crosshair set system-wide; ADR-0014 accepts that residue, and a
+/// cursor-scheme reload clears it.)
+fn snapshot_cursor(shape: CursorShape) -> HCURSOR {
+    let snapshot = CURSOR_SNAPSHOT.get_or_init(|| {
+        let mut handles = [0_isize; 7];
+        for (slot, shape) in handles.iter_mut().zip(ALL_SHAPES) {
+            let loaded = unsafe { LoadCursorW(ptr::null_mut(), shape.idc()) };
+            // Our own copy: the shared handle belongs to the system, and this one
+            // has to outlive every `SetSystemCursor` we hand a copy of.
+            if loaded.is_null() {
+                continue;
+            }
+            let copy = unsafe { CopyIcon(loaded) };
+            *slot = copy as isize;
+        }
+        handles
+    });
+    snapshot[shape.index()] as HCURSOR
+}
+
 /// Points every common system cursor at `shape`. Each `SetSystemCursor`
 /// consumes the handle it is given, so every id gets its own [`CopyIcon`] of the
-/// shared cursor — passing the shared handle would have the system destroy a
-/// cursor it does not own.
+/// snapshot — passing the snapshot itself would have the system destroy the one
+/// copy that cannot be reloaded.
 ///
 /// The whole set is overridden rather than just `OCR_NORMAL` because the pointer
 /// travels over the user's apps during placement: leaving `OCR_IBEAM` alone
@@ -707,7 +793,7 @@ fn set_cursor(shape: CursorShape) {
 /// Called only from the poll thread and from the two entry points that own the
 /// override, so the shape cannot be written by two racers at once.
 fn apply_cursor(shape: CursorShape) {
-    let cursor: HCURSOR = unsafe { LoadCursorW(ptr::null_mut(), shape.idc()) };
+    let cursor: HCURSOR = snapshot_cursor(shape);
     if cursor.is_null() {
         eprintln!(
             "placement: could not load the {shape:?} cursor; leaving the system cursor as-is"
@@ -911,7 +997,7 @@ fn finish_gesture(release: Point) {
     let Some(gesture) = lock(&GESTURE).take() else {
         return;
     };
-    let pending = pending_rect_for(gesture, release);
+    let pending = gesture_rect(gesture, release);
     let changed = match gesture {
         Gesture::Create => {
             let Some((x, y, width, height)) = pending else {
@@ -949,17 +1035,31 @@ fn finish_gesture(release: Point) {
 /// The rectangle a gesture commits, computed against an explicit release point
 /// rather than the polled cursor — the release coordinate is the authoritative
 /// one, and the poll may not have ticked since the last mouse move.
-fn pending_rect_for(gesture: Gesture, release: Point) -> Option<(i32, i32, u32, u32)> {
+fn gesture_rect(gesture: Gesture, pointer: Point) -> Option<(i32, i32, u32, u32)> {
     let anchor = Point::new(
         START_X.load(Ordering::SeqCst),
         START_Y.load(Ordering::SeqCst),
     );
-    let dx = release.x.saturating_sub(anchor.x);
-    let dy = release.y.saturating_sub(anchor.y);
+    // Saturating: the operands are screen coordinates, so a difference cannot
+    // realistically overflow, but a wrapped delta would teleport an area.
+    let dx = pointer.x.saturating_sub(anchor.x);
+    let dy = pointer.y.saturating_sub(anchor.y);
+    let monitors = overlay::monitor_rects();
     let rect = match gesture {
-        Gesture::Create => Rect::from_corner_points(anchor, release),
-        Gesture::Move { start, .. } => interaction::move_by(start, dx, dy),
-        Gesture::Resize { start, resize, .. } => interaction::resize_by(start, resize, dx, dy),
+        // A create drag needs no containment — both of its corners are places
+        // the cursor actually reached, so it is on screen by construction — but
+        // it snaps like everything else.
+        Gesture::Create => {
+            interaction::snap_move(Rect::from_corner_points(anchor, pointer), &monitors)
+        }
+        Gesture::Move { start, .. } => {
+            interaction::settle_move(interaction::move_by(start, dx, dy), &monitors)
+        }
+        Gesture::Resize { start, resize, .. } => interaction::settle_resize(
+            interaction::resize_by(start, resize, dx, dy),
+            resize,
+            &monitors,
+        ),
         Gesture::Close { .. } | Gesture::MenuItem { .. } | Gesture::Inert => return None,
     };
     Some(overlay::as_tuple(rect))

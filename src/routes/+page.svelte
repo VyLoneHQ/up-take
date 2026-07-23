@@ -41,6 +41,7 @@ let monitors: PhysRect[] = $state([]);
 let origin: Origin = $state([0, 0]);
 let areas: AreaView[] = $state([]);
 let selection: PhysRect | null = $state(null);
+let draggedArea: number | null = $state(null);
 let hoveredArea: number | null = $state(null);
 let menu: MenuView | null = $state(null);
 // The WebView owns its scale (ADR-0011); refreshed on every state event in case
@@ -57,6 +58,7 @@ const areaFrames: AreaFrame[] = $derived(
     origin,
     dpr,
     overlayState === 'placement' ? hoveredArea : null,
+    overlayState === 'placement' ? draggedArea : null,
   ),
 );
 // The selection box is only meaningful while placing; guarding on the state as
@@ -90,7 +92,10 @@ onMount(() => {
     dpr = window.devicePixelRatio;
     // A hidden overlay is drawing nothing; drop any half-finished selection so
     // it cannot reappear on the next show before the poll clears it.
-    if (overlayState === 'hidden') selection = null;
+    if (overlayState === 'hidden') {
+      selection = null;
+      draggedArea = null;
+    }
   });
   const unlistenAreas = listen<AreasPayload>('overlay://areas', (event) => {
     areas = event.payload.areas;
@@ -99,6 +104,7 @@ onMount(() => {
     'placement://selection',
     (event) => {
       selection = event.payload.rect;
+      draggedArea = event.payload.source;
     },
   );
   const unlistenHover = listen<HoverPayload>('overlay://hover', (event) => {
@@ -146,6 +152,7 @@ onMount(() => {
       <div
         class="area"
         class:hovered={area.hovered}
+        class:source={area.source}
         class:pinned={area.layer !== 'auto'}
         style="left: {area.rect.x}px; top: {area.rect.y}px; width: {area.rect
           .width}px; height: {area.rect.height}px"
@@ -252,6 +259,18 @@ onMount(() => {
   background: rgba(120, 180, 255, 0.06);
   box-shadow: 0 0 6px rgba(120, 180, 255, 0.3);
   pointer-events: none;
+}
+
+/* The area a move or resize started from, while the drag is live. Drawn as a
+   faint grey outline with no fill so it reads as "this is where it is coming
+   from" rather than as a second area — a solid copy left behind is the thing
+   that made a move look like a duplication. Purely derived from the live
+   gesture, so a cancelled or interrupted drag restores the normal appearance
+   with no undo path of its own. */
+.area.source {
+  border: 1.5px dashed rgba(190, 195, 205, 0.5);
+  background: transparent;
+  box-shadow: none;
 }
 
 /* The hovered area in Placement: brighter, so which area a drag will grab is

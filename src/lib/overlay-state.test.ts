@@ -147,6 +147,24 @@ describe('areaFramesCss', () => {
     expect(frames.map((frame) => frame.layer)).toEqual(['auto', 'front']);
   });
 
+  it('marks the dragged area as the source and not as hovered', () => {
+    // A move must never look like two areas. The source is styled as where the
+    // area is coming from; the hover chrome is suppressed because its close
+    // control would sit at the source while the cursor is elsewhere.
+    const frames = areaFramesCss(areas, [0, 0], 1, 9, 9);
+
+    expect(frames.map((frame) => frame.source)).toEqual([false, true]);
+    expect(frames.map((frame) => frame.hovered)).toEqual([false, false]);
+  });
+
+  it('leaves every area normal when no drag is in progress', () => {
+    // The restore path: cancelling a drag clears the source, and the styling
+    // follows because it is derived rather than stored.
+    const frames = areaFramesCss(areas, [0, 0], 1, null, null);
+
+    expect(frames.every((frame) => !frame.source)).toBe(true);
+  });
+
   it('draws nothing at all when the scale is unusable', () => {
     // Matching physRectsToCss: a NaN-positioned area still covers the screen
     // while being unclickable, which is worse than no area drawn.
