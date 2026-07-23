@@ -9,13 +9,35 @@
 //!
 //! The way back is a **global low-level mouse hook** (`WH_MOUSE_LL`). It runs
 //! while the overlay stays click-through, so the desktop keeps compositing live
-//! content crisply; it *owns the drag* (button-down → move → button-up) and
+//! content crisply; it *owns the gesture* (button-down → move → button-up) and
 //! **swallows the button events** so the app underneath receives nothing. The
-//! selection rectangle is drawn by the WebView from coordinates this module
-//! publishes; a **global crosshair cursor** ([`SetSystemCursor`]) marks the
-//! surface as draggable, because a click-through window can set no cursor of its
-//! own (no `WM_SETCURSOR` ever reaches it). All three pieces were validated in
-//! isolation by the spikes recorded in ADR-0014 before this was written.
+//! rectangles are drawn by the WebView from coordinates this module publishes;
+//! a **global cursor override** ([`SetSystemCursor`]) supplies the pointer
+//! shape, because a click-through window can set no cursor of its own (no
+//! `WM_SETCURSOR` ever reaches it). All three pieces were validated in isolation
+//! by the spikes recorded in ADR-0014 before this was written.
+//!
+//! # Everything an area appears to have is a rectangle this module hit-tests
+//!
+//! Because no mouse event reaches the WebView, **nothing rendered in the overlay
+//! can be clicked as a DOM element** — not the close control, not a menu row.
+//! The area's whole lifecycle therefore runs through this hook: a press is
+//! classified against the area under the cursor ([`classify_press`]), and what
+//! it grabbed decides what the drag does — create, move, resize, dismiss, or
+//! pick a menu row. The geometry of that classification is pure and lives in
+//! `uptake_core::interaction`; this module supplies only the Win32 half. The
+//! frontend receives the same rectangles and draws them, so the thing on screen
+//! and the thing that responds are one rectangle rather than two that agree by
+//! coincidence.
+//!
+//! # The hook writes atomics; the poll does the work
+//!
+//! A `WH_MOUSE_LL` callback that takes too long is *silently removed* by Windows
+//! (`LowLevelHooksTimeout`), so anything that is not strictly per-event runs in
+//! [`pump`], driven by the click-through poll at ~60 Hz: publishing the live
+//! rectangle, tracking the cursor shape, and the hover highlights. The hook
+//! takes a lock only on a button press, which happens once per gesture rather
+//! than at the mouse's report rate.
 //!
 //! # Thread affinity — the one rule that makes or breaks the hook
 //!
@@ -59,18 +81,22 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, Ordering};
+use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
+use uptake_core::area::{AreaId, Layer};
+use uptake_core::geometry::{Point, Rect};
+use uptake_core::interaction::{self, Handle, Resize};
 
 use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, CopyIcon, HHOOK, IDC_CROSS, LoadCursorW, MSLLHOOKSTRUCT, OCR_APPSTARTING,
-    OCR_CROSS, OCR_HAND, OCR_IBEAM, OCR_NO, OCR_NORMAL, OCR_SIZEALL, OCR_SIZENESW, OCR_SIZENS,
-    OCR_SIZENWSE, OCR_SIZEWE, OCR_UP, OCR_WAIT, SPI_SETCURSORS, SetSystemCursor, SetWindowsHookExW,
+    CallNextHookEx, CopyIcon, HCURSOR, HHOOK, IDC_CROSS, IDC_HAND, IDC_SIZEALL, IDC_SIZENESW,
+    IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, LoadCursorW, MSLLHOOKSTRUCT, OCR_APPSTARTING, OCR_CROSS,
+    OCR_HAND, OCR_IBEAM, OCR_NO, OCR_NORMAL, OCR_SIZEALL, OCR_SIZENESW, OCR_SIZENS, OCR_SIZENWSE,
+    OCR_SIZEWE, OCR_UP, OCR_WAIT, SPI_SETCURSORS, SetSystemCursor, SetWindowsHookExW,
     SystemParametersInfoW, UnhookWindowsHookEx, WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP,
     WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP,
 };
@@ -79,6 +105,12 @@ use crate::overlay;
 
 /// The Tauri event the frontend listens on for the live selection rectangle.
 const SELECTION_EVENT: &str = "placement://selection";
+
+/// The Tauri event carrying the open area menu, or `null` when none is open.
+const MENU_EVENT: &str = "overlay://menu";
+
+/// The Tauri event carrying which area the cursor is over, or `null`.
+const HOVER_EVENT: &str = "overlay://hover";
 
 /// The installed hook, as an `HHOOK` cast to `isize`; `0` means "no hook". Only
 /// [`install_on_main_thread`] / [`teardown_now`] touch it, and both run on the
@@ -134,6 +166,152 @@ static CUR_Y: AtomicI32 = AtomicI32::new(0);
 /// captures nothing.
 static APP: OnceLock<AppHandle> = OnceLock::new();
 
+/// What the current left-button drag *means* — decided once, at button-down,
+/// from what was under the cursor.
+///
+/// Separate from [`DRAGGING`] rather than folded into it because the two answer
+/// different questions and are cleared by different things: `DRAGGING` is "is a
+/// drag visually in progress" (a cancel clears it immediately, from another
+/// thread), while this is the payload that drag needs to commit. Both are
+/// cleared together on every path that ends a gesture, and the release handler
+/// reads the payload only when `DRAGGING` says the gesture is still live.
+static GESTURE: Mutex<Option<Gesture>> = Mutex::new(None);
+
+/// The open area menu (ADR-0013's per-area Layer control), or `None`.
+///
+/// The menu is **drawn by the WebView and hit-tested here**, from the same
+/// rectangles: the overlay is click-through, so a DOM element could never
+/// receive the click, and two independent layout calculations would eventually
+/// disagree about where a row is. Rust computes each row's rectangle once,
+/// sends it to be drawn, and tests clicks against that same value.
+static MENU: Mutex<Option<AreaMenu>> = Mutex::new(None);
+
+/// The cursor shape currently pushed to the OS, or `None` when the override is
+/// not installed.
+///
+/// Process-wide rather than a field of [`PumpState`] on purpose. The poll's
+/// per-show state is reset when the overlay is *shown*, but the cursor override
+/// is installed and torn down on entering and leaving *Placement*, and those are
+/// not the same moment: `Living → Placement` re-enters placement without
+/// restarting the poll. With the cache on the poll, that transition would leave
+/// the poll believing the OS still had the shape from before, and skip the write
+/// that would have corrected it.
+static APPLIED_CURSOR: Mutex<Option<CursorShape>> = Mutex::new(None);
+
+/// What a left-button drag is doing. Decided at button-down and fixed for the
+/// gesture: re-classifying mid-drag would let a move turn into a resize because
+/// the cursor happened to cross an edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Gesture {
+    /// Rubber-band a new area out of empty space.
+    Create,
+    /// Move an existing area, from the bounds it had at button-down.
+    Move { id: AreaId, start: Rect },
+    /// Resize an existing area from one edge or corner.
+    Resize {
+        id: AreaId,
+        resize: Resize,
+        start: Rect,
+    },
+    /// A press on an area's close control. Dismisses **on release, and only if
+    /// the cursor is still on the control** — the press-and-release-on-target
+    /// contract every button on every platform honours, and the only way to
+    /// change your mind about a gesture with no undo.
+    Close { id: AreaId, control: Rect },
+    /// A press on a row of the open area menu, resolved the same way.
+    MenuItem { index: usize },
+    /// A press that has already done its job and must do nothing more on
+    /// release — closing an open menu by clicking away from it, or landing on
+    /// menu padding between rows. It still exists as a gesture so the release is
+    /// swallowed and cannot fall through to whatever is underneath.
+    Inert,
+}
+
+/// The open per-area menu.
+struct AreaMenu {
+    /// The area whose menu this is.
+    area: AreaId,
+    /// The menu's outer rectangle, physical px.
+    bounds: Rect,
+    /// One entry per row, in draw order.
+    items: Vec<MenuEntry>,
+    /// The row under the cursor, for the hover highlight.
+    hovered: Option<usize>,
+}
+
+/// One row of the area menu.
+#[derive(Clone, Copy)]
+struct MenuEntry {
+    rect: Rect,
+    action: MenuAction,
+    label: &'static str,
+    /// Whether this row shows a tick — the area's current tier.
+    checked: bool,
+}
+
+/// What a menu row does when activated.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MenuAction {
+    /// Pin the area to a stacking tier (ADR-0013).
+    SetLayer(Layer),
+    /// Remove the area.
+    Dismiss,
+}
+
+/// The pointer shape placement wants for what is under the cursor.
+///
+/// A click-through window receives no `WM_SETCURSOR`, so this is not a CSS
+/// cursor but a process-wide [`SetSystemCursor`] override, the same mechanism as
+/// the crosshair. It is the only affordance an area's handles have: nothing
+/// hovers, nothing highlights on the OS side, so the cursor *is* the signal that
+/// an edge will resize rather than move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CursorShape {
+    /// Over empty overlay: a drag here creates an area.
+    Cross,
+    /// Over an area's body: a drag moves it.
+    Move,
+    /// Over a north or south edge.
+    SizeNS,
+    /// Over an east or west edge.
+    SizeWE,
+    /// Over a north-west or south-east corner.
+    SizeNWSE,
+    /// Over a north-east or south-west corner.
+    SizeNESW,
+    /// Over a close control or a menu row.
+    Hand,
+}
+
+impl CursorShape {
+    /// The `IDC_*` cursor this shape maps to.
+    const fn idc(self) -> *const u16 {
+        match self {
+            Self::Cross => IDC_CROSS,
+            Self::Move => IDC_SIZEALL,
+            Self::SizeNS => IDC_SIZENS,
+            Self::SizeWE => IDC_SIZEWE,
+            Self::SizeNWSE => IDC_SIZENWSE,
+            Self::SizeNESW => IDC_SIZENESW,
+            Self::Hand => IDC_HAND,
+        }
+    }
+
+    /// The shape a given grab calls for.
+    const fn for_handle(handle: Handle) -> Self {
+        match handle {
+            Handle::Close => Self::Hand,
+            Handle::Body => Self::Move,
+            Handle::Resize(resize) => match resize {
+                Resize::North | Resize::South => Self::SizeNS,
+                Resize::East | Resize::West => Self::SizeWE,
+                Resize::NorthWest | Resize::SouthEast => Self::SizeNWSE,
+                Resize::NorthEast | Resize::SouthWest => Self::SizeNESW,
+            },
+        }
+    }
+}
+
 /// The system cursors overridden during placement. Overriding only `OCR_NORMAL`
 /// would leave a text caret or a hand showing whenever the drag crossed a field
 /// or a link underneath, so the whole common set is pinned to the crosshair and
@@ -162,6 +340,37 @@ const OVERRIDDEN_CURSORS: [u32; 13] = [
 struct SelectionPayload {
     /// `(x, y, width, height)` or `None` to clear the box.
     rect: Option<(i32, i32, u32, u32)>,
+}
+
+/// The open area menu as the frontend draws it, or `None`.
+#[derive(Serialize, Clone)]
+struct MenuPayload {
+    menu: Option<MenuView>,
+}
+
+/// The menu's geometry, physical px — every rectangle already laid out here, so
+/// the frontend positions rows rather than computing them.
+#[derive(Serialize, Clone)]
+struct MenuView {
+    rect: (i32, i32, u32, u32),
+    items: Vec<MenuItemView>,
+    /// The row under the cursor, for the highlight.
+    hovered: Option<usize>,
+}
+
+/// One drawn menu row.
+#[derive(Serialize, Clone)]
+struct MenuItemView {
+    rect: (i32, i32, u32, u32),
+    label: &'static str,
+    /// Whether to show a tick — this is the area's current tier.
+    checked: bool,
+}
+
+/// Which area the cursor is over, so its chrome can be revealed on hover.
+#[derive(Serialize, Clone)]
+struct HoverPayload {
+    id: Option<u64>,
 }
 
 /// Enters placement: install the mouse hook and override the cursor, on the
@@ -226,48 +435,154 @@ pub fn is_dragging() -> bool {
 /// area.
 pub fn cancel_drag() {
     DRAGGING.store(false, Ordering::SeqCst);
+    *lock(&GESTURE) = None;
 }
 
-/// Publishes the live selection rectangle to the frontend, and clears it once
-/// when a drag ends. Called every poll tick (`click_through`), which paces the
-/// emit to ~60 Hz regardless of the mouse's report rate — the hook itself only
-/// writes atomics, so a 1000 Hz mouse cannot flood the IPC channel.
+/// What [`pump`] remembers between ticks, so each emit fires on a change rather
+/// than every frame.
+#[derive(Default)]
+pub struct PumpState {
+    /// Whether the previous tick saw a live gesture, so the clearing emit fires
+    /// exactly once on the gesture→idle edge.
+    was_dragging: bool,
+    /// The area the previous tick reported as hovered.
+    hovered_area: Option<u64>,
+    /// The menu row the previous tick reported as hovered.
+    hovered_item: Option<usize>,
+}
+
+/// The poll's placement work, run every tick (`click_through`, ~60 Hz).
 ///
-/// `was_dragging` is the caller's memory across ticks: it is what makes the
-/// clearing emit fire exactly once on the drag→idle edge rather than every tick.
-pub fn pump_selection(app: &AppHandle, was_dragging: &mut bool) {
-    if is_dragging() {
-        let _ = app.emit(
-            SELECTION_EVENT,
-            SelectionPayload {
-                rect: Some(current_rect()),
-            },
-        );
-        *was_dragging = true;
-    } else if *was_dragging {
+/// **Everything expensive lives here rather than in the hook**, which is the
+/// module's central performance rule and not a stylistic one: a `WH_MOUSE_LL`
+/// callback that takes too long is silently *removed* by Windows
+/// (`LowLevelHooksTimeout`), so the hook writes atomics and this reads them. It
+/// also caps the IPC rate at the poll's cadence however fast the mouse reports,
+/// and keeps the store lock off the mouse's critical path — hover classification
+/// needs the area set, and a 1000 Hz mouse would take that lock 1000 times a
+/// second for a result that can only be redrawn 60 times.
+///
+/// Three jobs: publish the live gesture rectangle, keep the cursor shape
+/// matching what is under the pointer, and track the hover highlights.
+pub fn pump(app: &AppHandle, state: &mut PumpState) {
+    pump_gesture(app, state);
+    pump_hover(app, state);
+}
+
+/// Publishes the live gesture rectangle, and clears it once when the gesture
+/// ends.
+fn pump_gesture(app: &AppHandle, state: &mut PumpState) {
+    if let Some(rect) = pending_rect() {
+        let _ = app.emit(SELECTION_EVENT, SelectionPayload { rect: Some(rect) });
+        state.was_dragging = true;
+    } else if state.was_dragging {
         let _ = app.emit(SELECTION_EVENT, SelectionPayload { rect: None });
-        *was_dragging = false;
+        state.was_dragging = false;
     }
 }
 
-/// The current drag rectangle from the anchor and moving corner, normalised so
-/// a drag in any direction yields a positive-size rect (the geometry layer owns
-/// that normalisation, and the empty-rect rejection at creation).
-fn current_rect() -> (i32, i32, u32, u32) {
-    use uptake_core::geometry::{Point, Rect};
-    let rect = Rect::from_corner_points(
-        Point::new(
-            START_X.load(Ordering::SeqCst),
-            START_Y.load(Ordering::SeqCst),
-        ),
-        Point::new(CUR_X.load(Ordering::SeqCst), CUR_Y.load(Ordering::SeqCst)),
+/// Classifies what is under the cursor and updates the cursor shape and the
+/// hover highlights when they change.
+///
+/// Skipped entirely while placement is inactive: in `Living` the overlay does
+/// not own the pointer, so overriding the system cursor there would change the
+/// cursor inside the user's apps.
+fn pump_hover(app: &AppHandle, state: &mut PumpState) {
+    if !ACTIVE.load(Ordering::SeqCst) {
+        return;
+    }
+    let point = Point::new(CUR_X.load(Ordering::SeqCst), CUR_Y.load(Ordering::SeqCst));
+
+    // A menu, while open, owns the pointer above everything under it.
+    let menu_item = menu_item_at(point);
+    if let Some(menu_hover) = menu_hover_changed(menu_item) {
+        state.hovered_item = menu_hover;
+        emit_menu(app);
+    }
+
+    let menu_open = lock(&MENU).is_some();
+    let (shape, hovered_area) = if menu_open {
+        (
+            if menu_item.is_some() {
+                CursorShape::Hand
+            } else {
+                CursorShape::Cross
+            },
+            None,
+        )
+    } else {
+        match overlay::area_at(app, point) {
+            Some((id, bounds, _)) => (
+                interaction::handle_at(bounds, point)
+                    .map_or(CursorShape::Cross, CursorShape::for_handle),
+                Some(id.get()),
+            ),
+            None => (CursorShape::Cross, None),
+        }
+    };
+
+    // A live gesture keeps the shape it started with: the cursor must not flicker
+    // between move and resize as the pointer crosses edges mid-drag.
+    let shape = match *lock(&GESTURE) {
+        Some(gesture) => gesture_cursor(gesture),
+        None => shape,
+    };
+    set_cursor(shape);
+    if state.hovered_area != hovered_area {
+        state.hovered_area = hovered_area;
+        let _ = app.emit(HOVER_EVENT, HoverPayload { id: hovered_area });
+    }
+}
+
+/// The cursor a gesture in progress holds for its duration.
+const fn gesture_cursor(gesture: Gesture) -> CursorShape {
+    match gesture {
+        Gesture::Create => CursorShape::Cross,
+        Gesture::Move { .. } => CursorShape::Move,
+        Gesture::Resize { resize, .. } => CursorShape::for_handle(Handle::Resize(resize)),
+        Gesture::Close { .. } | Gesture::MenuItem { .. } => CursorShape::Hand,
+        Gesture::Inert => CursorShape::Cross,
+    }
+}
+
+/// Updates the open menu's hovered row, returning the new value only when it
+/// changed (so the caller emits once rather than every tick).
+fn menu_hover_changed(item: Option<usize>) -> Option<Option<usize>> {
+    let mut guard = lock(&MENU);
+    let menu = guard.as_mut()?;
+    if menu.hovered == item {
+        return None;
+    }
+    menu.hovered = item;
+    Some(item)
+}
+
+/// The rectangle the current gesture would commit, or `None` when no gesture is
+/// live or the gesture draws no rectangle (a button press).
+///
+/// This is the single place a gesture's geometry is derived, so what the user
+/// sees while dragging and what is committed on release cannot disagree.
+fn pending_rect() -> Option<(i32, i32, u32, u32)> {
+    if !is_dragging() {
+        return None;
+    }
+    let gesture = (*lock(&GESTURE))?;
+    let anchor = Point::new(
+        START_X.load(Ordering::SeqCst),
+        START_Y.load(Ordering::SeqCst),
     );
-    (
-        rect.origin.x,
-        rect.origin.y,
-        rect.size.width,
-        rect.size.height,
-    )
+    let current = Point::new(CUR_X.load(Ordering::SeqCst), CUR_Y.load(Ordering::SeqCst));
+    // Saturating: the operands are screen coordinates, so a difference cannot
+    // realistically overflow, but a wrapped delta would teleport an area.
+    let dx = current.x.saturating_sub(anchor.x);
+    let dy = current.y.saturating_sub(anchor.y);
+    let rect = match gesture {
+        Gesture::Create => Rect::from_corner_points(anchor, current),
+        Gesture::Move { start, .. } => interaction::move_by(start, dx, dy),
+        Gesture::Resize { start, resize, .. } => interaction::resize_by(start, resize, dx, dy),
+        Gesture::Close { .. } | Gesture::MenuItem { .. } | Gesture::Inert => return None,
+    };
+    Some(overlay::as_tuple(rect))
 }
 
 /// Installs the low-level mouse hook (once), marks placement active, and
@@ -298,7 +613,9 @@ fn install_on_main_thread() {
     }
     ACTIVE.store(true, Ordering::SeqCst);
     WANT_TEARDOWN.store(false, Ordering::SeqCst);
-    override_system_cursors();
+    // The resting shape; the poll refines it to a move or resize cursor as soon
+    // as the pointer is over an area.
+    set_cursor(CursorShape::Cross);
 }
 
 /// Marks placement inactive and clears the visual drag, then either tears the
@@ -311,6 +628,12 @@ fn install_on_main_thread() {
 fn leave_on_main_thread() {
     ACTIVE.store(false, Ordering::SeqCst);
     DRAGGING.store(false, Ordering::SeqCst);
+    *lock(&GESTURE) = None;
+    // The menu belongs to Placement: leaving with it still on screen would draw
+    // a control over a click-through overlay that nothing could ever click.
+    if let Some(app) = APP.get() {
+        close_menu(app);
+    }
     if LEFT_PENDING.load(Ordering::SeqCst) || RIGHT_PENDING.load(Ordering::SeqCst) {
         WANT_TEARDOWN.store(true, Ordering::SeqCst);
     } else {
@@ -336,7 +659,12 @@ fn teardown_now() {
     LEFT_PENDING.store(false, Ordering::SeqCst);
     RIGHT_PENDING.store(false, Ordering::SeqCst);
     DRAGGING.store(false, Ordering::SeqCst);
+    *lock(&GESTURE) = None;
     restore_system_cursors();
+    // The override is gone, so the cache must forget what it believes the OS
+    // has — otherwise the next entry into Placement would skip re-applying a
+    // shape that is no longer set.
+    *lock(&APPLIED_CURSOR) = None;
 }
 
 /// Performs the deferred uninstall from [`leave_on_main_thread`] once nothing
@@ -352,20 +680,42 @@ fn maybe_finish_teardown() {
     }
 }
 
-/// Points every common system cursor at the crosshair. Each `SetSystemCursor`
+/// Sets the system cursor shape, skipping the work when it is already applied.
+///
+/// The guard matters: [`apply_cursor`] is 13 `CopyIcon` + `SetSystemCursor`
+/// pairs, and the poll asks for a shape 60 times a second. Only a change costs
+/// anything.
+fn set_cursor(shape: CursorShape) {
+    let mut applied = lock(&APPLIED_CURSOR);
+    if *applied == Some(shape) {
+        return;
+    }
+    apply_cursor(shape);
+    *applied = Some(shape);
+}
+
+/// Points every common system cursor at `shape`. Each `SetSystemCursor`
 /// consumes the handle it is given, so every id gets its own [`CopyIcon`] of the
-/// shared `IDC_CROSS` — passing the shared handle would have the system destroy
-/// a cursor it does not own.
-fn override_system_cursors() {
-    let cross = unsafe { LoadCursorW(ptr::null_mut(), IDC_CROSS) };
-    if cross.is_null() {
+/// shared cursor — passing the shared handle would have the system destroy a
+/// cursor it does not own.
+///
+/// The whole set is overridden rather than just `OCR_NORMAL` because the pointer
+/// travels over the user's apps during placement: leaving `OCR_IBEAM` alone
+/// would show a text caret the moment the cursor crossed a text field
+/// underneath, which reads as "the overlay lost the pointer".
+///
+/// Called only from the poll thread and from the two entry points that own the
+/// override, so the shape cannot be written by two racers at once.
+fn apply_cursor(shape: CursorShape) {
+    let cursor: HCURSOR = unsafe { LoadCursorW(ptr::null_mut(), shape.idc()) };
+    if cursor.is_null() {
         eprintln!(
-            "placement: could not load the crosshair cursor; leaving the system cursor as-is"
+            "placement: could not load the {shape:?} cursor; leaving the system cursor as-is"
         );
         return;
     }
     for id in OVERRIDDEN_CURSORS {
-        let copy = unsafe { CopyIcon(cross) };
+        let copy = unsafe { CopyIcon(cursor) };
         if !copy.is_null() {
             // Ignoring the BOOL: a failed override on one id leaves that cursor
             // at its default, which is a cosmetic imperfection during placement,
@@ -379,6 +729,10 @@ fn override_system_cursors() {
 
 /// Reloads every system cursor from the registry, undoing [`override_system_cursors`]
 /// for all processes. Harmless if no override is active.
+/// Deliberately takes no lock: this also runs from the panic hook, and a panic
+/// raised while [`APPLIED_CURSOR`] happened to be held would deadlock a process
+/// that is already failing. Forgetting the cached shape is [`teardown_now`]'s
+/// job instead — on the panic path nothing will read it again anyway.
 fn restore_system_cursors() {
     unsafe {
         SystemParametersInfoW(SPI_SETCURSORS, 0, ptr::null_mut(), 0);
@@ -430,6 +784,7 @@ fn handle_mouse(wparam: WPARAM, lparam: LPARAM) -> bool {
     // the duration of the call.
     let info = unsafe { &*(lparam as *const MSLLHOOKSTRUCT) };
     let (x, y) = (info.pt.x, info.pt.y);
+    let point = Point::new(x, y);
     match wparam as u32 {
         WM_LBUTTONDOWN => {
             if !ACTIVE.load(Ordering::SeqCst) {
@@ -443,15 +798,22 @@ fn handle_mouse(wparam: WPARAM, lparam: LPARAM) -> bool {
             START_Y.store(y, Ordering::SeqCst);
             CUR_X.store(x, Ordering::SeqCst);
             CUR_Y.store(y, Ordering::SeqCst);
+            // Classified before the lock is taken, not inside the assignment:
+            // `classify_press` takes the menu and store locks itself, and
+            // nesting those inside this one would be a lock order to reason
+            // about rather than one that cannot exist.
+            let gesture = classify_press(point);
+            *lock(&GESTURE) = Some(gesture);
             DRAGGING.store(true, Ordering::SeqCst);
             LEFT_PENDING.store(true, Ordering::SeqCst);
             true
         }
         WM_MOUSEMOVE => {
-            if is_dragging() {
-                CUR_X.store(x, Ordering::SeqCst);
-                CUR_Y.store(y, Ordering::SeqCst);
-            }
+            // Recorded unconditionally, not only while dragging: the poll reads
+            // this to decide the cursor shape and the hover highlight, both of
+            // which exist precisely when no drag is in progress.
+            CUR_X.store(x, Ordering::SeqCst);
+            CUR_Y.store(y, Ordering::SeqCst);
             false
         }
         WM_LBUTTONUP => {
@@ -459,8 +821,12 @@ fn handle_mouse(wparam: WPARAM, lparam: LPARAM) -> bool {
                 if DRAGGING.swap(false, Ordering::SeqCst) {
                     CUR_X.store(x, Ordering::SeqCst);
                     CUR_Y.store(y, Ordering::SeqCst);
-                    finish_drag();
+                    finish_gesture(point);
                 }
+                // A cancelled or abandoned gesture clears `DRAGGING` without
+                // reaching `finish_gesture`, so the payload is dropped here
+                // instead — leaving it would let the next press inherit it.
+                *lock(&GESTURE) = None;
                 maybe_finish_teardown();
                 true
             } else {
@@ -475,6 +841,13 @@ fn handle_mouse(wparam: WPARAM, lparam: LPARAM) -> bool {
             true
         }
         WM_RBUTTONUP if RIGHT_PENDING.swap(false, Ordering::SeqCst) => {
+            // Opened on *release*, not on press: a menu that appears under a
+            // still-held button is one the same gesture can dismiss by accident.
+            if ACTIVE.load(Ordering::SeqCst)
+                && let Some(app) = APP.get()
+            {
+                open_menu(app, point);
+            }
             maybe_finish_teardown();
             true
         }
@@ -482,24 +855,242 @@ fn handle_mouse(wparam: WPARAM, lparam: LPARAM) -> bool {
     }
 }
 
-/// Turns a completed drag into an area. A drag that never moved is a zero-size
-/// rectangle, which `AreaStore::create` rejects — so an ordinary click in
-/// placement creates nothing, by construction rather than by a special case.
-fn finish_drag() {
+/// Decides what a left-button press at `point` begins.
+///
+/// Precedence, outermost first: an open menu owns every click while it is up
+/// (including one outside it, which closes it); then an area's own controls and
+/// edges; then empty overlay, which rubber-bands a new area.
+///
+/// Takes the store lock, which is safe here and would not be on every mouse
+/// *move*: a press happens once per gesture, so this runs at click rate rather
+/// than at the mouse's report rate. See [`pump`] for the moves.
+fn classify_press(point: Point) -> Gesture {
+    if menu_contains(point) {
+        return match menu_item_at(point) {
+            Some(index) => Gesture::MenuItem { index },
+            // Inside the menu but on its padding: a press that does nothing,
+            // rather than one that falls through to the area underneath.
+            None => Gesture::Inert,
+        };
+    }
+    if let Some(app) = APP.get() {
+        // A click anywhere outside an open menu dismisses it, and does not also
+        // act on what it landed on — the standard contract, and the one that
+        // makes a mis-click cheap.
+        if close_menu(app) {
+            return Gesture::Inert;
+        }
+        if let Some((id, bounds, _)) = overlay::area_at(app, point) {
+            return match interaction::handle_at(bounds, point) {
+                Some(Handle::Close) => Gesture::Close {
+                    id,
+                    control: interaction::close_control(bounds),
+                },
+                Some(Handle::Resize(resize)) => Gesture::Resize {
+                    id,
+                    resize,
+                    start: bounds,
+                },
+                // `handle_at` returns `None` only for a point outside the area,
+                // which `area_at` has already excluded — so this is the body.
+                Some(Handle::Body) | None => Gesture::Move { id, start: bounds },
+            };
+        }
+    }
+    Gesture::Create
+}
+
+/// Commits whatever gesture just ended, at the release point.
+///
+/// Called only when [`DRAGGING`] was still set — a cancelled or abandoned
+/// gesture never reaches here, so every path below is a deliberate completion.
+fn finish_gesture(release: Point) {
     let Some(app) = APP.get() else {
         return;
     };
-    let (x, y, width, height) = current_rect();
-    // The area's physical bounds, logged so a placement problem is an
-    // observation rather than a guess (the F-15 lesson). The coordinate space
-    // itself is settled: hardware testing confirmed `MSLLHOOKSTRUCT.pt` matches
-    // `cursor_position` — the space the store and click-through regions use —
-    // across every monitor, the 125% primary included.
-    #[cfg(debug_assertions)]
-    eprintln!("placement: created area {width}x{height} at ({x}, {y})");
-    if overlay::create_default_area(app, x, y, width, height)
-        && let Err(error) = overlay::emit_areas(app)
-    {
-        eprintln!("placement: created an area but could not emit the new set: {error}");
+    let Some(gesture) = lock(&GESTURE).take() else {
+        return;
+    };
+    let pending = pending_rect_for(gesture, release);
+    let changed = match gesture {
+        Gesture::Create => {
+            let Some((x, y, width, height)) = pending else {
+                return;
+            };
+            // Logged so a placement problem is an observation rather than a
+            // guess (the F-15 lesson). The coordinate space itself is settled:
+            // hardware testing confirmed `MSLLHOOKSTRUCT.pt` matches
+            // `cursor_position` — the space the store and click-through regions
+            // use — across every monitor, the 125% primary included.
+            #[cfg(debug_assertions)]
+            eprintln!("placement: created area {width}x{height} at ({x}, {y})");
+            overlay::create_default_area(app, x, y, width, height)
+        }
+        Gesture::Move { id, .. } | Gesture::Resize { id, .. } => {
+            let Some((x, y, width, height)) = pending else {
+                return;
+            };
+            overlay::move_area(app, id, Rect::new(x, y, width, height))
+        }
+        // A press-and-release contract: the release must land on the control it
+        // started on. Sliding off cancels, which is how a user takes back a
+        // dismissal they have already begun.
+        Gesture::Close { id, control } => {
+            control.contains(release) && overlay::dismiss_area(app, id)
+        }
+        Gesture::MenuItem { index } => return activate_menu_item(app, index, release),
+        Gesture::Inert => return,
+    };
+    if changed && let Err(error) = overlay::emit_areas(app) {
+        eprintln!("placement: applied a gesture but could not emit the new set: {error}");
     }
+}
+
+/// The rectangle a gesture commits, computed against an explicit release point
+/// rather than the polled cursor — the release coordinate is the authoritative
+/// one, and the poll may not have ticked since the last mouse move.
+fn pending_rect_for(gesture: Gesture, release: Point) -> Option<(i32, i32, u32, u32)> {
+    let anchor = Point::new(
+        START_X.load(Ordering::SeqCst),
+        START_Y.load(Ordering::SeqCst),
+    );
+    let dx = release.x.saturating_sub(anchor.x);
+    let dy = release.y.saturating_sub(anchor.y);
+    let rect = match gesture {
+        Gesture::Create => Rect::from_corner_points(anchor, release),
+        Gesture::Move { start, .. } => interaction::move_by(start, dx, dy),
+        Gesture::Resize { start, resize, .. } => interaction::resize_by(start, resize, dx, dy),
+        Gesture::Close { .. } | Gesture::MenuItem { .. } | Gesture::Inert => return None,
+    };
+    Some(overlay::as_tuple(rect))
+}
+
+// ---------------------------------------------------------------------------
+// The per-area menu (ADR-0013): the control that sets an area's Layer tier.
+// ---------------------------------------------------------------------------
+
+/// Opens the area menu for whatever is under `point`, replacing any open menu.
+/// Does nothing if the point is over empty overlay — a menu with no area to act
+/// on has nothing to offer.
+fn open_menu(app: &AppHandle, point: Point) {
+    let Some((area, _, layer)) = overlay::area_at(app, point) else {
+        close_menu(app);
+        return;
+    };
+    // Anchored to the monitor under the cursor, never to the virtual desktop:
+    // desktop-relative chrome can land in a dead zone no cursor can reach (F-13).
+    let monitor = overlay::monitor_bounds_at(app, point);
+    let spec: [(MenuAction, &'static str); 4] = [
+        (MenuAction::SetLayer(Layer::Front), "Always on top"),
+        (MenuAction::SetLayer(Layer::Auto), "Auto"),
+        (MenuAction::SetLayer(Layer::Back), "Always behind"),
+        (MenuAction::Dismiss, "Dismiss"),
+    ];
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "a fixed four-item menu cannot overflow u32"
+    )]
+    let bounds = interaction::menu_bounds(point, spec.len() as u32, monitor);
+    let items = spec
+        .iter()
+        .enumerate()
+        .map(|(index, (action, label))| MenuEntry {
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "a fixed four-item menu cannot overflow u32"
+            )]
+            rect: interaction::menu_item_bounds(bounds, index as u32),
+            action: *action,
+            label,
+            checked: *action == MenuAction::SetLayer(layer),
+        })
+        .collect();
+    *lock(&MENU) = Some(AreaMenu {
+        area,
+        bounds,
+        items,
+        hovered: None,
+    });
+    emit_menu(app);
+}
+
+/// Closes any open area menu. Returns whether one was open — which is what lets
+/// `Esc` consume the menu instead of backing out of Placement.
+pub fn close_menu(app: &AppHandle) -> bool {
+    let was_open = lock(&MENU).take().is_some();
+    if was_open {
+        emit_menu(app);
+    }
+    was_open
+}
+
+/// The index of the menu row containing `point`, if a menu is open at all.
+fn menu_item_at(point: Point) -> Option<usize> {
+    let guard = lock(&MENU);
+    let menu = guard.as_ref()?;
+    menu.items.iter().position(|item| item.rect.contains(point))
+}
+
+/// Whether `point` is inside the open menu's outer rectangle.
+fn menu_contains(point: Point) -> bool {
+    lock(&MENU)
+        .as_ref()
+        .is_some_and(|menu| menu.bounds.contains(point))
+}
+
+/// Performs the action of a menu row, if the release landed on the row the press
+/// started on — the same press-and-release contract the close control uses.
+fn activate_menu_item(app: &AppHandle, index: usize, release: Point) {
+    let action = {
+        let guard = lock(&MENU);
+        let Some(menu) = guard.as_ref() else {
+            return;
+        };
+        let Some(entry) = menu.items.get(index) else {
+            return;
+        };
+        if !entry.rect.contains(release) {
+            return;
+        }
+        (menu.area, entry.action)
+    };
+    let (area, action) = action;
+    close_menu(app);
+    let changed = match action {
+        MenuAction::SetLayer(layer) => overlay::set_area_layer(app, area, layer),
+        MenuAction::Dismiss => overlay::dismiss_area(app, area),
+    };
+    if changed && let Err(error) = overlay::emit_areas(app) {
+        eprintln!("placement: menu action applied but could not emit the new set: {error}");
+    }
+}
+
+/// Emits the open menu (or its absence) for the frontend to draw.
+fn emit_menu(app: &AppHandle) {
+    let payload = {
+        let guard = lock(&MENU);
+        MenuPayload {
+            menu: guard.as_ref().map(|menu| MenuView {
+                rect: overlay::as_tuple(menu.bounds),
+                hovered: menu.hovered,
+                items: menu
+                    .items
+                    .iter()
+                    .map(|item| MenuItemView {
+                        rect: overlay::as_tuple(item.rect),
+                        label: item.label,
+                        checked: item.checked,
+                    })
+                    .collect(),
+            }),
+        }
+    };
+    let _ = app.emit(MENU_EVENT, payload);
+}
+
+/// Locks a mutex, treating poisoning as recoverable: everything under these
+/// locks is plain data that stays valid after a panic, and architecture §5
+/// forbids `unwrap`.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }

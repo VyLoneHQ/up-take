@@ -154,16 +154,18 @@ fn poll_loop(app: &AppHandle) -> ! {
                 .unwrap_or_else(PoisonError::into_inner),
         );
 
-        // Reset per show cycle: makes the drag→idle clearing emit in
-        // `pump_selection` fire once when a placement drag ends, not every tick.
-        let mut was_dragging = false;
+        // Reset per show cycle: the pump's edge-triggered emits (gesture ended,
+        // cursor shape changed, hover moved) compare against this, and a fresh
+        // show starts from "nothing applied yet" rather than from whatever the
+        // last cycle left behind.
+        let mut pump = crate::placement::PumpState::default();
         loop {
             tick(app, &state);
-            // Publish the live placement selection rectangle at the poll's
-            // cadence. The mouse hook only writes atomics, so pacing the emit
-            // here caps it at ~60 Hz however fast the mouse reports — see
-            // `placement::pump_selection`.
-            crate::placement::pump_selection(app, &mut was_dragging);
+            // Drive the placement pump at the poll's cadence: the live gesture
+            // rectangle, the cursor shape, and the hover highlights. The mouse
+            // hook only writes atomics, so pacing the work here caps it at
+            // ~60 Hz however fast the mouse reports — see `placement::pump`.
+            crate::placement::pump(app, &mut pump);
 
             // Pace to FRAME, but let deactivate cut the sleep short.
             let guard = lock(&state.active);

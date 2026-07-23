@@ -3,13 +3,22 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { onMount } from 'svelte';
 import {
+  type AreaFrame,
   type AreasPayload,
+  type AreaView,
+  areaFramesCss,
+  dismissFocusedArea,
   escapeOverlay,
+  type HoverPayload,
+  isRemoveKey,
+  type MenuFrame,
+  type MenuPayload,
+  type MenuView,
+  menuFrameCss,
   monitorFramesCss,
   type Origin,
   type OverlayStateName,
   type PhysRect,
-  physRectsToCss,
   physRectToCss,
   type SelectionPayload,
   type StatePayload,
@@ -30,23 +39,47 @@ import { type CssRect, isDismissKey } from '$lib/regions';
 let overlayState = $state<OverlayStateName>('hidden');
 let monitors: PhysRect[] = $state([]);
 let origin: Origin = $state([0, 0]);
-let areas: PhysRect[] = $state([]);
+let areas: AreaView[] = $state([]);
 let selection: PhysRect | null = $state(null);
+let hoveredArea: number | null = $state(null);
+let menu: MenuView | null = $state(null);
 // The WebView owns its scale (ADR-0011); refreshed on every state event in case
 // the overlay moved to a monitor at a different DPI.
 let dpr = $state(1);
 
 const frames: CssRect[] = $derived(monitorFramesCss(monitors, origin, dpr));
-const areaFrames: CssRect[] = $derived(physRectsToCss(areas, origin, dpr));
+// Hover chrome — the close control, the brighter border — belongs to Placement
+// only: in Living the overlay does not own the pointer, so a control that
+// appeared to follow the cursor would be one no click could reach.
+const areaFrames: AreaFrame[] = $derived(
+  areaFramesCss(
+    areas,
+    origin,
+    dpr,
+    overlayState === 'placement' ? hoveredArea : null,
+  ),
+);
 // The selection box is only meaningful while placing; guarding on the state as
 // well as the payload keeps a stale rectangle from lingering after a transition.
 const selectionFrame: CssRect | null = $derived(
   overlayState === 'placement' ? physRectToCss(selection, origin, dpr) : null,
 );
+const menuFrame: MenuFrame | null = $derived(
+  overlayState === 'placement' ? menuFrameCss(menu, origin, dpr) : null,
+);
 
 function onKeydown(event: KeyboardEvent) {
-  if (!isDismissKey(event.key)) return;
-  void escapeOverlay(invoke);
+  if (isDismissKey(event.key)) {
+    void escapeOverlay(invoke);
+    return;
+  }
+  if (isRemoveKey(event.key)) {
+    // `preventDefault` so the key cannot also reach anything else the WebView
+    // might do with it; the overlay renders no editable content today, and this
+    // keeps that true if it ever does.
+    event.preventDefault();
+    void dismissFocusedArea(invoke);
+  }
 }
 
 onMount(() => {
@@ -68,19 +101,29 @@ onMount(() => {
       selection = event.payload.rect;
     },
   );
+  const unlistenHover = listen<HoverPayload>('overlay://hover', (event) => {
+    hoveredArea = event.payload.id;
+  });
+  const unlistenMenu = listen<MenuPayload>('overlay://menu', (event) => {
+    menu = event.payload.menu;
+  });
 
   // Request the current state only *after* the listeners are registered.
   // `listen` resolves once the backend has recorded the subscription; requesting
   // before that races the reply and drops it — which is exactly the startup
   // case, where the overlay is already in Placement (with areas possibly already
   // present) when the webview mounts. Chaining on the promise closes the gap.
-  const ready = Promise.all([unlistenState, unlistenAreas, unlistenSelection]);
+  const ready = Promise.all([
+    unlistenState,
+    unlistenAreas,
+    unlistenSelection,
+    unlistenHover,
+    unlistenMenu,
+  ]);
   void ready.then(() => invoke('overlay_request_state'));
   return () => {
-    void ready.then(([un1, un2, un3]) => {
-      un1();
-      un2();
-      un3();
+    void ready.then((unlisteners) => {
+      for (const unlisten of unlisteners) unlisten();
     });
   };
 });
@@ -99,11 +142,27 @@ onMount(() => {
   {/if}
 
   {#if overlayState !== 'hidden'}
-    {#each areaFrames as area (`${area.x},${area.y},${area.width},${area.height}`)}
+    {#each areaFrames as area (area.id)}
       <div
         class="area"
-        style="left: {area.x}px; top: {area.y}px; width: {area.width}px; height: {area.height}px"
-      ></div>
+        class:hovered={area.hovered}
+        class:pinned={area.layer !== 'auto'}
+        style="left: {area.rect.x}px; top: {area.rect.y}px; width: {area.rect
+          .width}px; height: {area.rect.height}px"
+      >
+        {#if area.layer !== 'auto'}
+          <span class="layer-badge">{area.layer === 'front' ? '▲' : '▼'}</span>
+        {/if}
+      </div>
+      {#if area.hovered}
+        <div
+          class="close"
+          style="left: {area.close.x}px; top: {area.close.y}px; width: {area
+            .close.width}px; height: {area.close.height}px"
+        >
+          ×
+        </div>
+      {/if}
     {/each}
   {/if}
 
@@ -112,6 +171,25 @@ onMount(() => {
       class="selection"
       style="left: {selectionFrame.x}px; top: {selectionFrame.y}px; width: {selectionFrame.width}px; height: {selectionFrame.height}px"
     ></div>
+  {/if}
+
+  {#if menuFrame}
+    <div
+      class="menu"
+      style="left: {menuFrame.rect.x}px; top: {menuFrame.rect.y}px; width: {menuFrame
+        .rect.width}px; height: {menuFrame.rect.height}px"
+    ></div>
+    {#each menuFrame.items as item (item.label)}
+      <div
+        class="menu-item"
+        class:hovered={item.hovered}
+        style="left: {item.rect.x}px; top: {item.rect.y}px; width: {item.rect
+          .width}px; height: {item.rect.height}px"
+      >
+        <span class="tick">{item.checked ? '✓' : ''}</span>
+        <span class="label">{item.label}</span>
+      </div>
+    {/each}
   {/if}
 </main>
 
@@ -176,6 +254,45 @@ onMount(() => {
   pointer-events: none;
 }
 
+/* The hovered area in Placement: brighter, so which area a drag will grab is
+   visible before the button goes down. The cursor shape says *what* the drag
+   will do (move, resize, dismiss) — that half is a system cursor set by
+   placement.rs, because a click-through window receives no WM_SETCURSOR. */
+.area.hovered {
+  border-color: rgba(160, 210, 255, 1);
+  background: rgba(120, 180, 255, 0.12);
+  box-shadow: 0 0 10px rgba(120, 180, 255, 0.5);
+}
+
+/* A pinned tier (ADR-0013) is a state the user set and must be able to see; an
+   `Auto` area shows nothing, since that is the default and marking it would be
+   noise on every area. */
+.layer-badge {
+  position: absolute;
+  left: 4px;
+  top: 2px;
+  font: 11px/1 system-ui, sans-serif;
+  color: rgba(160, 210, 255, 0.95);
+  text-shadow: 0 0 3px rgba(0, 0, 0, 0.8);
+}
+
+/* The close control. Positioned from the rectangle Rust hit-tests — never from
+   a layout computed here — so what is drawn and what is clickable are the same
+   rectangle by construction. Revealed on hover only: a persistent ✕ on every
+   area would be permanent clutter over the user's screen. */
+.close {
+  position: absolute;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 14px/1 system-ui, sans-serif;
+  color: rgba(255, 255, 255, 0.95);
+  background: rgba(190, 70, 80, 0.85);
+  border-radius: 0 3px 0 4px;
+  pointer-events: none;
+}
+
 /* The live selection box while dragging out a new area: a dashed rubber-band so
    it reads as in-progress rather than committed. Fed from the mouse hook via the
    poll at ~60 Hz. */
@@ -186,5 +303,41 @@ onMount(() => {
   border-radius: 4px;
   background: rgba(120, 180, 255, 0.12);
   pointer-events: none;
+}
+
+/* The per-area menu (ADR-0013). Drawn here, hit-tested in placement.rs against
+   the same rectangles — the overlay is click-through, so this is a picture of a
+   menu that Rust makes behave like one. Rows are absolutely positioned from the
+   rects Rust sent rather than flowed inside the panel, so a row can never be
+   drawn anywhere other than where a click on it is detected. */
+.menu {
+  position: absolute;
+  box-sizing: border-box;
+  background: rgba(24, 28, 36, 0.96);
+  border: 1px solid rgba(120, 180, 255, 0.45);
+  border-radius: 6px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+}
+
+.menu-item {
+  position: absolute;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  font: 13px/1 system-ui, sans-serif;
+  color: rgba(235, 240, 250, 0.95);
+  pointer-events: none;
+}
+
+.menu-item.hovered {
+  background: rgba(120, 180, 255, 0.22);
+}
+
+.menu-item .tick {
+  width: 12px;
+  color: rgba(160, 210, 255, 1);
 }
 </style>
