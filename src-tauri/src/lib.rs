@@ -1,11 +1,11 @@
 mod click_through;
 #[cfg(debug_assertions)]
 mod dev_harness;
-#[cfg(windows)]
-mod display_watch;
 mod hotkey;
 mod overlay;
 mod overlay_state;
+#[cfg(windows)]
+mod overlay_wndproc;
 mod placement;
 mod tray;
 
@@ -147,7 +147,7 @@ pub fn run() -> tauri::Result<()> {
             // unnoticed. Architecture §5 class 3: log with context, keep the app
             // alive.
             #[cfg(windows)]
-            if let Err(error) = display_watch::install(app.handle()) {
+            if let Err(error) = overlay_wndproc::install(app.handle()) {
                 eprintln!(
                     "display-watch: display changes while the overlay is visible will not be tracked: {error}"
                 );

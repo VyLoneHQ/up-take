@@ -562,12 +562,19 @@ fn pump_hook_health(app: &AppHandle, state: &mut PumpState) {
         state.silent_ticks = 0;
         return;
     }
-    if state.reinstall_cooldown > 0 {
-        state.reinstall_cooldown -= 1;
-        return;
-    }
     let events = HOOK_EVENTS.load(Ordering::Relaxed);
     let cursor = real_cursor(app);
+    if state.reinstall_cooldown > 0 {
+        // Keep the baselines current while waiting. Skipping them would leave
+        // the next comparison reading against values a whole second old, which
+        // is the sort of stale-baseline bug that makes a health check quietly
+        // stop detecting anything.
+        state.reinstall_cooldown -= 1;
+        state.last_cursor = cursor;
+        state.last_events = events;
+        state.silent_ticks = 0;
+        return;
+    }
     let moved = matches!((cursor, state.last_cursor), (Some(now), Some(before)) if now != before);
     state.last_cursor = cursor;
 
@@ -583,6 +590,11 @@ fn pump_hook_health(app: &AppHandle, state: &mut PumpState) {
         state.reinstall_cooldown = REINSTALL_COOLDOWN_TICKS;
         eprintln!("placement: mouse hook stopped receiving input; reinstalling");
         if let Err(error) = app.run_on_main_thread(reinstall_on_main_thread) {
+            // The main thread is not servicing its queue — which is itself the
+            // reason the hook died, if something has put it in a modal loop.
+            // Nothing here can fix that from another thread: installing and
+            // removing a low-level hook are both thread-affine to the event
+            // loop.
             eprintln!("placement: could not schedule a hook reinstall: {error}");
         }
     }
@@ -616,6 +628,10 @@ fn reinstall_on_main_thread() {
     *lock(&GESTURE) = None;
     if ACTIVE.load(Ordering::SeqCst) {
         install_on_main_thread();
+        eprintln!(
+            "placement: mouse hook reinstalled (installed: {})",
+            HOOK.load(Ordering::SeqCst) != 0
+        );
     }
 }
 

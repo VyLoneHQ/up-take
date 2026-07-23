@@ -1,34 +1,53 @@
-//! Rust-side subscription to Windows display-configuration changes
-//! (roadmap task 1.3, quality-bars.md §3 M-6).
+//! The overlay window's own wndproc: the window messages tao does not handle
+//! and the overlay cannot do without.
+//!
+//! Subclassed via comctl32 subclassing — the supported composition mechanism;
+//! tao subclasses the same window and the chain composes. Two messages, for two
+//! unrelated reasons.
+//!
+//! # `WM_DISPLAYCHANGE` — display-configuration changes (task 1.3, M-6)
 //!
 //! tao surfaces no event when a monitor is added, removed, rearranged or
 //! changes resolution: it handles `WM_DPICHANGED` (and then only by rescaling
 //! the window — see `overlay::sync_bounds` for why that is wrong for the
-//! overlay) and ignores `WM_DISPLAYCHANGE` entirely. Without this module a
-//! *visible* overlay keeps stale bounds until the next hide/show cycle, and a
-//! monitor rearrangement that moves the virtual-desktop origin without
-//! changing its size leaves every click-through region anchored to the old
-//! origin with no event firing anywhere.
+//! overlay) and ignores `WM_DISPLAYCHANGE` entirely. Without it a *visible*
+//! overlay keeps stale bounds until the next hide/show cycle, and a monitor
+//! rearrangement that moves the virtual-desktop origin without changing its size
+//! leaves every click-through region anchored to the old origin with no event
+//! firing anywhere. Observed, not consumed: it is forwarded down the chain.
 //!
-//! The overlay window's wndproc is therefore subclassed via comctl32
-//! subclassing — the supported composition mechanism; tao subclasses the same
-//! window and the chain composes — and `WM_DISPLAYCHANGE`, which Windows
-//! broadcasts to every top-level window after any display-configuration
-//! change, triggers a bounds re-sync.
+//! # `WM_SYSCOMMAND`/`SC_KEYMENU` — refusing to enter menu mode
+//!
+//! Pressing and releasing `Alt` on its own makes Windows send the focused window
+//! `SC_KEYMENU`, and `DefWindowProc` answers it by entering a **modal menu
+//! loop** on that thread. The overlay is `decorations: false` with no menu bar
+//! and no system menu, so there is nothing for that loop to show — but the main
+//! thread is now inside a nested loop, and the main thread is what services the
+//! placement mouse hook. A `WH_MOUSE_LL` callback that cannot run promptly is
+//! *silently removed* by Windows, so a bare `Alt` press left the overlay in
+//! Placement with dead input until the user toggled the state twice.
+//!
+//! `Alt` is not an incidental key here either: holding it is how a drag opts out
+//! of edge snapping (`interaction::SNAP_DISTANCE`), so releasing it is the
+//! ordinary end of a precise placement. This message is therefore **consumed**,
+//! not forwarded — the documented way for a window with no menu to decline menu
+//! mode.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use tauri::AppHandle;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
-use windows_sys::Win32::UI::WindowsAndMessaging::{WM_DISPLAYCHANGE, WM_NCDESTROY};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    SC_KEYMENU, WM_DISPLAYCHANGE, WM_NCDESTROY, WM_SYSCOMMAND,
+};
 
 use crate::overlay;
 
 /// Distinguishes this registration from any other subclass on the window.
 const SUBCLASS_ID: usize = 0x5550_544b; // "UPTK"
 
-/// Installs the display-change hook on the overlay window.
+/// Installs the overlay's wndproc subclass.
 ///
 /// Must run on the thread that owns the window — `SetWindowSubclass` is
 /// thread-affine. Tauri's `setup` runs there, and `lib.rs` calls this from
@@ -52,8 +71,8 @@ pub fn install(app: &AppHandle) -> Result<(), String> {
 }
 
 /// Runs in the window's message loop; `data` is the `Box<AppHandle>` leaked by
-/// [`install`]. Everything is forwarded down the chain via `DefSubclassProc` —
-/// this proc only *observes* `WM_DISPLAYCHANGE`, it does not consume it.
+/// [`install`]. `WM_DISPLAYCHANGE` is observed and forwarded; `SC_KEYMENU` is
+/// the one message consumed, and the module docs say why.
 unsafe extern "system" fn subclass_proc(
     hwnd: HWND,
     message: u32,
@@ -62,6 +81,12 @@ unsafe extern "system" fn subclass_proc(
     _subclass_id: usize,
     data: usize,
 ) -> LRESULT {
+    // Consumed rather than forwarded: returning 0 without reaching
+    // `DefWindowProc` is how a window with no menu declines menu mode. The low
+    // four bits of `wparam` are reserved by the system, hence the mask.
+    if message == WM_SYSCOMMAND && (wparam & 0xFFF0) == SC_KEYMENU as usize {
+        return 0;
+    }
     match message {
         WM_DISPLAYCHANGE => {
             let app = unsafe { &*(data as *const AppHandle) };

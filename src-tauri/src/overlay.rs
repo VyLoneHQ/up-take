@@ -30,7 +30,7 @@ pub const WINDOW_LABEL: &str = "overlay";
 /// Bounds are recomputed on every call rather than cached, which covers
 /// display changes that happen while the app sits hidden in the tray. The
 /// other half of M-6 — a display change while the overlay is *visible* — is
-/// [`sync_bounds`]'s job, driven by `display_watch` and the window-event hook
+/// [`sync_bounds`]'s job, driven by `overlay_wndproc` and the window-event hook
 /// in `lib.rs`.
 pub fn show(app: &AppHandle) -> Result<(), String> {
     let window = overlay_window(app)?;
