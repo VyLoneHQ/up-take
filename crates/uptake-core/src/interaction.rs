@@ -24,6 +24,12 @@
 //! resize band around a 20 px-tall area would leave no body to grab it by, so
 //! every band shrinks with the area rather than swallowing it. This is why the
 //! spans are functions and not constants.
+//!
+//! Since [`MIN_AREA_SPAN`] was raised to 72 those caps no longer bind for any
+//! area the app can actually produce — every control is at full size at the
+//! minimum. They are kept deliberately: they are what makes "the controls always
+//! fit" true by construction rather than by an arithmetic argument that would
+//! silently expire the next time a constant moves.
 
 use crate::geometry::{Point, Rect};
 
@@ -31,15 +37,30 @@ use crate::geometry::{Point, Rect};
 ///
 /// This is the "minimum size policy" the area model deferred to task 1.6. It
 /// exists for one concrete reason: **an area the user cannot grab is an area
-/// the user cannot dismiss.** Below roughly this span there is no room for a
-/// close control, a resize band and a draggable body at once, so a smaller area
-/// would be a permanent fixture of the screen — the same failure the
-/// empty-rectangle rejection in `AreaStore::create` prevents, only reached by a
-/// slightly longer drag.
+/// the user cannot dismiss.** A too-small area would be a permanent fixture of
+/// the screen — the same failure the empty-rectangle rejection in
+/// `AreaStore::create` prevents, only reached by a slightly longer drag.
+///
+/// # Why 72 and not the arithmetic floor
+///
+/// Raised from 24 after hardware testing, and the reason is worth keeping: 24 is
+/// the point below which the controls stop *fitting*, so at 24 they only fit by
+/// shrinking — [`close_control`] caps itself at half the area, so a
+/// minimum-sized area got a close control scaled down with it. A control that
+/// shrinks is a control that is hard to hit, on the areas where hitting it
+/// matters most.
+///
+/// 72 is three times that floor, which is the smallest span at which **every
+/// control is at full size and there is still body left to drag**: an 18 px
+/// close control and an 8 px resize band on each side leave 56 px of grabbable
+/// interior. The adaptive caps in [`close_control`] and [`handle_at`] are
+/// therefore now defensive rather than load-bearing — nothing the app can
+/// produce reaches them — and they are kept because they are what makes that
+/// claim true by construction instead of by arithmetic done once in a comment.
 ///
 /// A resize clamps to this rather than refusing, so the area stops shrinking
 /// under the cursor instead of the drag appearing to break.
-pub const MIN_AREA_SPAN: u32 = 24;
+pub const MIN_AREA_SPAN: u32 = 72;
 
 /// How wide the grab band along an area's edge is, before adapting to size.
 const RESIZE_BAND: u32 = 8;
@@ -733,6 +754,7 @@ fn clamp_to_u32(value: i64) -> u32 {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "a failed unwrap is a failed test")]
 mod tests {
     use super::*;
     use proptest::prelude::*;
@@ -804,19 +826,31 @@ mod tests {
     }
 
     #[test]
-    fn every_control_shrinks_rather_than_swallowing_a_minimum_sized_area() {
-        // The reason the bands are functions of the area: at MIN_AREA_SPAN a
-        // fixed 8 px band and an 18 px close control would together leave no
-        // body at all, and an area with no body cannot be moved.
-        let tiny = Rect::new(0, 0, MIN_AREA_SPAN, MIN_AREA_SPAN);
+    fn a_minimum_sized_area_gets_full_size_controls_and_still_has_a_body() {
+        // What raising MIN_AREA_SPAN to 72 bought. At the old floor of 24 the
+        // close control had to shrink to fit, which made the hardest area to hit
+        // also the one with the smallest target. Nothing shrinks now.
+        let smallest = Rect::new(0, 0, MIN_AREA_SPAN, MIN_AREA_SPAN);
+        assert_eq!(close_control(smallest).size.width, CLOSE_SPAN);
+        assert_eq!(close_control(smallest).size.height, CLOSE_SPAN);
+        // And the interior is still reachable, clear of every band and control.
+        let centre = Point::new(
+            i32::try_from(MIN_AREA_SPAN / 2).unwrap(),
+            i32::try_from(MIN_AREA_SPAN / 2).unwrap(),
+        );
+        assert_eq!(handle_at(smallest, centre), Some(Handle::Body));
+    }
+
+    #[test]
+    fn the_controls_still_shrink_for_a_rectangle_below_the_minimum() {
+        // Defensive rather than reachable: no area the app produces is this
+        // small any more. Kept because it is what makes the guarantee above
+        // structural — if a future change lowers MIN_AREA_SPAN, the controls
+        // adapt instead of overlapping into an ungrabbable area.
+        let tiny = Rect::new(0, 0, 20, 20);
         let control = close_control(tiny);
         assert!(control.size.width <= tiny.size.width / 2);
-        let centre = Point::new(
-            tiny.size.width as i32 / 2,
-            // Below the close control, clear of the north band.
-            tiny.size.height as i32 / 2 + 2,
-        );
-        assert_eq!(handle_at(tiny, centre), Some(Handle::Body));
+        assert_eq!(handle_at(tiny, Point::new(10, 10)), Some(Handle::Body));
     }
 
     #[test]
@@ -1038,11 +1072,13 @@ mod tests {
     #[test]
     fn a_snap_that_would_shrink_an_area_below_the_minimum_is_dropped() {
         let monitors = vec![Rect::new(0, 0, 1920, 1080)];
-        // 26 px wide, its west edge 8 px from the monitor edge: snapping flush
-        // would leave 18 px, under MIN_AREA_SPAN.
-        let narrow = Rect::new(8, 500, 26, 200);
+        // Overhangs the monitor's left edge by 8 px and is only 4 px wider than
+        // the minimum, so pulling its west edge flush would shrink it under
+        // MIN_AREA_SPAN. Dropping the snap is right: clamping instead would put
+        // the edge somewhere the user did not drag it *and* not flush either.
+        let narrow = Rect::new(-8, 500, MIN_AREA_SPAN + 4, 200);
         const { assert!(8 < SNAP_DISTANCE, "the west edge must be inside snap range") };
-        assert_eq!(snap_resize(narrow, Resize::East, &monitors), narrow);
+        assert_eq!(snap_resize(narrow, Resize::West, &monitors), narrow);
     }
 
     #[test]
