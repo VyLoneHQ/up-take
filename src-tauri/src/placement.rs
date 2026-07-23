@@ -1154,14 +1154,26 @@ fn finish_gesture(release: Point) {
             let Some((x, y, width, height)) = pending else {
                 return;
             };
+            let created = overlay::create_default_area(app, x, y, width, height);
             // Logged so a placement problem is an observation rather than a
-            // guess (the F-15 lesson). The coordinate space itself is settled:
-            // hardware testing confirmed `MSLLHOOKSTRUCT.pt` matches
-            // `cursor_position` — the space the store and click-through regions
-            // use — across every monitor, the 125% primary included.
+            // guess (the F-15 lesson) — and logged *after* the attempt, with its
+            // outcome. Printing "created area" before the call claimed a
+            // creation that had not happened yet and sometimes never did: an
+            // empty drag produced `created area 0x0`, which is precisely the
+            // sort of confidently wrong log line that sends a later debugging
+            // session in the wrong direction.
+            //
+            // The coordinate space itself is settled: hardware testing confirmed
+            // `MSLLHOOKSTRUCT.pt` matches `cursor_position` — the space the
+            // store and click-through regions use — across every monitor, the
+            // 125% primary included.
             #[cfg(debug_assertions)]
-            eprintln!("placement: created area {width}x{height} at ({x}, {y})");
-            overlay::create_default_area(app, x, y, width, height)
+            if created {
+                eprintln!("placement: created area {width}x{height} at ({x}, {y})");
+            } else {
+                eprintln!("placement: drag at ({x}, {y}) was {width}x{height} — nothing created");
+            }
+            created
         }
         Gesture::Move { id, .. } | Gesture::Resize { id, .. } => {
             let Some((x, y, width, height)) = pending else {
