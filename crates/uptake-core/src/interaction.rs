@@ -234,7 +234,10 @@ pub fn is_placeable(bounds: Rect) -> bool {
 ///
 /// Small enough that deliberate placement a few pixels off an edge is still
 /// possible, large enough that "put it against the edge" needs no precision.
-pub const SNAP_DISTANCE: u32 = 12;
+/// Raised from 12 after hardware testing found it fussier than it looked; the
+/// escape hatch for the remaining cases is holding `Alt`, which suppresses
+/// snapping entirely for that drag.
+pub const SNAP_DISTANCE: u32 = 15;
 
 /// How much of an area must stay on a monitor, in physical pixels per axis.
 pub const MIN_VISIBLE_SPAN: u32 = 48;
@@ -1038,6 +1041,7 @@ mod tests {
         // 26 px wide, its west edge 8 px from the monitor edge: snapping flush
         // would leave 18 px, under MIN_AREA_SPAN.
         let narrow = Rect::new(8, 500, 26, 200);
+        const { assert!(8 < SNAP_DISTANCE, "the west edge must be inside snap range") };
         assert_eq!(snap_resize(narrow, Resize::East, &monitors), narrow);
     }
 

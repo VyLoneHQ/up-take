@@ -128,6 +128,13 @@ pub fn run() -> tauri::Result<()> {
             // can override the cursor, so a panic while placing does not leave
             // every app showing the crosshair. See `placement`.
             placement::install_panic_guard();
+            // Clear any cursor override a *previous* run left behind. The system
+            // cursor is global and survives a hard kill (ADR-0014 accepts that),
+            // so without this the user keeps a crosshair everywhere until they
+            // reload their cursor scheme — and, worse, this process would take
+            // that crosshair for the genuine cursor when it snapshots the set it
+            // restores from. Cheap, and it makes a crashed run self-repairing.
+            placement::clear_cursor_residue();
             // Display-configuration changes reach a *visible* overlay only
             // through WM_DISPLAYCHANGE, which tao does not surface — the
             // native hook is the M-6 subscription (task 1.3).

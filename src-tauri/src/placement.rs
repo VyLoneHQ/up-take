@@ -59,8 +59,24 @@
 //! `Placement` ([`exit`], subject to the deferral below), a graceful shutdown
 //! ([`teardown`] from `RunEvent::Exit`), and a panic ([`install_panic_guard`]).
 //! What it cannot cover is a **hard kill** (Task Manager) mid-placement, which
-//! runs none of our code and leaves the crosshair set until the user's next
-//! cursor-scheme reload — a limitation ADR-0014 accepts explicitly.
+//! runs none of our code — a limitation ADR-0014 accepts explicitly. The *next*
+//! launch repairs it, though: [`clear_cursor_residue`] runs at startup, and
+//! [`snapshot_cursor`] reloads the registry before capturing the set it restores
+//! from. Without that second part the residue would be worse than cosmetic — a
+//! process starting up under a leftover crosshair would take the crosshair for
+//! the user's real cursor and could then never change shape again.
+//!
+//! # A low-level hook can be removed without being told
+//!
+//! Windows drops a `WH_MOUSE_LL` hook whose callback overruns
+//! `LowLevelHooksTimeout`, and starves one in a medium-integrity process while a
+//! higher-integrity window holds the foreground (UIPI — F-25). Neither is
+//! reported: [`HOOK`] still holds a handle, so nothing here would notice, and
+//! `Placement` would sit on screen with no working input for the rest of the
+//! session. [`pump_hook_health`] watches for it — the cursor moving while the
+//! hook counts no events — and reinstalls. That does not defeat UIPI and does
+//! not try to; it restores the overlay once the elevated window is no longer in
+//! front, instead of leaving "press the hotkey twice" as the only way back.
 //!
 //! # Abandoned gestures: a swallowed button-down obliges us to the button-up
 //!
@@ -81,7 +97,7 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
 use serde::Serialize;
@@ -92,6 +108,7 @@ use uptake_core::interaction::{self, Handle, Resize};
 
 use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_MENU};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CopyIcon, HCURSOR, HHOOK, IDC_CROSS, IDC_HAND, IDC_SIZEALL, IDC_SIZENESW,
     IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, LoadCursorW, MSLLHOOKSTRUCT, OCR_APPSTARTING, OCR_CROSS,
@@ -160,6 +177,11 @@ static START_X: AtomicI32 = AtomicI32::new(0);
 static START_Y: AtomicI32 = AtomicI32::new(0);
 static CUR_X: AtomicI32 = AtomicI32::new(0);
 static CUR_Y: AtomicI32 = AtomicI32::new(0);
+
+/// How many events the hook has processed. Only ever compared against its own
+/// previous value — see [`pump_hook_health`], which uses it to notice that
+/// Windows has silently removed the hook.
+static HOOK_EVENTS: AtomicU64 = AtomicU64::new(0);
 
 /// The app handle the hook callback needs to reach the `AreaStore` and emit.
 /// Set on the first [`enter`]; a static because the `extern "system"` callback
@@ -413,6 +435,14 @@ pub fn exit(app: &AppHandle) {
     }
 }
 
+/// Clears any cursor override left installed by an earlier process, and is safe
+/// when there is none — reloading the registry cursors over identical ones is a
+/// no-op. Called once at startup; see the note on [`snapshot_cursor`] for why
+/// this also protects the snapshot's correctness.
+pub fn clear_cursor_residue() {
+    restore_system_cursors();
+}
+
 /// Restores the system cursors and removes the hook unconditionally — the
 /// graceful-shutdown path, called from `RunEvent::Exit`. The process is
 /// exiting either way, so an outstanding pending release no longer matters.
@@ -467,6 +497,16 @@ pub struct PumpState {
     hovered_area: Option<u64>,
     /// The menu row the previous tick reported as hovered.
     hovered_item: Option<usize>,
+    /// The real cursor position the previous tick read, for the hook health
+    /// check.
+    last_cursor: Option<Point>,
+    /// [`HOOK_EVENTS`] as of the previous tick.
+    last_events: u64,
+    /// Consecutive ticks in which the cursor moved but the hook saw nothing.
+    silent_ticks: u32,
+    /// Ticks left before the health check may act again, so a reinstall is not
+    /// retried every frame while an elevated window holds the foreground.
+    reinstall_cooldown: u32,
 }
 
 /// The poll's placement work, run every tick (`click_through`, ~60 Hz).
@@ -483,8 +523,100 @@ pub struct PumpState {
 /// Three jobs: publish the live gesture rectangle, keep the cursor shape
 /// matching what is under the pointer, and track the hover highlights.
 pub fn pump(app: &AppHandle, state: &mut PumpState) {
+    pump_hook_health(app, state);
     pump_gesture(app, state);
     pump_hover(app, state);
+}
+
+/// Ticks the health check may skip after a reinstall (~1 s at the poll's
+/// cadence), so a foreground elevated window cannot make this spin.
+const REINSTALL_COOLDOWN_TICKS: u32 = 60;
+
+/// Consecutive silent ticks before the hook is presumed dead. Three is ~50 ms —
+/// long enough that a single dropped frame is not a diagnosis.
+const SILENT_TICKS_BEFORE_REINSTALL: u32 = 3;
+
+/// Notices that the mouse hook has stopped delivering events and reinstalls it.
+///
+/// **Windows removes a low-level hook without telling anyone.** It does so when
+/// a callback overruns `LowLevelHooksTimeout`, and a hook in a medium-integrity
+/// process is starved while a higher-integrity window holds the foreground
+/// (UIPI — F-25, and the reason interacting with Task Manager used to leave the
+/// overlay inert until the user toggled Placement off and on again). In both
+/// cases [`HOOK`] still holds a handle, so [`install_on_main_thread`] believes
+/// there is nothing to do and the overlay stays in Placement with no working
+/// input for the rest of the session.
+///
+/// The detection needs no timers: if the real cursor has moved since the last
+/// tick and the hook has not counted a single event, the hook is not receiving
+/// input. Comparing positions alone would not do — during fast motion the
+/// hook's last reported point legitimately lags the polled one — which is why
+/// this compares the *event counter* against its own previous value.
+///
+/// Reinstalling cannot defeat UIPI, and does not try to: while Task Manager is
+/// focused, input still belongs to it. What it restores is the state
+/// *afterwards*, so the overlay works again the moment the elevated window is
+/// no longer in front, instead of needing the hotkey twice.
+fn pump_hook_health(app: &AppHandle, state: &mut PumpState) {
+    if !ACTIVE.load(Ordering::SeqCst) {
+        state.silent_ticks = 0;
+        return;
+    }
+    if state.reinstall_cooldown > 0 {
+        state.reinstall_cooldown -= 1;
+        return;
+    }
+    let events = HOOK_EVENTS.load(Ordering::Relaxed);
+    let cursor = real_cursor(app);
+    let moved = matches!((cursor, state.last_cursor), (Some(now), Some(before)) if now != before);
+    state.last_cursor = cursor;
+
+    if moved && events == state.last_events {
+        state.silent_ticks += 1;
+    } else {
+        state.silent_ticks = 0;
+    }
+    state.last_events = events;
+
+    if state.silent_ticks >= SILENT_TICKS_BEFORE_REINSTALL {
+        state.silent_ticks = 0;
+        state.reinstall_cooldown = REINSTALL_COOLDOWN_TICKS;
+        eprintln!("placement: mouse hook stopped receiving input; reinstalling");
+        if let Err(error) = app.run_on_main_thread(reinstall_on_main_thread) {
+            eprintln!("placement: could not schedule a hook reinstall: {error}");
+        }
+    }
+}
+
+/// The cursor position as the OS reports it, independent of the hook.
+fn real_cursor(app: &AppHandle) -> Option<Point> {
+    let position = overlay::overlay_window(app).ok()?.cursor_position().ok()?;
+    Point::from_physical_f64(position.x, position.y)
+}
+
+/// Replaces a hook that is no longer delivering events. Runs on the event-loop
+/// thread, the only one that may install or remove one.
+///
+/// Gesture state is discarded rather than carried over: a hook that missed
+/// events may well have missed a button release, so [`LEFT_PENDING`] and its
+/// siblings can no longer be trusted to describe the physical buttons. Keeping
+/// them would leave the hook swallowing a release that already happened —
+/// exactly the stuck state this is meant to clear.
+fn reinstall_on_main_thread() {
+    let hook = HOOK.swap(0, Ordering::SeqCst);
+    if hook != 0 {
+        unsafe {
+            UnhookWindowsHookEx(hook as HHOOK);
+        }
+    }
+    LEFT_PENDING.store(false, Ordering::SeqCst);
+    RIGHT_PENDING.store(false, Ordering::SeqCst);
+    WANT_TEARDOWN.store(false, Ordering::SeqCst);
+    DRAGGING.store(false, Ordering::SeqCst);
+    *lock(&GESTURE) = None;
+    if ACTIVE.load(Ordering::SeqCst) {
+        install_on_main_thread();
+    }
 }
 
 /// Publishes the live gesture rectangle, and clears it once when the gesture
@@ -757,13 +889,19 @@ const ALL_SHAPES: [CursorShape; 7] = [
 
 /// The real cursor for a shape, loading the whole set on first use.
 ///
-/// First use is necessarily the first [`apply_cursor`], which runs before any
-/// override is installed — so what is captured is the user's genuine cursor
-/// scheme. (The exception is a previous run hard-killed mid-placement, which
-/// leaves the crosshair set system-wide; ADR-0014 accepts that residue, and a
-/// cursor-scheme reload clears it.)
+/// The set is reloaded from the registry before it is read, so what is captured
+/// is the user's genuine scheme no matter what this or any previous process left
+/// installed.
 fn snapshot_cursor(shape: CursorShape) -> HCURSOR {
     let snapshot = CURSOR_SNAPSHOT.get_or_init(|| {
+        // Reload the user's real cursors from the registry *first*. Reading the
+        // live table would be circular whenever a previous run was killed while
+        // its override was active — the crosshair it left behind is still
+        // installed, so every shape would be captured as a crosshair and the
+        // pointer could never change again. That is not hypothetical: a hard
+        // kill leaves exactly that state, and so does every hot restart under
+        // `tauri dev`.
+        restore_system_cursors();
         let mut handles = [0_isize; 7];
         for (slot, shape) in handles.iter_mut().zip(ALL_SHAPES) {
             let loaded = unsafe { LoadCursorW(ptr::null_mut(), shape.idc()) };
@@ -866,6 +1004,9 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
 /// if [`DRAGGING`] is *also* still set — a cancelled or abandoned drag cleared
 /// it already, so that release is swallowed and discarded, not finished.
 fn handle_mouse(wparam: WPARAM, lparam: LPARAM) -> bool {
+    // Proof of life for the health check. Relaxed: nothing is ordered against
+    // it, only its own change from one poll tick to the next is read.
+    HOOK_EVENTS.fetch_add(1, Ordering::Relaxed);
     // Safe: for a mouse hook Windows passes an `MSLLHOOKSTRUCT` here, valid for
     // the duration of the call.
     let info = unsafe { &*(lparam as *const MSLLHOOKSTRUCT) };
@@ -1045,24 +1186,57 @@ fn gesture_rect(gesture: Gesture, pointer: Point) -> Option<(i32, i32, u32, u32)
     let dx = pointer.x.saturating_sub(anchor.x);
     let dy = pointer.y.saturating_sub(anchor.y);
     let monitors = overlay::monitor_rects();
+    // Holding Alt turns edge snapping off for the rest of the drag — the
+    // standard escape hatch for placing something a few pixels off an edge that
+    // the snap would otherwise swallow. It does **not** disable containment:
+    // that is the guarantee an area can always be reached again, and a modifier
+    // key is not a good reason to let one be lost.
+    let free = snapping_suppressed();
     let rect = match gesture {
         // A create drag needs no containment — both of its corners are places
         // the cursor actually reached, so it is on screen by construction — but
         // it snaps like everything else.
         Gesture::Create => {
-            interaction::snap_move(Rect::from_corner_points(anchor, pointer), &monitors)
+            let drawn = Rect::from_corner_points(anchor, pointer);
+            if free {
+                drawn
+            } else {
+                interaction::snap_move(drawn, &monitors)
+            }
         }
         Gesture::Move { start, .. } => {
-            interaction::settle_move(interaction::move_by(start, dx, dy), &monitors)
+            let moved = interaction::move_by(start, dx, dy);
+            if free {
+                interaction::contain(moved, &monitors)
+            } else {
+                interaction::settle_move(moved, &monitors)
+            }
         }
-        Gesture::Resize { start, resize, .. } => interaction::settle_resize(
-            interaction::resize_by(start, resize, dx, dy),
-            resize,
-            &monitors,
-        ),
+        Gesture::Resize { start, resize, .. } => {
+            let resized = interaction::resize_by(start, resize, dx, dy);
+            if free {
+                interaction::contain(resized, &monitors)
+            } else {
+                interaction::settle_resize(resized, resize, &monitors)
+            }
+        }
         Gesture::Close { .. } | Gesture::MenuItem { .. } | Gesture::Inert => return None,
     };
     Some(overlay::as_tuple(rect))
+}
+
+/// Whether the user is holding `Alt`, which suppresses edge snapping.
+///
+/// Read at the moment the rectangle is computed rather than latched at
+/// button-down, so the key can be pressed or released *during* a drag and the
+/// area follows immediately — which is how the modifier behaves in every tool
+/// that has one, and it means a user who forgot to hold it need not restart the
+/// gesture.
+fn snapping_suppressed() -> bool {
+    // The high bit is "currently down"; the low bit is "pressed since last
+    // call", which would make this true long after the key came back up.
+    let state = unsafe { GetAsyncKeyState(i32::from(VK_MENU)) };
+    (state as u16 & 0x8000) != 0
 }
 
 // ---------------------------------------------------------------------------
