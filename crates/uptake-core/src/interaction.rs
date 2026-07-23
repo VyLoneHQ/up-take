@@ -35,32 +35,40 @@ use crate::geometry::{Point, Rect};
 
 /// The smallest an area may be on either axis, in physical pixels.
 ///
-/// This is the "minimum size policy" the area model deferred to task 1.6. It
-/// exists for one concrete reason: **an area the user cannot grab is an area
-/// the user cannot dismiss.** A too-small area would be a permanent fixture of
-/// the screen — the same failure the empty-rectangle rejection in
-/// `AreaStore::create` prevents, only reached by a slightly longer drag.
+/// **One pixel: an area only has to be non-empty.** There is no size policy any
+/// more, because there no longer needs to be one. The old minimum existed for a
+/// single reason — an area too small to hold its own close control could never
+/// be dismissed, so it was permanent for the session — and that reason went away
+/// when chrome learned to sit *outside* a small area ([`CHROME_INSIDE_SPAN`]).
+/// A 4x6 px region for OCR-ing one word is now a legitimate area rather than a
+/// shape the app refuses to make.
 ///
-/// # Why 72 and not the arithmetic floor
+/// A zero-width or zero-height rectangle is still refused, here and in
+/// `AreaStore::create`: it can never be drawn or hit-tested, which is an
+/// invariant rather than a policy.
+pub const MIN_AREA_SPAN: u32 = 1;
+
+/// The span, on both axes, at or above which an area's chrome is drawn
+/// **inside** it rather than outside.
 ///
-/// Raised from 24 after hardware testing, and the reason is worth keeping: 24 is
-/// the point below which the controls stop *fitting*, so at 24 they only fit by
-/// shrinking — [`close_control`] caps itself at half the area, so a
-/// minimum-sized area got a close control scaled down with it. A control that
-/// shrinks is a control that is hard to hit, on the areas where hitting it
-/// matters most.
+/// # Why there are two placements rather than one
 ///
-/// 72 is three times that floor, which is the smallest span at which **every
-/// control is at full size and there is still body left to drag**: an 18 px
-/// close control and an 8 px resize band on each side leave 56 px of grabbable
-/// interior. The adaptive caps in [`close_control`] and [`handle_at`] are
-/// therefore now defensive rather than load-bearing — nothing the app can
-/// produce reaches them — and they are kept because they are what makes that
-/// claim true by construction instead of by arithmetic done once in a comment.
+/// Areas are persistent and often sit packed together, so for an ordinary area
+/// the close control belongs tucked inside its own corner, where it can never
+/// overlap the area next door. That stops working once the area approaches the
+/// size of the control: chrome inside would cover the very thing being captured,
+/// and below a point it does not fit at all. Small areas therefore put their
+/// chrome just outside, which is what lets the minimum size be one pixel.
 ///
-/// A resize clamps to this rather than refusing, so the area stops shrinking
-/// under the cursor instead of the drag appearing to break.
-pub const MIN_AREA_SPAN: u32 = 72;
+/// # Why this number
+///
+/// An inside control starts shrinking when the area falls below twice its own
+/// size — 36 px, from the halving cap in [`close_control`]. 50 keeps headroom
+/// above that floor, so the control is never drawn at a reduced size and a
+/// resize does not sit oscillating on the boundary.
+///
+/// **This is a threshold, not a limit.** Nothing is forbidden below it.
+pub const CHROME_INSIDE_SPAN: u32 = 50;
 
 /// How wide the grab band along an area's edge is, before adapting to size.
 const RESIZE_BAND: u32 = 8;
@@ -119,24 +127,65 @@ impl Resize {
     }
 }
 
-/// The close control's rectangle: a square inside the area's top-right corner.
-///
-/// Shrinks with the area so it is never larger than a quarter of it — a control
-/// that covers the thing it belongs to is not a control.
+/// Whether this area is small enough that its chrome goes outside it.
 #[must_use]
-pub fn close_control(bounds: Rect) -> Rect {
-    let span = CLOSE_SPAN
-        .min(bounds.size.width / 2)
-        .min(bounds.size.height / 2)
+pub fn chrome_is_outside(bounds: Rect) -> bool {
+    bounds.size.width < CHROME_INSIDE_SPAN || bounds.size.height < CHROME_INSIDE_SPAN
+}
+
+/// The close control's rectangle — inside the area's top-right corner when
+/// there is room, otherwise just outside one of its four corners.
+///
+/// # Choosing the outside corner
+///
+/// The top-right is preferred, matching where the control sits on a large area,
+/// but it is only taken if it lands on a real monitor. An area in the top-right
+/// of a screen would otherwise put its control in the void past the edge — drawn
+/// nowhere, clickable never, and the area therefore undismissable, which is the
+/// exact failure this design exists to prevent. The other three corners are
+/// tried in turn, and for any small area sitting on a monitor at least one of
+/// them is on screen.
+///
+/// The last resort — no corner on the desktop at all, which takes a degenerate
+/// area such as a one-pixel-tall strip spanning a whole monitor — puts the
+/// control back inside, shrunk to fit. It may then cover the area, which is
+/// ugly; it is still reachable, which is the property that matters.
+#[must_use]
+pub fn close_control(bounds: Rect, monitors: &[Rect]) -> Rect {
+    if !chrome_is_outside(bounds) {
+        return Rect::new(
+            // `right()` is exclusive, so the control's left edge is `span` back
+            // from it. i64 throughout: an area can sit at a negative
+            // virtual-desktop coordinate.
+            clamp_to_i32(bounds.right() - i64::from(CLOSE_SPAN)),
+            bounds.origin.y,
+            CLOSE_SPAN,
+            CLOSE_SPAN,
+        );
+    }
+    let span = i64::from(CLOSE_SPAN);
+    let outside_left = i64::from(bounds.origin.x) - span;
+    let outside_top = i64::from(bounds.origin.y) - span;
+    for (x, y) in [
+        (bounds.right(), outside_top),
+        (outside_left, outside_top),
+        (bounds.right(), bounds.bottom()),
+        (outside_left, bounds.bottom()),
+    ] {
+        let candidate = Rect::new(clamp_to_i32(x), clamp_to_i32(y), CLOSE_SPAN, CLOSE_SPAN);
+        if is_on_desktop(candidate, monitors) {
+            return candidate;
+        }
+    }
+    let inside = CLOSE_SPAN
+        .min(bounds.size.width)
+        .min(bounds.size.height)
         .max(1);
     Rect::new(
-        // `right()` is exclusive, so the control's left edge is `span` back from
-        // it. i64 throughout: an area can sit at a negative virtual-desktop
-        // coordinate, and its right edge can exceed i32 only after saturation.
-        clamp_to_i32(bounds.right() - i64::from(span)),
+        clamp_to_i32(bounds.right() - i64::from(inside)),
         bounds.origin.y,
-        span,
-        span,
+        inside,
+        inside,
     )
 }
 
@@ -151,12 +200,24 @@ pub fn close_control(bounds: Rect) -> Rect {
 /// competed with a resize band would be a dismiss gesture that sometimes
 /// silently resizes instead — and dismissing is the gesture with no undo.
 #[must_use]
-pub fn handle_at(bounds: Rect, point: Point) -> Option<Handle> {
+pub fn handle_at(bounds: Rect, point: Point, monitors: &[Rect]) -> Option<Handle> {
+    // Tested before the bounds check, because on a small area the control is
+    // *outside* them: a point that grabs the close control need not be a point
+    // inside the area at all.
+    if close_control(bounds, monitors).contains(point) {
+        return Some(Handle::Close);
+    }
     if !bounds.contains(point) {
         return None;
     }
-    if close_control(bounds).contains(point) {
-        return Some(Handle::Close);
+    if chrome_is_outside(bounds) {
+        // A small area is all body. Resize bands carved out of the inside would
+        // leave nothing to drag, and at a few pixels across there is no room to
+        // aim at one edge rather than another anyway. Outside resize handles
+        // belong with the first area type that needs them (task 1.7); until
+        // then a small area moves and dismisses but does not resize, which is a
+        // gap rather than a dead end — dismiss and redraw is one gesture each.
+        return Some(Handle::Body);
     }
     let band = i64::from(
         RESIZE_BAND
@@ -238,13 +299,12 @@ pub fn resize_by(bounds: Rect, resize: Resize, dx: i32, dy: i32) -> Rect {
     )
 }
 
-/// Whether a freshly dragged rectangle is big enough to become an area.
+/// Whether a freshly dragged rectangle can become an area.
 ///
-/// A drag shorter than [`MIN_AREA_SPAN`] on either axis reads as a click or a
-/// slip of the hand, not as an intent to claim a sliver of screen — and the
-/// sliver it would produce is one the user could not grab to remove. Paired with
-/// `AreaStore::create`'s empty-rectangle rejection: this is the *policy*, that
-/// is the *invariant*.
+/// Only emptiness disqualifies it now. This used to enforce a minimum size on
+/// the grounds that a sliver had no room for the controls that would remove it;
+/// outside chrome ([`close_control`]) removed that constraint, and with it the
+/// reason to second-guess a deliberately tiny selection.
 #[must_use]
 pub fn is_placeable(bounds: Rect) -> bool {
     bounds.size.width >= MIN_AREA_SPAN && bounds.size.height >= MIN_AREA_SPAN
@@ -429,8 +489,15 @@ pub fn is_on_desktop(rect: Rect, monitors: &[Rect]) -> bool {
         for pair_y in ys.windows(2) {
             // The cell's midpoint stands for the whole cell: no monitor edge
             // falls strictly inside a cell, so the cell cannot be part covered.
-            let cx = (pair_x[0] + pair_x[1]) / 2;
-            let cy = (pair_y[0] + pair_y[1]) / 2;
+            //
+            // `div_euclid`, not `/`. Integer division truncates toward zero, so
+            // the midpoint of a cell spanning `[-1, 0)` comes out as `0` — a
+            // point outside the cell it is meant to represent, and on the wrong
+            // side of the boundary. Every cell at or left of the origin is
+            // affected, which on this project's own hardware means the portrait
+            // monitor at x < 0. Found by a property test, not by reading.
+            let cx = (pair_x[0] + pair_x[1]).div_euclid(2);
+            let cy = (pair_y[0] + pair_y[1]).div_euclid(2);
             let centre = Point::new(clamp_to_i32(cx), clamp_to_i32(cy));
             if !monitors.iter().any(|monitor| monitor.contains(centre)) {
                 return false;
@@ -503,7 +570,7 @@ pub fn contain(bounds: Rect, monitors: &[Rect]) -> Rect {
     }
     // Larger than any monitor, so full coverage is unreachable. Fall back to the
     // weaker promise that still matters: it can be grabbed and dismissed.
-    keep_reachable(bounds, host)
+    keep_reachable(bounds, host, monitors)
 }
 
 /// The horizontal shift that pulls `bounds` off any uncovered overhang.
@@ -597,7 +664,7 @@ fn clamp_into(bounds: Rect, host: Rect) -> Rect {
 /// The last-resort guarantee for an area too large to place on the desktop at
 /// all: keep its close control on the host monitor, and keep enough of its body
 /// there to grab.
-fn keep_reachable(bounds: Rect, host: Rect) -> Rect {
+fn keep_reachable(bounds: Rect, host: Rect, monitors: &[Rect]) -> Rect {
     let visible_x = i64::from(MIN_VISIBLE_SPAN.min(bounds.size.width));
     let visible_y = i64::from(MIN_VISIBLE_SPAN.min(bounds.size.height));
     let mut dx = axis_push(
@@ -616,7 +683,7 @@ fn keep_reachable(bounds: Rect, host: Rect) -> Rect {
     );
     // The close control decides ties: an area that can be reached but not closed
     // is still permanent.
-    let control = close_control(bounds);
+    let control = close_control(bounds, monitors);
     dx += axis_contain(
         i64::from(control.origin.x) + dx,
         control.right() + dx,
@@ -776,14 +843,17 @@ mod tests {
 
     #[test]
     fn a_point_outside_the_area_grabs_nothing() {
-        assert_eq!(handle_at(area(), Point::new(99, 150)), None);
-        assert_eq!(handle_at(area(), Point::new(300, 150)), None);
-        assert_eq!(handle_at(area(), Point::new(150, 250)), None);
+        assert_eq!(handle_at(area(), Point::new(99, 150), &[]), None);
+        assert_eq!(handle_at(area(), Point::new(300, 150), &[]), None);
+        assert_eq!(handle_at(area(), Point::new(150, 250), &[]), None);
     }
 
     #[test]
     fn the_middle_of_an_area_is_the_body() {
-        assert_eq!(handle_at(area(), Point::new(200, 175)), Some(Handle::Body));
+        assert_eq!(
+            handle_at(area(), Point::new(200, 175), &[]),
+            Some(Handle::Body)
+        );
     }
 
     #[test]
@@ -800,7 +870,7 @@ mod tests {
         ];
         for (point, expected) in cases {
             assert_eq!(
-                handle_at(a, point),
+                handle_at(a, point, &[]),
                 Some(Handle::Resize(expected)),
                 "at {point:?}"
             );
@@ -812,13 +882,13 @@ mod tests {
         // Documented precedence, pinned: dismissing has no undo, so it must not
         // be the gesture that sometimes resizes by accident.
         let a = area();
-        assert_eq!(handle_at(a, Point::new(298, 101)), Some(Handle::Close));
-        assert!(close_control(a).contains(Point::new(298, 101)));
+        assert_eq!(handle_at(a, Point::new(298, 101), &[]), Some(Handle::Close));
+        assert!(close_control(a, &[]).contains(Point::new(298, 101)));
     }
 
     #[test]
     fn the_close_control_sits_inside_the_areas_top_right() {
-        let control = close_control(area());
+        let control = close_control(area(), &[]);
         assert_eq!(control.right(), area().right());
         assert_eq!(control.origin.y, area().origin.y);
         assert_eq!(control.size, control.size);
@@ -826,31 +896,79 @@ mod tests {
     }
 
     #[test]
-    fn a_minimum_sized_area_gets_full_size_controls_and_still_has_a_body() {
-        // What raising MIN_AREA_SPAN to 72 bought. At the old floor of 24 the
-        // close control had to shrink to fit, which made the hardest area to hit
-        // also the one with the smallest target. Nothing shrinks now.
-        let smallest = Rect::new(0, 0, MIN_AREA_SPAN, MIN_AREA_SPAN);
-        assert_eq!(close_control(smallest).size.width, CLOSE_SPAN);
-        assert_eq!(close_control(smallest).size.height, CLOSE_SPAN);
-        // And the interior is still reachable, clear of every band and control.
+    fn an_area_at_the_threshold_keeps_its_chrome_inside_and_full_size() {
+        // CHROME_INSIDE_SPAN's whole job: at the boundary the control is inside,
+        // at full size, and there is still body to grab. If it has to shrink
+        // here, the threshold has been set too low.
+        let smallest_inside = Rect::new(0, 0, CHROME_INSIDE_SPAN, CHROME_INSIDE_SPAN);
+        assert!(!chrome_is_outside(smallest_inside));
+        let control = close_control(smallest_inside, &[]);
+        assert_eq!(control.size.width, CLOSE_SPAN);
+        assert_eq!(control.size.height, CLOSE_SPAN);
+        assert_eq!(smallest_inside.intersection(control), Some(control));
         let centre = Point::new(
-            i32::try_from(MIN_AREA_SPAN / 2).unwrap(),
-            i32::try_from(MIN_AREA_SPAN / 2).unwrap(),
+            i32::try_from(CHROME_INSIDE_SPAN / 2).unwrap(),
+            i32::try_from(CHROME_INSIDE_SPAN / 2).unwrap(),
         );
-        assert_eq!(handle_at(smallest, centre), Some(Handle::Body));
+        assert_eq!(handle_at(smallest_inside, centre, &[]), Some(Handle::Body));
     }
 
     #[test]
-    fn the_controls_still_shrink_for_a_rectangle_below_the_minimum() {
-        // Defensive rather than reachable: no area the app produces is this
-        // small any more. Kept because it is what makes the guarantee above
-        // structural — if a future change lowers MIN_AREA_SPAN, the controls
-        // adapt instead of overlapping into an ungrabbable area.
-        let tiny = Rect::new(0, 0, 20, 20);
-        let control = close_control(tiny);
-        assert!(control.size.width <= tiny.size.width / 2);
-        assert_eq!(handle_at(tiny, Point::new(10, 10)), Some(Handle::Body));
+    fn a_small_area_puts_its_close_control_outside_itself() {
+        let monitors = vec![Rect::new(0, 0, 1920, 1080)];
+        let tiny = Rect::new(900, 500, 6, 4);
+        assert!(chrome_is_outside(tiny));
+        let control = close_control(tiny, &monitors);
+        assert_eq!(control.size.width, CLOSE_SPAN, "outside, so never shrunk");
+        assert_eq!(tiny.intersection(control), None, "must not cover the area");
+        // The preferred corner: just past the top-right.
+        assert_eq!(control.origin, Point::new(906, 482));
+        // And it is clickable even though it lies outside the area's bounds.
+        assert_eq!(
+            handle_at(tiny, Point::new(910, 486), &monitors),
+            Some(Handle::Close)
+        );
+    }
+
+    #[test]
+    fn a_small_area_in_a_screen_corner_moves_its_control_to_a_corner_that_exists() {
+        // The failure this rule prevents: an area in the top-right of a monitor
+        // would put a top-right control past the edge, drawn nowhere and clicked
+        // never, leaving the area permanently undismissable.
+        let monitors = vec![Rect::new(0, 0, 1920, 1080)];
+        let corner = Rect::new(1914, 0, 6, 4);
+        let control = close_control(corner, &monitors);
+        assert!(
+            is_on_desktop(control, &monitors),
+            "control landed off-screen at {control:?}"
+        );
+        assert_eq!(corner.intersection(control), None);
+    }
+
+    #[test]
+    fn a_small_area_is_all_body_so_it_can_still_be_dragged() {
+        // Resize bands carved out of a 6x4 area would leave nothing to grab.
+        let monitors = vec![Rect::new(0, 0, 1920, 1080)];
+        let tiny = Rect::new(900, 500, 6, 4);
+        for point in [
+            Point::new(900, 500),
+            Point::new(905, 503),
+            Point::new(902, 501),
+        ] {
+            assert_eq!(handle_at(tiny, point, &monitors), Some(Handle::Body));
+        }
+    }
+
+    #[test]
+    fn a_degenerate_area_with_no_free_corner_falls_back_to_a_shrunken_inside_control() {
+        // A one-pixel-tall strip spanning a whole monitor has no outside corner
+        // on the desktop at all. The control goes back inside and shrinks to
+        // fit: ugly, still clickable, and still on screen.
+        let monitors = vec![Rect::new(0, 0, 1920, 1080)];
+        let strip = Rect::new(0, 0, 1920, 1);
+        let control = close_control(strip, &monitors);
+        assert!(is_on_desktop(control, &monitors));
+        assert_eq!(control.size.height, 1);
     }
 
     #[test]
@@ -889,10 +1007,13 @@ mod tests {
     }
 
     #[test]
-    fn a_drag_too_small_to_grab_is_not_placeable() {
-        assert!(is_placeable(Rect::new(0, 0, MIN_AREA_SPAN, MIN_AREA_SPAN)));
-        assert!(!is_placeable(Rect::new(0, 0, MIN_AREA_SPAN - 1, 400)));
-        assert!(!is_placeable(Rect::new(0, 0, 400, MIN_AREA_SPAN - 1)));
+    fn only_an_empty_drag_is_unplaceable() {
+        // No size policy any more: outside chrome made a tiny area dismissable,
+        // which was the only reason one ever existed.
+        assert!(is_placeable(Rect::new(0, 0, 1, 1)));
+        assert!(is_placeable(Rect::new(0, 0, 6, 4)));
+        assert!(!is_placeable(Rect::new(0, 0, 0, 400)));
+        assert!(!is_placeable(Rect::new(0, 0, 400, 0)));
         assert!(!is_placeable(Rect::new(0, 0, 0, 0)));
     }
 
@@ -912,7 +1033,9 @@ mod tests {
     ///
     /// Every pixel on real desktop is the rule, so this is just full coverage.
     fn is_reachable(bounds: Rect, monitors: &[Rect]) -> bool {
-        is_on_desktop(bounds, monitors)
+        // Both halves: the area itself on real desktop, and — now that chrome
+        // can sit outside a small area — the control that dismisses it too.
+        is_on_desktop(bounds, monitors) && is_on_desktop(close_control(bounds, monitors), monitors)
     }
 
     /// Whether some single monitor is large enough to hold the area.
@@ -930,14 +1053,19 @@ mod tests {
     /// The weaker promise for an area too large to place: it can still be
     /// grabbed and, above all, closed.
     fn is_grabbable(bounds: Rect, monitors: &[Rect]) -> bool {
-        let control = close_control(bounds);
-        monitors.iter().any(|monitor| {
-            monitor.intersection(control) == Some(control)
-                && monitor.intersection(bounds).is_some_and(|overlap| {
+        // The two conditions are checked against the desktop separately, not
+        // against one monitor each. Outside chrome may legitimately sit on a
+        // *different* monitor from the body it belongs to — an area along a
+        // shared edge puts its control over the border — and demanding a single
+        // monitor satisfy both was an artefact of this helper, not a real
+        // requirement. The property test found it.
+        is_on_desktop(close_control(bounds, monitors), monitors)
+            && monitors.iter().any(|monitor| {
+                monitor.intersection(bounds).is_some_and(|overlap| {
                     overlap.size.width >= MIN_VISIBLE_SPAN.min(bounds.size.width)
                         && overlap.size.height >= MIN_VISIBLE_SPAN.min(bounds.size.height)
                 })
-        })
+            })
     }
 
     #[test]
@@ -1070,13 +1198,13 @@ mod tests {
     }
 
     #[test]
-    fn a_snap_that_would_shrink_an_area_below_the_minimum_is_dropped() {
+    fn a_snap_that_would_invert_an_area_is_dropped() {
+        // Pulling this area's west edge flush would push it past its own east
+        // edge — not a small area but a backwards one. Dropping the snap is
+        // right: clamping instead would put the edge somewhere the user did not
+        // drag it *and* not flush either.
         let monitors = vec![Rect::new(0, 0, 1920, 1080)];
-        // Overhangs the monitor's left edge by 8 px and is only 4 px wider than
-        // the minimum, so pulling its west edge flush would shrink it under
-        // MIN_AREA_SPAN. Dropping the snap is right: clamping instead would put
-        // the edge somewhere the user did not drag it *and* not flush either.
-        let narrow = Rect::new(-8, 500, MIN_AREA_SPAN + 4, 200);
+        let narrow = Rect::new(-8, 500, 4, 200);
         const { assert!(8 < SNAP_DISTANCE, "the west edge must be inside snap range") };
         assert_eq!(snap_resize(narrow, Resize::West, &monitors), narrow);
     }
@@ -1155,7 +1283,7 @@ mod tests {
                 bounds.origin.y + (f64::from(bounds.size.height - 1) * fy) as i32,
             );
             prop_assert!(bounds.contains(point));
-            prop_assert!(handle_at(bounds, point).is_some());
+            prop_assert!(handle_at(bounds, point, &[]).is_some());
         }
 
         #[test]

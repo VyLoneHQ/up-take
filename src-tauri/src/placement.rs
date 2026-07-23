@@ -693,12 +693,8 @@ fn pump_hover(app: &AppHandle, state: &mut PumpState) {
             None,
         )
     } else {
-        match overlay::area_at(app, point) {
-            Some((id, bounds, _)) => (
-                interaction::handle_at(bounds, point)
-                    .map_or(CursorShape::Cross, CursorShape::for_handle),
-                Some(id.get()),
-            ),
+        match overlay::area_handle_at(app, point) {
+            Some((id, _, handle)) => (CursorShape::for_handle(handle), Some(id.get())),
             None => (CursorShape::Cross, None),
         }
     };
@@ -1123,20 +1119,18 @@ fn classify_press(point: Point) -> Gesture {
         if close_menu(app) {
             return Gesture::Inert;
         }
-        if let Some((id, bounds, _)) = overlay::area_at(app, point) {
-            return match interaction::handle_at(bounds, point) {
-                Some(Handle::Close) => Gesture::Close {
+        if let Some((id, bounds, handle)) = overlay::area_handle_at(app, point) {
+            return match handle {
+                Handle::Close => Gesture::Close {
                     id,
-                    control: interaction::close_control(bounds),
+                    control: overlay::close_control_of(bounds),
                 },
-                Some(Handle::Resize(resize)) => Gesture::Resize {
+                Handle::Resize(resize) => Gesture::Resize {
                     id,
                     resize,
                     start: bounds,
                 },
-                // `handle_at` returns `None` only for a point outside the area,
-                // which `area_at` has already excluded — so this is the body.
-                Some(Handle::Body) | None => Gesture::Move { id, start: bounds },
+                Handle::Body => Gesture::Move { id, start: bounds },
             };
         }
     }

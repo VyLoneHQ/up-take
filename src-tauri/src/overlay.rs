@@ -452,13 +452,17 @@ pub(crate) const fn as_tuple(rect: Rect) -> (i32, i32, u32, u32) {
 /// Emits the current area set. Called on entering a visible state, on the
 /// frontend's mount request, and by the placement hook after every change.
 pub(crate) fn emit_areas(app: &AppHandle) -> Result<(), String> {
+    // Fetched once, before the store lock: the close control's position depends
+    // on the monitors, because on a small area it sits *outside* the area and
+    // has to pick a corner that is actually on a screen.
+    let monitors = monitor_rects();
     let store = app.state::<Mutex<AreaStore>>();
     let areas = lock(&store)
         .iter()
         .map(|area| AreaPayload {
             id: area.id.get(),
             rect: as_tuple(area.bounds),
-            close: as_tuple(interaction::close_control(area.bounds)),
+            close: as_tuple(interaction::close_control(area.bounds, &monitors)),
             layer: layer_name(area.layer),
         })
         .collect();
@@ -477,6 +481,32 @@ pub(crate) fn area_at(app: &AppHandle, point: Point) -> Option<(AreaId, Rect, La
     let guard = lock(&store);
     let area = guard.hit_test_any(point)?;
     Some((area.id, area.bounds, area.layer))
+}
+
+/// The topmost area whose *interaction surface* contains `point`, and which
+/// part of it was grabbed.
+///
+/// Distinct from [`area_at`] because that surface is no longer the area's own
+/// rectangle: a small area's close control sits outside its bounds, so a point
+/// that grabs a control need not be a point inside anything. Asking
+/// `interaction::handle_at` per area, top-down, is what keeps "what is drawn"
+/// and "what responds" the same set of rectangles.
+pub(crate) fn area_handle_at(
+    app: &AppHandle,
+    point: Point,
+) -> Option<(AreaId, Rect, interaction::Handle)> {
+    let monitors = monitor_rects();
+    let store = app.state::<Mutex<AreaStore>>();
+    let guard = lock(&store);
+    guard.iter_top_down().find_map(|area| {
+        interaction::handle_at(area.bounds, point, &monitors)
+            .map(|handle| (area.id, area.bounds, handle))
+    })
+}
+
+/// The close control's rectangle for an area, against the current monitors.
+pub(crate) fn close_control_of(bounds: Rect) -> Rect {
+    interaction::close_control(bounds, &monitor_rects())
 }
 
 /// Commits a move or resize: the new bounds, plus a raise — manipulating an area

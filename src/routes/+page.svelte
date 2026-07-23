@@ -303,8 +303,12 @@ onMount(() => {
   justify-content: center;
   font: 14px/1 system-ui, sans-serif;
   color: rgba(255, 255, 255, 0.95);
-  background: rgba(190, 70, 80, 0.85);
-  border-radius: 0 3px 0 4px;
+  background: rgba(190, 70, 80, 0.9);
+  /* Uniformly rounded rather than tucked into a corner: on a small area this
+     control sits *outside* the area, and at whichever of the four corners is
+     actually on a monitor, so it has no fixed corner to be shaped for. */
+  border-radius: 3px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
   pointer-events: none;
 }
 
