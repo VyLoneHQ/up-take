@@ -234,6 +234,17 @@ export function showsTint(state: OverlayStateName): boolean {
 }
 
 /**
+ * Whether this state may show the per-area menu — any visible state. The menu
+ * is reachable from Living too (ADR-0016: right-click on the topmost
+ * interactive area), not just from Placement; only a hidden overlay can never
+ * legitimately have one, and Rust closes the menu on every transition to
+ * hidden anyway, so this is the belt to that suspender.
+ */
+export function showsMenu(state: OverlayStateName): boolean {
+  return state !== 'hidden';
+}
+
+/**
  * Emits the `Esc` intent. Never throws: `Esc` is a dismiss path, and an
  * unhandled rejection here would strand the user with the overlay holding
  * focus. Returns whether the intent landed.

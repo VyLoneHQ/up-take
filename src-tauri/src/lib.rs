@@ -85,19 +85,17 @@ pub fn run() -> tauri::Result<()> {
         .invoke_handler(tauri::generate_handler![
             overlay::overlay_escape,
             overlay::overlay_dismiss_focused,
-            overlay::overlay_request_state,
-            click_through::overlay_set_interactive_regions
+            overlay::overlay_request_state
         ])
         .on_window_event(|window, event| {
             if window.label() != overlay::WINDOW_LABEL {
                 return;
             }
-            // Each of these can invalidate the CSS→physical region conversion
-            // (the window's origin or scale factor changed) or the overlay's
-            // fit itself — tao's WM_DPICHANGED handler rescales the window's
-            // physical size, which sync_bounds must undo. sync_bounds is
-            // self-converging, so the events raised by its own corrections
-            // come back here and find nothing to do.
+            // Each of these can invalidate the overlay's fit — tao's
+            // WM_DPICHANGED handler rescales the window's physical size, which
+            // sync_bounds must undo. sync_bounds is self-converging, so the
+            // events raised by its own corrections come back here and find
+            // nothing to do.
             if matches!(
                 event,
                 WindowEvent::Moved(_)

@@ -22,13 +22,13 @@
 //!
 //! It calls [`overlay::show`] **from a spawned thread**, which the hotkey does
 //! not: `WM_HOTKEY` is dispatched on the event-loop thread, so a hotkey summon
-//! never exercises the off-event-loop path (see `hotkey.rs`). That path is the
-//! one where `show`'s `reconvert_regions` call is load-bearing — on the event
-//! loop, tao buffers the `Moved` event until the handler returns and the
-//! regions get refreshed incidentally; off it, the event arrives while the
-//! window is still hidden, `sync_bounds` returns early, and only the explicit
-//! call saves it. A bug there would pass every dev-boot test and fail in
-//! release.
+//! never exercises the off-event-loop path (see `hotkey.rs`). Off the event
+//! loop, the `Moved`/`Resized` events a reposition raises arrive while the
+//! window is still hidden and `sync_bounds` returns early — historically the
+//! path where a display change taken while hidden left state stale (the
+//! region re-anchoring bug of task 1.3's follow-up; that machinery is gone
+//! since ADR-0016, but the path itself still deserves the exercise). A bug
+//! there would pass every dev-boot test and fail in release.
 //!
 //! Combined with a display change made *during* the wait, this reproduces the
 //! full hide → rearrange → show sequence with no hands on the keyboard.
@@ -60,25 +60,13 @@ const RESHOW_VAR: &str = "UPTAKE_DEV_RESHOW";
 /// guard so M-9 can still be reproduced with two dev instances.
 const ALLOW_MULTIPLE_VAR: &str = "UPTAKE_DEV_ALLOW_MULTIPLE";
 
-/// Environment variable that forces the overlay click-through even where an
-/// interactive area would otherwise take input.
-const FORCE_CLICKTHROUGH_VAR: &str = "UPTAKE_DEV_FORCE_CLICKTHROUGH";
-
 /// Whether the single-instance guard should be skipped this run.
+///
+/// (An earlier `UPTAKE_DEV_FORCE_CLICKTHROUGH` toggle lived here too. It was
+/// deleted with ADR-0016: the window is unconditionally click-through now, so
+/// there is nothing left to force.)
 pub fn single_instance_disabled() -> bool {
     env::var(ALLOW_MULTIPLE_VAR).is_ok()
-}
-
-/// Whether to force the overlay click-through even over interactive areas.
-///
-/// The investigation it began — does a *click-through* overlay avoid the
-/// hardware-video degradation an *interactive* one causes? — is settled and
-/// recorded in ADR-0014 (yes; the overlay is now click-through whenever
-/// visible). The toggle is kept as a testing aid for task 1.6c, which adds the
-/// per-area carve-outs where the window does take input: setting this forces
-/// click-through anyway, to compare video quality with and without them.
-pub fn force_click_through() -> bool {
-    env::var(FORCE_CLICKTHROUGH_VAR).is_ok()
 }
 
 /// The thread that ran `setup`, i.e. the event-loop thread.
@@ -154,21 +142,8 @@ fn reshow_delay() -> Option<Duration> {
     }
 }
 
-/// Prints the inputs to a CSS→physical region conversion.
-///
-/// The scale mismatch was invisible until both sides of the IPC boundary
-/// printed their own numbers: the frontend's CSS x of 2085.06 back-solved to a
-/// 4448 px viewport, i.e. 5560/1.25, while Rust was converting at 1.0. Neither
-/// number is wrong on its own — only together do they show the disagreement,
-/// which is why this prints the viewport width the CSS values imply rather than
-/// just the scale.
-pub fn log_conversion(scale: f64, origin_x: i32, origin_y: i32, window_width: u32) {
-    if env::var(RESHOW_VAR).is_err() {
-        return;
-    }
-    let implied_viewport = f64::from(window_width) / scale;
-    eprintln!(
-        "dev-harness: converting at scale {scale} · window origin ({origin_x}, {origin_y}) · \
-         physical width {window_width} · implies a {implied_viewport:.2} px CSS viewport"
-    );
-}
+// (A `log_conversion` helper printed the Rust side of the CSS→physical region
+// conversion here until ADR-0016 deleted that conversion with the rest of the
+// per-region click-through machinery. The lesson it embodied — print both
+// sides of an IPC boundary before trusting either — is recorded in ADR-0011
+// and survives in the frontend's own conversion fail-safes.)

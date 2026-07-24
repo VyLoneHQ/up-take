@@ -12,6 +12,7 @@ import {
   type PhysRect,
   physRectsToCss,
   physRectToCss,
+  showsMenu,
   showsTint,
 } from './overlay-state';
 import type { Invoke } from './regions';
@@ -93,6 +94,17 @@ describe('showsTint', () => {
     expect(showsTint('placement')).toBe(true);
     expect(showsTint('living')).toBe(false);
     expect(showsTint('hidden')).toBe(false);
+  });
+});
+
+describe('showsMenu', () => {
+  it('allows the area menu in every visible state', () => {
+    // Living included (ADR-0016): the menu opens there on a right-click over an
+    // interactive area, and a Placement-only gate would leave Rust hit-testing
+    // a menu the user cannot see.
+    expect(showsMenu('placement')).toBe(true);
+    expect(showsMenu('living')).toBe(true);
+    expect(showsMenu('hidden')).toBe(false);
   });
 });
 
