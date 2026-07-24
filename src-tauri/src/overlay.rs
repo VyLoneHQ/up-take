@@ -14,7 +14,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
-use uptake_core::area::{AreaId, AreaStore, AreaType, Layer};
+use uptake_core::area::{AreaId, AreaStore, AreaType, Input, Layer};
 use uptake_core::geometry::{Monitor, Point, Rect, Size, virtual_desktop_bounds};
 use uptake_core::interaction;
 
@@ -61,16 +61,6 @@ pub fn show(app: &AppHandle) -> Result<(), String> {
     window
         .set_focus()
         .map_err(|e| format!("Could not focus the overlay: {e}"))?;
-    // Re-anchor the stored regions to the origin just applied. [`sync_bounds`]
-    // cannot do this for us: it returns early while the overlay is hidden, and
-    // the reposition above happens *before* `show()`, so the `Moved` event it
-    // raises finds an invisible window and does nothing.
-    //
-    // Without this, a display change between a hide and the next show leaves
-    // every region anchored to the old origin. The frontend does not rescue it
-    // — it re-reports on resize only, and a rearrangement that moves the
-    // virtual-desktop origin without changing its size resizes nothing.
-    click_through::reconvert_regions(app);
     click_through::activate(app);
     Ok(())
 }
@@ -78,8 +68,8 @@ pub fn show(app: &AppHandle) -> Result<(), String> {
 /// Hides the overlay. The window stays alive so the next `show` is instant.
 pub fn hide(app: &AppHandle) -> Result<(), String> {
     // Stop the poll first: quality-bars.md §1 requires zero poll activity
-    // while the overlay is hidden. The poll thread resets the window to
-    // interactive as it parks.
+    // while the overlay is hidden. The poll thread re-asserts click-through —
+    // the window's only state (ADR-0016) — as it parks.
     click_through::deactivate(app);
     overlay_window(app)?
         .hide()
@@ -93,8 +83,8 @@ pub fn hide(app: &AppHandle) -> Result<(), String> {
 }
 
 /// Re-fits a *visible* overlay to the virtual desktop and refreshes the
-/// click-through regions. This is M-6 while the overlay is up: a monitor
-/// hot-plugged, unplugged, rearranged, or changing resolution or DPI.
+/// monitor cache. This is M-6 while the overlay is up: a monitor hot-plugged,
+/// unplugged, rearranged, or changing resolution or DPI.
 ///
 /// Idempotent and self-converging: bounds are only written when they differ
 /// from what the window already has, so the `Moved`/`Resized` events its own
@@ -104,9 +94,11 @@ pub fn hide(app: &AppHandle) -> Result<(), String> {
 /// is right for a normal window and wrong for one that must cover the virtual
 /// desktop physically.
 ///
-/// Regions are re-converted even when the bounds did not change: a scale-factor
-/// change alone invalidates the CSS→physical conversion without moving the
-/// window (see `click_through::reconvert_regions`).
+/// The re-fit is also what keeps the frontend's own conversions honest: a
+/// scale change ends in the overlay being written back to a display-derived
+/// rect, whose `resize` reaches the WebView and re-renders everything at the
+/// fresh `devicePixelRatio` (ADR-0011 — the physical rects Rust emits are
+/// converted frontend-side).
 ///
 /// A hidden overlay is left alone — [`show`] recomputes bounds anyway, and
 /// resizing a hidden window would spend cycles on state the next `show`
@@ -128,7 +120,6 @@ pub fn sync_bounds(app: &AppHandle) -> Result<(), String> {
     // An area snapped to a monitor that no longer exists would be contained
     // against a rectangle that is no longer there.
     refresh_monitor_cache(&window);
-    click_through::reconvert_regions(app);
     Ok(())
 }
 
@@ -317,14 +308,15 @@ fn drive(app: &AppHandle, event: Event) {
 }
 
 /// Performs a state's effect: show or hide the window (which also (de)activates
-/// the click-through poll), toggle the placement input layer, and emit the new
-/// state and area set to the frontend.
+/// the poll), set the placement layer's mode, and emit the new state and area
+/// set to the frontend.
 ///
-/// `placement::enter`/`exit` own the mouse hook and the crosshair cursor, which
-/// belong to Placement alone. `exit` is called on the way into Living and
-/// Hidden (and is idempotent) so they are torn down as soon as this state
-/// transition allows — the one exception being a button still physically held
-/// from an abandoned drag, which `placement::exit` briefly outlives on purpose
+/// The `placement` module owns the mouse hook, which is installed for **every
+/// visible state** (ADR-0016): in Placement it owns whole gestures, in Living
+/// it routes per-area input. The crosshair cursor belongs to Placement alone —
+/// `enter_living` drops it. `exit` (→ Hidden) tears the hook down as soon as
+/// the transition allows — the one exception being a button still physically
+/// held from an abandoned drag, which the hook briefly outlives on purpose
 /// rather than leak that button's eventual release to the app underneath (see
 /// the `placement` module docs).
 fn apply(app: &AppHandle, state: OverlayState) -> Result<(), String> {
@@ -343,7 +335,7 @@ fn apply(app: &AppHandle, state: OverlayState) -> Result<(), String> {
         }
         OverlayState::Living => {
             show(app)?;
-            placement::exit(app);
+            placement::enter_living(app);
             emit_state(app, state)?;
             emit_areas(app)
         }
@@ -470,17 +462,65 @@ pub(crate) fn emit_areas(app: &AppHandle) -> Result<(), String> {
         .map_err(|e| format!("Could not emit overlay areas: {e}"))
 }
 
-/// The topmost area containing `point`, whatever its input mode, with the state
-/// a placement gesture needs. `None` when the point is over empty overlay.
+/// What a hit-test resolves to: the identity and the two menu-relevant
+/// properties of an area, detached from the store so no lock outlives the call.
+#[derive(Clone, Copy)]
+pub(crate) struct AreaSummary {
+    pub id: AreaId,
+    pub layer: Layer,
+    pub input: Input,
+}
+
+impl AreaSummary {
+    fn of(area: &uptake_core::area::Area) -> Self {
+        Self {
+            id: area.id,
+            layer: area.layer,
+            input: area.input,
+        }
+    }
+}
+
+/// The topmost area containing `point`, whatever its input mode — the area a
+/// placement gesture or a Placement menu acts on. `None` when the point is
+/// over empty overlay.
 ///
 /// [`AreaStore::hit_test_any`], not `hit_test`: a pass-through area is invisible
 /// to a click in `Living` and must still be grabbable while editing the layout,
 /// or it can never be moved or removed.
-pub(crate) fn area_at(app: &AppHandle, point: Point) -> Option<(AreaId, Rect, Layer)> {
+pub(crate) fn area_at(app: &AppHandle, point: Point) -> Option<AreaSummary> {
     let store = app.state::<Mutex<AreaStore>>();
     let guard = lock(&store);
-    let area = guard.hit_test_any(point)?;
-    Some((area.id, area.bounds, area.layer))
+    guard.hit_test_any(point).map(AreaSummary::of)
+}
+
+/// The topmost **interactive** area containing `point` — the area that claims
+/// a `Living` mouse event (ADR-0016, V-7). `None` means the event belongs to
+/// the user's apps: the point is over empty overlay, or over areas that are
+/// all pass-through.
+///
+/// [`AreaStore::hit_test`], not `hit_test_any` — the difference *is* the input
+/// model: a pass-through area never takes a click in `Living`, however high it
+/// is stacked, including a Filter pinned to `Front` (the property the store's
+/// tests pin).
+pub(crate) fn interactive_area_at(app: &AppHandle, point: Point) -> Option<AreaSummary> {
+    let store = app.state::<Mutex<AreaStore>>();
+    let guard = lock(&store);
+    guard.hit_test(point).map(AreaSummary::of)
+}
+
+/// Raises an area to the top of its tier — §3.2a's "the area you last touched
+/// is on top", applied to a `Living` click (ADR-0016). Returns whether the id
+/// resolved.
+pub(crate) fn raise_area(app: &AppHandle, id: AreaId) -> bool {
+    let store = app.state::<Mutex<AreaStore>>();
+    lock(&store).bring_to_front(id)
+}
+
+/// Sets whether an area takes input or lets it fall through (V-7).
+pub(crate) fn set_area_input(app: &AppHandle, id: AreaId, input: Input) -> bool {
+    let store = app.state::<Mutex<AreaStore>>();
+    lock(&store).set_input(id, input)
 }
 
 /// The topmost area whose *interaction surface* contains `point`, and which
@@ -523,8 +563,42 @@ pub(crate) fn move_area(app: &AppHandle, id: AreaId, bounds: Rect) -> bool {
 
 /// Removes an area. Returns whether one was removed.
 pub(crate) fn dismiss_area(app: &AppHandle, id: AreaId) -> bool {
-    let store = app.state::<Mutex<AreaStore>>();
-    lock(&store).remove(id).is_some()
+    let removed = {
+        let store = app.state::<Mutex<AreaStore>>();
+        lock(&store).remove(id).is_some()
+    };
+    if removed {
+        collapse_living_if_empty(app);
+    }
+    removed
+}
+
+/// Collapses `Living` to `Hidden` when the last area is dismissed there.
+///
+/// `overlay_state::next` collapses Living-without-areas on every *event*, but a
+/// dismissal is not an event through the state machine — and the Living menu's
+/// Dismiss row (ADR-0016) made "the last area disappears while Living" an
+/// ordinary path rather than a keyboard corner case (`Delete` right after a
+/// transition was the only way before). Without this, the overlay would sit in
+/// a state the state machine says cannot exist: visible to the OS but showing
+/// nothing, click-through everywhere, hook installed and poll running —
+/// indistinguishable from hidden except in cost.
+///
+/// Lock order is state → store (via [`has_areas`]), the same order [`drive`]
+/// uses; nothing takes them the other way around.
+fn collapse_living_if_empty(app: &AppHandle) {
+    let target = {
+        let cell = app.state::<Mutex<OverlayState>>();
+        let mut guard = lock(&cell);
+        if *guard != OverlayState::Living || has_areas(app) {
+            return;
+        }
+        *guard = OverlayState::Hidden;
+        OverlayState::Hidden
+    };
+    if let Err(error) = apply(app, target) {
+        eprintln!("overlay: could not apply state {target:?}: {error}");
+    }
 }
 
 /// Pins an area to a stacking tier (ADR-0013).
@@ -640,10 +714,10 @@ pub fn overlay_dismiss_focused(app: AppHandle) -> Result<(), String> {
     let Some(point) = Point::from_physical_f64(position.x, position.y) else {
         return Ok(());
     };
-    let Some((id, _, _)) = area_at(&app, point) else {
+    let Some(area) = area_at(&app, point) else {
         return Ok(());
     };
-    if dismiss_area(&app, id) {
+    if dismiss_area(&app, area.id) {
         placement::close_menu(&app);
         emit_areas(&app)?;
     }

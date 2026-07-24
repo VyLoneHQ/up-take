@@ -1,21 +1,33 @@
-//! Live-placement input for the overlay (roadmap task 1.6,
-//! [ADR-0014](../../../Projects/UP-TAKE/DECISIONS/ADR-0014-capture-and-render-over-live-content.md)).
+//! Mouse input for the overlay — placement gestures *and* Living-area routing
+//! (roadmap tasks 1.6/1.6c,
+//! [ADR-0014](../../../Projects/UP-TAKE/DECISIONS/ADR-0014-capture-and-render-over-live-content.md),
+//! [ADR-0016](../../../Projects/UP-TAKE/DECISIONS/ADR-0016-living-input-via-the-global-hook.md)).
 //!
-//! The overlay is **click-through whenever it is visible** (ADR-0014): a
-//! transparent window that ignores the cursor is the only overlay state that
-//! does not degrade hardware-accelerated video underneath it. That is right for
-//! the resting `Living` state, but it takes the mouse away from the one moment
-//! the overlay genuinely needs it — dragging out a new area in `Placement`.
+//! The overlay window is **never interactive** (ADR-0016, hardening ADR-0014's
+//! click-through-whenever-visible rule into an unconditional one): a transparent
+//! window that ignores the cursor is the only overlay state that does not
+//! degrade hardware-accelerated video underneath it. Every mouse event the
+//! overlay acts on therefore arrives through a **global low-level mouse hook**
+//! (`WH_MOUSE_LL`) instead, installed for as long as the overlay is visible.
+//! What the hook does with a button press depends on the [`Mode`]:
 //!
-//! The way back is a **global low-level mouse hook** (`WH_MOUSE_LL`). It runs
-//! while the overlay stays click-through, so the desktop keeps compositing live
-//! content crisply; it *owns the gesture* (button-down → move → button-up) and
-//! **swallows the button events** so the app underneath receives nothing. The
-//! rectangles are drawn by the WebView from coordinates this module publishes;
-//! a **global cursor override** ([`SetSystemCursor`]) supplies the pointer
-//! shape, because a click-through window can set no cursor of its own (no
-//! `WM_SETCURSOR` ever reaches it). All three pieces were validated in isolation
-//! by the spikes recorded in ADR-0014 before this was written.
+//! - **`Placement`** — the hook owns the whole gesture (button-down → move →
+//!   button-up) and swallows both buttons unconditionally: drags create, move
+//!   and resize areas, and a **global cursor override** ([`SetSystemCursor`])
+//!   supplies the pointer shape, because a click-through window can set no
+//!   cursor of its own (no `WM_SETCURSOR` ever reaches it).
+//! - **`Living`** — the user's apps own the pointer, and the hook takes only
+//!   what the area model assigns to areas: a press on the topmost *interactive*
+//!   area (`AreaStore::hit_test` — pass-through areas are invisible to input,
+//!   V-7) is swallowed and acted on (left raises the area per §3.2a recency,
+//!   right opens its menu); every other press is passed through untouched. No
+//!   cursor override — the pointer belongs to whatever is underneath.
+//! - **`Hidden`** — the hook is torn down (subject to the pending-button
+//!   deferral below) and everything here is inert.
+//!
+//! The rectangles are drawn by the WebView from coordinates this module
+//! publishes. All the Win32 pieces were validated in isolation by the spikes
+//! recorded in ADR-0014 before this was written.
 //!
 //! # Everything an area appears to have is a rectangle this module hit-tests
 //!
@@ -97,12 +109,12 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
-use uptake_core::area::{AreaId, Layer};
+use uptake_core::area::{AreaId, Input, Layer};
 use uptake_core::geometry::{Point, Rect};
 use uptake_core::interaction::{self, Handle, Resize};
 
@@ -137,12 +149,42 @@ const HOVER_EVENT: &str = "overlay://hover";
 /// process-wide state without a lock.
 static HOOK: AtomicIsize = AtomicIsize::new(0);
 
-/// Whether placement is the current overlay state. Gates whether a fresh
-/// `WM_LBUTTONDOWN`/`WM_RBUTTONDOWN` starts a new swallowed gesture — set by
-/// [`enter`], cleared by [`exit`] the instant the state machine leaves
-/// `Placement`, independent of whether the hook itself is still installed
-/// (see [`WANT_TEARDOWN`] and the module docs on abandoned gestures).
-static ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Which overlay state the hook is serving (ADR-0016). Decides what a fresh
+/// button event means: a Placement gesture, a Living routing decision, or
+/// nothing at all.
+///
+/// Kept as its own tri-state rather than read from the overlay's state mutex
+/// because the hook callback consults it on every button event and must not
+/// take a lock to do so. Set only on the event-loop thread by the mode
+/// transitions ([`enter`], [`enter_living`], [`exit`]), independent of whether
+/// the hook itself is still installed (see [`WANT_TEARDOWN`] and the module
+/// docs on abandoned gestures).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// The overlay is hidden; the hook is torn down or about to be.
+    Hidden = 0,
+    /// Areas float, apps have input; the hook routes per-area (ADR-0016).
+    Living = 1,
+    /// UP-TAKE owns the pointer; the hook owns whole gestures.
+    Placement = 2,
+}
+
+/// The current [`Mode`], as its discriminant.
+static MODE: AtomicU8 = AtomicU8::new(Mode::Hidden as u8);
+
+/// Reads the current [`Mode`].
+fn mode() -> Mode {
+    match MODE.load(Ordering::SeqCst) {
+        2 => Mode::Placement,
+        1 => Mode::Living,
+        _ => Mode::Hidden,
+    }
+}
+
+/// Sets the current [`Mode`]. Event-loop thread only.
+fn set_mode(mode: Mode) {
+    MODE.store(mode as u8, Ordering::SeqCst);
+}
 
 /// Whether a placement drag is visually in progress — drives the on-screen
 /// selection box and [`is_dragging`]. **Not** the same thing as "a button is
@@ -278,6 +320,10 @@ struct MenuEntry {
 enum MenuAction {
     /// Pin the area to a stacking tier (ADR-0013).
     SetLayer(Layer),
+    /// Set whether the area takes input or lets it fall through (V-7). The
+    /// menu row is a toggle, so the action carries the value the row would
+    /// switch *to*.
+    SetInput(Input),
     /// Remove the area.
     Dismiss,
 }
@@ -421,18 +467,29 @@ struct HoverPayload {
 pub fn enter(app: &AppHandle) {
     // First entry wins; later ones are the same handle, so ignore the result.
     let _ = APP.set(app.clone());
-    if let Err(error) = app.run_on_main_thread(install_on_main_thread) {
+    if let Err(error) = app.run_on_main_thread(enter_placement_on_main_thread) {
         eprintln!("placement: could not schedule hook install on the main thread: {error}");
     }
 }
 
-/// Leaves placement: marks it inactive and either uninstalls the hook and
-/// restores the cursor immediately, or — if a button it swallowed is still
-/// physically held — defers that until the pending release is seen (see the
-/// module docs on abandoned gestures). Runs on the event-loop thread.
-/// Idempotent.
+/// Enters Living: the hook stays (or gets) installed for per-area routing
+/// (ADR-0016), the cursor override is dropped — the apps own the pointer — and
+/// any half-done placement gesture or open menu is cleared. Runs on the
+/// event-loop thread. Idempotent.
+pub fn enter_living(app: &AppHandle) {
+    let _ = APP.set(app.clone());
+    if let Err(error) = app.run_on_main_thread(enter_living_on_main_thread) {
+        eprintln!("placement: could not schedule Living entry on the main thread: {error}");
+    }
+}
+
+/// Leaves every visible state: marks the hook's mode `Hidden` and either
+/// uninstalls the hook and restores the cursor immediately, or — if a button it
+/// swallowed is still physically held — defers that until the pending release
+/// is seen (see the module docs on abandoned gestures). Runs on the event-loop
+/// thread. Idempotent.
 pub fn exit(app: &AppHandle) {
-    if let Err(error) = app.run_on_main_thread(leave_on_main_thread) {
+    if let Err(error) = app.run_on_main_thread(exit_on_main_thread) {
         eprintln!("placement: could not schedule placement exit on the main thread: {error}");
     }
 }
@@ -560,7 +617,11 @@ const SILENT_TICKS_BEFORE_REINSTALL: u32 = 3;
 /// *afterwards*, so the overlay works again the moment the elevated window is
 /// no longer in front, instead of needing the hotkey twice.
 fn pump_hook_health(app: &AppHandle, state: &mut PumpState) {
-    if !ACTIVE.load(Ordering::SeqCst) {
+    // Guarded by mode, not by "is the hook installed": the whole point is to
+    // notice a hook that *should* be installed and silently is not. Living
+    // needs this exactly as much as Placement — a dead hook there means every
+    // interactive area silently stops taking input (ADR-0016).
+    if mode() == Mode::Hidden {
         state.silent_ticks = 0;
         return;
     }
@@ -640,8 +701,12 @@ fn reinstall_on_main_thread() {
     WANT_TEARDOWN.store(false, Ordering::SeqCst);
     DRAGGING.store(false, Ordering::SeqCst);
     *lock(&GESTURE) = None;
-    if ACTIVE.load(Ordering::SeqCst) {
-        install_on_main_thread();
+    // Only the hook is re-created — the mode and the cursor override are
+    // whatever they already were. Re-entering the full Placement path here
+    // would stomp a hover-refined cursor shape back to the crosshair, and in
+    // Living would wrongly assert one.
+    if mode() != Mode::Hidden {
+        ensure_hook();
         eprintln!(
             "placement: mouse hook reinstalled (installed: {})",
             HOOK.load(Ordering::SeqCst) != 0
@@ -680,11 +745,15 @@ fn pump_gesture(app: &AppHandle, state: &mut PumpState) {
 /// Classifies what is under the cursor and updates the cursor shape and the
 /// hover highlights when they change.
 ///
-/// Skipped entirely while placement is inactive: in `Living` the overlay does
-/// not own the pointer, so overriding the system cursor there would change the
-/// cursor inside the user's apps.
+/// The menu hover highlight runs in every visible mode — the area menu is
+/// reachable from `Living` too (ADR-0016), and a menu whose rows never light up
+/// reads as a picture rather than a control. The cursor override and the area
+/// hover chrome remain `Placement`-only: in `Living` the overlay does not own
+/// the pointer, so overriding the system cursor there would change the cursor
+/// inside the user's apps, and hover chrome would advertise gestures (move,
+/// resize) that only `Placement` offers.
 fn pump_hover(app: &AppHandle, state: &mut PumpState) {
-    if !ACTIVE.load(Ordering::SeqCst) {
+    if mode() == Mode::Hidden {
         return;
     }
     let point = Point::new(CUR_X.load(Ordering::SeqCst), CUR_Y.load(Ordering::SeqCst));
@@ -694,6 +763,9 @@ fn pump_hover(app: &AppHandle, state: &mut PumpState) {
     if let Some(menu_hover) = menu_hover_changed(menu_item) {
         state.hovered_item = menu_hover;
         emit_menu(app);
+    }
+    if mode() != Mode::Placement {
+        return;
     }
 
     let menu_open = lock(&MENU).is_some();
@@ -776,15 +848,9 @@ fn dragged_area() -> Option<u64> {
     }
 }
 
-/// Installs the low-level mouse hook (once), marks placement active, and
-/// asserts the crosshair. Runs on the event-loop thread — see the module docs
-/// on why that is mandatory.
-///
-/// Clearing [`WANT_TEARDOWN`] here matters for the case where placement is
-/// re-entered before a previously deferred teardown fired (see [`exit`] and
-/// [`maybe_finish_teardown`]): re-entering cancels the pending uninstall rather
-/// than racing it.
-fn install_on_main_thread() {
+/// Installs the low-level mouse hook if it is not already installed. Runs on
+/// the event-loop thread — see the module docs on why that is mandatory.
+fn ensure_hook() {
     if HOOK.load(Ordering::SeqCst) == 0 {
         // The current module handle, as the spike used. `dwThreadId = 0` makes
         // the hook global; the callback still runs in-process, on this thread.
@@ -792,36 +858,76 @@ fn install_on_main_thread() {
         let hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), hmod, 0) };
         if hook.is_null() {
             // Not fatal and not silently swallowed either: without the hook,
-            // placement cannot capture a drag, but the global hotkey still
-            // toggles state (F-13's guaranteed escape), so the user is not
-            // stranded. Logged rather than shown, because this failure path is
+            // no area can take input, but the global hotkey still toggles
+            // state (F-13's guaranteed escape), so the user is not stranded.
+            // Logged rather than shown, because this failure path is
             // essentially unreachable (SetWindowsHookExW fails only on resource
             // exhaustion or a locked desktop).
-            eprintln!("placement: SetWindowsHookExW failed; drag-to-create is unavailable");
+            eprintln!("placement: SetWindowsHookExW failed; area input is unavailable");
         } else {
             HOOK.store(hook as isize, Ordering::SeqCst);
         }
     }
-    ACTIVE.store(true, Ordering::SeqCst);
+}
+
+/// Enters `Placement` mode: hook installed, crosshair asserted. Runs on the
+/// event-loop thread.
+///
+/// Clearing [`WANT_TEARDOWN`] here matters for the case where a visible state
+/// is re-entered before a previously deferred teardown fired (see [`exit`] and
+/// [`maybe_finish_teardown`]): re-entering cancels the pending uninstall rather
+/// than racing it.
+fn enter_placement_on_main_thread() {
+    ensure_hook();
+    set_mode(Mode::Placement);
     WANT_TEARDOWN.store(false, Ordering::SeqCst);
     // The resting shape; the poll refines it to a move or resize cursor as soon
     // as the pointer is over an area.
     set_cursor(CursorShape::Cross);
 }
 
-/// Marks placement inactive and clears the visual drag, then either tears the
+/// Enters `Living` mode: hook kept for per-area routing (ADR-0016), cursor
+/// override dropped, gesture state and menu cleared. Runs on the event-loop
+/// thread.
+///
+/// A live gesture does not survive the transition — the hotkey was pressed
+/// mid-drag, and the drag's meaning was a Placement meaning — but a *pending
+/// button* does: its down was swallowed, so its eventual up must still be (the
+/// abandoned-gesture contract in the module docs), which the mode change does
+/// not disturb because [`LEFT_PENDING`]/[`RIGHT_PENDING`] are tracked
+/// independently of mode.
+fn enter_living_on_main_thread() {
+    ensure_hook();
+    set_mode(Mode::Living);
+    WANT_TEARDOWN.store(false, Ordering::SeqCst);
+    DRAGGING.store(false, Ordering::SeqCst);
+    *lock(&GESTURE) = None;
+    // The menu is re-resolved per mode (its target resolution differs — see
+    // `open_menu`), so a menu opened in Placement does not carry over.
+    if let Some(app) = APP.get() {
+        close_menu(app);
+    }
+    // Living does not own the pointer: the override would change the cursor
+    // inside the user's apps. Restore only if one is actually applied — the
+    // registry reload is global state other apps see, not a free no-op.
+    if lock(&APPLIED_CURSOR).take().is_some() {
+        restore_system_cursors();
+    }
+}
+
+/// Marks the mode `Hidden` and clears the visual drag, then either tears the
 /// hook down immediately or defers it. Runs on the event-loop thread.
 ///
 /// The defer condition is exactly "a button we swallowed the down of has not
 /// yet come back up": tearing the hook down anyway would remove the only thing
 /// that can still catch that release, turning an abandoned gesture into
 /// exactly the leak this module exists to prevent (see the module docs).
-fn leave_on_main_thread() {
-    ACTIVE.store(false, Ordering::SeqCst);
+fn exit_on_main_thread() {
+    set_mode(Mode::Hidden);
     DRAGGING.store(false, Ordering::SeqCst);
     *lock(&GESTURE) = None;
-    // The menu belongs to Placement: leaving with it still on screen would draw
-    // a control over a click-through overlay that nothing could ever click.
+    // The menu belongs to a visible overlay: leaving with it still on screen
+    // would draw a control over a hidden window that nothing could ever click.
     if let Some(app) = APP.get() {
         close_menu(app);
     }
@@ -1039,28 +1145,29 @@ fn handle_mouse(wparam: WPARAM, lparam: LPARAM) -> bool {
     let (x, y) = (info.pt.x, info.pt.y);
     let point = Point::new(x, y);
     match wparam as u32 {
-        WM_LBUTTONDOWN => {
-            if !ACTIVE.load(Ordering::SeqCst) {
-                // Placement has already been left (most likely: the brief
-                // deferred-teardown window from an earlier abandoned drag).
-                // A fresh press here belongs to whatever the user is doing
-                // now, not to a drag we should start.
-                return false;
+        WM_LBUTTONDOWN => match mode() {
+            // The hook's mode has already been left (most likely: the brief
+            // deferred-teardown window from an earlier abandoned drag). A
+            // fresh press here belongs to whatever the user is doing now, not
+            // to a gesture we should start.
+            Mode::Hidden => false,
+            Mode::Placement => {
+                START_X.store(x, Ordering::SeqCst);
+                START_Y.store(y, Ordering::SeqCst);
+                CUR_X.store(x, Ordering::SeqCst);
+                CUR_Y.store(y, Ordering::SeqCst);
+                // Classified before the lock is taken, not inside the
+                // assignment: `classify_press` takes the menu and store locks
+                // itself, and nesting those inside this one would be a lock
+                // order to reason about rather than one that cannot exist.
+                let gesture = classify_press(point);
+                *lock(&GESTURE) = Some(gesture);
+                DRAGGING.store(true, Ordering::SeqCst);
+                LEFT_PENDING.store(true, Ordering::SeqCst);
+                true
             }
-            START_X.store(x, Ordering::SeqCst);
-            START_Y.store(y, Ordering::SeqCst);
-            CUR_X.store(x, Ordering::SeqCst);
-            CUR_Y.store(y, Ordering::SeqCst);
-            // Classified before the lock is taken, not inside the assignment:
-            // `classify_press` takes the menu and store locks itself, and
-            // nesting those inside this one would be a lock order to reason
-            // about rather than one that cannot exist.
-            let gesture = classify_press(point);
-            *lock(&GESTURE) = Some(gesture);
-            DRAGGING.store(true, Ordering::SeqCst);
-            LEFT_PENDING.store(true, Ordering::SeqCst);
-            true
-        }
+            Mode::Living => living_lbutton_down(point),
+        },
         WM_MOUSEMOVE => {
             // Recorded unconditionally, not only while dragging: the poll reads
             // this to decide the cursor shape and the hover highlight, both of
@@ -1086,17 +1193,35 @@ fn handle_mouse(wparam: WPARAM, lparam: LPARAM) -> bool {
                 false
             }
         }
-        WM_RBUTTONDOWN => {
-            if !ACTIVE.load(Ordering::SeqCst) {
-                return false;
+        WM_RBUTTONDOWN => match mode() {
+            Mode::Hidden => false,
+            // Placement swallows every right press: a stray right-click must
+            // neither pop a context menu underneath nor steal focus (which
+            // would take the `Esc` dismiss path with it).
+            Mode::Placement => {
+                RIGHT_PENDING.store(true, Ordering::SeqCst);
+                true
             }
-            RIGHT_PENDING.store(true, Ordering::SeqCst);
-            true
-        }
+            // Living takes only what belongs to an area (ADR-0016): a right
+            // press over the topmost *interactive* area, or any right press
+            // while a menu is open (the release will act on the menu state —
+            // close it, or replace it over another area). Everything else is
+            // the user's, untouched.
+            Mode::Living => {
+                let claimed = lock(&MENU).is_some()
+                    || APP
+                        .get()
+                        .is_some_and(|app| overlay::interactive_area_at(app, point).is_some());
+                if claimed {
+                    RIGHT_PENDING.store(true, Ordering::SeqCst);
+                }
+                claimed
+            }
+        },
         WM_RBUTTONUP if RIGHT_PENDING.swap(false, Ordering::SeqCst) => {
             // Opened on *release*, not on press: a menu that appears under a
             // still-held button is one the same gesture can dismiss by accident.
-            if ACTIVE.load(Ordering::SeqCst)
+            if mode() != Mode::Hidden
                 && let Some(app) = APP.get()
             {
                 open_menu(app, point);
@@ -1105,6 +1230,55 @@ fn handle_mouse(wparam: WPARAM, lparam: LPARAM) -> bool {
             true
         }
         _ => false,
+    }
+}
+
+/// What a left press means in `Living` (ADR-0016): an open menu owns every
+/// click exactly as in Placement; otherwise the topmost *interactive* area
+/// under the point claims the press and is raised (§3.2a — touching an area
+/// puts it on top of its tier, applied on the press like every window
+/// manager); otherwise the press belongs to the user's apps and passes
+/// through untouched. Returns whether the event is swallowed.
+///
+/// Living never starts drags — moving and resizing are `Placement` gestures —
+/// so [`DRAGGING`] is set only for the menu-row press, where the existing
+/// release path ([`finish_gesture`] → [`activate_menu_item`]) implements the
+/// press-and-release-on-target contract. A raised area's press needs nothing
+/// on release beyond being swallowed, which [`LEFT_PENDING`] alone provides.
+fn living_lbutton_down(point: Point) -> bool {
+    if menu_contains(point) {
+        let gesture = match menu_item_at(point) {
+            Some(index) => Gesture::MenuItem { index },
+            // Menu padding: a press that does nothing, rather than one that
+            // falls through to whatever is underneath the menu.
+            None => Gesture::Inert,
+        };
+        *lock(&GESTURE) = Some(gesture);
+        DRAGGING.store(true, Ordering::SeqCst);
+        LEFT_PENDING.store(true, Ordering::SeqCst);
+        return true;
+    }
+    let Some(app) = APP.get() else {
+        return false;
+    };
+    if close_menu(app) {
+        // The click that dismisses a menu does not also act on what it landed
+        // on — the standard contract — so it is swallowed even when it sits
+        // over the user's app.
+        LEFT_PENDING.store(true, Ordering::SeqCst);
+        return true;
+    }
+    match overlay::interactive_area_at(app, point) {
+        Some(area) => {
+            if overlay::raise_area(app, area.id)
+                && let Err(error) = overlay::emit_areas(app)
+            {
+                eprintln!("placement: raised an area but could not emit the new set: {error}");
+            }
+            LEFT_PENDING.store(true, Ordering::SeqCst);
+            true
+        }
+        None => false,
     }
 }
 
@@ -1286,25 +1460,48 @@ fn vk_is_down(vk: i32) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Opens the area menu for whatever is under `point`, replacing any open menu.
-/// Does nothing if the point is over empty overlay — a menu with no area to act
-/// on has nothing to offer.
+/// Does nothing if the point resolves to no area — then a click has nothing to
+/// act on, and any open menu simply closes.
+///
+/// **The target resolution is mode-dependent, and the difference is the V-7
+/// input model itself.** In `Placement` the menu opens for the topmost area of
+/// *any* input mode (`hit_test_any`) — a pass-through area must stay editable
+/// while the layout is being edited, or it becomes permanent. In `Living` it
+/// opens only for the topmost *interactive* area (`hit_test`): a pass-through
+/// area is invisible to the cursor there by definition, and its pixels belong
+/// to whatever app is underneath. That also means flipping an area to
+/// pass-through from its own Living menu makes the menu unreachable until
+/// Placement — deliberate, and the reason the toggle sits next to the Layer
+/// rows that share the same recovery path.
 fn open_menu(app: &AppHandle, point: Point) {
-    let Some((area, _, layer)) = overlay::area_at(app, point) else {
+    let target = match mode() {
+        Mode::Placement => overlay::area_at(app, point),
+        Mode::Living => overlay::interactive_area_at(app, point),
+        Mode::Hidden => None,
+    };
+    let Some(area) = target else {
         close_menu(app);
         return;
     };
     // Anchored to the monitor under the cursor, never to the virtual desktop:
     // desktop-relative chrome can land in a dead zone no cursor can reach (F-13).
     let monitor = overlay::monitor_bounds_at(app, point);
-    let spec: [(MenuAction, &'static str); 4] = [
+    // The toggle row switches to the opposite of the area's current input mode;
+    // its tick shows the current state (ticked = pass-through).
+    let toggled_input = match area.input {
+        Input::Interactive => Input::PassThrough,
+        Input::PassThrough => Input::Interactive,
+    };
+    let spec: [(MenuAction, &'static str); 5] = [
         (MenuAction::SetLayer(Layer::Front), "Always on top"),
         (MenuAction::SetLayer(Layer::Auto), "Auto"),
         (MenuAction::SetLayer(Layer::Back), "Always behind"),
+        (MenuAction::SetInput(toggled_input), "Click-through"),
         (MenuAction::Dismiss, "Dismiss"),
     ];
     #[allow(
         clippy::cast_possible_truncation,
-        reason = "a fixed four-item menu cannot overflow u32"
+        reason = "a fixed five-item menu cannot overflow u32"
     )]
     let bounds = interaction::menu_bounds(point, spec.len() as u32, monitor);
     let items = spec
@@ -1313,16 +1510,20 @@ fn open_menu(app: &AppHandle, point: Point) {
         .map(|(index, (action, label))| MenuEntry {
             #[allow(
                 clippy::cast_possible_truncation,
-                reason = "a fixed four-item menu cannot overflow u32"
+                reason = "a fixed five-item menu cannot overflow u32"
             )]
             rect: interaction::menu_item_bounds(bounds, index as u32),
             action: *action,
             label,
-            checked: *action == MenuAction::SetLayer(layer),
+            checked: match action {
+                MenuAction::SetLayer(layer) => *layer == area.layer,
+                MenuAction::SetInput(_) => area.input == Input::PassThrough,
+                MenuAction::Dismiss => false,
+            },
         })
         .collect();
     *lock(&MENU) = Some(AreaMenu {
-        area,
+        area: area.id,
         bounds,
         items,
         hovered: None,
@@ -1374,6 +1575,7 @@ fn activate_menu_item(app: &AppHandle, index: usize, release: Point) {
     close_menu(app);
     let changed = match action {
         MenuAction::SetLayer(layer) => overlay::set_area_layer(app, area, layer),
+        MenuAction::SetInput(input) => overlay::set_area_input(app, area, input),
         MenuAction::Dismiss => overlay::dismiss_area(app, area),
     };
     if changed && let Err(error) = overlay::emit_areas(app) {

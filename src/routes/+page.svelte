@@ -22,6 +22,7 @@ import {
   physRectToCss,
   type SelectionPayload,
   type StatePayload,
+  showsMenu,
   showsTint,
 } from '$lib/overlay-state';
 import { type CssRect, isDismissKey } from '$lib/regions';
@@ -66,8 +67,10 @@ const areaFrames: AreaFrame[] = $derived(
 const selectionFrame: CssRect | null = $derived(
   overlayState === 'placement' ? physRectToCss(selection, origin, dpr) : null,
 );
+// The menu renders in every visible state, not just Placement: in Living it is
+// opened by a right-click on an interactive area (ADR-0016).
 const menuFrame: MenuFrame | null = $derived(
-  overlayState === 'placement' ? menuFrameCss(menu, origin, dpr) : null,
+  showsMenu(overlayState) ? menuFrameCss(menu, origin, dpr) : null,
 );
 
 function onKeydown(event: KeyboardEvent) {
