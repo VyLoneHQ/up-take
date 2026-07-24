@@ -29,11 +29,14 @@
 //!
 //! [`area`] holds the product's central noun — a rectangle of screen the user
 //! has claimed, its three orthogonal properties, and the z-ordered store that
-//! owns area identity and stacking. It is built on [`geometry`] and, like it,
-//! is pure: no window, no capture, no OS.
+//! owns area identity and stacking. [`interaction`] holds the geometry of
+//! *handling* one: which part of an area a pointer grabs and how dragging it
+//! changes the bounds. Both are built on [`geometry`] and, like it, are pure: no
+//! window, no capture, no OS.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
 pub mod area;
 pub mod geometry;
+pub mod interaction;

@@ -1,11 +1,11 @@
 mod click_through;
 #[cfg(debug_assertions)]
 mod dev_harness;
-#[cfg(windows)]
-mod display_watch;
 mod hotkey;
 mod overlay;
 mod overlay_state;
+#[cfg(windows)]
+mod overlay_wndproc;
 mod placement;
 mod tray;
 
@@ -84,6 +84,7 @@ pub fn run() -> tauri::Result<()> {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             overlay::overlay_escape,
+            overlay::overlay_dismiss_focused,
             overlay::overlay_request_state,
             click_through::overlay_set_interactive_regions
         ])
@@ -127,6 +128,13 @@ pub fn run() -> tauri::Result<()> {
             // can override the cursor, so a panic while placing does not leave
             // every app showing the crosshair. See `placement`.
             placement::install_panic_guard();
+            // Clear any cursor override a *previous* run left behind. The system
+            // cursor is global and survives a hard kill (ADR-0014 accepts that),
+            // so without this the user keeps a crosshair everywhere until they
+            // reload their cursor scheme — and, worse, this process would take
+            // that crosshair for the genuine cursor when it snapshots the set it
+            // restores from. Cheap, and it makes a crashed run self-repairing.
+            placement::clear_cursor_residue();
             // Display-configuration changes reach a *visible* overlay only
             // through WM_DISPLAYCHANGE, which tao does not surface — the
             // native hook is the M-6 subscription (task 1.3).
@@ -139,7 +147,7 @@ pub fn run() -> tauri::Result<()> {
             // unnoticed. Architecture §5 class 3: log with context, keep the app
             // alive.
             #[cfg(windows)]
-            if let Err(error) = display_watch::install(app.handle()) {
+            if let Err(error) = overlay_wndproc::install(app.handle()) {
                 eprintln!(
                     "display-watch: display changes while the overlay is visible will not be tracked: {error}"
                 );

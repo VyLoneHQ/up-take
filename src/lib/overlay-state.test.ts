@@ -1,7 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  type AreaView,
+  areaFramesCss,
+  dismissFocusedArea,
   escapeOverlay,
+  isRemoveKey,
+  type MenuView,
+  menuFrameCss,
   monitorFramesCss,
   type PhysRect,
   physRectsToCss,
@@ -104,5 +110,123 @@ describe('escapeOverlay', () => {
     const invoke = vi.fn<Invoke>().mockRejectedValue(new Error('no window'));
 
     await expect(escapeOverlay(invoke)).resolves.toBe(false);
+  });
+});
+
+describe('areaFramesCss', () => {
+  const areas: AreaView[] = [
+    {
+      id: 7,
+      rect: [100, 100, 200, 150],
+      close: [282, 100, 18, 18],
+      layer: 'auto',
+    },
+    {
+      id: 9,
+      rect: [-1000, -200, 300, 300],
+      close: [-718, -200, 18, 18],
+      layer: 'front',
+    },
+  ];
+
+  it('converts the area and its close control against the same origin and scale', () => {
+    const [first] = areaFramesCss(areas, [-1080, -1080], 2, null);
+
+    expect(first?.id).toBe(7);
+    expect(first?.rect).toEqual({ x: 590, y: 590, width: 100, height: 75 });
+    // The control must land on the area's own top-right, not near it: it is the
+    // rectangle Rust hit-tests, so a drift here is a control that is drawn in
+    // one place and clickable in another.
+    expect(first?.close).toEqual({ x: 681, y: 590, width: 9, height: 9 });
+  });
+
+  it('carries the layer tier and marks only the hovered area', () => {
+    const frames = areaFramesCss(areas, [0, 0], 1, 9);
+
+    expect(frames.map((frame) => frame.hovered)).toEqual([false, true]);
+    expect(frames.map((frame) => frame.layer)).toEqual(['auto', 'front']);
+  });
+
+  it('marks the dragged area as the source and not as hovered', () => {
+    // A move must never look like two areas. The source is styled as where the
+    // area is coming from; the hover chrome is suppressed because its close
+    // control would sit at the source while the cursor is elsewhere.
+    const frames = areaFramesCss(areas, [0, 0], 1, 9, 9);
+
+    expect(frames.map((frame) => frame.source)).toEqual([false, true]);
+    expect(frames.map((frame) => frame.hovered)).toEqual([false, false]);
+  });
+
+  it('leaves every area normal when no drag is in progress', () => {
+    // The restore path: cancelling a drag clears the source, and the styling
+    // follows because it is derived rather than stored.
+    const frames = areaFramesCss(areas, [0, 0], 1, null, null);
+
+    expect(frames.every((frame) => !frame.source)).toBe(true);
+  });
+
+  it('draws nothing at all when the scale is unusable', () => {
+    // Matching physRectsToCss: a NaN-positioned area still covers the screen
+    // while being unclickable, which is worse than no area drawn.
+    expect(areaFramesCss(areas, [0, 0], Number.NaN, null)).toEqual([]);
+    expect(areaFramesCss(areas, [0, 0], 0, null)).toEqual([]);
+  });
+});
+
+describe('menuFrameCss', () => {
+  const menu: MenuView = {
+    rect: [400, 300, 176, 122],
+    items: [
+      { rect: [400, 305, 176, 28], label: 'Always on top', checked: false },
+      { rect: [400, 333, 176, 28], label: 'Auto', checked: true },
+    ],
+    hovered: 1,
+  };
+
+  it('positions every row from the rect Rust hit-tests', () => {
+    const frame = menuFrameCss(menu, [0, 0], 1);
+
+    expect(frame?.rect).toEqual({ x: 400, y: 300, width: 176, height: 122 });
+    expect(frame?.items[0]?.rect).toEqual({
+      x: 400,
+      y: 305,
+      width: 176,
+      height: 28,
+    });
+    expect(frame?.items.map((item) => item.hovered)).toEqual([false, true]);
+    expect(frame?.items.map((item) => item.checked)).toEqual([false, true]);
+  });
+
+  it('is null when no menu is open or the scale is unusable', () => {
+    expect(menuFrameCss(null, [0, 0], 1)).toBeNull();
+    expect(menuFrameCss(menu, [0, 0], Number.NaN)).toBeNull();
+  });
+});
+
+describe('isRemoveKey', () => {
+  it('removes on Delete only', () => {
+    expect(isRemoveKey('Delete')).toBe(true);
+    expect(isRemoveKey('Escape')).toBe(false);
+  });
+
+  it('does not treat Backspace as a remove key', () => {
+    // Deliberate: Backspace is the reflexive "undo that" key, and dismissing an
+    // area has no undo.
+    expect(isRemoveKey('Backspace')).toBe(false);
+  });
+});
+
+describe('dismissFocusedArea', () => {
+  it('asks Rust to dismiss the area under the cursor', async () => {
+    const invoke = vi.fn<Invoke>().mockResolvedValue(undefined);
+
+    await expect(dismissFocusedArea(invoke)).resolves.toBe(true);
+    expect(invoke).toHaveBeenCalledWith('overlay_dismiss_focused');
+  });
+
+  it('resolves false instead of throwing when the command fails', async () => {
+    const invoke = vi.fn<Invoke>().mockRejectedValue(new Error('no window'));
+
+    await expect(dismissFocusedArea(invoke)).resolves.toBe(false);
   });
 });

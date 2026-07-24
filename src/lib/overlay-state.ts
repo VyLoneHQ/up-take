@@ -27,9 +27,135 @@ export interface StatePayload {
   monitors: PhysRect[];
 }
 
+/** An area's stacking tier (ADR-0013). */
+export type LayerName = 'front' | 'auto' | 'back';
+
+/**
+ * One area as Rust sends it. Every rectangle is **physical** and already laid
+ * out by Rust, including the close control's: the overlay is click-through, so
+ * that control is hit-tested against the Rust-side rectangle rather than as a
+ * DOM element, and computing a second one here is how it would end up drawn
+ * somewhere it cannot be clicked.
+ */
+export interface AreaView {
+  id: number;
+  rect: PhysRect;
+  close: PhysRect;
+  layer: LayerName;
+}
+
 /** The payload of the `overlay://areas` event: every area, bottom-first. */
 export interface AreasPayload {
-  areas: PhysRect[];
+  areas: AreaView[];
+}
+
+/** The payload of the `overlay://hover` event: the area under the cursor. */
+export interface HoverPayload {
+  id: number | null;
+}
+
+/** One row of the per-area menu, positioned by Rust. */
+export interface MenuItemView {
+  rect: PhysRect;
+  label: string;
+  checked: boolean;
+}
+
+/** The open per-area menu (ADR-0013's Layer control). */
+export interface MenuView {
+  rect: PhysRect;
+  items: MenuItemView[];
+  hovered: number | null;
+}
+
+/** The payload of the `overlay://menu` event; `menu` is null when none is open. */
+export interface MenuPayload {
+  menu: MenuView | null;
+}
+
+/** An area ready to draw: CSS geometry plus the state that styles it. */
+export interface AreaFrame {
+  id: number;
+  rect: CssRect;
+  close: CssRect;
+  layer: LayerName;
+  hovered: boolean;
+  /** This area is the source of a live move or resize: draw it as where the
+   * area is coming *from*, not as a second area. */
+  source: boolean;
+}
+
+/** The open menu ready to draw. */
+export interface MenuFrame {
+  rect: CssRect;
+  items: { rect: CssRect; label: string; checked: boolean; hovered: boolean }[];
+}
+
+/**
+ * Converts the area set into drawable frames, marking the hovered one.
+ *
+ * Returns nothing when the `dpr` is unusable, matching {@link physRectsToCss} —
+ * an area drawn at a `NaN` position is worse than an area not drawn, because it
+ * still cannot be clicked but now also hides what is underneath.
+ */
+export function areaFramesCss(
+  areas: readonly AreaView[],
+  origin: Origin,
+  dpr: number,
+  hoveredId: number | null,
+  draggedId: number | null = null,
+): AreaFrame[] {
+  const rects = physRectsToCss(
+    areas.map((area) => area.rect),
+    origin,
+    dpr,
+  );
+  const closes = physRectsToCss(
+    areas.map((area) => area.close),
+    origin,
+    dpr,
+  );
+  if (rects.length !== areas.length || closes.length !== areas.length)
+    return [];
+  return areas.map((area, index) => ({
+    id: area.id,
+    // Checked above, so these are present; the non-null assertions keep the
+    // types honest without a second guard per element.
+    rect: rects[index] as CssRect,
+    close: closes[index] as CssRect,
+    layer: area.layer,
+    // A dragged area is not also "hovered": the hover chrome invites a gesture
+    // that is already under way, and its close control would sit at the source
+    // position while the cursor is somewhere else entirely.
+    hovered: area.id === hoveredId && area.id !== draggedId,
+    source: area.id === draggedId,
+  }));
+}
+
+/** Converts the open menu into drawable geometry, or `null` when none is open. */
+export function menuFrameCss(
+  menu: MenuView | null,
+  origin: Origin,
+  dpr: number,
+): MenuFrame | null {
+  if (menu === null) return null;
+  const rect = physRectToCss(menu.rect, origin, dpr);
+  if (rect === null) return null;
+  const items = physRectsToCss(
+    menu.items.map((item) => item.rect),
+    origin,
+    dpr,
+  );
+  if (items.length !== menu.items.length) return null;
+  return {
+    rect,
+    items: menu.items.map((item, index) => ({
+      rect: items[index] as CssRect,
+      label: item.label,
+      checked: item.checked,
+      hovered: index === menu.hovered,
+    })),
+  };
 }
 
 /**
@@ -38,6 +164,12 @@ export interface AreasPayload {
  */
 export interface SelectionPayload {
   rect: PhysRect | null;
+  /**
+   * The area being moved or resized, if any. It is drawn as the drag's *source*
+   * — where the area is coming from — rather than as a normal area, so a move
+   * does not look like two areas existing at once.
+   */
+  source: number | null;
 }
 
 /**
@@ -112,6 +244,34 @@ export async function escapeOverlay(invoke: Invoke): Promise<boolean> {
     return true;
   } catch (error) {
     console.error('Failed to emit the escape intent:', error);
+    return false;
+  }
+}
+
+/**
+ * Whether this key removes the area under the cursor (PRODUCT-VISION §4.3:
+ * `Delete` removes, `Esc` never does).
+ *
+ * `Backspace` is deliberately **not** included. On a keyboard without a
+ * dedicated `Delete` key it is the obvious substitute, but it is also the key
+ * people press reflexively to undo their last input — and dismissing an area
+ * has no undo.
+ */
+export function isRemoveKey(key: string): boolean {
+  return key === 'Delete';
+}
+
+/**
+ * Removes the area under the cursor. Never throws, for the same reason
+ * {@link escapeOverlay} does not: an unhandled rejection in a key handler is a
+ * silent failure the user reads as the overlay having hung.
+ */
+export async function dismissFocusedArea(invoke: Invoke): Promise<boolean> {
+  try {
+    await invoke('overlay_dismiss_focused');
+    return true;
+  } catch (error) {
+    console.error('Failed to dismiss the focused area:', error);
     return false;
   }
 }

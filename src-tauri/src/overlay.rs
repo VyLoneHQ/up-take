@@ -14,8 +14,9 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
-use uptake_core::area::{AreaStore, AreaType};
+use uptake_core::area::{AreaId, AreaStore, AreaType, Layer};
 use uptake_core::geometry::{Monitor, Point, Rect, Size, virtual_desktop_bounds};
+use uptake_core::interaction;
 
 use crate::click_through;
 use crate::overlay_state::{Event, OverlayState, next};
@@ -29,11 +30,15 @@ pub const WINDOW_LABEL: &str = "overlay";
 /// Bounds are recomputed on every call rather than cached, which covers
 /// display changes that happen while the app sits hidden in the tray. The
 /// other half of M-6 — a display change while the overlay is *visible* — is
-/// [`sync_bounds`]'s job, driven by `display_watch` and the window-event hook
+/// [`sync_bounds`]'s job, driven by `overlay_wndproc` and the window-event hook
 /// in `lib.rs`.
 pub fn show(app: &AppHandle) -> Result<(), String> {
     let window = overlay_window(app)?;
     apply_bounds(&window, desired_bounds(&window)?)?;
+    // The same enumeration `desired_bounds` just did, kept for the placement
+    // poll — see `MONITOR_CACHE`. Refreshed here because `show` is the path a
+    // display change taken while the overlay was hidden arrives by.
+    refresh_monitor_cache(&window);
     // Known baseline before anything is visible: **click-through** (ADR-0014).
     // The overlay must never degrade the live content it sits over, so it
     // ignores the cursor whenever it is visible — in `Placement` the mouse hook
@@ -118,6 +123,11 @@ pub fn sync_bounds(app: &AppHandle) -> Result<(), String> {
     if needs_write(current_bounds(&window)?, desired) {
         apply_bounds(&window, desired)?;
     }
+    // A display change is exactly when the cached monitor list goes stale, and
+    // this is the function every display change routes through while visible.
+    // An area snapped to a monitor that no longer exists would be contained
+    // against a rectangle that is no longer there.
+    refresh_monitor_cache(&window);
     click_through::reconvert_regions(app);
     Ok(())
 }
@@ -268,11 +278,18 @@ pub fn toggle(app: &AppHandle) {
 
 /// Handles `Esc` from the overlay.
 ///
-/// A drag in progress is cancelled first and the state is left unchanged
-/// (ADR-0012: mid-drag `Esc` = cancel); otherwise `Esc` backs out of Placement.
-/// The distinction is read from the placement hook rather than tracked here,
-/// because the hook is the only thing that knows a drag is live.
+/// `Esc` backs out of exactly one thing, innermost first: an open area menu, then
+/// a drag in progress (ADR-0012: mid-drag `Esc` = cancel, state unchanged), then
+/// Placement itself. Anything else would make `Esc` skip past a transient thing
+/// the user can see on screen — dismissing the menu *and* leaving Placement on
+/// one keypress is the shape users read as "it did too much".
+///
+/// Both inner cases are read from the placement module rather than tracked here,
+/// because the hook is the only thing that knows a gesture is live.
 pub fn escape(app: &AppHandle) {
+    if placement::close_menu(app) {
+        return;
+    }
     if placement::is_dragging() {
         placement::cancel_drag();
         drive(app, Event::Escape { mid_drag: true });
@@ -387,37 +404,183 @@ fn has_areas(app: &AppHandle) -> bool {
 /// frames and the selection box.
 const AREAS_EVENT: &str = "overlay://areas";
 
-/// The area rectangles sent to the frontend.
+/// One area as the frontend draws it.
+#[derive(Serialize, Clone)]
+struct AreaPayload {
+    /// The store's id, so the frontend keys on identity rather than on
+    /// geometry — two areas may legitimately share bounds.
+    id: u64,
+    /// Bounds in physical virtual-desktop px.
+    rect: (i32, i32, u32, u32),
+    /// The close control's rectangle, physical px. Computed here rather than in
+    /// the frontend because the **hook hit-tests this exact rectangle**
+    /// (`uptake_core::interaction`); a control drawn from a second, independent
+    /// layout calculation would eventually be drawn somewhere it cannot be
+    /// clicked, which is the F-13 failure in miniature.
+    close: (i32, i32, u32, u32),
+    /// `"front"`, `"auto"` or `"back"` — the area's stacking tier (ADR-0013),
+    /// so a pinned area can be marked as such on screen.
+    layer: &'static str,
+}
+
+/// The area set sent to the frontend.
 #[derive(Serialize, Clone)]
 struct AreasPayload {
-    /// Each area's bounds in physical virtual-desktop px, bottom-first (paint
-    /// order — later areas draw over earlier ones).
-    areas: Vec<(i32, i32, u32, u32)>,
+    /// Every area, bottom-first (paint order — later areas draw over earlier
+    /// ones), in the tier-aware order the store already maintains.
+    areas: Vec<AreaPayload>,
+}
+
+const fn layer_name(layer: Layer) -> &'static str {
+    match layer {
+        Layer::Front => "front",
+        Layer::Auto => "auto",
+        Layer::Back => "back",
+    }
+}
+
+/// A rect as the `(x, y, width, height)` tuple the frontend receives.
+pub(crate) const fn as_tuple(rect: Rect) -> (i32, i32, u32, u32) {
+    (
+        rect.origin.x,
+        rect.origin.y,
+        rect.size.width,
+        rect.size.height,
+    )
 }
 
 /// Emits the current area set. Called on entering a visible state, on the
-/// frontend's mount request, and by the placement hook after it creates one.
+/// frontend's mount request, and by the placement hook after every change.
 pub(crate) fn emit_areas(app: &AppHandle) -> Result<(), String> {
+    // Fetched once, before the store lock: the close control's position depends
+    // on the monitors, because on a small area it sits *outside* the area and
+    // has to pick a corner that is actually on a screen.
+    let monitors = monitor_rects();
     let store = app.state::<Mutex<AreaStore>>();
     let areas = lock(&store)
         .iter()
-        .map(|area| {
-            (
-                area.bounds.origin.x,
-                area.bounds.origin.y,
-                area.bounds.size.width,
-                area.bounds.size.height,
-            )
+        .map(|area| AreaPayload {
+            id: area.id.get(),
+            rect: as_tuple(area.bounds),
+            close: as_tuple(interaction::close_control(area.bounds, &monitors)),
+            layer: layer_name(area.layer),
         })
         .collect();
     app.emit(AREAS_EVENT, AreasPayload { areas })
         .map_err(|e| format!("Could not emit overlay areas: {e}"))
 }
 
+/// The topmost area containing `point`, whatever its input mode, with the state
+/// a placement gesture needs. `None` when the point is over empty overlay.
+///
+/// [`AreaStore::hit_test_any`], not `hit_test`: a pass-through area is invisible
+/// to a click in `Living` and must still be grabbable while editing the layout,
+/// or it can never be moved or removed.
+pub(crate) fn area_at(app: &AppHandle, point: Point) -> Option<(AreaId, Rect, Layer)> {
+    let store = app.state::<Mutex<AreaStore>>();
+    let guard = lock(&store);
+    let area = guard.hit_test_any(point)?;
+    Some((area.id, area.bounds, area.layer))
+}
+
+/// The topmost area whose *interaction surface* contains `point`, and which
+/// part of it was grabbed.
+///
+/// Distinct from [`area_at`] because that surface is no longer the area's own
+/// rectangle: a small area's close control sits outside its bounds, so a point
+/// that grabs a control need not be a point inside anything. Asking
+/// `interaction::handle_at` per area, top-down, is what keeps "what is drawn"
+/// and "what responds" the same set of rectangles.
+pub(crate) fn area_handle_at(
+    app: &AppHandle,
+    point: Point,
+) -> Option<(AreaId, Rect, interaction::Handle)> {
+    let monitors = monitor_rects();
+    let store = app.state::<Mutex<AreaStore>>();
+    let guard = lock(&store);
+    guard.iter_top_down().find_map(|area| {
+        interaction::handle_at(area.bounds, point, &monitors)
+            .map(|handle| (area.id, area.bounds, handle))
+    })
+}
+
+/// The close control's rectangle for an area, against the current monitors.
+pub(crate) fn close_control_of(bounds: Rect) -> Rect {
+    interaction::close_control(bounds, &monitor_rects())
+}
+
+/// Commits a move or resize: the new bounds, plus a raise — manipulating an area
+/// is exactly the §3.2a interaction that puts it on top of its tier.
+///
+/// A rejected `set_bounds` (unknown id, or an empty rectangle) leaves the area
+/// untouched and skips the raise; there is nothing to raise if the gesture did
+/// not apply.
+pub(crate) fn move_area(app: &AppHandle, id: AreaId, bounds: Rect) -> bool {
+    let store = app.state::<Mutex<AreaStore>>();
+    let mut guard = lock(&store);
+    guard.set_bounds(id, bounds) && guard.bring_to_front(id)
+}
+
+/// Removes an area. Returns whether one was removed.
+pub(crate) fn dismiss_area(app: &AppHandle, id: AreaId) -> bool {
+    let store = app.state::<Mutex<AreaStore>>();
+    lock(&store).remove(id).is_some()
+}
+
+/// Pins an area to a stacking tier (ADR-0013).
+pub(crate) fn set_area_layer(app: &AppHandle, id: AreaId, layer: Layer) -> bool {
+    let store = app.state::<Mutex<AreaStore>>();
+    lock(&store).set_layer(id, layer)
+}
+
+/// The monitor rectangles, cached.
+///
+/// Enumerating monitors is a Win32 round trip that allocates, and the placement
+/// poll needs this list on **every tick** to snap and contain a dragged area —
+/// 60 times a second, for a list that changes only when the user replugs a
+/// display. So it is refreshed where the display configuration is already being
+/// read ([`show`] and [`sync_bounds`], the two paths a display change reaches)
+/// rather than polled.
+static MONITOR_CACHE: Mutex<Vec<Rect>> = Mutex::new(Vec::new());
+
+/// Refreshes [`MONITOR_CACHE`] from the window's current monitor list.
+fn refresh_monitor_cache(window: &WebviewWindow) {
+    if let Ok(list) = monitors(window) {
+        *lock(&MONITOR_CACHE) = list.iter().map(|monitor| monitor.bounds).collect();
+    }
+}
+
+/// The cached monitor rectangles, for snapping and containment.
+pub(crate) fn monitor_rects() -> Vec<Rect> {
+    lock(&MONITOR_CACHE).clone()
+}
+
+/// The bounds of the monitor containing `point`, for positioning per-monitor
+/// chrome. Falls back to the whole virtual desktop when the point is on no
+/// monitor at all — which happens in the dead zones between mismatched monitors,
+/// where any answer is a guess and the desktop is at least never `None`.
+pub(crate) fn monitor_bounds_at(app: &AppHandle, point: Point) -> Rect {
+    let fallback = Rect::new(point.x, point.y, 1, 1);
+    let Ok(window) = overlay_window(app) else {
+        return fallback;
+    };
+    let monitors = monitors(&window).unwrap_or_default();
+    if let Some(monitor) = uptake_core::geometry::monitor_at(&monitors, point) {
+        return monitor.bounds;
+    }
+    virtual_desktop_bounds(monitors.iter().map(|m| m.bounds)).unwrap_or(fallback)
+}
+
 /// Creates a `Default` area at the given physical bounds, returning whether one
-/// was created. `Default` is the only type task 1.6 ships (R-17); an empty
-/// rectangle — a click or a drag that never moved — creates nothing, which
-/// `AreaStore::create` enforces.
+/// was created. `Default` is the only type task 1.6 ships (R-17).
+///
+/// Two rejections, and they are different in kind. `AreaStore::create` refuses
+/// an *empty* rectangle as a model invariant — a zero-pixel area could never be
+/// drawn or dismissed. `interaction::is_placeable` refuses anything smaller than
+/// `MIN_AREA_SPAN` as a *policy*: a click or a twitch of the hand should not
+/// leave a sliver of an area behind, and a sliver has no room for the controls
+/// that would remove it. The policy check runs first so the invariant stays the
+/// last line of defence rather than the only one.
 ///
 /// The placement hook calls this from the event-loop thread; it takes the store
 /// lock only for the push.
@@ -432,6 +595,9 @@ pub(crate) fn create_default_area(
         origin: Point::new(x, y),
         size: Size::new(width, height),
     };
+    if !interaction::is_placeable(bounds) {
+        return false;
+    }
     let store = app.state::<Mutex<AreaStore>>();
     lock(&store).create(AreaType::Default, bounds).is_some()
 }
@@ -446,6 +612,42 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[tauri::command]
 pub fn overlay_escape(app: AppHandle) {
     escape(&app);
+}
+
+/// IPC surface: `Delete` from the overlay dismisses the area under the cursor.
+///
+/// PRODUCT-VISION §4.3 asks for "`Delete` on the focused area". **Focused here
+/// means the area under the cursor**, and that choice is deliberate rather than
+/// a placeholder: it is the one definition where the user can see, before
+/// pressing a key with no undo, exactly which area will go. A remembered
+/// "last-touched" focus would let `Delete` remove something off-screen or on
+/// another monitor. Keyboard-only focus that moves without a cursor is task
+/// 1.16's (M-11); this is the mouse-adjacent half, and the close control is the
+/// pure-pointer path.
+///
+/// With the cursor over empty overlay, `Delete` does nothing — deliberately not
+/// "the topmost area", which would be a deletion the user never pointed at.
+#[tauri::command]
+pub fn overlay_dismiss_focused(app: AppHandle) -> Result<(), String> {
+    // Read the cursor from the window rather than from the placement hook's last
+    // reported position: the hook only reports while it is installed, so a
+    // `Delete` pressed before the mouse has moved since entering Placement would
+    // act on a stale point.
+    let window = overlay_window(&app)?;
+    let position = window
+        .cursor_position()
+        .map_err(|e| format!("Could not read the cursor position: {e}"))?;
+    let Some(point) = Point::from_physical_f64(position.x, position.y) else {
+        return Ok(());
+    };
+    let Some((id, _, _)) = area_at(&app, point) else {
+        return Ok(());
+    };
+    if dismiss_area(&app, id) {
+        placement::close_menu(&app);
+        emit_areas(&app)?;
+    }
+    Ok(())
 }
 
 /// IPC surface: the frontend requests the current state on mount.

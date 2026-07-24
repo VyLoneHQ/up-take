@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 837c62b26f4cbd946fe912b8ef42a66183396ab865b287a1e40ae1af7586578b # shrinks to bounds = Rect { origin: Point { x: 0, y: 0 }, size: Size { width: 24, height: 24 } }, resize = West, dx = -5537, dy = 0
+cc 4c337000a25791b8cc4ba5b394b98a7ce541158c23c266e3804e81acc8355715 # shrinks to bounds = Rect { origin: Point { x: 0, y: 1250 }, size: Size { width: 24, height: 191 } }, resize = West, dx = -1058, dy = 0
+cc 4bfe9d59bfb967dc7e4c7324763da6a65795c6c3681f54773004f193db596b7f # shrinks to bounds = Rect { origin: Point { x: 1407, y: -1083 }, size: Size { width: 1, height: 1 } }, resize = SouthEast, dx = 2579, dy = 0
+cc 48f39c4e2c95d6c2241c26c9caa8b4dd779c3d7af8978d17d7e1fc9b97528c74 # shrinks to bounds = Rect { origin: Point { x: 0, y: 1441 }, size: Size { width: 1, height: 1 } }, resize = South, dx = 0, dy = 0
