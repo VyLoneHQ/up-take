@@ -108,7 +108,9 @@ use uptake_core::interaction::{self, Handle, Resize};
 
 use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_MENU};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, VK_LBUTTON, VK_MENU, VK_RBUTTON,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CopyIcon, HCURSOR, HHOOK, IDC_CROSS, IDC_HAND, IDC_SIZEALL, IDC_SIZENESW,
     IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, LoadCursorW, MSLLHOOKSTRUCT, OCR_APPSTARTING, OCR_CROSS,
@@ -609,11 +611,23 @@ fn real_cursor(app: &AppHandle) -> Option<Point> {
 /// Replaces a hook that is no longer delivering events. Runs on the event-loop
 /// thread, the only one that may install or remove one.
 ///
-/// Gesture state is discarded rather than carried over: a hook that missed
-/// events may well have missed a button release, so [`LEFT_PENDING`] and its
-/// siblings can no longer be trusted to describe the physical buttons. Keeping
-/// them would leave the hook swallowing a release that already happened —
-/// exactly the stuck state this is meant to clear.
+/// The live gesture itself ([`DRAGGING`]/[`GESTURE`]) is discarded rather than
+/// carried over: a hook that missed events may have missed the cursor moving
+/// too, so the in-progress rectangle can no longer be trusted. The abandoned
+/// gesture is then treated the same way [`cancel_drag`] treats one — its
+/// eventual release is still swallowed (see below), it just commits nothing.
+///
+/// [`LEFT_PENDING`]/[`RIGHT_PENDING`] are **not** blindly cleared, though:
+/// neither "clear" nor "keep" is safe on its own here. Clearing would leak the
+/// pending button's release the moment the button is still physically held —
+/// the down was genuinely swallowed while the hook was alive, and nothing else
+/// will ever swallow the matching up (the reinstall-time version of the leak
+/// the module docs describe for cancel/toggle-away). Keeping it regardless
+/// risks the opposite: swallowing an unrelated future release if the button
+/// cycled up and back down again while the hook was dead. [`GetAsyncKeyState`]
+/// resolves the ambiguity the same way [`snapping_suppressed`] reads `Alt` —
+/// by trusting what a button is doing right now rather than assuming what it
+/// was doing before the hook died.
 fn reinstall_on_main_thread() {
     let hook = HOOK.swap(0, Ordering::SeqCst);
     if hook != 0 {
@@ -621,8 +635,8 @@ fn reinstall_on_main_thread() {
             UnhookWindowsHookEx(hook as HHOOK);
         }
     }
-    LEFT_PENDING.store(false, Ordering::SeqCst);
-    RIGHT_PENDING.store(false, Ordering::SeqCst);
+    LEFT_PENDING.store(vk_is_down(i32::from(VK_LBUTTON)), Ordering::SeqCst);
+    RIGHT_PENDING.store(vk_is_down(i32::from(VK_RBUTTON)), Ordering::SeqCst);
     WANT_TEARDOWN.store(false, Ordering::SeqCst);
     DRAGGING.store(false, Ordering::SeqCst);
     *lock(&GESTURE) = None;
@@ -1255,9 +1269,15 @@ fn gesture_rect(gesture: Gesture, pointer: Point) -> Option<(i32, i32, u32, u32)
 /// that has one, and it means a user who forgot to hold it need not restart the
 /// gesture.
 fn snapping_suppressed() -> bool {
-    // The high bit is "currently down"; the low bit is "pressed since last
-    // call", which would make this true long after the key came back up.
-    let state = unsafe { GetAsyncKeyState(i32::from(VK_MENU)) };
+    vk_is_down(i32::from(VK_MENU))
+}
+
+/// Whether a virtual key is physically down right now, independent of the
+/// hook. The high bit of [`GetAsyncKeyState`]'s result is "currently down";
+/// the low bit is "pressed since the last call", which would make this true
+/// long after the key came back up.
+fn vk_is_down(vk: i32) -> bool {
+    let state = unsafe { GetAsyncKeyState(vk) };
     (state as u16 & 0x8000) != 0
 }
 
