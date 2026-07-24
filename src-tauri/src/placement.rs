@@ -877,13 +877,32 @@ fn ensure_hook() {
 /// is re-entered before a previously deferred teardown fired (see [`exit`] and
 /// [`maybe_finish_teardown`]): re-entering cancels the pending uninstall rather
 /// than racing it.
+///
+/// Closes a menu left open by a **different** mode — the same reasoning
+/// [`enter_living_on_main_thread`] applies to a menu opened in Placement,
+/// applied symmetrically: `Living`'s menu is resolved against `hit_test`
+/// (interactive areas only) and anchored to wherever it was right-clicked, so
+/// carrying it into `Placement` would leave a stale control on screen that
+/// swallows the next click (`classify_press`'s menu-first precedence) instead
+/// of starting the gesture the user actually made. Gated on the *previous*
+/// mode, not unconditional, because [`enter`] is also reached by a `Summon`
+/// while already in `Placement` (`overlay_state::next` sends `Placement` to
+/// `Placement` on that event) — documented as idempotent, so a menu the user
+/// is legitimately interacting with there must not be closed out from under
+/// them.
 fn enter_placement_on_main_thread() {
+    let previous = mode();
     ensure_hook();
     set_mode(Mode::Placement);
     WANT_TEARDOWN.store(false, Ordering::SeqCst);
     // The resting shape; the poll refines it to a move or resize cursor as soon
     // as the pointer is over an area.
     set_cursor(CursorShape::Cross);
+    if previous != Mode::Placement
+        && let Some(app) = APP.get()
+    {
+        close_menu(app);
+    }
 }
 
 /// Enters `Living` mode: hook kept for per-area routing (ADR-0016), cursor
