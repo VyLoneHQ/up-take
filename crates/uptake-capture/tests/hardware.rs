@@ -60,3 +60,30 @@ fn off_screen_and_empty_regions_error_without_capturing() {
         Err(uptake_capture::CaptureError::EmptyRegion)
     ));
 }
+
+/// The GDI fallback (task 1.8), driven directly since it does not fire on its
+/// own on a healthy desktop. Proves the DIB is captured and the BGRA→RGBA-opaque
+/// conversion is right end to end: a real desktop frame comes back fully opaque,
+/// and an all-zero result would mean nothing was blitted.
+///
+/// Selects the path by argument, not by an environment variable: libtest runs
+/// these tests concurrently, so a process-global switch set here would be read
+/// by `captures_a_small_region_at_the_primary_origin` running beside it, which
+/// would then silently capture via GDI and still pass — leaving the crate's
+/// only live-WGC assertion testing the wrong path.
+#[test]
+#[ignore = "needs a real desktop: drives a real GDI screen BitBlt"]
+fn the_forced_gdi_fallback_captures_an_opaque_frame() {
+    ensure_dpi_aware();
+    let captured = uptake_capture::capture_region_via_gdi(Rect::new(0, 0, 64, 48)).unwrap();
+
+    assert_eq!(captured.rect, Rect::new(0, 0, 64, 48));
+    assert_eq!(captured.bitmap.size(), Size::new(64, 48));
+    assert!(
+        captured
+            .bitmap
+            .pixels()
+            .chunks_exact(4)
+            .all(|px| px[3] == 0xFF)
+    );
+}

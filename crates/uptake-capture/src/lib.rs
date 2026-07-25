@@ -20,10 +20,21 @@
 //! region partly outside the virtual desktop is clamped to it: the returned
 //! [`CapturedRegion::rect`] says what the bitmap actually shows.
 //!
-//! Captures are strict: if any touched monitor fails to deliver a frame, the
-//! whole capture reports the error rather than silently returning a bitmap
-//! with a hole in it. (The GDI fallback for WGC-blocked content is task 1.8
-//! and will slot in per monitor, exactly where that strictness lives.)
+//! When a touched monitor's WGC session cannot deliver a frame, the capture
+//! falls back to a GDI `BitBlt` of that monitor's rectangle rather than failing
+//! outright ([`gdi`]; architecture.md §5, "degrade gracefully"). That fallback
+//! recovers the *no-WGC-frame* case — a session that refused to start or
+//! stalled — and nothing more: DRM and hardware-overlay content are composited
+//! black by the DWM under every capture API, GDI included, so this is a
+//! WGC-unavailable fallback, not a protected-content bypass. A capture fails
+//! only when **both** paths fail for a monitor, or the display topology changes
+//! mid-capture (which aborts the whole capture, since the plan is now stale).
+//!
+//! [`capture_region_via_gdi`] takes the fallback for every monitor, skipping
+//! WGC. The fallback does not otherwise fire on a healthy modern desktop, so
+//! this is how it is exercised and pixel-compared against WGC on the rig
+//! (`examples/grab.rs --gdi`), and it is the diagnostic to reach for if WGC
+//! ever misbehaves in the field.
 //!
 //! # What callers must know
 //!
@@ -46,6 +57,8 @@ mod blit;
 mod error;
 mod plan;
 
+#[cfg(windows)]
+mod gdi;
 #[cfg(windows)]
 mod monitors;
 #[cfg(windows)]
@@ -80,10 +93,45 @@ pub struct CapturedRegion {
 /// [`CaptureError`] and each variant's message says what to do about it.
 #[cfg(windows)]
 pub fn capture_region(region: Rect) -> Result<CapturedRegion, CaptureError> {
+    capture_region_inner(region, false)
+}
+
+/// Captures `region` through the GDI fallback alone, as if WGC were
+/// unavailable on every monitor.
+///
+/// The fallback never fires on its own on a healthy desktop, so this is how it
+/// is verified (`tests/hardware.rs`, `examples/grab.rs --gdi`) and the
+/// diagnostic to reach for if WGC misbehaves in the field. Prefer
+/// [`capture_region`] everywhere else: GDI captures hardware-overlay video as
+/// black where WGC is crisp, and it cannot be told to exclude a window.
+///
+/// This is an explicit parameter rather than an environment switch on purpose —
+/// a process-global that changes which path a capture takes can be flipped by
+/// one test and silently observed by another running beside it.
+#[cfg(windows)]
+pub fn capture_region_via_gdi(region: Rect) -> Result<CapturedRegion, CaptureError> {
+    capture_region_inner(region, true)
+}
+
+#[cfg(windows)]
+fn capture_region_inner(region: Rect, force_gdi: bool) -> Result<CapturedRegion, CaptureError> {
     let monitors = monitors::enumerate()?;
     let capture_plan = plan::plan(region, &monitors)?;
     let mut bitmap =
         RgbaBitmap::transparent(capture_plan.output.size).ok_or(CaptureError::TooLarge)?;
+
+    if force_gdi {
+        for &shot in &capture_plan.shots {
+            let pixels = gdi::capture_shot(shot)?;
+            if !blit::blit(&mut bitmap, shot.dest_x, shot.dest_y, &pixels, shot.size) {
+                return Err(CaptureError::DisplayChanged);
+            }
+        }
+        return Ok(CapturedRegion {
+            rect: capture_plan.output,
+            bitmap,
+        });
+    }
 
     // Spawn every shot before waiting on any: monitors capture in parallel,
     // so a multi-monitor region costs one first-frame latency, not one per
@@ -97,7 +145,18 @@ pub fn capture_region(region: Rect) -> Result<CapturedRegion, CaptureError> {
 
     for shot_in_flight in pending {
         let shot = shot_in_flight.shot();
-        let pixels = shot_in_flight.wait(deadline)?;
+        let pixels = match shot_in_flight.wait(deadline) {
+            Ok(pixels) => pixels,
+            // A stale plan means the desktop changed under us; the whole
+            // capture is now built against the wrong topology, so abort rather
+            // than fall back monitor-by-monitor onto coordinates that moved.
+            Err(err @ CaptureError::DisplayChanged) => return Err(err),
+            // WGC could not deliver this monitor — fall back to GDI for it.
+            // Keep the original WGC error if GDI also fails: it names the
+            // monitor and the underlying reason, and a double failure means the
+            // system is genuinely unable to capture, not that GDI is the story.
+            Err(wgc_err) => gdi::capture_shot(shot).map_err(|_gdi_err| wgc_err)?,
+        };
         if !blit::blit(&mut bitmap, shot.dest_x, shot.dest_y, &pixels, shot.size) {
             // The extracted crop always matches the plan by construction; a
             // mismatch means the world changed under us mid-capture.
