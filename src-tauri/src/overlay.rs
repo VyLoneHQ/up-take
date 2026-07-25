@@ -217,6 +217,44 @@ pub(crate) fn overlay_window(app: &AppHandle) -> Result<WebviewWindow, String> {
         .ok_or_else(|| format!("Window '{WINDOW_LABEL}' does not exist — check tauri.conf.json."))
 }
 
+/// Permanently excludes the overlay from every capture API — its own,
+/// screen-sharing, and every other process's
+/// ([ADR-0019](../../../Projects/UP-TAKE/DECISIONS/ADR-0019-overlay-excluded-from-capture.md)).
+///
+/// Called once from `setup`, right after the window exists. **Never** toggled
+/// around a capture — decision 1 is explicit that `uptake-capture` stays
+/// ignorant of the overlay forever, which is what makes a self-containing live
+/// mirror structurally impossible rather than merely defended against. Would
+/// need re-applying only if the window were ever destroyed and recreated,
+/// which nothing here does today (`hide` keeps it alive).
+///
+/// A failed call **degrades, it does not abort** (decision 4): below Windows
+/// 10.0.19041 `SetWindowDisplayAffinity` fails, logged rather than treated as
+/// a startup failure, and the overlay is then visible in captures like any
+/// other window.
+#[cfg(windows)]
+pub fn exclude_from_capture(app: &AppHandle) -> Result<(), String> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE,
+    };
+    let window = overlay_window(app)?;
+    let hwnd = window
+        .hwnd()
+        .map_err(|e| format!("Could not get the overlay window handle: {e}"))?
+        .0;
+    // SAFETY: `hwnd` is a live top-level window handle owned by this process,
+    // valid for the duration of this call.
+    let ok = unsafe { SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) };
+    if ok == 0 {
+        return Err(
+            "SetWindowDisplayAffinity failed (Windows build below 10.0.19041?) — the overlay \
+             will be visible in screen captures."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // The three-state interaction model (ADR-0012).
 //
@@ -462,13 +500,16 @@ pub(crate) fn emit_areas(app: &AppHandle) -> Result<(), String> {
         .map_err(|e| format!("Could not emit overlay areas: {e}"))
 }
 
-/// What a hit-test resolves to: the identity and the two menu-relevant
-/// properties of an area, detached from the store so no lock outlives the call.
+/// What a hit-test resolves to: the identity and the menu-relevant properties
+/// of an area, detached from the store so no lock outlives the call.
 #[derive(Clone, Copy)]
 pub(crate) struct AreaSummary {
     pub id: AreaId,
     pub layer: Layer,
     pub input: Input,
+    /// What the area is — the area menu shows Copy/Save only for `Default`
+    /// areas (task 1.9's scope; a typed capture area is 1.9b's).
+    pub kind: AreaType,
 }
 
 impl AreaSummary {
@@ -477,6 +518,7 @@ impl AreaSummary {
             id: area.id,
             layer: area.layer,
             input: area.input,
+            kind: area.kind,
         }
     }
 }
@@ -605,6 +647,19 @@ fn collapse_living_if_empty(app: &AppHandle) {
 pub(crate) fn set_area_layer(app: &AppHandle, id: AreaId, layer: Layer) -> bool {
     let store = app.state::<Mutex<AreaStore>>();
     lock(&store).set_layer(id, layer)
+}
+
+/// An area's current bounds, for the output pipeline (task 1.9) to capture.
+///
+/// Read fresh at the moment Copy/Save is activated rather than carried from
+/// the menu's own opening: the menu can stay open across pump ticks, and a
+/// capture should target where the area is *now*, not where it was when the
+/// menu was drawn (it cannot move while a menu is open today, but this is the
+/// same "read state at the point of action" discipline [`overlay_dismiss_focused`]
+/// already follows).
+pub(crate) fn area_bounds(app: &AppHandle, id: AreaId) -> Option<Rect> {
+    let store = app.state::<Mutex<AreaStore>>();
+    lock(&store).get(id).map(|area| area.bounds)
 }
 
 /// The monitor rectangles, cached.

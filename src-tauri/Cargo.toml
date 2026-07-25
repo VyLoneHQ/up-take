@@ -24,6 +24,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 uptake-core = { workspace = true }
+uptake-capture = { workspace = true }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 serde = { workspace = true }
@@ -38,14 +39,25 @@ tauri-plugin-single-instance = "2"
 #     WM_DISPLAYCHANGE.
 #   - placement.rs: the WH_MOUSE_LL hook, SetSystemCursor, and GetModuleHandleW
 #     (Win32_System_LibraryLoader) for live-placement input (ADR-0014).
+#   - overlay.rs: SetWindowDisplayAffinity (ADR-0019).
+#   - output.rs: the clipboard (Win32_System_DataExchange), GlobalAlloc
+#     (Win32_System_Memory), and GetLocalTime (Win32_System_SystemInformation)
+#     for the output pipeline (task 1.9).
 # tao already pulls windows-sys transitively; this makes the usage explicit and
 # feature-gated to exactly what we call.
 windows-sys = { workspace = true, features = [
   "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_System_DataExchange",
   "Win32_System_LibraryLoader",
+  "Win32_System_Memory",
+  "Win32_System_SystemInformation",
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
 ] }
+# The PNG encoder task 1.7's grab.rs example already validated (WIC-backed,
+# no new codec to vet) — reused rather than adding a second PNG dependency.
+windows-capture = "2.0"
 
 [lints]
 workspace = true

@@ -114,7 +114,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
-use uptake_core::area::{AreaId, Input, Layer};
+use uptake_core::area::{AreaId, AreaType, Input, Layer};
 use uptake_core::geometry::{Point, Rect};
 use uptake_core::interaction::{self, Handle, Resize};
 
@@ -326,6 +326,12 @@ enum MenuAction {
     SetInput(Input),
     /// Remove the area.
     Dismiss,
+    /// Capture the area and publish it to the clipboard alone (task 1.9,
+    /// `Default` areas only — a typed capture area is 1.9b's).
+    Copy,
+    /// Capture the area and write it to `Pictures\UP-TAKE\` (task 1.9, same
+    /// scope as `Copy`). A separate, explicit action — does not also copy.
+    SaveToFile,
 }
 
 /// The pointer shape placement wants for what is under the cursor.
@@ -1511,16 +1517,22 @@ fn open_menu(app: &AppHandle, point: Point) {
         Input::Interactive => Input::PassThrough,
         Input::PassThrough => Input::Interactive,
     };
-    let spec: [(MenuAction, &'static str); 5] = [
-        (MenuAction::SetLayer(Layer::Front), "Always on top"),
-        (MenuAction::SetLayer(Layer::Auto), "Auto"),
-        (MenuAction::SetLayer(Layer::Back), "Always behind"),
-        (MenuAction::SetInput(toggled_input), "Click-through"),
-        (MenuAction::Dismiss, "Dismiss"),
-    ];
+    let mut spec: Vec<(MenuAction, &'static str)> = Vec::with_capacity(7);
+    // Copy/Save lead the menu — the primary actions, ahead of the layout
+    // settings below them — and are scoped to `Default` areas only (task
+    // 1.9; a typed capture area with its own menu is 1.9b's).
+    if area.kind == AreaType::Default {
+        spec.push((MenuAction::Copy, "Copy"));
+        spec.push((MenuAction::SaveToFile, "Save image"));
+    }
+    spec.push((MenuAction::SetLayer(Layer::Front), "Always on top"));
+    spec.push((MenuAction::SetLayer(Layer::Auto), "Auto"));
+    spec.push((MenuAction::SetLayer(Layer::Back), "Always behind"));
+    spec.push((MenuAction::SetInput(toggled_input), "Click-through"));
+    spec.push((MenuAction::Dismiss, "Dismiss"));
     #[allow(
         clippy::cast_possible_truncation,
-        reason = "a fixed five-item menu cannot overflow u32"
+        reason = "a menu this short cannot overflow u32"
     )]
     let bounds = interaction::menu_bounds(point, spec.len() as u32, monitor);
     let items = spec
@@ -1529,7 +1541,7 @@ fn open_menu(app: &AppHandle, point: Point) {
         .map(|(index, (action, label))| MenuEntry {
             #[allow(
                 clippy::cast_possible_truncation,
-                reason = "a fixed five-item menu cannot overflow u32"
+                reason = "a menu this short cannot overflow u32"
             )]
             rect: interaction::menu_item_bounds(bounds, index as u32),
             action: *action,
@@ -1537,7 +1549,7 @@ fn open_menu(app: &AppHandle, point: Point) {
             checked: match action {
                 MenuAction::SetLayer(layer) => *layer == area.layer,
                 MenuAction::SetInput(_) => area.input == Input::PassThrough,
-                MenuAction::Dismiss => false,
+                MenuAction::Dismiss | MenuAction::Copy | MenuAction::SaveToFile => false,
             },
         })
         .collect();
@@ -1596,6 +1608,26 @@ fn activate_menu_item(app: &AppHandle, index: usize, release: Point) {
         MenuAction::SetLayer(layer) => overlay::set_area_layer(app, area, layer),
         MenuAction::SetInput(input) => overlay::set_area_input(app, area, input),
         MenuAction::Dismiss => overlay::dismiss_area(app, area),
+        // Neither touches the area store — nothing to re-emit — and both are
+        // spawned onto their own thread rather than run here: a capture is
+        // ~100-300 ms even warm (`uptake_capture` crate docs, F-29), and this
+        // function runs on the event-loop thread, inside the `WH_MOUSE_LL`
+        // callback's call stack. A hook callback that blocks that long risks
+        // Windows silently removing the hook (`LowLevelHooksTimeout`, F-33's
+        // failure class) — see the `output` module docs.
+        MenuAction::Copy => {
+            if let Some(bounds) = overlay::area_bounds(app, area) {
+                std::thread::spawn(move || crate::output::copy_to_clipboard(bounds));
+            }
+            false
+        }
+        MenuAction::SaveToFile => {
+            if let Some(bounds) = overlay::area_bounds(app, area) {
+                let app = app.clone();
+                std::thread::spawn(move || crate::output::save_to_file(&app, bounds));
+            }
+            false
+        }
     };
     if changed && let Err(error) = overlay::emit_areas(app) {
         eprintln!("placement: menu action applied but could not emit the new set: {error}");
