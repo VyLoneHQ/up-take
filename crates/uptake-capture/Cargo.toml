@@ -1,0 +1,49 @@
+# uptake-capture — Windows Graphics Capture (WGC) of screen regions.
+#
+# The Windows-specific capture surface, isolated here per architecture.md §2 so
+# the platform-independent crates never touch a Windows API. Depends on
+# siblings only through uptake-core types (Rect in, RgbaBitmap out).
+#
+# The GDI fallback for WGC-blocked content is task 1.8 and will live here too.
+
+[package]
+name = "uptake-capture"
+description = "One-shot Windows Graphics Capture of virtual-desktop regions into RGBA bitmaps."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+uptake-core = { workspace = true }
+thiserror = { workspace = true }
+
+[target."cfg(windows)".dependencies]
+# The WGC wrapper the 2026-07-22 capture spike validated on the dev rig
+# (first frame ~90 ms, hardware-overlay video captured crisply — ADR-0014).
+# MIT-licensed; verified against deny.toml's allow-list.
+windows-capture = "2.0"
+# Win32 APIs called directly:
+#   - monitors.rs: EnumDisplayMonitors (monitor rects + HMONITORs)
+#   - wgc.rs: PeekMessageW/PostThreadMessageW (timeout escape for a capture
+#     thread whose frame never arrives) and GetCurrentThreadId
+#   - examples/grab.rs and tests: SetProcessDpiAwarenessContext, because
+#     monitor coordinates are physical only in a per-monitor-DPI-aware process
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_System_Threading",
+  "Win32_UI_HiDpi",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+# quality-bars.md §2: coordinate math gets property tests. The capture plan
+# (region ∩ monitors → per-monitor crops and output offsets) is coordinate math.
+proptest = { workspace = true }
+
+[lints]
+workspace = true
