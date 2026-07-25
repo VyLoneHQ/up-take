@@ -2,6 +2,7 @@ mod click_through;
 #[cfg(debug_assertions)]
 mod dev_harness;
 mod hotkey;
+mod output;
 mod overlay;
 mod overlay_state;
 #[cfg(windows)]
@@ -149,6 +150,14 @@ pub fn run() -> tauri::Result<()> {
                 eprintln!(
                     "display-watch: display changes while the overlay is visible will not be tracked: {error}"
                 );
+            }
+            // ADR-0019: permanent, one-time exclusion from every capture API.
+            // Not fatal — a failed call degrades to "the overlay is visible in
+            // captures" (decision 4), which is worse than the norm but not a
+            // reason to refuse to start.
+            #[cfg(windows)]
+            if let Err(error) = overlay::exclude_from_capture(app.handle()) {
+                eprintln!("overlay: {error}");
             }
             // Registered before the tray: architecture §4's mitigation is
             // telling the user a failed registration, and that still holds
