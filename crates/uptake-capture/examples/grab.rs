@@ -14,6 +14,15 @@
 //! cargo run -p uptake-capture --example grab -- -1000 0 400 300 portrait.png
 //! ```
 //!
+//! Prepend `--gdi` to force the GDI fallback (task 1.8) instead of WGC, so the
+//! two paths can be grabbed side by side and eyeballed on the same content —
+//! the fallback does not fire on its own on a healthy desktop:
+//!
+//! ```text
+//! cargo run -p uptake-capture --example grab -- 100 100 640 480 wgc.png
+//! cargo run -p uptake-capture --example grab -- --gdi 100 100 640 480 gdi.png
+//! ```
+//!
 //! Prints the clamped rectangle and the capture latency — the number the §1
 //! budget (selection→clipboard < 300 ms) cares about.
 
@@ -35,9 +44,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("could not enable per-monitor DPI awareness".into());
     }
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // `--gdi` forces the fallback path via the crate's UPTAKE_FORCE_GDI seam.
+    let force_gdi = args.first().is_some_and(|a| a == "--gdi");
+    if force_gdi {
+        args.remove(0);
+        // SAFETY: single-threaded here, before any capture thread is spawned.
+        unsafe { std::env::set_var("UPTAKE_FORCE_GDI", "1") };
+    }
     let [x, y, width, height, rest @ ..] = args.as_slice() else {
-        return Err("usage: grab <x> <y> <width> <height> [out.png]".into());
+        return Err("usage: grab [--gdi] <x> <y> <width> <height> [out.png]".into());
     };
     let region = Rect::new(x.parse()?, y.parse()?, width.parse()?, height.parse()?);
     let out_path = rest.first().map_or("grab.png", String::as_str);
@@ -62,9 +78,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let warm_elapsed = warm_started.elapsed();
 
     println!(
-        "captured {:?} (requested {:?}) in {:.1} ms cold / {:.1} ms warm -> {out_path}",
+        "captured {:?} (requested {:?}) via {} in {:.1} ms cold / {:.1} ms warm -> {out_path}",
         captured.rect,
         region,
+        if force_gdi { "GDI" } else { "WGC" },
         elapsed.as_secs_f64() * 1000.0,
         warm_elapsed.as_secs_f64() * 1000.0,
     );

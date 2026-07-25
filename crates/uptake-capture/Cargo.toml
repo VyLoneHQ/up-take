@@ -4,7 +4,8 @@
 # the platform-independent crates never touch a Windows API. Depends on
 # siblings only through uptake-core types (Rect in, RgbaBitmap out).
 #
-# The GDI fallback for WGC-blocked content is task 1.8 and will live here too.
+# WGC is the primary path (wgc.rs); gdi.rs is the fallback for monitors WGC
+# cannot deliver a frame for (task 1.8).
 
 [package]
 name = "uptake-capture"
@@ -30,6 +31,8 @@ windows-capture = "2.0"
 #   - monitors.rs: EnumDisplayMonitors (monitor rects + HMONITORs)
 #   - wgc.rs: PeekMessageW/PostThreadMessageW (timeout escape for a capture
 #     thread whose frame never arrives) and GetCurrentThreadId
+#   - gdi.rs: GetDC/BitBlt/CreateDIBSection et al. (the WGC-unavailable
+#     fallback: BitBlt the screen DC into a top-down DIB)
 #   - examples/grab.rs and tests: SetProcessDpiAwarenessContext, because
 #     monitor coordinates are physical only in a per-monitor-DPI-aware process
 windows-sys = { workspace = true, features = [
