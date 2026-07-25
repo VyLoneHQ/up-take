@@ -33,10 +33,18 @@
 //! *handling* one: which part of an area a pointer grabs and how dragging it
 //! changes the bounds. Both are built on [`geometry`] and, like it, are pure: no
 //! window, no capture, no OS.
+//!
+//! # Bitmaps
+//!
+//! [`bitmap`] holds [`bitmap::RgbaBitmap`], the CPU-side RGBA image that
+//! capture produces and OCR/encoding consume — here rather than in
+//! `uptake-capture` so that consumers of pixels never depend on the
+//! Windows-only crate that produced them.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
 pub mod area;
+pub mod bitmap;
 pub mod geometry;
 pub mod interaction;
