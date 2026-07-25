@@ -30,10 +30,11 @@
 //! only when **both** paths fail for a monitor, or the display topology changes
 //! mid-capture (which aborts the whole capture, since the plan is now stale).
 //!
-//! Setting the `UPTAKE_FORCE_GDI` environment variable skips WGC entirely and
-//! captures every monitor through GDI. The fallback path does not otherwise
-//! fire on a healthy modern desktop, so this is how it is exercised and
-//! pixel-compared against WGC on the rig (`examples/grab.rs --gdi`).
+//! [`capture_region_via_gdi`] takes the fallback for every monitor, skipping
+//! WGC. The fallback does not otherwise fire on a healthy modern desktop, so
+//! this is how it is exercised and pixel-compared against WGC on the rig
+//! (`examples/grab.rs --gdi`), and it is the diagnostic to reach for if WGC
+//! ever misbehaves in the field.
 //!
 //! # What callers must know
 //!
@@ -92,15 +93,34 @@ pub struct CapturedRegion {
 /// [`CaptureError`] and each variant's message says what to do about it.
 #[cfg(windows)]
 pub fn capture_region(region: Rect) -> Result<CapturedRegion, CaptureError> {
+    capture_region_inner(region, false)
+}
+
+/// Captures `region` through the GDI fallback alone, as if WGC were
+/// unavailable on every monitor.
+///
+/// The fallback never fires on its own on a healthy desktop, so this is how it
+/// is verified (`tests/hardware.rs`, `examples/grab.rs --gdi`) and the
+/// diagnostic to reach for if WGC misbehaves in the field. Prefer
+/// [`capture_region`] everywhere else: GDI captures hardware-overlay video as
+/// black where WGC is crisp, and it cannot be told to exclude a window.
+///
+/// This is an explicit parameter rather than an environment switch on purpose —
+/// a process-global that changes which path a capture takes can be flipped by
+/// one test and silently observed by another running beside it.
+#[cfg(windows)]
+pub fn capture_region_via_gdi(region: Rect) -> Result<CapturedRegion, CaptureError> {
+    capture_region_inner(region, true)
+}
+
+#[cfg(windows)]
+fn capture_region_inner(region: Rect, force_gdi: bool) -> Result<CapturedRegion, CaptureError> {
     let monitors = monitors::enumerate()?;
     let capture_plan = plan::plan(region, &monitors)?;
     let mut bitmap =
         RgbaBitmap::transparent(capture_plan.output.size).ok_or(CaptureError::TooLarge)?;
 
-    // The forcing seam (see the crate docs): capture every monitor through GDI,
-    // as if WGC were unavailable, so the fallback path can be exercised on a
-    // desktop where it would never fire on its own.
-    if std::env::var_os("UPTAKE_FORCE_GDI").is_some() {
+    if force_gdi {
         for &shot in &capture_plan.shots {
             let pixels = gdi::capture_shot(shot)?;
             if !blit::blit(&mut bitmap, shot.dest_x, shot.dest_y, &pixels, shot.size) {

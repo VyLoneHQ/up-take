@@ -45,13 +45,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut args: Vec<String> = std::env::args().skip(1).collect();
-    // `--gdi` forces the fallback path via the crate's UPTAKE_FORCE_GDI seam.
+    // `--gdi` takes the fallback path instead of WGC for every monitor.
     let force_gdi = args.first().is_some_and(|a| a == "--gdi");
     if force_gdi {
         args.remove(0);
-        // SAFETY: single-threaded here, before any capture thread is spawned.
-        unsafe { std::env::set_var("UPTAKE_FORCE_GDI", "1") };
     }
+    let capture = if force_gdi {
+        uptake_capture::capture_region_via_gdi
+    } else {
+        uptake_capture::capture_region
+    };
     let [x, y, width, height, rest @ ..] = args.as_slice() else {
         return Err("usage: grab [--gdi] <x> <y> <width> <height> [out.png]".into());
     };
@@ -59,7 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out_path = rest.first().map_or("grab.png", String::as_str);
 
     let started = std::time::Instant::now();
-    let captured = uptake_capture::capture_region(region)?;
+    let captured = capture(region)?;
     let elapsed = started.elapsed();
 
     let png = ImageEncoder::new(ImageFormat::Png, ImageEncoderPixelFormat::Rgba8)?.encode(
@@ -74,7 +77,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // budget actually governs — the app is a resident tray process, so its
     // captures are all warm ones.
     let warm_started = std::time::Instant::now();
-    let _ = uptake_capture::capture_region(region)?;
+    let _ = capture(region)?;
     let warm_elapsed = warm_started.elapsed();
 
     println!(

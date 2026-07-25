@@ -141,6 +141,11 @@ fn blit_into_dib(
             0,
         );
         if bitmap.is_null() || bits.is_null() {
+            // A handle with no pixel pointer should not be reachable, but if it
+            // ever is, it is still a GDI object this function created.
+            if !bitmap.is_null() {
+                DeleteObject(bitmap as HGDIOBJ);
+            }
             DeleteDC(mem_dc);
             return Err("could not allocate the capture bitmap");
         }
