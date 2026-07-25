@@ -1617,7 +1617,8 @@ fn activate_menu_item(app: &AppHandle, index: usize, release: Point) {
         // failure class) — see the `output` module docs.
         MenuAction::Copy => {
             if let Some(bounds) = overlay::area_bounds(app, area) {
-                std::thread::spawn(move || crate::output::copy_to_clipboard(bounds));
+                let app = app.clone();
+                std::thread::spawn(move || crate::output::copy_to_clipboard(&app, bounds));
             }
             false
         }

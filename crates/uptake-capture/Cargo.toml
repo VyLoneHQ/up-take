@@ -26,7 +26,7 @@ thiserror = { workspace = true }
 # The WGC wrapper the 2026-07-22 capture spike validated on the dev rig
 # (first frame ~90 ms, hardware-overlay video captured crisply — ADR-0014).
 # MIT-licensed; verified against deny.toml's allow-list.
-windows-capture = "2.0"
+windows-capture = { workspace = true }
 # Win32 APIs called directly:
 #   - monitors.rs: EnumDisplayMonitors (monitor rects + HMONITORs)
 #   - wgc.rs: PeekMessageW/PostThreadMessageW (timeout escape for a capture

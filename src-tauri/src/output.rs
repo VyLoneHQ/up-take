@@ -20,10 +20,10 @@
 //! and [`save_to_file`] are therefore designed to be called from a **freshly
 //! spawned thread**, never from the hook callback itself; `placement.rs` owns
 //! that spawn. Any thread may call `uptake_capture::capture_region` (its own
-//! contract) and the Win32 clipboard functions used here take no window
-//! handle, so nothing below is thread-affine.
+//! contract), and the clipboard is opened against the overlay's `HWND` — a
+//! plain field read on tao's side, safe from any thread — so nothing below is
+//! thread-affine.
 
-use std::ffi::c_void;
 use std::fs;
 use std::path::PathBuf;
 use std::ptr;
@@ -57,9 +57,16 @@ const BUDGET_HARD_FAIL_MS: u128 = 600;
 /// writing a file (a screenshot is transient) does not transfer here, and the
 /// cost (an area copied forty times is forty stray PNGs) stays. Nothing is
 /// written to disk by this path.
-pub(crate) fn copy_to_clipboard(bounds: Rect) {
+pub(crate) fn copy_to_clipboard(app: &AppHandle, bounds: Rect) {
     let started = Instant::now();
-    let outcome = capture(bounds).and_then(|(bitmap, png)| publish_clipboard(&bitmap, &png));
+    let outcome = capture(bounds).and_then(|(bitmap, png)| {
+        // Both buffers are built *before* the clipboard is opened. The
+        // clipboard is a global system resource — every other process's
+        // access blocks while it is held — so no per-pixel work belongs
+        // inside the bracket, and a 4K-sized area is a 33 MB conversion.
+        let dib = dibv5_bytes(&bitmap)?;
+        publish_clipboard(overlay_hwnd(app)?, &dib, &png)
+    });
     report("copy", started, outcome);
 }
 
@@ -120,16 +127,36 @@ fn report(action: &str, started: Instant, outcome: Result<(), String>) {
 // Clipboard: both CF_DIBV5 and the registered "PNG" format (PRODUCT-VISION §8).
 // ---------------------------------------------------------------------------
 
-/// Opens the clipboard, empties it, publishes both formats, and closes it.
+/// The overlay window's handle, to own the clipboard with.
 ///
-/// `OpenClipboard(NULL)` associates the open clipboard with the current
-/// thread/task rather than a specific window — there is no window handle
-/// naturally available on the spawned thread this runs on, and none is
-/// required: the clipboard functions used here are not window-affine.
-fn publish_clipboard(bitmap: &RgbaBitmap, png: &[u8]) -> Result<(), String> {
+/// Resolving it is a `HashMap` lookup plus a plain field read on tao's side
+/// (`Window::hwnd` returns `self.window.0` — no event-loop dispatch), so this
+/// is safe from the spawned thread these actions run on.
+fn overlay_hwnd(app: &AppHandle) -> Result<HWND, String> {
+    Ok(crate::overlay::overlay_window(app)?
+        .hwnd()
+        .map_err(|error| format!("could not get the overlay window handle: {error}"))?
+        .0)
+}
+
+/// Opens the clipboard against `owner`, empties it, publishes both formats,
+/// and closes it.
+///
+/// **`owner` must not be null.** `OpenClipboard(NULL)` would associate the
+/// open clipboard with the current task rather than a window, which is
+/// convenient on a spawned thread but out of contract: `EmptyClipboard`'s
+/// documented remarks state that a NULL window handle "sets the clipboard
+/// owner to NULL. Note that this causes `SetClipboardData` to fail." It does
+/// not fail in practice on Windows 11 — the first cut of this module shipped
+/// that way and was verified working on the rig — but relying on documented-
+/// to-fail behaviour is the shape F-25 and F-33 both took, so the overlay's
+/// own `HWND` is passed instead. Nothing is delay-rendered, so being the
+/// clipboard owner costs the overlay nothing: it receives
+/// `WM_DESTROYCLIPBOARD`, which `DefWindowProc` ignores.
+fn publish_clipboard(owner: HWND, dib: &[u8], png: &[u8]) -> Result<(), String> {
     // SAFETY: `OpenClipboard`/`CloseClipboard` bracket every clipboard call
-    // below; `null_mut()` is an explicitly supported argument.
-    let opened = unsafe { OpenClipboard(ptr::null_mut::<c_void>() as HWND) };
+    // below; `owner` is a live top-level window handle owned by this process.
+    let opened = unsafe { OpenClipboard(owner) };
     if opened == 0 {
         return Err("could not open the clipboard".to_string());
     }
@@ -138,7 +165,7 @@ fn publish_clipboard(bitmap: &RgbaBitmap, png: &[u8]) -> Result<(), String> {
         if unsafe { EmptyClipboard() } == 0 {
             return Err("could not empty the clipboard".to_string());
         }
-        set_clipboard_dibv5(bitmap)?;
+        set_clipboard_data(CF_DIBV5, dib)?;
         set_clipboard_png(png)?;
         Ok(())
     })();
@@ -204,7 +231,8 @@ fn set_clipboard_data(format: u32, data: &[u8]) -> Result<(), String> {
 /// `winuser.h` and unchanged since Windows 2000.
 const CF_DIBV5: u32 = 17;
 
-/// Builds and publishes a `BITMAPV5HEADER` DIB with a true alpha channel.
+/// Builds a `BITMAPV5HEADER` DIB with a true alpha channel, as the packed
+/// bytes `CF_DIBV5` expects: header immediately followed by the pixels.
 ///
 /// DIBs are conventionally bottom-up for clipboard compatibility (a negative,
 /// top-down height is valid GDI but not every consumer handles it), so the
@@ -213,9 +241,15 @@ const CF_DIBV5: u32 = 17;
 /// `BI_RGB` — is what makes a partially transparent capture (the dead zones
 /// between mismatched monitors, `uptake-capture`'s crate docs) paste with its
 /// transparency intact instead of forced opaque.
-fn set_clipboard_dibv5(bitmap: &RgbaBitmap) -> Result<(), String> {
+fn dibv5_bytes(bitmap: &RgbaBitmap) -> Result<Vec<u8>, String> {
     let width = i32::try_from(bitmap.width()).map_err(|_| "capture width overflows a DIB")?;
     let height = i32::try_from(bitmap.height()).map_err(|_| "capture height overflows a DIB")?;
+    let pixels = bottom_up_bgra(bitmap);
+    // Zero is documented as acceptable only for `BI_RGB` ("This may be set to
+    // zero for BI_RGB bitmaps") and this DIB is `BI_BITFIELDS`, so a consumer
+    // deriving the pixel extent from the header gets the real size.
+    let size_image =
+        u32::try_from(pixels.len()).map_err(|_| "capture overflows a DIB's image size")?;
     let header = BITMAPV5HEADER {
         bV5Size: u32::try_from(size_of::<BITMAPV5HEADER>()).unwrap_or_default(),
         bV5Width: width,
@@ -224,7 +258,7 @@ fn set_clipboard_dibv5(bitmap: &RgbaBitmap) -> Result<(), String> {
         bV5Planes: 1,
         bV5BitCount: 32,
         bV5Compression: BI_BITFIELDS,
-        bV5SizeImage: 0,
+        bV5SizeImage: size_image,
         bV5XPelsPerMeter: 0,
         bV5YPelsPerMeter: 0,
         bV5ClrUsed: 0,
@@ -243,7 +277,9 @@ fn set_clipboard_dibv5(bitmap: &RgbaBitmap) -> Result<(), String> {
         bV5ProfileSize: 0,
         bV5Reserved: 0,
     };
-    let pixels = bottom_up_bgra(bitmap);
+    // SAFETY: `BITMAPV5HEADER` is a `repr(C)` plain-old-data struct with no
+    // padding at 4-byte alignment; reading its own storage as bytes for its
+    // own size cannot read out of bounds.
     let header_bytes = unsafe {
         std::slice::from_raw_parts(
             (&raw const header).cast::<u8>(),
@@ -253,7 +289,7 @@ fn set_clipboard_dibv5(bitmap: &RgbaBitmap) -> Result<(), String> {
     let mut dib = Vec::with_capacity(header_bytes.len() + pixels.len());
     dib.extend_from_slice(header_bytes);
     dib.extend_from_slice(&pixels);
-    set_clipboard_data(CF_DIBV5, &dib)
+    Ok(dib)
 }
 
 /// `bitmap`'s pixels as bottom-up `B, G, R, A` — the DIB's on-the-wire order
@@ -373,6 +409,26 @@ mod tests {
         let path = unique_path(&dir, stem);
         assert_eq!(path, dir.join(format!("{stem}_3.png")));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_dib_is_a_v5_header_followed_by_its_pixels_with_a_real_size_image() {
+        let bitmap = RgbaBitmap::from_pixels(
+            uptake_core::geometry::Size::new(3, 2),
+            vec![0_u8; 3 * 2 * 4],
+        )
+        .unwrap();
+        let dib = dibv5_bytes(&bitmap).unwrap();
+        assert_eq!(dib.len(), 124 + 3 * 2 * 4);
+        // bV5Size is the first field and must equal the header's own length,
+        // which is how a consumer picks the header version.
+        assert_eq!(u32::from_le_bytes(dib[0..4].try_into().unwrap()), 124);
+        // bV5SizeImage sits at offset 20; zero is only sanctioned for BI_RGB
+        // and this DIB is BI_BITFIELDS.
+        assert_eq!(
+            u32::from_le_bytes(dib[20..24].try_into().unwrap()),
+            3 * 2 * 4
+        );
     }
 
     #[test]

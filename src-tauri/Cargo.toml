@@ -57,7 +57,7 @@ windows-sys = { workspace = true, features = [
 ] }
 # The PNG encoder task 1.7's grab.rs example already validated (WIC-backed,
 # no new codec to vet) — reused rather than adding a second PNG dependency.
-windows-capture = "2.0"
+windows-capture = { workspace = true }
 
 [lints]
 workspace = true
