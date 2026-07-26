@@ -402,6 +402,14 @@ fn drive(app: &AppHandle, event: Event) {
 /// rather than leak that button's eventual release to the app underneath (see
 /// the `placement` module docs).
 fn apply(app: &AppHandle, state: OverlayState) -> Result<(), String> {
+    // The state the machine settled on, logged where the effect happens rather
+    // than where the decision is made — so the line reports what the overlay
+    // actually became, not what `next` intended. Debug-only; task 1.15 owns
+    // real logging. Added for task 1.9b's rig pass, where every other check
+    // (did arming work, did the Screenshot auto-exit) is only readable if the
+    // current state is an observation instead of an assumption.
+    #[cfg(debug_assertions)]
+    eprintln!("overlay: state -> {state:?}");
     match state {
         OverlayState::Hidden => {
             // Emit first so the frontend clears its indicator, then hide.
@@ -438,15 +446,21 @@ fn emit_state(app: &AppHandle, state: OverlayState) -> Result<(), String> {
     let origin = (position.x, position.y);
     // The per-monitor focus frames are a Placement-only indicator; every other
     // state sends none.
+    // Read from `MONITOR_CACHE` rather than re-enumerating. `show` refreshes the
+    // cache immediately before this runs, so it is current — and using the one
+    // list means `overlay://active-monitor`'s index cannot address a different
+    // array than the one sent here. A fresh enumeration would be a second
+    // source of truth for the same fact, which is how the badge would end up
+    // highlighting the wrong monitor.
     let monitors = if matches!(state, OverlayState::Placement) {
-        monitors(&window)?
+        monitor_rects()
             .iter()
-            .map(|m| {
+            .map(|bounds| {
                 (
-                    m.bounds.origin.x,
-                    m.bounds.origin.y,
-                    m.bounds.size.width,
-                    m.bounds.size.height,
+                    bounds.origin.x,
+                    bounds.origin.y,
+                    bounds.size.width,
+                    bounds.size.height,
                 )
             })
             .collect()
@@ -798,6 +812,37 @@ pub(crate) fn create_area(
     // future clamp or snap in `create` cannot silently desynchronise the pin
     // from the pixels.
     Some((id, bounds))
+}
+
+const ACTIVE_MONITOR_EVENT: &str = "overlay://active-monitor";
+
+/// The payload of `overlay://active-monitor`: which monitor holds the cursor.
+#[derive(Serialize, Clone)]
+struct ActiveMonitorPayload {
+    /// An index into the `monitors` array of the last `overlay://state` — both
+    /// come from [`monitor_rects`], so they address the same list. `null` when
+    /// the cursor is in a dead zone between mismatched monitors, where any
+    /// answer would be a guess.
+    index: Option<usize>,
+}
+
+/// Which monitor contains `point`, as an index into [`monitor_rects`].
+pub(crate) fn monitor_index_at(point: Point) -> Option<usize> {
+    monitor_rects()
+        .iter()
+        .position(|bounds| bounds.contains(point))
+}
+
+/// Tells the frontend which monitor the per-monitor placement chrome belongs on.
+///
+/// Emitted on change from the placement poll rather than folded into
+/// `overlay://state`: the answer changes as the cursor crosses a monitor edge,
+/// which is not a state transition, and re-emitting the whole state payload for
+/// it would recompute geometry for a one-integer change.
+pub(crate) fn emit_active_monitor(app: &AppHandle, index: Option<usize>) {
+    if let Err(error) = app.emit(ACTIVE_MONITOR_EVENT, ActiveMonitorPayload { index }) {
+        eprintln!("overlay: could not emit the active monitor: {error}");
+    }
 }
 
 /// The payload of `overlay://pin`: one area's capture is ready to render.

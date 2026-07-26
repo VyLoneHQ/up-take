@@ -56,6 +56,16 @@ export interface AreasPayload {
 }
 
 /**
+ * The payload of `overlay://active-monitor`: which monitor holds the cursor.
+ *
+ * An index into the `monitors` array of the last {@link StatePayload}. `null`
+ * when the cursor is in a dead zone between mismatched monitors.
+ */
+export interface ActiveMonitorPayload {
+  index: number | null;
+}
+
+/**
  * The payload of the `overlay://pin` event: one area's capture is ready.
  *
  * Carries a **URL, not bytes**. The `uptake-area://` scheme exists precisely so

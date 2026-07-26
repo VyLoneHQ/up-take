@@ -4,6 +4,7 @@ import { listen } from '@tauri-apps/api/event';
 import { onMount } from 'svelte';
 import { SvelteMap } from 'svelte/reactivity';
 import {
+  type ActiveMonitorPayload,
   type AreaFrame,
   type AreasPayload,
   type AreaView,
@@ -54,6 +55,10 @@ let menu: MenuView | null = $state(null);
 // this — arming is placement state living beside the mouse hook — and re-emits
 // the state whenever it changes.
 let armed: ArmableType | null = $state(null);
+// Which monitor holds the cursor — an index into `monitors`, both from Rust's
+// one cached list. Null in a dead zone between mismatched monitors, in which
+// case no badge is drawn at all rather than one guessed onto a screen.
+let activeMonitor: number | null = $state(null);
 // Each area's pinned capture URL, keyed by area id. Versioned URLs (see the
 // Rust `captures` module), so a re-capture replaces the entry with a distinct
 // address rather than relying on the WebView to bust its own cache.
@@ -133,6 +138,12 @@ onMount(() => {
       if (!live.has(id)) pins.delete(id);
     }
   });
+  const unlistenActiveMonitor = listen<ActiveMonitorPayload>(
+    'overlay://active-monitor',
+    (event) => {
+      activeMonitor = event.payload.index;
+    },
+  );
   const unlistenPin = listen<PinPayload>('overlay://pin', (event) => {
     // Arrives ~200 ms after the area itself: the area appears the instant the
     // drag ends and fills in when its capture lands, rather than leaving a hole
@@ -161,6 +172,7 @@ onMount(() => {
   const ready = Promise.all([
     unlistenState,
     unlistenAreas,
+    unlistenActiveMonitor,
     unlistenPin,
     unlistenSelection,
     unlistenHover,
@@ -179,7 +191,7 @@ onMount(() => {
 
 <main class="overlay" class:active={showsTint(overlayState)}>
   {#if showsTint(overlayState)}
-    {#each frames as frame (`${frame.x},${frame.y},${frame.width},${frame.height}`)}
+    {#each frames as frame, i (`${frame.x},${frame.y},${frame.width},${frame.height}`)}
       <div
         class="monitor-frame"
         style="left: {frame.x}px; top: {frame.y}px; width: {frame.width}px; height: {frame.height}px"
@@ -188,8 +200,12 @@ onMount(() => {
              nothing is armed: absence means Default, and a permanent label
              naming the resting state is the "which mode am I in?" noise the
              design avoids. This indicator is the thing that buys down the cost
-             of having transient mode state at all, so it is deliberately loud. -->
-        {#if armed}
+             of having transient mode state at all, so it is deliberately loud.
+
+             On the cursor's monitor ONLY (F-13). Shown on all of them at once —
+             as the first cut did — it reads as "every screen is armed" and
+             buries the single fact it exists to convey. -->
+        {#if armed && i === activeMonitor}
           <span class="armed-badge">{armed}</span>
         {/if}
       </div>

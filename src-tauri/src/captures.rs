@@ -39,8 +39,11 @@ use tauri::http::{Request, Response, StatusCode};
 use tauri::{AppHandle, Manager, UriSchemeContext};
 use uptake_core::area::AreaId;
 
-/// The scheme name. Registered in `lib.rs`; the WebView reaches it as
-/// `uptake-area://localhost/<id>-<version>.png` on Windows.
+/// The scheme name, as registered in `lib.rs`.
+///
+/// **Not the URL the WebView uses** — on Windows that is
+/// `http://uptake-area.localhost/…`. See [`pin_url`], which is the only thing
+/// that should ever build one.
 pub const SCHEME: &str = "uptake-area";
 
 /// One area's pinned capture: the PNG bytes and the version its URL carries.
@@ -91,10 +94,33 @@ impl CaptureStore {
     }
 }
 
-/// The URL path a pinned capture is served at, for the frontend to request.
+/// The URL a pinned capture is served at, for the frontend to request.
+///
+/// # The Windows form is not the obvious one
+///
+/// **On Windows (and Android) a Tauri custom protocol is reached at
+/// `http://<scheme>.localhost/…`, not at `<scheme>://localhost/…`.** The first
+/// cut of this function used the obvious form; it produced a URL WebView2
+/// cannot resolve, and the only symptom was a broken-image icon in the corner
+/// of every pin — indistinguishable from "the capture returned nothing".
+/// Confirmed against `tauri-2.11.5`'s own `protocol::isolation`, which builds
+/// `format!("{https}://{schema}.localhost")` for exactly this reason; `https`
+/// there is the opt-in `app.windows.useHttpsScheme`, which this app leaves at
+/// its `false` default.
+///
+/// The non-Windows arm is the platform-correct form for macOS and Linux, where
+/// the scheme *is* registered as a real scheme. Neither platform is built yet
+/// (the crate is Windows-only today) — it is written out rather than
+/// `todo!()`ed because getting it wrong is invisible until someone looks at a
+/// blank pin, which is precisely what just happened here.
 #[must_use]
 pub fn pin_url(id: AreaId, version: u64) -> String {
-    format!("{SCHEME}://localhost/{}-{version}.png", id.get())
+    let path = format!("{}-{version}.png", id.get());
+    if cfg!(windows) {
+        format!("http://{SCHEME}.localhost/{path}")
+    } else {
+        format!("{SCHEME}://localhost/{path}")
+    }
 }
 
 /// Parses `<id>-<version>.png` out of a request path.
@@ -241,7 +267,32 @@ mod tests {
         // URLs, so `pin_url` and `parse_path` only have to agree with each other.
         let area = ids(1)[0];
         let url = pin_url(area, 99);
-        let path = url.trim_start_matches("uptake-area://localhost");
-        assert_eq!(parse_path(path), Some((area.get(), 99)));
+        // Parse the path out the way a URL parser would, rather than trimming a
+        // hard-coded prefix: the previous version of this test trimmed
+        // `"uptake-area://localhost"`, which passed happily while `pin_url`
+        // emitted a URL WebView2 could not resolve at all. A test that only ever
+        // sees its own assumption cannot catch that.
+        let path = url
+            .split_once("://")
+            .and_then(|(_, rest)| rest.split_once('/'))
+            .map(|(_, path)| format!("/{path}"));
+        assert_eq!(path.as_deref().and_then(parse_path), Some((area.get(), 99)));
+    }
+
+    #[test]
+    fn the_windows_url_uses_the_http_localhost_form_tauri_actually_serves() {
+        // Pinned as a value, not derived from the same helper, because the bug
+        // this catches was a *plausible* URL rather than a malformed one — see
+        // `pin_url`'s docs. On Windows the scheme is a host, not a scheme.
+        let area = ids(1)[0];
+        let url = pin_url(area, 7);
+        if cfg!(windows) {
+            assert_eq!(
+                url,
+                format!("http://uptake-area.localhost/{}-7.png", area.get())
+            );
+        } else {
+            assert_eq!(url, format!("uptake-area://localhost/{}-7.png", area.get()));
+        }
     }
 }

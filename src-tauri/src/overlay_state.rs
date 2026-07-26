@@ -4,8 +4,15 @@
 //! The overlay is always in exactly one of three states:
 //!
 //! - **`Hidden`** — nothing on screen; the user's apps have input.
-//! - **`Placement`** — UP-TAKE has input focus: a light tint dims the screen,
-//!   the whole surface is interactive, and the user drags to create areas.
+//! - **`Placement`** — UP-TAKE has input focus and the user drags to create
+//!   areas. This line used to say "a light tint dims the screen" and "the whole
+//!   surface is interactive"; **both stopped being true and the comment did
+//!   not follow.** Task 1.6c replaced the full-surface tint with a per-monitor
+//!   edge vignette, because a flat fill over a hardware video plane punches it
+//!   to solid grey — and placing over live content is the product (ADR-0014).
+//!   The surface is *click-through*, not interactive; the mouse hook supplies
+//!   the drag. Corrected 2026-07-26 after a rig pass reported the missing tint
+//!   as a bug, which is what a stale comment buys you.
 //! - **`Living`** — the user's apps have input; areas float and stay
 //!   interactive, while everything between them is click-through.
 //!

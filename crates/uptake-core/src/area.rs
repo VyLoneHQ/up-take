@@ -159,22 +159,34 @@ impl AreaType {
     /// answer "and then what?", and getting it wrong strands the user in the
     /// wrong state. So the five unbuilt types below are **not** answered here —
     /// they take the conservative value and say so.
+    ///
+    /// # Every type stays, as of ADR-0023
+    ///
+    /// ADR-0018 §6 had `Screenshot` **exit** on create. Driving it on real
+    /// hardware immediately read as wrong: the capture lands and the overlay
+    /// drops you out from under your own hands, before you can nudge or resize
+    /// the area you just drew. Reversed by
+    /// [ADR-0023](ADR-0023-screenshot-stays-in-placement.md); the exit becomes
+    /// an opt-in setting (task 1.14).
+    ///
+    /// **The axis is still worth having, and this is the evidence for it.** The
+    /// reversal was a one-value change with no structural edit anywhere — which
+    /// is exactly what a per-type property is for. Had "and then what?" been
+    /// inlined at the call site instead, this would have been surgery.
     #[must_use]
     pub const fn after_create(self) -> AfterCreate {
         match self {
-            // ADR-0018 §6, decided: the capture is taken, the pin is on screen,
-            // and PLACEMENT has nothing left to do.
-            Self::Screenshot => AfterCreate::ExitPlacement,
-            // ADR-0018 §6, decided.
-            Self::Default => AfterCreate::StayInPlacement,
-            // Not decided — these types are not built. Staying is the
-            // conservative answer because it is the status quo: an unexpected
-            // stay costs one `Esc`, an unexpected exit drops the user out of a
-            // mode they were still using. Revisit per type as each one ships,
-            // rather than inheriting this by default.
-            Self::Record | Self::Ocr | Self::Upscale | Self::Analysis | Self::Filter => {
-                AfterCreate::StayInPlacement
-            }
+            // Every type stays in PLACEMENT today (ADR-0023). Written as one
+            // arm rather than seven because there is currently one answer; the
+            // *return type* is what keeps a second answer cheap to add, not the
+            // shape of this match.
+            Self::Default
+            | Self::Screenshot
+            | Self::Record
+            | Self::Ocr
+            | Self::Upscale
+            | Self::Analysis
+            | Self::Filter => AfterCreate::StayInPlacement,
         }
     }
 }
@@ -670,16 +682,16 @@ mod tests {
     }
 
     #[test]
-    fn screenshot_is_the_only_type_that_exits_placement_on_create() {
-        // ADR-0018 §6 decided exactly two types and left the other five to the
-        // task that builds them. Pinning the whole set means a new type cannot
-        // inherit `ExitPlacement` by being added to the wrong match arm — the
-        // failure the ADR names as "strands the user in the wrong state".
+    fn no_type_exits_placement_on_create() {
+        // ADR-0023 reversed ADR-0018 §6 after a rig pass: being dropped out of
+        // PLACEMENT the instant a capture lands, before you can nudge the area
+        // you just drew, reads as the app taking the tool out of your hands.
+        // Pinned as a whole-set assertion rather than deleted, so a type that
+        // later wants `ExitPlacement` has to change this test deliberately.
         for kind in ALL_TYPES {
-            let expected = matches!(kind, AreaType::Screenshot);
             assert_eq!(
-                kind.after_create() == AfterCreate::ExitPlacement,
-                expected,
+                kind.after_create(),
+                AfterCreate::StayInPlacement,
                 "{kind:?} after_create"
             );
         }

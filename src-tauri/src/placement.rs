@@ -611,6 +611,16 @@ pub struct PumpState {
     /// Ticks left before the health check may act again, so a reinstall is not
     /// retried every frame while an elevated window holds the foreground.
     reinstall_cooldown: u32,
+    /// The monitor the previous tick reported as holding the cursor.
+    ///
+    /// **Doubly optional on purpose.** The outer `None` means "nothing reported
+    /// yet this Placement" and is cleared on every tick outside Placement, so
+    /// re-entering always re-emits; the inner `None` is the real answer for a
+    /// cursor in a dead zone between mismatched monitors. Collapsing the two
+    /// would leave a re-entry silent whenever the cursor had not moved to a
+    /// different monitor meanwhile — the common case, since the user usually
+    /// re-summons where they left off.
+    active_monitor: Option<Option<usize>>,
 }
 
 /// The poll's placement work, run every tick (`click_through`, ~60 Hz).
@@ -810,7 +820,20 @@ fn pump_hover(app: &AppHandle, state: &mut PumpState) {
         emit_menu(app);
     }
     if mode() != Mode::Placement {
+        // Forget the reported monitor so the next entry into Placement re-emits
+        // it — see `PumpState::active_monitor`.
+        state.active_monitor = None;
         return;
+    }
+
+    // Which monitor the per-monitor chrome belongs on (F-13). The armed-type
+    // badge follows the cursor: showing it on every monitor at once — as the
+    // first cut did — reads as "every screen is armed" and buries the one fact
+    // the indicator exists to convey, which ADR-0018 §3 makes load-bearing.
+    let active_monitor = overlay::monitor_index_at(point);
+    if state.active_monitor != Some(active_monitor) {
+        state.active_monitor = Some(active_monitor);
+        overlay::emit_active_monitor(app, active_monitor);
     }
 
     let menu_open = lock(&MENU).is_some();
