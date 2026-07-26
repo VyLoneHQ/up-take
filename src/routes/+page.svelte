@@ -2,6 +2,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { onMount } from 'svelte';
+import { SvelteMap } from 'svelte/reactivity';
 import {
   type AreaFrame,
   type AreasPayload,
@@ -22,6 +23,7 @@ import {
   type Origin,
   type OverlayStateName,
   type PhysRect,
+  type PinPayload,
   physRectToCss,
   type SelectionPayload,
   type StatePayload,
@@ -52,6 +54,10 @@ let menu: MenuView | null = $state(null);
 // this — arming is placement state living beside the mouse hook — and re-emits
 // the state whenever it changes.
 let armed: ArmableType | null = $state(null);
+// Each area's pinned capture URL, keyed by area id. Versioned URLs (see the
+// Rust `captures` module), so a re-capture replaces the entry with a distinct
+// address rather than relying on the WebView to bust its own cache.
+let pins = $state(new SvelteMap<number, string>());
 // The WebView owns its scale (ADR-0011); refreshed on every state event in case
 // the overlay moved to a monitor at a different DPI.
 let dpr = $state(1);
@@ -119,6 +125,19 @@ onMount(() => {
   });
   const unlistenAreas = listen<AreasPayload>('overlay://areas', (event) => {
     areas = event.payload.areas;
+    // Drop pins whose area is gone. Rust frees the bytes on dismiss; this is
+    // the view's side of the same lifetime, and without it the map would keep
+    // growing across a long session with URLs that now 404.
+    const live = new Set(event.payload.areas.map((area) => area.id));
+    for (const id of pins.keys()) {
+      if (!live.has(id)) pins.delete(id);
+    }
+  });
+  const unlistenPin = listen<PinPayload>('overlay://pin', (event) => {
+    // Arrives ~200 ms after the area itself: the area appears the instant the
+    // drag ends and fills in when its capture lands, rather than leaving a hole
+    // where the user just dragged.
+    pins.set(event.payload.id, event.payload.url);
   });
   const unlistenSelection = listen<SelectionPayload>(
     'placement://selection',
@@ -142,6 +161,7 @@ onMount(() => {
   const ready = Promise.all([
     unlistenState,
     unlistenAreas,
+    unlistenPin,
     unlistenSelection,
     unlistenHover,
     unlistenMenu,
@@ -163,7 +183,16 @@ onMount(() => {
       <div
         class="monitor-frame"
         style="left: {frame.x}px; top: {frame.y}px; width: {frame.width}px; height: {frame.height}px"
-      ></div>
+      >
+        <!-- What the next drag will make (ADR-0018 §3). Nothing is shown when
+             nothing is armed: absence means Default, and a permanent label
+             naming the resting state is the "which mode am I in?" noise the
+             design avoids. This indicator is the thing that buys down the cost
+             of having transient mode state at all, so it is deliberately loud. -->
+        {#if armed}
+          <span class="armed-badge">{armed}</span>
+        {/if}
+      </div>
     {/each}
   {/if}
 
@@ -177,6 +206,18 @@ onMount(() => {
           style="left: {area.rect.x}px; top: {area.rect.y}px; width: {area.rect
             .width}px; height: {area.rect.height}px"
         >
+          {#if pins.get(area.id)}
+            <!-- The Snipaste pin (ADR-0014 §6). The bytes arrive over the
+                 uptake-area:// scheme, not the IPC bridge — see `captures`.
+                 `draggable={false}` because the overlay owns the mouse in
+                 placement and a native image drag would fight the hook. -->
+            <img
+              class="pin"
+              src={pins.get(area.id)}
+              alt=""
+              draggable={false}
+            />
+          {/if}
           {#if area.layer !== 'auto'}
             <span class="layer-badge">{area.layer === 'front' ? '▲' : '▼'}</span>
           {/if}
@@ -309,6 +350,41 @@ onMount(() => {
   font: 11px/1 system-ui, sans-serif;
   color: rgba(160, 210, 255, 0.95);
   text-shadow: 0 0 3px rgba(0, 0, 0, 0.8);
+}
+
+/* The armed-type cue (ADR-0018 §3), per monitor like the rest of the placement
+   chrome (F-13). Sized and contrasted to be noticed rather than discovered: the
+   ADR's own "makes hard" section says a weak indicator turns this design back
+   into the "which mode am I in?" problem at one-drag scale, so understating it
+   here would be undoing the decision. */
+.armed-badge {
+  position: absolute;
+  left: 50%;
+  top: 12px;
+  transform: translateX(-50%);
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: rgba(120, 180, 255, 0.92);
+  color: rgba(10, 20, 35, 0.95);
+  font: 600 13px/1 system-ui, sans-serif;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
+}
+
+/* A Screenshot area's captured pixels, filling the area exactly (ADR-0014 §6).
+   `object-fit: fill` rather than `contain`: the capture was taken *at* the
+   area's rectangle, so the two always share an aspect ratio, and `contain`
+   would letterbox on a rounding difference instead of showing it. */
+.pin {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  border-radius: 3px;
+  pointer-events: none;
+  user-select: none;
 }
 
 /* The close control. Positioned from the rectangle Rust hit-tests — never from

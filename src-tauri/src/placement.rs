@@ -1416,7 +1416,16 @@ fn finish_gesture(release: Point) {
             let Some((x, y, width, height)) = pending else {
                 return;
             };
-            let created = overlay::create_default_area(app, x, y, width, height);
+            // The armed type is consumed here, and `disarm` runs on **every**
+            // outcome including a rejected drag: ADR-0018 §2 clears arming "when
+            // an area is created", and a sliver drag that creates nothing is
+            // still the user having taken their shot. Leaving it armed would
+            // make the *next* drag — possibly minutes later, possibly meant as
+            // a plain Default area — silently produce a Screenshot, which is
+            // exactly the "which mode am I in?" failure the ADR is avoiding.
+            let kind = armed().unwrap_or(AreaType::Default);
+            disarm();
+            let created = overlay::create_area(app, kind, x, y, width, height);
             // Logged so a placement problem is an observation rather than a
             // guess (the F-15 lesson) — and logged *after* the attempt, with its
             // outcome. Printing "created area" before the call claimed a
@@ -1430,12 +1439,20 @@ fn finish_gesture(release: Point) {
             // store and click-through regions use — across every monitor, the
             // 125% primary included.
             #[cfg(debug_assertions)]
-            if created {
-                eprintln!("placement: created area {width}x{height} at ({x}, {y})");
+            if created.is_some() {
+                eprintln!("placement: created {kind:?} area {width}x{height} at ({x}, {y})");
             } else {
                 eprintln!("placement: drag at ({x}, {y}) was {width}x{height} — nothing created");
             }
-            created
+            if let Some((id, bounds)) = created {
+                // Order matters. The capture is dispatched first so its ~200 ms
+                // runs while the mode transition happens rather than after it,
+                // and neither blocks this callback: `capture_on_create` spawns
+                // and `area_created` posts to the event loop.
+                capture_on_create(app, kind, id, bounds);
+                overlay::area_created(app, kind);
+            }
+            created.is_some()
         }
         Gesture::Move { id, .. } | Gesture::Resize { id, .. } => {
             let Some((x, y, width, height)) = pending else {
@@ -1454,6 +1471,25 @@ fn finish_gesture(release: Point) {
     };
     if changed && let Err(error) = overlay::emit_areas(app) {
         eprintln!("placement: applied a gesture but could not emit the new set: {error}");
+    }
+}
+
+/// Dispatches the capture a freshly created area needs, if its type has one.
+///
+/// Only `Screenshot` captures on create — ADR-0018 settles that for the one type
+/// it decided, and the rest have no gesture yet. Written as an explicit match
+/// rather than as another `AreaType` method because "does creating this capture
+/// pixels?" has exactly one answer today, and inventing a fourth per-type axis
+/// on one data point is how the other three got harder to change.
+fn capture_on_create(app: &AppHandle, kind: AreaType, id: AreaId, bounds: Rect) {
+    match kind {
+        AreaType::Screenshot => crate::output::capture_into_area(app, id, bounds),
+        AreaType::Default
+        | AreaType::Record
+        | AreaType::Ocr
+        | AreaType::Upscale
+        | AreaType::Analysis
+        | AreaType::Filter => {}
     }
 }
 

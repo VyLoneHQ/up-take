@@ -14,7 +14,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
-use uptake_core::area::{AreaId, AreaStore, AreaType, Input, Layer};
+use uptake_core::area::{AfterCreate, AreaId, AreaStore, AreaType, Input, Layer};
 use uptake_core::geometry::{Monitor, Point, Rect, Size, virtual_desktop_bounds};
 use uptake_core::interaction;
 
@@ -486,6 +486,7 @@ fn has_areas(app: &AppHandle) -> bool {
 /// origin and `devicePixelRatio` (ADR-0011), exactly as it does the monitor
 /// frames and the selection box.
 const AREAS_EVENT: &str = "overlay://areas";
+const PIN_EVENT: &str = "overlay://pin";
 
 /// One area as the frontend draws it.
 #[derive(Serialize, Clone)]
@@ -663,6 +664,10 @@ pub(crate) fn dismiss_area(app: &AppHandle, id: AreaId) -> bool {
         lock(&store).remove(id).is_some()
     };
     if removed {
+        // The pinned capture goes with the area that displayed it — see
+        // `captures`'s Lifetime note; a map that only grows is a leak the
+        // 8-hour soak (M-20) would find and nothing else would.
+        crate::captures::forget(app, id);
         collapse_living_if_empty(app);
     }
     removed
@@ -753,8 +758,12 @@ pub(crate) fn monitor_bounds_at(app: &AppHandle, point: Point) -> Rect {
     virtual_desktop_bounds(monitors.iter().map(|m| m.bounds)).unwrap_or(fallback)
 }
 
-/// Creates a `Default` area at the given physical bounds, returning whether one
-/// was created. `Default` is the only type task 1.6 ships (R-17).
+/// Creates an area of `kind` at the given physical bounds, returning its id and
+/// stored rectangle, or `None` if nothing was created.
+///
+/// `kind` comes from the arming state (ADR-0018 §1) — `Default` when nothing is
+/// armed. Task 1.6 shipped `Default` alone (R-17); 1.9b adds `Screenshot` as the
+/// first type a gesture can actually select.
 ///
 /// Two rejections, and they are different in kind. `AreaStore::create` refuses
 /// an *empty* rectangle as a model invariant — a zero-pixel area could never be
@@ -766,22 +775,76 @@ pub(crate) fn monitor_bounds_at(app: &AppHandle, point: Point) -> Rect {
 ///
 /// The placement hook calls this from the event-loop thread; it takes the store
 /// lock only for the push.
-pub(crate) fn create_default_area(
+pub(crate) fn create_area(
     app: &AppHandle,
+    kind: AreaType,
     x: i32,
     y: i32,
     width: u32,
     height: u32,
-) -> bool {
+) -> Option<(AreaId, Rect)> {
     let bounds = Rect {
         origin: Point::new(x, y),
         size: Size::new(width, height),
     };
     if !interaction::is_placeable(bounds) {
-        return false;
+        return None;
     }
     let store = app.state::<Mutex<AreaStore>>();
-    lock(&store).create(AreaType::Default, bounds).is_some()
+    let id = lock(&store).create(kind, bounds)?;
+    // The bounds travel back with the id because the capture that follows a
+    // Screenshot create needs the *stored* rectangle, not the one the caller
+    // asked for. They are equal today; returning the store's answer means a
+    // future clamp or snap in `create` cannot silently desynchronise the pin
+    // from the pixels.
+    Some((id, bounds))
+}
+
+/// The payload of `overlay://pin`: one area's capture is ready to render.
+#[derive(Serialize, Clone)]
+struct PinPayload {
+    id: u64,
+    /// The URL to load it from — a `uptake-area://` address, **not** the bytes.
+    /// See `captures`'s module docs for why the pixels do not travel over this
+    /// bridge.
+    url: String,
+}
+
+/// Announces that `id`'s capture is pinned and available at its versioned URL.
+///
+/// Emitted rather than folded into `overlay://areas` because the two have
+/// different timing: an area appears the instant the drag ends, and its capture
+/// lands ~200 ms later. Making the area wait for its pixels would put a visible
+/// hole where the user just dragged.
+pub(crate) fn emit_pin(app: &AppHandle, id: AreaId, version: u64) -> Result<(), String> {
+    app.emit(
+        PIN_EVENT,
+        PinPayload {
+            id: id.get(),
+            url: crate::captures::pin_url(id, version),
+        },
+    )
+    .map_err(|e| format!("Could not emit the pin: {e}"))
+}
+
+/// Applies a type's ADR-0018 §6 after-create behaviour, on the event loop.
+///
+/// **Queued rather than run inline, and that is the point.** The only caller is
+/// `placement::finish_gesture`, which runs inside the `WH_MOUSE_LL` callback;
+/// the transition it triggers shows and hides windows, reloads the system cursor
+/// scheme and emits to the WebView. `run_on_main_thread` from the event-loop
+/// thread posts rather than calls, so the hook returns immediately and the work
+/// happens on the next iteration — the same discipline every other mode
+/// transition in `placement` already follows, and the failure class F-33 found
+/// by spending too long in a hook callback.
+pub(crate) fn area_created(app: &AppHandle, kind: AreaType) {
+    let exits_placement = kind.after_create() == AfterCreate::ExitPlacement;
+    let handle = app.clone();
+    if let Err(error) = app.run_on_main_thread(move || {
+        drive(&handle, Event::AreaCreated { exits_placement });
+    }) {
+        eprintln!("overlay: could not apply the after-create transition: {error}");
+    }
 }
 
 /// Locks a mutex, treating poisoning as recoverable — the state under it is a

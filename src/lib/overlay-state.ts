@@ -55,6 +55,18 @@ export interface AreasPayload {
   areas: AreaView[];
 }
 
+/**
+ * The payload of the `overlay://pin` event: one area's capture is ready.
+ *
+ * Carries a **URL, not bytes**. The `uptake-area://` scheme exists precisely so
+ * a ~270 KB capture never crosses this JSON bridge — see the Rust `captures`
+ * module.
+ */
+export interface PinPayload {
+  id: number;
+  url: string;
+}
+
 /** The payload of the `overlay://hover` event: the area under the cursor. */
 export interface HoverPayload {
   id: number | null;

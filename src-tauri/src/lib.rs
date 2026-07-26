@@ -1,3 +1,4 @@
+mod captures;
 mod click_through;
 #[cfg(debug_assertions)]
 mod dev_harness;
@@ -79,6 +80,13 @@ pub fn run() -> tauri::Result<()> {
     builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        // The pinned-capture transport (task 1.9b). **Async** on purpose: the
+        // handler takes the capture-store lock and copies up to tens of MB, and
+        // the synchronous variant would do that on the WebView's request path
+        // with the event loop waiting behind it.
+        .register_asynchronous_uri_scheme_protocol(captures::SCHEME, |ctx, request, responder| {
+            responder.respond(captures::serve(ctx, request));
+        })
         // Used only from Rust, and only to report a failed hotkey registration
         // (architecture §4). No frontend capability grants it, so the WebView
         // cannot open dialogs.
@@ -124,6 +132,10 @@ pub fn run() -> tauri::Result<()> {
             // summon: `has_areas` reads it to decide whether Living is real, and
             // the placement hook writes it when a drag creates one.
             app.manage(Mutex::new(AreaStore::new()));
+            // The pinned captures a Screenshot area renders (task 1.9b). Managed
+            // here rather than lazily because the URI scheme handler is live from
+            // the first frame and reads it on every request.
+            app.manage(Mutex::new(captures::CaptureStore::default()));
             // Chain a system-cursor restore onto the panic hook before anything
             // can override the cursor, so a panic while placing does not leave
             // every app showing the crosshair. See `placement`.

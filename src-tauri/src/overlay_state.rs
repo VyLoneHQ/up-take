@@ -54,6 +54,18 @@ pub enum Event {
     /// the debug startup show. Always ends in `Placement`, so the user lands
     /// ready to place an area.
     Summon,
+    /// An area was just created, carrying that type's answer to ADR-0018 §6's
+    /// "and then what?" ([`uptake_core::area::AreaType::after_create`]).
+    ///
+    /// The polarity lives in the table below rather than at the call site: a
+    /// caller that decides *whether to send an event* can get the condition
+    /// backwards silently, where a caller that always reports what happened
+    /// cannot.
+    AreaCreated {
+        /// Whether this type's creation ends `Placement` (`Screenshot` does;
+        /// `Default` does not).
+        exits_placement: bool,
+    },
 }
 
 /// The next state, given the current one, the event, and whether any areas
@@ -78,6 +90,20 @@ pub fn next(current: OverlayState, event: Event, has_areas: bool) -> OverlayStat
     let target = match (current, event) {
         // A summon always brings up the placement surface, from any state.
         (_, Event::Summon) => OverlayState::Placement,
+        // A type whose creation ends Placement hands input back (ADR-0018 §6).
+        // It lands in Living, not Hidden, because an area now exists — and
+        // `collapse` below is what guarantees that rather than a rule here
+        // (ADR-0018 §7).
+        (
+            OverlayState::Placement,
+            Event::AreaCreated {
+                exits_placement: true,
+            },
+        ) => OverlayState::Living,
+        // Creating a Default area changes nothing about the state; neither does
+        // any creation outside Placement, which cannot happen today but must
+        // still have an answer for the function to stay total.
+        (_, Event::AreaCreated { .. }) => current,
         // Cancelling a drag leaves the overlay where it is (Placement). This
         // arm is first so a mid-drag Esc never reaches the arming rung below —
         // the ladder is innermost-first, and arming deliberately survives a
@@ -219,6 +245,44 @@ mod tests {
         let armed = next(armed_mid_drag, ESC_ARMED, true);
         assert_eq!(armed, OverlayState::Placement, "disarmed");
         assert_eq!(next(armed, ESC, true), OverlayState::Living, "backed out");
+    }
+
+    #[test]
+    fn creating_a_screenshot_hands_input_back_but_creating_a_default_does_not() {
+        const CREATED_EXITING: Event = Event::AreaCreated {
+            exits_placement: true,
+        };
+        const CREATED_STAYING: Event = Event::AreaCreated {
+            exits_placement: false,
+        };
+        // `has_areas` is true because the area that fired this event exists —
+        // that is what keeps the exit in Living instead of collapsing to Hidden
+        // (ADR-0018 §7).
+        assert_eq!(
+            next(OverlayState::Placement, CREATED_EXITING, true),
+            OverlayState::Living
+        );
+        assert_eq!(
+            next(OverlayState::Placement, CREATED_STAYING, true),
+            OverlayState::Placement
+        );
+    }
+
+    #[test]
+    fn a_creation_that_somehow_reports_no_areas_collapses_rather_than_stranding_living() {
+        // Not reachable today — the created area is in the store before this
+        // event fires — but the function is total, and a Living state with no
+        // areas is the one the click-through poll reads as "take every click".
+        assert_eq!(
+            next(
+                OverlayState::Placement,
+                Event::AreaCreated {
+                    exits_placement: true
+                },
+                false
+            ),
+            OverlayState::Hidden
+        );
     }
 
     #[test]
