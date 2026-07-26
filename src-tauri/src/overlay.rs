@@ -654,6 +654,34 @@ pub(crate) fn area_handle_at(
     })
 }
 
+/// The topmost **interactive** area whose interaction surface contains `point`.
+///
+/// The `Living` counterpart of [`area_handle_at`], and it draws the same
+/// distinction [`AreaStore::hit_test`] and `hit_test_any` already do: in
+/// `Placement` the user is editing the workspace, so every area is grabbable
+/// whatever its [`Input`]; in `Living` a pass-through area's pixels belong to
+/// the app underneath, so it must be invisible to the cursor here.
+///
+/// **This is what makes a pass-through area ungrabbable in `Living` today** —
+/// the gap task 1.17(b) closes by giving such areas grabbable chrome. Until
+/// then, `Filter` and `Record` areas (pass-through by default) can only be
+/// manipulated from `Placement`.
+pub(crate) fn interactive_area_handle_at(
+    app: &AppHandle,
+    point: Point,
+) -> Option<(AreaId, Rect, interaction::Handle)> {
+    let monitors = monitor_rects();
+    let store = app.state::<Mutex<AreaStore>>();
+    let guard = lock(&store);
+    guard
+        .iter_top_down()
+        .filter(|area| area.is_interactive())
+        .find_map(|area| {
+            interaction::handle_at(area.bounds, point, &monitors)
+                .map(|handle| (area.id, area.bounds, handle))
+        })
+}
+
 /// The close control's rectangle for an area, against the current monitors.
 pub(crate) fn close_control_of(bounds: Rect) -> Rect {
     interaction::close_control(bounds, &monitor_rects())
@@ -845,6 +873,46 @@ pub(crate) fn emit_active_monitor(app: &AppHandle, index: Option<usize>) {
     }
 }
 
+const FLASH_EVENT: &str = "overlay://flash";
+
+/// The payload of `overlay://flash`: an action on this area just succeeded.
+#[derive(Serialize, Clone)]
+struct FlashPayload {
+    id: u64,
+    /// Distinguishes one flash from the next so the frontend can restart the
+    /// animation. Two Copies in a row are two events with identical `id`, which
+    /// a reactive framework would otherwise coalesce into no visible change at
+    /// all — the failure being *silence*, which is the very thing this fixes.
+    nonce: u64,
+}
+
+/// Acknowledges a completed user-initiated action by flashing its area.
+///
+/// **The success half of F-35.** That row records the failure half — a failed
+/// Copy or Save reaches nobody once the app is not run from a console — and
+/// concludes the deciding axis is *"did a user ask for this?"*. By that test a
+/// *successful* Copy needs an answer just as much: the user pressed a menu row
+/// and, until now, absolutely nothing happened on screen.
+///
+/// This is the cheap half. The clickable "Image saved — open folder" toast is
+/// task 1.15's, with the rest of F-35: the overlay is `WS_EX_TRANSPARENT`, so a
+/// toast cannot be a clickable DOM element and has to be drawn by the WebView
+/// and hit-tested in Rust the way the area menu already is. Not hard, but not a
+/// two-line change either.
+pub(crate) fn emit_flash(app: &AppHandle, id: AreaId) {
+    static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nonce = NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if let Err(error) = app.emit(
+        FLASH_EVENT,
+        FlashPayload {
+            id: id.get(),
+            nonce,
+        },
+    ) {
+        eprintln!("overlay: could not emit the flash: {error}");
+    }
+}
+
 /// The payload of `overlay://pin`: one area's capture is ready to render.
 #[derive(Serialize, Clone)]
 struct PinPayload {
@@ -896,6 +964,16 @@ pub(crate) fn area_created(app: &AppHandle, kind: AreaType) {
 /// plain enum, valid after any panic, and architecture §5 forbids `unwrap`.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// IPC surface: the frontend returns a latency probe once its frame has painted.
+///
+/// Deliberately does no validation beyond existing: the value is one this
+/// process minted moments earlier, and a nonsense one can only distort a debug
+/// statistic. Rejecting it would be more code guarding less.
+#[tauri::command]
+pub fn overlay_report_latency(probe: u64) {
+    placement::record_latency(probe);
 }
 
 /// IPC surface: `Esc` from the overlay emits this intent.

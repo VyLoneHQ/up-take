@@ -94,6 +94,7 @@ pub fn run() -> tauri::Result<()> {
         .invoke_handler(tauri::generate_handler![
             overlay::overlay_escape,
             overlay::overlay_arm_type,
+            overlay::overlay_report_latency,
             overlay::overlay_dismiss_focused,
             overlay::overlay_request_state
         ])

@@ -14,6 +14,7 @@ import {
   armedTypeForKey,
   dismissFocusedArea,
   escapeOverlay,
+  type FlashPayload,
   type HoverPayload,
   isRemoveKey,
   type MenuFrame,
@@ -26,6 +27,7 @@ import {
   type PhysRect,
   type PinPayload,
   physRectToCss,
+  reportLatency,
   type SelectionPayload,
   type StatePayload,
   showsMenu,
@@ -50,6 +52,11 @@ let areas: AreaView[] = $state([]);
 let selection: PhysRect | null = $state(null);
 let draggedArea: number | null = $state(null);
 let hoveredArea: number | null = $state(null);
+// The CSS cursor Rust resolved for whatever is under the pointer (task 1.17a).
+// Only ever set in Living: Placement overrides the *system* cursor instead,
+// because there it owns the whole surface and the shape must hold over the
+// user's apps too.
+let hoverCursor: string | null = $state(null);
 let menu: MenuView | null = $state(null);
 // What the next drag will make, or null for Default (ADR-0018 §3). Rust owns
 // this — arming is placement state living beside the mouse hook — and re-emits
@@ -63,27 +70,42 @@ let activeMonitor: number | null = $state(null);
 // Rust `captures` module), so a re-capture replaces the entry with a distinct
 // address rather than relying on the WebView to bust its own cache.
 let pins = $state(new SvelteMap<number, string>());
+// Areas that just completed a Copy or Save, mapped to the nonce of that
+// completion. Keyed rendering on the nonce is what restarts the animation when
+// the same action runs twice on the same area.
+let flashes = $state(new SvelteMap<number, number>());
 // The WebView owns its scale (ADR-0011); refreshed on every state event in case
 // the overlay moved to a monitor at a different DPI.
 let dpr = $state(1);
 
 const frames: CssRect[] = $derived(monitorFramesCss(monitors, origin, dpr));
-// Hover chrome — the close control, the brighter border — belongs to Placement
-// only: in Living the overlay does not own the pointer, so a control that
-// appeared to follow the cursor would be one no click could reach.
+// Hover chrome — the close control, the brighter border — shows in every
+// visible state as of task 1.17(a).
+//
+// It was Placement-only, for a reason that had already stopped being true:
+// "in Living the overlay does not own the pointer, so a control that appeared
+// to follow the cursor would be one no click could reach." ADR-0016 gave Living
+// per-area input via the global hook, and 1.17(a) lets a press there begin a
+// real move or resize — so the pointer *is* owned over an interactive area, and
+// a handle the user cannot see is a handle they will not reach for.
+//
+// Rust decides what counts as hovered in each state (interactive areas only in
+// Living), so this no longer gates on the state at all — gating in both places
+// is how the two would drift apart.
 const areaFrames: AreaFrame[] = $derived(
-  areaFramesCss(
-    areas,
-    origin,
-    dpr,
-    overlayState === 'placement' ? hoveredArea : null,
-    overlayState === 'placement' ? draggedArea : null,
-  ),
+  areaFramesCss(areas, origin, dpr, hoveredArea, draggedArea),
 );
-// The selection box is only meaningful while placing; guarding on the state as
-// well as the payload keeps a stale rectangle from lingering after a transition.
+// The drag preview renders in every visible state as of task 1.17(a), because
+// Living now has move and resize gestures of its own.
+//
+// It was gated on `placement`, which had been harmless while Living had no
+// gestures — and became a bug the moment it did: `areaFrames` marks the dragged
+// area as the *source* and stops drawing it (the preview IS the area for the
+// duration), so a Living drag hid the area with nothing put in its place. The
+// area appeared to vanish until the gesture ended. Two gates on one fact, and
+// only one of them moved.
 const selectionFrame: CssRect | null = $derived(
-  overlayState === 'placement' ? physRectToCss(selection, origin, dpr) : null,
+  overlayState === 'hidden' ? null : physRectToCss(selection, origin, dpr),
 );
 // The menu renders in every visible state, not just Placement: in Living it is
 // opened by a right-click on an interactive area (ADR-0016).
@@ -137,6 +159,9 @@ onMount(() => {
     for (const id of pins.keys()) {
       if (!live.has(id)) pins.delete(id);
     }
+    for (const id of flashes.keys()) {
+      if (!live.has(id)) flashes.delete(id);
+    }
   });
   const unlistenActiveMonitor = listen<ActiveMonitorPayload>(
     'overlay://active-monitor',
@@ -144,6 +169,9 @@ onMount(() => {
       activeMonitor = event.payload.index;
     },
   );
+  const unlistenFlash = listen<FlashPayload>('overlay://flash', (event) => {
+    flashes.set(event.payload.id, event.payload.nonce);
+  });
   const unlistenPin = listen<PinPayload>('overlay://pin', (event) => {
     // Arrives ~200 ms after the area itself: the area appears the instant the
     // drag ends and fills in when its capture lands, rather than leaving a hole
@@ -155,10 +183,16 @@ onMount(() => {
     (event) => {
       selection = event.payload.rect;
       draggedArea = event.payload.source;
+      // Close the latency loop on sampled frames. Scheduled after this
+      // assignment so the measurement covers the render it caused.
+      if (event.payload.probe !== null) {
+        reportLatency(invoke, event.payload.probe);
+      }
     },
   );
   const unlistenHover = listen<HoverPayload>('overlay://hover', (event) => {
     hoveredArea = event.payload.id;
+    hoverCursor = event.payload.cursor;
   });
   const unlistenMenu = listen<MenuPayload>('overlay://menu', (event) => {
     menu = event.payload.menu;
@@ -173,6 +207,7 @@ onMount(() => {
     unlistenState,
     unlistenAreas,
     unlistenActiveMonitor,
+    unlistenFlash,
     unlistenPin,
     unlistenSelection,
     unlistenHover,
@@ -189,7 +224,16 @@ onMount(() => {
 
 <svelte:window onkeydown={onKeydown} />
 
-<main class="overlay" class:active={showsTint(overlayState)}>
+<!-- The cursor is set inline from Rust's answer rather than by a CSS rule per
+     handle: the shape depends on a hit test only Rust performs, and the areas
+     themselves are `pointer-events: none`, so a `:hover` rule on them could
+     never fire. Applied to the root because that is the element the window
+     actually hit-tests against. -->
+<main
+  class="overlay"
+  class:active={showsTint(overlayState)}
+  style={hoverCursor ? `cursor: ${hoverCursor}` : undefined}
+>
   {#if showsTint(overlayState)}
     {#each frames as frame, i (`${frame.x},${frame.y},${frame.width},${frame.height}`)}
       <div
@@ -219,8 +263,8 @@ onMount(() => {
           class="area"
           class:hovered={area.hovered}
           class:pinned={area.layer !== 'auto'}
-          style="left: {area.rect.x}px; top: {area.rect.y}px; width: {area.rect
-            .width}px; height: {area.rect.height}px"
+          style="transform: translate3d({area.rect.x}px, {area.rect.y}px, 0); width: {area
+            .rect.width}px; height: {area.rect.height}px"
         >
           {#if pins.get(area.id)}
             <!-- The Snipaste pin (ADR-0014 §6). The bytes arrive over the
@@ -234,6 +278,15 @@ onMount(() => {
               draggable={false}
             />
           {/if}
+          {#if flashes.has(area.id)}
+            <!-- Acknowledges a completed Copy or Save. `{#key}` on the nonce
+                 recreates the element, which is what restarts the animation
+                 when the same action runs twice — otherwise the second Copy
+                 would be as silent as no Copy at all. -->
+            {#key flashes.get(area.id)}
+              <span class="flash"></span>
+            {/key}
+          {/if}
           {#if area.layer !== 'auto'}
             <span class="layer-badge">{area.layer === 'front' ? '▲' : '▼'}</span>
           {/if}
@@ -242,7 +295,7 @@ onMount(() => {
       {#if area.hovered}
         <div
           class="close"
-          style="left: {area.close.x}px; top: {area.close.y}px; width: {area
+          style="transform: translate3d({area.close.x}px, {area.close.y}px, 0); width: {area
             .close.width}px; height: {area.close.height}px"
         >
           ×
@@ -254,7 +307,7 @@ onMount(() => {
   {#if selectionFrame}
     <div
       class="selection"
-      style="left: {selectionFrame.x}px; top: {selectionFrame.y}px; width: {selectionFrame.width}px; height: {selectionFrame.height}px"
+      style="transform: translate3d({selectionFrame.x}px, {selectionFrame.y}px, 0); width: {selectionFrame.width}px; height: {selectionFrame.height}px"
     ></div>
   {/if}
 
@@ -330,6 +383,8 @@ onMount(() => {
    routing that makes it interactive land in 1.6c. Never intercepts input — the
    overlay is click-through and stays that way. */
 .area {
+  left: 0;
+  top: 0;
   position: absolute;
   box-sizing: border-box;
   border: 1.5px solid rgba(120, 180, 255, 0.9);
@@ -366,6 +421,39 @@ onMount(() => {
   font: 11px/1 system-ui, sans-serif;
   color: rgba(160, 210, 255, 0.95);
   text-shadow: 0 0 3px rgba(0, 0, 0, 0.8);
+}
+
+/* One-shot acknowledgement that a Copy or Save landed (F-35's success half).
+   A single impulse that eases out rather than a pulse or a persistent badge:
+   the point is "that worked", which is over the moment it is understood, and
+   anything that lingers becomes chrome on a workspace meant to stay quiet.
+   `forwards` leaves it at zero opacity; it costs one invisible span. */
+.flash {
+  position: absolute;
+  inset: 0;
+  border-radius: 3px;
+  background: rgba(190, 225, 255, 0.85);
+  pointer-events: none;
+  animation: uptake-flash 420ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes uptake-flash {
+  from {
+    opacity: 0.9;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+/* Respect the OS setting: an unexpected flash is exactly the kind of motion
+   `prefers-reduced-motion` exists for. Reduced to a brief static tint that
+   still answers "did it work?" without the transition. */
+@media (prefers-reduced-motion: reduce) {
+  .flash {
+    animation-duration: 900ms;
+    animation-timing-function: steps(2, end);
+  }
 }
 
 /* The armed-type cue (ADR-0018 §3), per monitor like the rest of the placement
@@ -408,6 +496,8 @@ onMount(() => {
    rectangle by construction. Revealed on hover only: a persistent ✕ on every
    area would be permanent clutter over the user's screen. */
 .close {
+  left: 0;
+  top: 0;
   position: absolute;
   box-sizing: border-box;
   display: flex;
@@ -428,6 +518,14 @@ onMount(() => {
    it reads as in-progress rather than committed. Fed from the mouse hook via the
    poll at ~60 Hz. */
 .selection {
+  left: 0;
+  top: 0;
+  /* The one element that moves every frame during a drag, so it is the one that
+     gets promoted: will-change keeps it on its own compositor layer, and a move
+     then costs a composite instead of a layout of the whole overlay. Applied
+     here and nowhere else — promoting every area would trade that layout cost
+     for GPU memory proportional to how many areas exist. */
+  will-change: transform;
   position: absolute;
   box-sizing: border-box;
   border: 1.5px dashed rgba(150, 200, 255, 0.95);

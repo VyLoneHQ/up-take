@@ -62,7 +62,7 @@ const BUDGET_HARD_FAIL_MS: u128 = 600;
 /// writing a file (a screenshot is transient) does not transfer here, and the
 /// cost (an area copied forty times is forty stray PNGs) stays. Nothing is
 /// written to disk by this path.
-pub(crate) fn copy_to_clipboard(app: &AppHandle, bounds: Rect) {
+pub(crate) fn copy_to_clipboard(app: &AppHandle, area: AreaId, bounds: Rect) {
     let started = Instant::now();
     let mut split = Split::default();
     let outcome = capture(bounds, &mut split).and_then(|(bitmap, png)| {
@@ -76,13 +76,18 @@ pub(crate) fn copy_to_clipboard(app: &AppHandle, bounds: Rect) {
         split.publish_ms = publish.elapsed().as_millis();
         result
     });
+    // Acknowledge the action on screen. Only on success: a flash after a
+    // failed Copy would be a lie the user has no way to check.
+    if outcome.is_ok() {
+        crate::overlay::emit_flash(app, area);
+    }
     report("copy", started, &split, outcome);
 }
 
 /// Captures `bounds` and writes it to `Pictures\UP-TAKE\`, creating the
 /// directory on first use. A separate, explicit action (PRODUCT-VISION §8) —
 /// does not also touch the clipboard.
-pub(crate) fn save_to_file(app: &AppHandle, bounds: Rect) {
+pub(crate) fn save_to_file(app: &AppHandle, area: AreaId, bounds: Rect) {
     let started = Instant::now();
     let mut split = Split::default();
     let outcome = capture(bounds, &mut split).and_then(|(_bitmap, png)| {
@@ -91,6 +96,9 @@ pub(crate) fn save_to_file(app: &AppHandle, bounds: Rect) {
         split.publish_ms = publish.elapsed().as_millis();
         result
     });
+    if outcome.is_ok() {
+        crate::overlay::emit_flash(app, area);
+    }
     report("save", started, &split, outcome);
 }
 

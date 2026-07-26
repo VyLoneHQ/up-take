@@ -56,6 +56,19 @@ export interface AreasPayload {
 }
 
 /**
+ * The payload of `overlay://flash`: a user-initiated action on this area
+ * succeeded, and the area should acknowledge it.
+ *
+ * `nonce` changes on every emit so a repeat of the same action on the same area
+ * restarts the animation instead of being coalesced into no visible change —
+ * which would fail in exactly the way this feature exists to fix.
+ */
+export interface FlashPayload {
+  id: number;
+  nonce: number;
+}
+
+/**
  * The payload of `overlay://active-monitor`: which monitor holds the cursor.
  *
  * An index into the `monitors` array of the last {@link StatePayload}. `null`
@@ -80,6 +93,21 @@ export interface PinPayload {
 /** The payload of the `overlay://hover` event: the area under the cursor. */
 export interface HoverPayload {
   id: number | null;
+  /**
+   * The CSS `cursor` keyword to apply, or `null` for none.
+   *
+   * Rust sends a keyword rather than a handle name because it owns the hit
+   * test — re-deriving "north-east edge ⇒ `nesw-resize`" here would be a second
+   * mapping to keep in step. It is `null` in Placement, where the *system*
+   * cursor is overridden instead (`SetSystemCursor`); two authorities on one
+   * pointer is how they end up disagreeing.
+   *
+   * ⚠️ **Applying this currently has no effect.** The overlay window is
+   * `WS_EX_TRANSPARENT` in every visible state (ADR-0016), so it receives no
+   * mouse messages and therefore no `WM_SETCURSOR` — a CSS cursor cannot apply
+   * anywhere on it. See `css_cursor` in `placement.rs` for the two routes out.
+   */
+  cursor: string | null;
 }
 
 /** One row of the per-area menu, positioned by Rust. */
@@ -192,6 +220,12 @@ export function menuFrameCss(
  */
 export interface SelectionPayload {
   rect: PhysRect | null;
+  /**
+   * A latency probe on sampled frames, or null. Echo it back **after this frame
+   * has painted** and Rust closes the loop on its own clock — the value is
+   * opaque here on purpose, so no epoch has to be reconciled across the bridge.
+   */
+  probe: number | null;
   /**
    * The area being moved or resized, if any. It is drawn as the drag's *source*
    * — where the area is coming from — rather than as a normal area, so a move
@@ -347,6 +381,31 @@ export async function armAreaType(
   } catch {
     return false;
   }
+}
+
+/**
+ * Removes the area under the cursor. Never throws, for the same reason
+ * {@link escapeOverlay} does not: an unhandled rejection in a key handler is a
+ * silent failure the user reads as the overlay having hung.
+ */
+/**
+ * Returns a latency probe once the frame carrying it has actually painted.
+ *
+ * **Two nested `requestAnimationFrame` calls, not one.** A rAF callback runs
+ * *before* the paint it belongs to, so measuring there would stop the clock
+ * early and flatter the result. The second callback runs on the following
+ * frame, by which point the first has been painted — the standard way to
+ * observe "after paint" from script.
+ *
+ * Never throws: this is instrumentation, and a failed measurement must not
+ * disturb the thing it measures.
+ */
+export function reportLatency(invoke: Invoke, probe: number): void {
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      void invoke('overlay_report_latency', { probe }).catch(() => {});
+    });
+  });
 }
 
 /**
