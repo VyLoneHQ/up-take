@@ -243,6 +243,21 @@ static APP: OnceLock<AppHandle> = OnceLock::new();
 /// reads the payload only when `DRAGGING` says the gesture is still live.
 static GESTURE: Mutex<Option<Gesture>> = Mutex::new(None);
 
+/// The [`AreaType`] armed for the **next** drag, or `None` meaning
+/// [`AreaType::Default`] (ADR-0018 §1).
+///
+/// **Transience is the whole point.** ADR-0009 §3 deleted global mode state by
+/// name, and this is mode state — bought back only because it cannot outlive one
+/// drag, so the "which mode am I in?" problem has no room to occur. It is
+/// cleared when an area is created, when a not-mid-drag `Esc` disarms it, and on
+/// every path that leaves Placement ([`enter_living_on_main_thread`],
+/// [`exit_on_main_thread`], [`teardown_now`]). It is never written to disk and
+/// never restored.
+///
+/// A `Mutex<Option<_>>` rather than an atomic, matching [`GESTURE`]: both are
+/// read from the hook callback, and the pair should look alike.
+static ARMED: Mutex<Option<AreaType>> = Mutex::new(None);
+
 /// The open area menu (ADR-0013's per-area Layer control), or `None`.
 ///
 /// The menu is **drawn by the WebView and hit-tested here**, from the same
@@ -549,6 +564,30 @@ pub fn is_dragging() -> bool {
 pub fn cancel_drag() {
     DRAGGING.store(false, Ordering::SeqCst);
     *lock(&GESTURE) = None;
+}
+
+/// Arms `kind` for the next drag (ADR-0018 §1), replacing anything already
+/// armed — pressing a second direct key changes your mind rather than erroring.
+pub fn arm(kind: AreaType) {
+    *lock(&ARMED) = Some(kind);
+}
+
+/// The type armed for the next drag, or `None` for [`AreaType::Default`].
+///
+/// Read by [`crate::overlay::escape`] for the ladder's middle rung, by the
+/// release handler to decide what to create, and by the poll to tell the
+/// indicator what the next drag will make.
+#[must_use]
+pub fn armed() -> Option<AreaType> {
+    *lock(&ARMED)
+}
+
+/// Clears the arming, so the next drag makes a [`AreaType::Default`] area.
+///
+/// Called on the `Esc` ladder's middle rung and after a create. Idempotent —
+/// disarming when nothing is armed is not an error, it is the common case.
+pub fn disarm() {
+    *lock(&ARMED) = None;
 }
 
 /// What [`pump`] remembers between ticks, so each emit fires on a change rather
@@ -927,6 +966,10 @@ fn enter_living_on_main_thread() {
     WANT_TEARDOWN.store(false, Ordering::SeqCst);
     DRAGGING.store(false, Ordering::SeqCst);
     *lock(&GESTURE) = None;
+    // Arming is Placement-only state and must not outlive it (ADR-0018 §2) —
+    // this is one of the three exits that guarantee "there is no mode to still
+    // be in later".
+    *lock(&ARMED) = None;
     // The menu is re-resolved per mode (its target resolution differs — see
     // `open_menu`), so a menu opened in Placement does not carry over.
     if let Some(app) = APP.get() {
@@ -951,6 +994,8 @@ fn exit_on_main_thread() {
     set_mode(Mode::Hidden);
     DRAGGING.store(false, Ordering::SeqCst);
     *lock(&GESTURE) = None;
+    // See `enter_living_on_main_thread`: arming never outlives Placement.
+    *lock(&ARMED) = None;
     // The menu belongs to a visible overlay: leaving with it still on screen
     // would draw a control over a hidden window that nothing could ever click.
     if let Some(app) = APP.get() {
@@ -982,6 +1027,10 @@ fn teardown_now() {
     RIGHT_PENDING.store(false, Ordering::SeqCst);
     DRAGGING.store(false, Ordering::SeqCst);
     *lock(&GESTURE) = None;
+    // Belt and braces: `exit_on_main_thread` has usually cleared this already,
+    // but `teardown_now` is also reached from the deferred path, and arming
+    // surviving a teardown would be exactly the mode state ADR-0009 §3 deleted.
+    *lock(&ARMED) = None;
     restore_system_cursors();
     // The override is gone, so the cache must forget what it believes the OS
     // has — otherwise the next entry into Placement would skip re-applying a

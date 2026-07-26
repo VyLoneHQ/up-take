@@ -25,6 +25,12 @@ export interface StatePayload {
   state: OverlayStateName;
   origin: Origin;
   monitors: PhysRect[];
+  /**
+   * The type armed for the next drag, or `null` for none (ADR-0018 §3).
+   * **Absence means `Default`** — the indicator shows no type cue when nothing
+   * is armed, rather than naming the resting state as if it were a choice.
+   */
+  armed: ArmableType | null;
 }
 
 /** An area's stacking tier (ADR-0013). */
@@ -270,6 +276,55 @@ export async function escapeOverlay(invoke: Invoke): Promise<boolean> {
  */
 export function isRemoveKey(key: string): boolean {
   return key === 'Delete';
+}
+
+/** An area type a direct key can arm for the next drag (ADR-0018 §1). */
+export type ArmableType = 'screenshot';
+
+/**
+ * Which type this key arms, or `null` if it arms nothing.
+ *
+ * Takes the event rather than the bare key, unlike {@link isRemoveKey} — and
+ * the difference is deliberate. Arming changes what the *next gesture means*,
+ * so a chord the user pressed for some other reason must not trigger it, and
+ * `Alt` in particular already has a meaning during placement (it suppresses
+ * snapping). A guard that lives in the predicate cannot be forgotten at a call
+ * site; one that lives in the handler can.
+ *
+ * `Shift` is not excluded: `Shift+S` is just how a capital `S` is typed.
+ */
+export function armedTypeForKey(
+  event: Pick<KeyboardEvent, 'key' | 'ctrlKey' | 'altKey' | 'metaKey'>,
+): ArmableType | null {
+  if (event.ctrlKey || event.altKey || event.metaKey) {
+    return null;
+  }
+  switch (event.key.toLowerCase()) {
+    case 's':
+      return 'screenshot';
+    default:
+      return null;
+  }
+}
+
+/**
+ * Arms the type of the next drag. Never throws, for the same reason
+ * {@link escapeOverlay} does not.
+ *
+ * Rust rejects arming outside placement, and that rejection is **expected**
+ * rather than exceptional — the key handler is live in `living` too. Logging it
+ * as an error would train the reader to ignore the console.
+ */
+export async function armAreaType(
+  invoke: Invoke,
+  kind: ArmableType,
+): Promise<boolean> {
+  try {
+    await invoke('overlay_arm_type', { kind });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

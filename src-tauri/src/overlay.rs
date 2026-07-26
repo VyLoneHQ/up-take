@@ -283,6 +283,14 @@ struct StatePayload {
     /// Each monitor's bounds in physical virtual-desktop px. Empty unless the
     /// state draws per-monitor chrome (Placement).
     monitors: Vec<(i32, i32, u32, u32)>,
+    /// The type armed for the next drag, or `null` for none (ADR-0018 §3).
+    ///
+    /// **Absence means `Default`** — the indicator shows no type cue when
+    /// nothing is armed, rather than showing "Default" as if it were a
+    /// selection. That is the ADR's wording and it matters: a permanent cue
+    /// naming the resting state is the "which mode am I in?" noise the design
+    /// avoids.
+    armed: Option<&'static str>,
 }
 
 const fn state_name(state: OverlayState) -> &'static str {
@@ -290,6 +298,20 @@ const fn state_name(state: OverlayState) -> &'static str {
         OverlayState::Hidden => "hidden",
         OverlayState::Placement => "placement",
         OverlayState::Living => "living",
+    }
+}
+
+/// An [`AreaType`] as the frontend names it — the same lowercase wire
+/// convention [`layer_name`] uses for [`Layer`].
+const fn type_name(kind: AreaType) -> &'static str {
+    match kind {
+        AreaType::Default => "default",
+        AreaType::Screenshot => "screenshot",
+        AreaType::Record => "record",
+        AreaType::Ocr => "ocr",
+        AreaType::Upscale => "upscale",
+        AreaType::Analysis => "analysis",
+        AreaType::Filter => "filter",
     }
 }
 
@@ -309,11 +331,17 @@ pub fn toggle(app: &AppHandle) {
 ///
 /// `Esc` backs out of exactly one thing, innermost first: an open area menu, then
 /// a drag in progress (ADR-0012: mid-drag `Esc` = cancel, state unchanged), then
-/// Placement itself. Anything else would make `Esc` skip past a transient thing
-/// the user can see on screen — dismissing the menu *and* leaving Placement on
-/// one keypress is the shape users read as "it did too much".
+/// the armed type (ADR-0018 §4), then Placement itself. Anything else would make
+/// `Esc` skip past a transient thing the user can see on screen — dismissing the
+/// menu *and* leaving Placement on one keypress is the shape users read as "it
+/// did too much".
 ///
-/// Both inner cases are read from the placement module rather than tracked here,
+/// **A cancelled drag deliberately keeps its arming.** The user asked for a
+/// Screenshot and mis-drew the rectangle; making them re-arm before retrying
+/// would punish the correction. That is why the drag rung is strictly inside the
+/// arming rung rather than clearing both.
+///
+/// Every inner case is read from the placement module rather than tracked here,
 /// because the hook is the only thing that knows a gesture is live.
 pub fn escape(app: &AppHandle) {
     if placement::close_menu(app) {
@@ -321,10 +349,26 @@ pub fn escape(app: &AppHandle) {
     }
     if placement::is_dragging() {
         placement::cancel_drag();
-        drive(app, Event::Escape { mid_drag: true });
-    } else {
-        drive(app, Event::Escape { mid_drag: false });
+        drive(
+            app,
+            Event::Escape {
+                mid_drag: true,
+                armed: placement::armed().is_some(),
+            },
+        );
+        return;
     }
+    let armed = placement::armed().is_some();
+    if armed {
+        placement::disarm();
+    }
+    drive(
+        app,
+        Event::Escape {
+            mid_drag: false,
+            armed,
+        },
+    );
 }
 
 /// Applies an event to the current state and performs the resulting effect.
@@ -409,12 +453,21 @@ fn emit_state(app: &AppHandle, state: OverlayState) -> Result<(), String> {
     } else {
         Vec::new()
     };
+    // Arming is Placement-only state, and reading it in any other state would
+    // report something the user cannot act on. `placement` clears it on exit
+    // anyway, so this guard is the second lock on the same door.
+    let armed = if matches!(state, OverlayState::Placement) {
+        placement::armed().map(type_name)
+    } else {
+        None
+    };
     app.emit(
         STATE_EVENT,
         StatePayload {
             state: state_name(state),
             origin,
             monitors,
+            armed,
         },
     )
     .map_err(|e| format!("Could not emit overlay state: {e}"))
@@ -741,6 +794,43 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[tauri::command]
 pub fn overlay_escape(app: AppHandle) {
     escape(&app);
+}
+
+/// Parses a wire type name into an [`AreaType`], the inverse of
+/// [`layer_name`]'s convention for [`Layer`].
+///
+/// Only the types a **direct key can arm** are accepted. The rest of
+/// `AreaType` is modelled but has no gesture, and silently accepting a name
+/// nothing can produce would turn a frontend typo into an area of a type the
+/// app cannot render.
+fn armable_type(name: &str) -> Option<AreaType> {
+    match name {
+        "screenshot" => Some(AreaType::Screenshot),
+        _ => None,
+    }
+}
+
+/// IPC surface: a direct key arms the type of the **next** drag (ADR-0018 §1).
+///
+/// Only meaningful in `Placement` — the state that has a next drag — and
+/// rejected elsewhere rather than stored for later, because arming that
+/// outlives the state it was set in is precisely the mode state ADR-0009 §3
+/// deleted.
+#[tauri::command]
+pub fn overlay_arm_type(app: AppHandle, kind: String) -> Result<(), String> {
+    let Some(kind) = armable_type(&kind) else {
+        return Err(format!("{kind} is not an armable area type"));
+    };
+    let state = *lock(&app.state::<Mutex<OverlayState>>());
+    if state != OverlayState::Placement {
+        return Err("arming is only meaningful in placement".to_string());
+    }
+    placement::arm(kind);
+    // Re-emit so the indicator picks up the new armed type; ADR-0018 §3 makes
+    // the indicator the thing that buys down the cost of having mode state at
+    // all, so arming without telling the frontend is the failure mode, not a
+    // missing nicety.
+    emit_state(&app, state)
 }
 
 /// IPC surface: `Delete` from the overlay dismisses the area under the cursor.

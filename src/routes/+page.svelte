@@ -6,7 +6,10 @@ import {
   type AreaFrame,
   type AreasPayload,
   type AreaView,
+  type ArmableType,
   areaFramesCss,
+  armAreaType,
+  armedTypeForKey,
   dismissFocusedArea,
   escapeOverlay,
   type HoverPayload,
@@ -45,6 +48,10 @@ let selection: PhysRect | null = $state(null);
 let draggedArea: number | null = $state(null);
 let hoveredArea: number | null = $state(null);
 let menu: MenuView | null = $state(null);
+// What the next drag will make, or null for Default (ADR-0018 §3). Rust owns
+// this — arming is placement state living beside the mouse hook — and re-emits
+// the state whenever it changes.
+let armed: ArmableType | null = $state(null);
 // The WebView owns its scale (ADR-0011); refreshed on every state event in case
 // the overlay moved to a monitor at a different DPI.
 let dpr = $state(1);
@@ -84,6 +91,15 @@ function onKeydown(event: KeyboardEvent) {
     // keeps that true if it ever does.
     event.preventDefault();
     void dismissFocusedArea(invoke);
+    return;
+  }
+  // A direct key arms the type of the next drag (ADR-0018 §1). Rust owns
+  // whether that is legal in the current state, so this fires the intent and
+  // lets it decide — the same division as every other key here.
+  const arming = armedTypeForKey(event);
+  if (arming) {
+    event.preventDefault();
+    void armAreaType(invoke, arming);
   }
 }
 
@@ -92,6 +108,7 @@ onMount(() => {
     overlayState = event.payload.state;
     monitors = event.payload.monitors;
     origin = event.payload.origin;
+    armed = event.payload.armed;
     dpr = window.devicePixelRatio;
     // A hidden overlay is drawing nothing; drop any half-finished selection so
     // it cannot reappear on the next show before the poll clears it.
