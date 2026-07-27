@@ -45,9 +45,31 @@
 //! ```text
 //! UPTAKE_DEV_ALLOW_MULTIPLE=1 pnpm tauri dev
 //! ```
+//!
+//! ## `UPTAKE_DEV_PACING`
+//!
+//! Task 1.17(a)'s gesture instrumentation: the achieved poll rate and the
+//! emit→painted round trip, one pair of lines per completed gesture, plus the
+//! sampled IPC probe that produces the second number.
+//!
+//! **It is opt-in for two separate reasons, and only one of them is noise.** A
+//! line per gesture is a line per *drag*, so an ordinary dev session that places
+//! a few areas gets a running commentary it did not ask for — that is the
+//! cosmetic half. The load-bearing half is that the probe adds an IPC round trip
+//! on every eighth selection frame, ~27 a second, **to the exact path it
+//! measures**: leaving it on by default means every dev build paces its drags
+//! while carrying the weight of watching itself, and the numbers drift towards
+//! measuring the measurement.
+//!
+//! Off by default; the two `quality-bars.md` §1 drag rows are re-measured by
+//! turning it on deliberately.
+//!
+//! ```text
+//! UPTAKE_DEV_PACING=1 pnpm tauri dev
+//! ```
 
 use std::env;
-use std::sync::OnceLock;
+use std::sync::{LazyLock, OnceLock};
 use std::thread::{self, ThreadId};
 use std::time::Duration;
 
@@ -59,6 +81,21 @@ const RESHOW_VAR: &str = "UPTAKE_DEV_RESHOW";
 /// Environment variable that, when set, skips registering the single-instance
 /// guard so M-9 can still be reproduced with two dev instances.
 const ALLOW_MULTIPLE_VAR: &str = "UPTAKE_DEV_ALLOW_MULTIPLE";
+
+/// Environment variable that, when set, turns on the gesture pacing and
+/// emit→painted instrumentation.
+const PACING_VAR: &str = "UPTAKE_DEV_PACING";
+
+/// Whether gesture instrumentation is on this run.
+///
+/// Read once and cached: the probe half of this is consulted on **every**
+/// selection frame — up to ~220 a second — and `env::var` allocates a `String`
+/// per call. Caching also means the answer cannot change mid-gesture, so a
+/// summary line always describes a gesture that was measured end to end.
+pub fn pacing_enabled() -> bool {
+    static ENABLED: LazyLock<bool> = LazyLock::new(|| env::var(PACING_VAR).is_ok());
+    *ENABLED
+}
 
 /// Whether the single-instance guard should be skipped this run.
 ///

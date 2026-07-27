@@ -143,6 +143,52 @@ impl AreaType {
             }
         }
     }
+
+    /// What happens to PLACEMENT once an area of this type has been created —
+    /// the per-type axis ADR-0018 §6 added.
+    ///
+    /// Unlike [`default_visual`](Self::default_visual) and
+    /// [`default_input`](Self::default_input) this is **not** a starting value
+    /// for a field on the area. It is a property of the *creating gesture*, and
+    /// it exists because the two decided types genuinely differ: placing several
+    /// `Default` areas in a row is the normal case, while a `Screenshot` has
+    /// finished the moment its capture is pinned and the user wants input back
+    /// in their own applications.
+    ///
+    /// ADR-0018 names the cost of this axis out loud: every future type must now
+    /// answer "and then what?", and getting it wrong strands the user in the
+    /// wrong state. So the five unbuilt types below are **not** answered here —
+    /// they take the conservative value and say so.
+    ///
+    /// # Every type stays, as of ADR-0023
+    ///
+    /// ADR-0018 §6 had `Screenshot` **exit** on create. Driving it on real
+    /// hardware immediately read as wrong: the capture lands and the overlay
+    /// drops you out from under your own hands, before you can nudge or resize
+    /// the area you just drew. Reversed by
+    /// [ADR-0023](ADR-0023-screenshot-stays-in-placement.md); the exit becomes
+    /// an opt-in setting (task 1.14).
+    ///
+    /// **The axis is still worth having, and this is the evidence for it.** The
+    /// reversal was a one-value change with no structural edit anywhere — which
+    /// is exactly what a per-type property is for. Had "and then what?" been
+    /// inlined at the call site instead, this would have been surgery.
+    #[must_use]
+    pub const fn after_create(self) -> AfterCreate {
+        match self {
+            // Every type stays in PLACEMENT today (ADR-0023). Written as one
+            // arm rather than seven because there is currently one answer; the
+            // *return type* is what keeps a second answer cheap to add, not the
+            // shape of this match.
+            Self::Default
+            | Self::Screenshot
+            | Self::Record
+            | Self::Ocr
+            | Self::Upscale
+            | Self::Analysis
+            | Self::Filter => AfterCreate::StayInPlacement,
+        }
+    }
 }
 
 /// Whether an area's contents update continuously — the first of the three
@@ -173,6 +219,25 @@ pub enum Input {
     Interactive,
     /// Mouse events fall through to whatever is beneath, regardless of z-order.
     PassThrough,
+}
+
+/// Whether creating an area of a given type leaves PLACEMENT (ADR-0018 §6).
+///
+/// Deliberately a two-variant enum rather than a `bool`: `after_create(t) ==
+/// AfterCreate::ExitPlacement` reads as the question it answers, where
+/// `exits_placement(t) == true` invites a caller to get the polarity backwards
+/// at the one call site where it matters.
+///
+/// The exit lands in **LIVING, not HIDDEN** — an area now exists, and
+/// `overlay_state::next` already collapses an arealess LIVING to HIDDEN, so no
+/// rule is needed here (ADR-0018 §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum AfterCreate {
+    /// PLACEMENT continues — the user is placing several areas in a row.
+    #[default]
+    StayInPlacement,
+    /// PLACEMENT ends and input returns to the user's own applications.
+    ExitPlacement,
 }
 
 /// Which stacking tier an area is pinned to (ADR-0013).
@@ -612,6 +677,22 @@ mod tests {
                 kind.default_visual() == Visual::Live,
                 expected,
                 "{kind:?} default_visual"
+            );
+        }
+    }
+
+    #[test]
+    fn no_type_exits_placement_on_create() {
+        // ADR-0023 reversed ADR-0018 §6 after a rig pass: being dropped out of
+        // PLACEMENT the instant a capture lands, before you can nudge the area
+        // you just drew, reads as the app taking the tool out of your hands.
+        // Pinned as a whole-set assertion rather than deleted, so a type that
+        // later wants `ExitPlacement` has to change this test deliberately.
+        for kind in ALL_TYPES {
+            assert_eq!(
+                kind.after_create(),
+                AfterCreate::StayInPlacement,
+                "{kind:?} after_create"
             );
         }
     }

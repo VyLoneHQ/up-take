@@ -1,3 +1,4 @@
+mod captures;
 mod click_through;
 #[cfg(debug_assertions)]
 mod dev_harness;
@@ -79,12 +80,35 @@ pub fn run() -> tauri::Result<()> {
     builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        // The pinned-capture transport (task 1.9b).
+        //
+        // Registered with the **asynchronous** API, and the honest note is that
+        // as used it buys nothing over the synchronous one. wry calls a custom
+        // protocol handler from inside its `WebResourceRequested` handler, on the
+        // WebView2 UI thread (`wry-0.55.1/src/webview2/mod.rs:955-1027`), and
+        // responding inline as below keeps the lock and the copy on that thread.
+        // This comment previously claimed the async form moved that work off the
+        // request path; it does not, and only `responder.respond` from another
+        // thread would.
+        //
+        // Left inline deliberately: the store holds **PNG** bytes, a few hundred
+        // KB for a typical area rather than the tens of MB an earlier comment
+        // here claimed (that figure is the *raw* BGRA size in `output.rs`), and
+        // the versioned immutable URL means one fetch per capture, not one per
+        // repaint. The async registration stays because it is the form that can
+        // be made to defer without a signature change if a pin ever gets big
+        // enough to need it.
+        .register_asynchronous_uri_scheme_protocol(captures::SCHEME, |ctx, request, responder| {
+            responder.respond(captures::serve(ctx, request));
+        })
         // Used only from Rust, and only to report a failed hotkey registration
         // (architecture §4). No frontend capability grants it, so the WebView
         // cannot open dialogs.
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             overlay::overlay_escape,
+            overlay::overlay_arm_type,
+            overlay::overlay_report_latency,
             overlay::overlay_dismiss_focused,
             overlay::overlay_request_state
         ])
@@ -123,6 +147,10 @@ pub fn run() -> tauri::Result<()> {
             // summon: `has_areas` reads it to decide whether Living is real, and
             // the placement hook writes it when a drag creates one.
             app.manage(Mutex::new(AreaStore::new()));
+            // The pinned captures a Screenshot area renders (task 1.9b). Managed
+            // here rather than lazily because the URI scheme handler is live from
+            // the first frame and reads it on every request.
+            app.manage(Mutex::new(captures::CaptureStore::default()));
             // Chain a system-cursor restore onto the panic hook before anything
             // can override the cursor, so a panic while placing does not leave
             // every app showing the crosshair. See `placement`.

@@ -27,11 +27,14 @@
 use std::fs;
 use std::path::PathBuf;
 use std::ptr;
+use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
 
 use tauri::{AppHandle, Manager};
+use uptake_core::area::AreaId;
 use uptake_core::bitmap::RgbaBitmap;
 use uptake_core::geometry::Rect;
+
 use windows_capture::encoder::{ImageEncoder, ImageEncoderPixelFormat, ImageFormat};
 use windows_sys::Win32::Foundation::{GlobalFree, HWND, SYSTEMTIME};
 use windows_sys::Win32::Graphics::Gdi::{BI_BITFIELDS, BITMAPV5HEADER, LCS_GM_IMAGES};
@@ -40,6 +43,8 @@ use windows_sys::Win32::System::DataExchange::{
 };
 use windows_sys::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows_sys::Win32::System::SystemInformation::GetLocalTime;
+
+use crate::captures::CaptureStore;
 
 /// The value Windows defines for `LCS_sRGB` (`wingdi.h`) — not exported by
 /// `windows-sys`'s `Gdi` module under any name (only the `LCS_GM_*` rendering
@@ -50,42 +55,180 @@ const LCS_S_RGB: u32 = 0x7352_4742;
 const BUDGET_TARGET_MS: u128 = 300;
 const BUDGET_HARD_FAIL_MS: u128 = 600;
 
-/// Captures `bounds` and publishes it to the clipboard alone.
+/// The pixels an export should use for `area`: its pinned capture if it has one,
+/// otherwise a fresh capture of `bounds`.
+///
+/// # A pinned area exports what it is showing, not what is under it
+///
+/// **This is the fix for a defect found on the rig 2026-07-27.** Both export
+/// actions used to capture live, unconditionally. While areas could not move that
+/// was indistinguishable from correct — a passive `Screenshot` pins the instant it
+/// is created, so its rectangle still held the same pixels. Task 1.17(a) added
+/// move and resize in LIVING, and from then on Copy on a moved Screenshot area
+/// returned **the desktop underneath its new position**, cropped to the area's
+/// size: a screenshot of whatever the area happened to be sitting on.
+///
+/// The failure is quiet, which is what makes it bad. The result is a plausible
+/// image of the right dimensions, so nothing looks broken until you look at what
+/// you pasted.
+///
+/// A `Default` area has no capture and falls through to the live path, which is
+/// the only thing Copy can mean for a bare claimed rectangle.
+fn export_source(
+    app: &AppHandle,
+    area: AreaId,
+    bounds: Rect,
+    split: &mut Split,
+) -> Result<(RgbaBitmap, Vec<u8>), String> {
+    if let Some(pinned) = crate::captures::pinned_capture(app, area) {
+        // Capture and encode both stay at 0 ms, which is the honest reading: this
+        // path does neither. It also keeps the §1 budget lines meaningful — a
+        // pinned export is not a measurement of the capture pipeline.
+        return Ok(pinned);
+    }
+    capture(bounds, split)
+}
+
+/// Publishes an area's image to the clipboard alone.
 ///
 /// PRODUCT-VISION §8: an area's source is still on screen, so re-copying is
 /// one gesture — the justification ShareX/Snipping Tool have for also
 /// writing a file (a screenshot is transient) does not transfer here, and the
 /// cost (an area copied forty times is forty stray PNGs) stays. Nothing is
 /// written to disk by this path.
-pub(crate) fn copy_to_clipboard(app: &AppHandle, bounds: Rect) {
+pub(crate) fn copy_to_clipboard(app: &AppHandle, area: AreaId, bounds: Rect) {
     let started = Instant::now();
-    let outcome = capture(bounds).and_then(|(bitmap, png)| {
+    let mut split = Split::default();
+    let outcome = export_source(app, area, bounds, &mut split).and_then(|(bitmap, png)| {
         // Both buffers are built *before* the clipboard is opened. The
         // clipboard is a global system resource — every other process's
         // access blocks while it is held — so no per-pixel work belongs
         // inside the bracket, and a 4K-sized area is a 33 MB conversion.
-        let dib = dibv5_bytes(&bitmap)?;
-        publish_clipboard(overlay_hwnd(app)?, &dib, &png)
+        let publish = Instant::now();
+        let result =
+            dibv5_bytes(&bitmap).and_then(|dib| publish_clipboard(overlay_hwnd(app)?, &dib, &png));
+        split.publish_ms = publish.elapsed().as_millis();
+        result
     });
-    report("copy", started, outcome);
+    // Acknowledge the action on screen. Only on success: a flash after a
+    // failed Copy would be a lie the user has no way to check.
+    if outcome.is_ok() {
+        crate::overlay::emit_flash(app, area);
+    }
+    report("copy", started, &split, outcome);
 }
 
-/// Captures `bounds` and writes it to `Pictures\UP-TAKE\`, creating the
-/// directory on first use. A separate, explicit action (PRODUCT-VISION §8) —
-/// does not also touch the clipboard.
-pub(crate) fn save_to_file(app: &AppHandle, bounds: Rect) {
+/// Writes an area's image to `Pictures\UP-TAKE\`, creating the directory on first
+/// use. A separate, explicit action (PRODUCT-VISION §8) — does not also touch the
+/// clipboard.
+pub(crate) fn save_to_file(app: &AppHandle, area: AreaId, bounds: Rect) {
     let started = Instant::now();
-    let outcome = capture(bounds).and_then(|(_bitmap, png)| write_file(app, &png));
-    report("save", started, outcome);
+    let mut split = Split::default();
+    let outcome = export_source(app, area, bounds, &mut split).and_then(|(_bitmap, png)| {
+        let publish = Instant::now();
+        let result = write_file(app, &png);
+        split.publish_ms = publish.elapsed().as_millis();
+        result
+    });
+    if outcome.is_ok() {
+        crate::overlay::emit_flash(app, area);
+    }
+    report("save", started, &split, outcome);
+}
+
+/// Where the selection→clipboard time actually goes, per stage (ms).
+///
+/// **Owed to task 1.9c by [ADR-0022].** Task 1.9's rig pass timed only the
+/// total, and the ADR's premise — that capture is ~65–70 % of it — was derived
+/// by *subtracting* the Copy and Save figures from each other rather than
+/// measured. 1.9c is a capture-side fix and would be worthless if the encode or
+/// the clipboard publish turned out to dominate instead, so the split is
+/// recorded rather than inferred.
+///
+/// [ADR-0022]: the private planning repo's
+/// `DECISIONS/ADR-0022-hold-a-frame-and-crop.md`
+#[derive(Default)]
+struct Split {
+    /// `uptake_capture::capture_region` — the stage 1.9c removes from the
+    /// measured interval.
+    capture_ms: u128,
+    /// PNG encode.
+    encode_ms: u128,
+    /// Whatever the action does with the bytes: the DIB conversion plus the
+    /// clipboard bracket for Copy, the file write for Save.
+    publish_ms: u128,
 }
 
 /// Captures `bounds` and encodes it as PNG, returning both the raw bitmap
 /// (needed for the DIB clipboard format, which is not decoded back out of the
-/// PNG) and the encoded bytes.
-fn capture(bounds: Rect) -> Result<(RgbaBitmap, Vec<u8>), String> {
+/// PNG) and the encoded bytes, and recording each stage's cost in `split`.
+fn capture(bounds: Rect, split: &mut Split) -> Result<(RgbaBitmap, Vec<u8>), String> {
+    let grab = Instant::now();
     let captured = uptake_capture::capture_region(bounds).map_err(|error| error.to_string())?;
+    split.capture_ms = grab.elapsed().as_millis();
+    let encode = Instant::now();
     let png = encode_png(&captured.bitmap)?;
+    split.encode_ms = encode.elapsed().as_millis();
     Ok((captured.bitmap, png))
+}
+
+/// Captures `bounds` for a newly created area: publishes to the clipboard
+/// (PRODUCT-VISION §8 — clipboard only) **and** pins the PNG for the area to
+/// render (ADR-0014 §6, the Snipaste pin).
+///
+/// # The seam task 1.9c changes
+///
+/// [ADR-0022] settles that §1's selection→clipboard budget is met by *holding a
+/// full-monitor frame and cropping it*, not by making capture faster — and 1.9c
+/// builds that. **The frame acquisition is deliberately confined to
+/// [`capture`]**, so 1.9c replaces one function's insides (or gives it an
+/// already-captured frame to crop) rather than restructuring this one. Nothing
+/// below assumes the pixels were captured *now*.
+///
+/// # Threading
+///
+/// Spawns, and the spawn is not optional. The only caller is
+/// `placement::finish_gesture`, which runs inside the `WH_MOUSE_LL` callback,
+/// and a capture is 100–300 ms even warm — far past `LowLevelHooksTimeout`, the
+/// failure class F-33 found the hard way.
+///
+/// [ADR-0022]: the private planning repo's
+/// `DECISIONS/ADR-0022-hold-a-frame-and-crop.md`
+pub(crate) fn capture_into_area(app: &AppHandle, id: AreaId, bounds: Rect) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let started = Instant::now();
+        let mut split = Split::default();
+        let outcome = capture(bounds, &mut split).and_then(|(bitmap, png)| {
+            let publish = Instant::now();
+            // The pin is stored *and announced* before the clipboard is touched:
+            // it is the thing the user can see, and a clipboard failure should
+            // still leave a visible capture on screen rather than an empty area.
+            //
+            // **The announcement used to come after the clipboard work, which
+            // silently voided that promise.** `dibv5_bytes(&bitmap)?` and
+            // `overlay_hwnd(&app)?` both return early from this closure, so
+            // either failure stored the bytes and never told the frontend they
+            // existed — an area left permanently blank, with the pixels sitting
+            // in the store, and a comment below asserting the opposite. Ordering
+            // the emit first makes the promise structural instead of a claim.
+            let version = {
+                let store = app.state::<Mutex<CaptureStore>>();
+                let mut guard = store.lock().unwrap_or_else(PoisonError::into_inner);
+                guard.insert(id, bitmap.clone(), png.clone())
+            };
+            if let Err(error) = crate::overlay::emit_pin(&app, id, version) {
+                eprintln!("output: pinned the capture but could not announce it: {error}");
+            }
+            // Recorded before the `?`s below, so a failure *inside* publishing is
+            // not reported as "publish 0 ms".
+            let published = dibv5_bytes(&bitmap)
+                .and_then(|dib| publish_clipboard(overlay_hwnd(&app)?, &dib, &png));
+            split.publish_ms = publish.elapsed().as_millis();
+            published
+        });
+        report("capture", started, &split, outcome);
+    });
 }
 
 /// Encodes RGBA8 pixels as PNG via the same WIC-backed encoder
@@ -103,23 +246,30 @@ fn encode_png(bitmap: &RgbaBitmap) -> Result<Vec<u8>, String> {
 /// after the fact (F-29's lesson): a capture alone measured ~190–230 ms warm,
 /// leaving little room before the 300 ms target and less before the 600 ms
 /// hard fail.
-fn report(action: &str, started: Instant, outcome: Result<(), String>) {
+fn report(action: &str, started: Instant, split: &Split, outcome: Result<(), String>) {
     let elapsed = started.elapsed().as_millis();
+    // The split rides along with every budget line, not just the debug one:
+    // the whole point (ADR-0022) is that "it was 320 ms" is not actionable and
+    // "capture 210, encode 25, publish 80" is.
+    let stages = format!(
+        "capture {} ms, encode {} ms, publish {} ms",
+        split.capture_ms, split.encode_ms, split.publish_ms
+    );
     match outcome {
         Ok(()) => {
             if elapsed > BUDGET_HARD_FAIL_MS {
                 eprintln!(
-                    "output: {action} took {elapsed} ms — over the §1 hard-fail budget ({BUDGET_HARD_FAIL_MS} ms)"
+                    "output: {action} took {elapsed} ms — over the §1 hard-fail budget ({BUDGET_HARD_FAIL_MS} ms) — {stages}"
                 );
             } else if elapsed > BUDGET_TARGET_MS {
                 eprintln!(
-                    "output: {action} took {elapsed} ms — over the §1 target ({BUDGET_TARGET_MS} ms), within the hard fail"
+                    "output: {action} took {elapsed} ms — over the §1 target ({BUDGET_TARGET_MS} ms), within the hard fail — {stages}"
                 );
             }
             #[cfg(debug_assertions)]
-            eprintln!("output: {action} finished in {elapsed} ms");
+            eprintln!("output: {action} finished in {elapsed} ms — {stages}");
         }
-        Err(error) => eprintln!("output: {action} failed after {elapsed} ms: {error}"),
+        Err(error) => eprintln!("output: {action} failed after {elapsed} ms: {error} — {stages}"),
     }
 }
 

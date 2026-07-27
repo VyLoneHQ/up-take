@@ -25,6 +25,12 @@ export interface StatePayload {
   state: OverlayStateName;
   origin: Origin;
   monitors: PhysRect[];
+  /**
+   * The type armed for the next drag, or `null` for none (ADR-0018 §3).
+   * **Absence means `Default`** — the indicator shows no type cue when nothing
+   * is armed, rather than naming the resting state as if it were a choice.
+   */
+  armed: ArmableType | null;
 }
 
 /** An area's stacking tier (ADR-0013). */
@@ -49,9 +55,59 @@ export interface AreasPayload {
   areas: AreaView[];
 }
 
+/**
+ * The payload of `overlay://flash`: a user-initiated action on this area
+ * succeeded, and the area should acknowledge it.
+ *
+ * `nonce` changes on every emit so a repeat of the same action on the same area
+ * restarts the animation instead of being coalesced into no visible change —
+ * which would fail in exactly the way this feature exists to fix.
+ */
+export interface FlashPayload {
+  id: number;
+  nonce: number;
+}
+
+/**
+ * The payload of `overlay://active-monitor`: which monitor holds the cursor.
+ *
+ * An index into the `monitors` array of the last {@link StatePayload}. `null`
+ * when the cursor is in a dead zone between mismatched monitors.
+ */
+export interface ActiveMonitorPayload {
+  index: number | null;
+}
+
+/**
+ * The payload of the `overlay://pin` event: one area's capture is ready.
+ *
+ * Carries a **URL, not bytes**. The `uptake-area://` scheme exists precisely so
+ * a ~270 KB capture never crosses this JSON bridge — see the Rust `captures`
+ * module.
+ */
+export interface PinPayload {
+  id: number;
+  url: string;
+}
+
 /** The payload of the `overlay://hover` event: the area under the cursor. */
 export interface HoverPayload {
   id: number | null;
+  /**
+   * The CSS `cursor` keyword to apply, or `null` for none.
+   *
+   * Rust sends a keyword rather than a handle name because it owns the hit
+   * test — re-deriving "north-east edge ⇒ `nesw-resize`" here would be a second
+   * mapping to keep in step. It is `null` in Placement, where the *system*
+   * cursor is overridden instead (`SetSystemCursor`); two authorities on one
+   * pointer is how they end up disagreeing.
+   *
+   * ⚠️ **Applying this currently has no effect.** The overlay window is
+   * `WS_EX_TRANSPARENT` in every visible state (ADR-0016), so it receives no
+   * mouse messages and therefore no `WM_SETCURSOR` — a CSS cursor cannot apply
+   * anywhere on it. See `css_cursor` in `placement.rs` for the two routes out.
+   */
+  cursor: string | null;
 }
 
 /** One row of the per-area menu, positioned by Rust. */
@@ -165,6 +221,12 @@ export function menuFrameCss(
 export interface SelectionPayload {
   rect: PhysRect | null;
   /**
+   * A latency probe on sampled frames, or null. Echo it back **after this frame
+   * has painted** and Rust closes the loop on its own clock — the value is
+   * opaque here on purpose, so no epoch has to be reconciled across the bridge.
+   */
+  probe: number | null;
+  /**
    * The area being moved or resized, if any. It is drawn as the drag's *source*
    * — where the area is coming from — rather than as a normal area, so a move
    * does not look like two areas existing at once.
@@ -270,6 +332,75 @@ export async function escapeOverlay(invoke: Invoke): Promise<boolean> {
  */
 export function isRemoveKey(key: string): boolean {
   return key === 'Delete';
+}
+
+/** An area type a direct key can arm for the next drag (ADR-0018 §1). */
+export type ArmableType = 'screenshot';
+
+/**
+ * Which type this key arms, or `null` if it arms nothing.
+ *
+ * Takes the event rather than the bare key, unlike {@link isRemoveKey} — and
+ * the difference is deliberate. Arming changes what the *next gesture means*,
+ * so a chord the user pressed for some other reason must not trigger it, and
+ * `Alt` in particular already has a meaning during placement (it suppresses
+ * snapping). A guard that lives in the predicate cannot be forgotten at a call
+ * site; one that lives in the handler can.
+ *
+ * `Shift` is not excluded: `Shift+S` is just how a capital `S` is typed.
+ */
+export function armedTypeForKey(
+  event: Pick<KeyboardEvent, 'key' | 'ctrlKey' | 'altKey' | 'metaKey'>,
+): ArmableType | null {
+  if (event.ctrlKey || event.altKey || event.metaKey) {
+    return null;
+  }
+  switch (event.key.toLowerCase()) {
+    case 's':
+      return 'screenshot';
+    default:
+      return null;
+  }
+}
+
+/**
+ * Arms the type of the next drag. Never throws, for the same reason
+ * {@link escapeOverlay} does not.
+ *
+ * Rust rejects arming outside placement, and that rejection is **expected**
+ * rather than exceptional — the key handler is live in `living` too. Logging it
+ * as an error would train the reader to ignore the console.
+ */
+export async function armAreaType(
+  invoke: Invoke,
+  kind: ArmableType,
+): Promise<boolean> {
+  try {
+    await invoke('overlay_arm_type', { kind });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Returns a latency probe once the frame carrying it has actually painted.
+ *
+ * **Two nested `requestAnimationFrame` calls, not one.** A rAF callback runs
+ * *before* the paint it belongs to, so measuring there would stop the clock
+ * early and flatter the result. The second callback runs on the following
+ * frame, by which point the first has been painted — the standard way to
+ * observe "after paint" from script.
+ *
+ * Never throws: this is instrumentation, and a failed measurement must not
+ * disturb the thing it measures.
+ */
+export function reportLatency(invoke: Invoke, probe: number): void {
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      void invoke('overlay_report_latency', { probe }).catch(() => {});
+    });
+  });
 }
 
 /**

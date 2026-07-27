@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   type AreaView,
   areaFramesCss,
+  armAreaType,
+  armedTypeForKey,
   dismissFocusedArea,
   escapeOverlay,
   isRemoveKey,
@@ -225,6 +227,61 @@ describe('isRemoveKey', () => {
     // Deliberate: Backspace is the reflexive "undo that" key, and dismissing an
     // area has no undo.
     expect(isRemoveKey('Backspace')).toBe(false);
+  });
+});
+
+describe('armedTypeForKey', () => {
+  const key = (over: Partial<KeyboardEvent> & { key: string }) => ({
+    ctrlKey: false,
+    altKey: false,
+    metaKey: false,
+    ...over,
+  });
+
+  it('arms Screenshot on S, in either case', () => {
+    expect(armedTypeForKey(key({ key: 's' }))).toBe('screenshot');
+    expect(armedTypeForKey(key({ key: 'S' }))).toBe('screenshot');
+  });
+
+  it('still arms when Shift is held, since that is how a capital S is typed', () => {
+    expect(armedTypeForKey(key({ key: 'S', shiftKey: true }))).toBe(
+      'screenshot',
+    );
+  });
+
+  it('arms nothing under Ctrl, Alt or Meta', () => {
+    // Alt is the one that matters: it already suppresses snapping during
+    // placement, so Alt+S is a chord the user may well press for that reason.
+    expect(armedTypeForKey(key({ key: 's', ctrlKey: true }))).toBeNull();
+    expect(armedTypeForKey(key({ key: 's', altKey: true }))).toBeNull();
+    expect(armedTypeForKey(key({ key: 's', metaKey: true }))).toBeNull();
+  });
+
+  it('arms nothing for keys with no type', () => {
+    expect(armedTypeForKey(key({ key: 'q' }))).toBeNull();
+    expect(armedTypeForKey(key({ key: 'Escape' }))).toBeNull();
+    expect(armedTypeForKey(key({ key: 'Delete' }))).toBeNull();
+  });
+});
+
+describe('armAreaType', () => {
+  it('asks Rust to arm the type of the next drag', async () => {
+    const invoke = vi.fn<Invoke>().mockResolvedValue(undefined);
+
+    await expect(armAreaType(invoke, 'screenshot')).resolves.toBe(true);
+    expect(invoke).toHaveBeenCalledWith('overlay_arm_type', {
+      kind: 'screenshot',
+    });
+  });
+
+  it('resolves false without logging when Rust refuses', async () => {
+    // Rust rejects arming outside placement, and the key handler is live in
+    // living too — so this rejection is the expected path, not an error.
+    const invoke = vi
+      .fn<Invoke>()
+      .mockRejectedValue(new Error('not in placement'));
+
+    await expect(armAreaType(invoke, 'screenshot')).resolves.toBe(false);
   });
 });
 

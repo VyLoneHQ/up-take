@@ -118,18 +118,19 @@ use uptake_core::area::{AreaId, AreaType, Input, Layer};
 use uptake_core::geometry::{Point, Rect};
 use uptake_core::interaction::{self, Handle, Resize};
 
-use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, VK_LBUTTON, VK_MENU, VK_RBUTTON,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, CopyIcon, HCURSOR, HHOOK, IDC_CROSS, IDC_HAND, IDC_SIZEALL, IDC_SIZENESW,
-    IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, LoadCursorW, MSLLHOOKSTRUCT, OCR_APPSTARTING, OCR_CROSS,
-    OCR_HAND, OCR_IBEAM, OCR_NO, OCR_NORMAL, OCR_SIZEALL, OCR_SIZENESW, OCR_SIZENS, OCR_SIZENWSE,
-    OCR_SIZEWE, OCR_UP, OCR_WAIT, SPI_SETCURSORS, SetSystemCursor, SetWindowsHookExW,
-    SystemParametersInfoW, UnhookWindowsHookEx, WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    CallNextHookEx, CopyIcon, GA_ROOT, GW_HWNDPREV, GetAncestor, GetWindow, HCURSOR, HHOOK,
+    IDC_CROSS, IDC_HAND, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE,
+    LoadCursorW, MSLLHOOKSTRUCT, OCR_APPSTARTING, OCR_CROSS, OCR_HAND, OCR_IBEAM, OCR_NO,
+    OCR_NORMAL, OCR_SIZEALL, OCR_SIZENESW, OCR_SIZENS, OCR_SIZENWSE, OCR_SIZEWE, OCR_UP, OCR_WAIT,
+    SPI_SETCURSORS, SetSystemCursor, SetWindowsHookExW, SystemParametersInfoW, UnhookWindowsHookEx,
+    WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WindowFromPoint,
 };
 
 use crate::overlay;
@@ -242,6 +243,21 @@ static APP: OnceLock<AppHandle> = OnceLock::new();
 /// cleared together on every path that ends a gesture, and the release handler
 /// reads the payload only when `DRAGGING` says the gesture is still live.
 static GESTURE: Mutex<Option<Gesture>> = Mutex::new(None);
+
+/// The [`AreaType`] armed for the **next** drag, or `None` meaning
+/// [`AreaType::Default`] (ADR-0018 §1).
+///
+/// **Transience is the whole point.** ADR-0009 §3 deleted global mode state by
+/// name, and this is mode state — bought back only because it cannot outlive one
+/// drag, so the "which mode am I in?" problem has no room to occur. It is
+/// cleared when an area is created, when a not-mid-drag `Esc` disarms it, and on
+/// every path that leaves Placement ([`enter_living_on_main_thread`],
+/// [`exit_on_main_thread`], [`teardown_now`]). It is never written to disk and
+/// never restored.
+///
+/// A `Mutex<Option<_>>` rather than an atomic, matching [`GESTURE`]: both are
+/// read from the hook callback, and the pair should look alike.
+static ARMED: Mutex<Option<AreaType>> = Mutex::new(None);
 
 /// The open area menu (ADR-0013's per-area Layer control), or `None`.
 ///
@@ -434,6 +450,111 @@ struct SelectionPayload {
     /// can draw it as the *source* of the drag instead of as a second area
     /// sitting where the first one used to be. `None` while creating.
     source: Option<u64>,
+    /// A latency probe: nanoseconds since [`EPOCH`], set on sampled frames only.
+    /// The frontend echoes it back once the frame has painted, and
+    /// [`record_latency`] closes the loop. `None` on unsampled frames.
+    probe: Option<u64>,
+}
+
+/// The process's monotonic zero, so a probe can round-trip through the WebView
+/// and come back comparable.
+///
+/// **One clock, deliberately.** Rust's `Instant` and JS's `performance.now()`
+/// have unrelated epochs, and reconciling them is its own source of error — so
+/// the frontend never reads the probe's value, it only hands the same number
+/// back. Everything is measured here.
+static EPOCH: std::sync::LazyLock<std::time::Instant> =
+    std::sync::LazyLock::new(std::time::Instant::now);
+
+/// Sample one frame in this many while a gesture runs.
+///
+/// Every frame would add an IPC call per frame to the exact path being measured,
+/// so the measurement would report its own weight. At ~220 Hz this still yields
+/// roughly 27 samples a second.
+const LATENCY_SAMPLE_EVERY: u64 = 8;
+
+/// How many selection frames have been emitted, for the sampling stride.
+static SELECTION_FRAMES: AtomicU64 = AtomicU64::new(0);
+
+/// Whether to stamp probes at all this run.
+///
+/// Split on `cfg` rather than tested with `cfg!`, because `dev_harness` does not
+/// exist in a release build — a `cfg!` test compiles both arms and would fail to
+/// resolve the path.
+#[cfg(debug_assertions)]
+fn probe_enabled() -> bool {
+    crate::dev_harness::pacing_enabled()
+}
+
+/// Release builds never stamp a probe, so nothing echoes and
+/// [`record_latency`] is never reached.
+#[cfg(not(debug_assertions))]
+fn probe_enabled() -> bool {
+    false
+}
+
+/// What the round trip cost, accumulated across one gesture.
+struct LatencySamples {
+    count: u32,
+    total_nanos: u128,
+    max_nanos: u64,
+}
+
+static LATENCY: Mutex<LatencySamples> = Mutex::new(LatencySamples {
+    count: 0,
+    total_nanos: 0,
+    max_nanos: 0,
+});
+
+/// Records a completed probe: emit → IPC → reactivity → layout → painted.
+///
+/// # What this measures, and what it does not
+///
+/// It covers the part of the pipeline **we control**. It excludes the
+/// mouse-to-hook latency ahead of it (the hook only writes atomics, so that is
+/// sub-millisecond) and DWM's final composite to the panel behind it. So it is a
+/// **lower bound** on what the eye sees — the right tool for telling our own
+/// costs apart, which is the open question, and not a claim about total
+/// input-to-photon latency.
+pub fn record_latency(probe_nanos: u64) {
+    let now = u64::try_from(EPOCH.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    let elapsed = now.saturating_sub(probe_nanos);
+    let mut guard = lock(&LATENCY);
+    guard.count = guard.count.saturating_add(1);
+    guard.total_nanos = guard.total_nanos.saturating_add(u128::from(elapsed));
+    guard.max_nanos = guard.max_nanos.max(elapsed);
+}
+
+/// Drains the accumulated samples as `(count, mean ms, worst ms)`.
+///
+/// Debug-only: its one caller is the poll's gesture report, which does not exist
+/// in a release build. [`record_latency`] stays compiled in both, because the IPC
+/// command that reaches it is registered unconditionally — in release nothing
+/// stamps a probe, so nothing echoes and it is never called.
+#[cfg(debug_assertions)]
+pub fn take_latency_summary() -> Option<(u32, f64, f64)> {
+    let mut guard = lock(&LATENCY);
+    if guard.count == 0 {
+        return None;
+    }
+    let count = guard.count;
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "milliseconds for a log line; a nanosecond total cannot reach \
+                  f64's exact-integer limit within a gesture"
+    )]
+    let mean = (guard.total_nanos as f64 / f64::from(count)) / 1_000_000.0;
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "same: a single sample's nanoseconds are far below 2^53"
+    )]
+    let worst = guard.max_nanos as f64 / 1_000_000.0;
+    *guard = LatencySamples {
+        count: 0,
+        total_nanos: 0,
+        max_nanos: 0,
+    };
+    Some((count, mean, worst))
 }
 
 /// The open area menu as the frontend draws it, or `None`.
@@ -465,6 +586,50 @@ struct MenuItemView {
 #[derive(Serialize, Clone)]
 struct HoverPayload {
     id: Option<u64>,
+    /// Which part of it — the CSS `cursor` keyword the frontend should apply,
+    /// or `null` when the cursor is over no area.
+    ///
+    /// **Sent as a cursor keyword rather than a handle name on purpose.** The
+    /// frontend has no business re-deriving "north-east edge ⇒ `nesw-resize`"
+    /// from a geometric fact Rust already resolved; a second mapping is a second
+    /// thing to drift. Rust owns the hit test, so it owns the answer.
+    cursor: Option<&'static str>,
+}
+
+/// The CSS `cursor` keyword for a handle — the WebView's counterpart to
+/// [`CursorShape::for_handle`]'s system cursor.
+///
+/// # ⚠️ Currently inert — the premise this was written on is false
+///
+/// This was added believing the overlay stops being click-through over an
+/// interactive area, so the WebView would receive `WM_SETCURSOR` there. **It
+/// does not.** `click_through`'s module docs are explicit: the window is
+/// **never** interactive, `WS_EX_TRANSPARENT` stays applied in every visible
+/// state (ADR-0016), and the per-area routing that once existed was *deleted*
+/// with that ADR rather than disabled. A window that receives no mouse messages
+/// receives no `WM_SETCURSOR`, so a CSS cursor cannot apply at any position.
+///
+/// Verified on the rig 2026-07-26: no cursor change in `Living`.
+///
+/// The value is still computed and emitted because Rust owns the hit test
+/// either way, and both remaining routes need this answer. The routes are:
+/// scope `SetSystemCursor` to "cursor is over one of our areas" (the same
+/// mechanism `Placement` already uses, applied narrowly — but its restore is a
+/// global cursor-scheme reload, so hover-in/hover-out cost needs measuring), or
+/// re-open ADR-0016 to let the window take input over areas, which that ADR
+/// names as an ADR-level decision and not a flag. Pending that choice, delete
+/// the frontend half rather than leave it looking functional.
+const fn css_cursor(handle: Handle) -> &'static str {
+    match handle {
+        Handle::Close => "pointer",
+        Handle::Body => "move",
+        Handle::Resize(resize) => match resize {
+            Resize::North | Resize::South => "ns-resize",
+            Resize::East | Resize::West => "ew-resize",
+            Resize::NorthWest | Resize::SouthEast => "nwse-resize",
+            Resize::NorthEast | Resize::SouthWest => "nesw-resize",
+        },
+    }
 }
 
 /// Enters placement: install the mouse hook and override the cursor, on the
@@ -551,6 +716,30 @@ pub fn cancel_drag() {
     *lock(&GESTURE) = None;
 }
 
+/// Arms `kind` for the next drag (ADR-0018 §1), replacing anything already
+/// armed — pressing a second direct key changes your mind rather than erroring.
+pub fn arm(kind: AreaType) {
+    *lock(&ARMED) = Some(kind);
+}
+
+/// The type armed for the next drag, or `None` for [`AreaType::Default`].
+///
+/// Read by [`crate::overlay::escape`] for the ladder's middle rung, by the
+/// release handler to decide what to create, and by the poll to tell the
+/// indicator what the next drag will make.
+#[must_use]
+pub fn armed() -> Option<AreaType> {
+    *lock(&ARMED)
+}
+
+/// Clears the arming, so the next drag makes a [`AreaType::Default`] area.
+///
+/// Called on the `Esc` ladder's middle rung and after a create. Idempotent —
+/// disarming when nothing is armed is not an error, it is the common case.
+pub fn disarm() {
+    *lock(&ARMED) = None;
+}
+
 /// What [`pump`] remembers between ticks, so each emit fires on a change rather
 /// than every frame.
 #[derive(Default)]
@@ -572,6 +761,20 @@ pub struct PumpState {
     /// Ticks left before the health check may act again, so a reinstall is not
     /// retried every frame while an elevated window holds the foreground.
     reinstall_cooldown: u32,
+    /// The CSS cursor the previous tick reported, so the emit fires on a change
+    /// of *shape* and not only of area — crossing from an area's body to its
+    /// edge is the same area but a different grab.
+    hovered_cursor: Option<&'static str>,
+    /// The monitor the previous tick reported as holding the cursor.
+    ///
+    /// **Doubly optional on purpose.** The outer `None` means "nothing reported
+    /// yet this Placement" and is cleared on every tick outside Placement, so
+    /// re-entering always re-emits; the inner `None` is the real answer for a
+    /// cursor in a dead zone between mismatched monitors. Collapsing the two
+    /// would leave a re-entry silent whenever the cursor had not moved to a
+    /// different monitor meanwhile — the common case, since the user usually
+    /// re-summons where they left off.
+    active_monitor: Option<Option<usize>>,
 }
 
 /// The poll's placement work, run every tick (`click_through`, ~60 Hz).
@@ -724,11 +927,25 @@ fn reinstall_on_main_thread() {
 /// ends.
 fn pump_gesture(app: &AppHandle, state: &mut PumpState) {
     if let Some(rect) = pending_rect() {
+        let frame = SELECTION_FRAMES.fetch_add(1, Ordering::Relaxed);
+        // Debug builds only, and within those only when `UPTAKE_DEV_PACING` asks
+        // for it. The probe costs an extra IPC round trip per sampled frame —
+        // ~27 a second at the measured 221 Hz — which is load added to the exact
+        // path it measures, so it is not something to leave running in every dev
+        // build either, let alone ship to users who will never read the number.
+        let probe = probe_enabled()
+            .then(|| {
+                frame
+                    .is_multiple_of(LATENCY_SAMPLE_EVERY)
+                    .then(|| u64::try_from(EPOCH.elapsed().as_nanos()).unwrap_or(u64::MAX))
+            })
+            .flatten();
         let _ = app.emit(
             SELECTION_EVENT,
             SelectionPayload {
                 rect: Some(rect),
                 source: dragged_area(),
+                probe,
             },
         );
         state.was_dragging = true;
@@ -742,6 +959,7 @@ fn pump_gesture(app: &AppHandle, state: &mut PumpState) {
             SelectionPayload {
                 rect: None,
                 source: None,
+                probe: None,
             },
         );
         state.was_dragging = false;
@@ -770,8 +988,65 @@ fn pump_hover(app: &AppHandle, state: &mut PumpState) {
         state.hovered_item = menu_hover;
         emit_menu(app);
     }
-    if mode() != Mode::Placement {
+    let placing = mode() == Mode::Placement;
+    if !placing {
+        // Forget the reported monitor so the next entry into Placement re-emits
+        // it — see `PumpState::active_monitor`.
+        state.active_monitor = None;
+        // Living still needs hover chrome (task 1.17(a)): areas are grabbable
+        // here now, and a handle the user cannot see is a handle they will not
+        // reach for. Resolved against *interactive* areas only, matching what
+        // `living_lbutton_down` will actually act on — chrome that appears on
+        // an area the press then ignores is worse than no chrome.
+        //
+        // **The cursor is deliberately not touched.** `set_cursor` drives a
+        // *global* `SetSystemCursor` override, and `enter_living_on_main_thread`
+        // drops it on purpose: Living does not own the pointer, so changing the
+        // shape would change it inside the user's apps too.
+        //
+        // This comment used to end "...belongs in the WebView — the window is
+        // not click-through over an interactive area, so CSS can reach it
+        // there." **That is false, and `css_cursor`'s own docs above say so** —
+        // the window is `WS_EX_TRANSPARENT` in *every* visible state (ADR-0016),
+        // receives no `WM_SETCURSOR` anywhere, and the rig confirmed no cursor
+        // change in Living on 2026-07-26. Two comments in one file disagreeing
+        // about that is worse than either being wrong alone, because the LIVING
+        // cursor is an open decision and a reader who lands on the wrong one
+        // re-derives the dead option. The two live routes are in `css_cursor`.
+        let grabbed = lock(&MENU)
+            .is_none()
+            .then(|| overlay::interactive_area_handle_at(app, point))
+            .flatten();
+        let hovered_area = grabbed.map(|(id, _, _)| id.get());
+        // A live gesture holds its shape for the duration, matching Placement:
+        // the cursor must not flicker between move and resize as the pointer
+        // crosses an edge mid-drag.
+        let cursor = match *lock(&GESTURE) {
+            Some(gesture) => Some(gesture_css_cursor(gesture)),
+            None => grabbed.map(|(_, _, handle)| css_cursor(handle)),
+        };
+        if state.hovered_area != hovered_area || state.hovered_cursor != cursor {
+            state.hovered_area = hovered_area;
+            state.hovered_cursor = cursor;
+            let _ = app.emit(
+                HOVER_EVENT,
+                HoverPayload {
+                    id: hovered_area,
+                    cursor,
+                },
+            );
+        }
         return;
+    }
+
+    // Which monitor the per-monitor chrome belongs on (F-13). The armed-type
+    // badge follows the cursor: showing it on every monitor at once — as the
+    // first cut did — reads as "every screen is armed" and buries the one fact
+    // the indicator exists to convey, which ADR-0018 §3 makes load-bearing.
+    let active_monitor = overlay::monitor_index_at(point);
+    if state.active_monitor != Some(active_monitor) {
+        state.active_monitor = Some(active_monitor);
+        overlay::emit_active_monitor(app, active_monitor);
     }
 
     let menu_open = lock(&MENU).is_some();
@@ -798,9 +1073,29 @@ fn pump_hover(app: &AppHandle, state: &mut PumpState) {
         None => shape,
     };
     set_cursor(shape);
-    if state.hovered_area != hovered_area {
+    if state.hovered_area != hovered_area || state.hovered_cursor.is_some() {
         state.hovered_area = hovered_area;
-        let _ = app.emit(HOVER_EVENT, HoverPayload { id: hovered_area });
+        // Placement drives the *system* cursor, so the WebView must not also
+        // set one — two authorities on one pointer is how they disagree.
+        state.hovered_cursor = None;
+        let _ = app.emit(
+            HOVER_EVENT,
+            HoverPayload {
+                id: hovered_area,
+                cursor: None,
+            },
+        );
+    }
+}
+
+/// The CSS cursor a gesture in progress holds for its duration — the WebView
+/// counterpart of [`gesture_cursor`].
+const fn gesture_css_cursor(gesture: Gesture) -> &'static str {
+    match gesture {
+        Gesture::Move { .. } => "move",
+        Gesture::Resize { resize, .. } => css_cursor(Handle::Resize(resize)),
+        Gesture::Close { .. } | Gesture::MenuItem { .. } => "pointer",
+        Gesture::Create | Gesture::Inert => "default",
     }
 }
 
@@ -927,6 +1222,10 @@ fn enter_living_on_main_thread() {
     WANT_TEARDOWN.store(false, Ordering::SeqCst);
     DRAGGING.store(false, Ordering::SeqCst);
     *lock(&GESTURE) = None;
+    // Arming is Placement-only state and must not outlive it (ADR-0018 §2) —
+    // this is one of the three exits that guarantee "there is no mode to still
+    // be in later".
+    *lock(&ARMED) = None;
     // The menu is re-resolved per mode (its target resolution differs — see
     // `open_menu`), so a menu opened in Placement does not carry over.
     if let Some(app) = APP.get() {
@@ -951,6 +1250,8 @@ fn exit_on_main_thread() {
     set_mode(Mode::Hidden);
     DRAGGING.store(false, Ordering::SeqCst);
     *lock(&GESTURE) = None;
+    // See `enter_living_on_main_thread`: arming never outlives Placement.
+    *lock(&ARMED) = None;
     // The menu belongs to a visible overlay: leaving with it still on screen
     // would draw a control over a hidden window that nothing could ever click.
     if let Some(app) = APP.get() {
@@ -982,6 +1283,10 @@ fn teardown_now() {
     RIGHT_PENDING.store(false, Ordering::SeqCst);
     DRAGGING.store(false, Ordering::SeqCst);
     *lock(&GESTURE) = None;
+    // Belt and braces: `exit_on_main_thread` has usually cleared this already,
+    // but `teardown_now` is also reached from the deferred path, and arming
+    // surviving a teardown would be exactly the mode state ADR-0009 §3 deleted.
+    *lock(&ARMED) = None;
     restore_system_cursors();
     // The override is gone, so the cache must forget what it believes the OS
     // has — otherwise the next entry into Placement would skip re-applying a
@@ -1169,6 +1474,19 @@ fn handle_mouse(wparam: WPARAM, lparam: LPARAM) -> bool {
     let info = unsafe { &*(lparam as *const MSLLHOOKSTRUCT) };
     let (x, y) = (info.pt.x, info.pt.y);
     let point = Point::new(x, y);
+    // A press belongs to whatever is actually on top at that point. Checked once
+    // here, before either button's handling, so neither path can forget it — and
+    // only on a **press**, never on a move, so the per-event cost stays off the
+    // hot path. See `shadowed_by_another_window`.
+    //
+    // This applies in Placement too, not just Living. Placement means "UP-TAKE
+    // owns the mouse", but that was always shorthand for "UP-TAKE is the topmost
+    // thing" — when it demonstrably is not, swallowing the click is the same
+    // mistake in either mode.
+    if matches!(wparam as u32, WM_LBUTTONDOWN | WM_RBUTTONDOWN) && shadowed_by_another_window(point)
+    {
+        return false;
+    }
     match wparam as u32 {
         WM_LBUTTONDOWN => match mode() {
             // The hook's mode has already been left (most likely: the brief
@@ -1293,18 +1611,188 @@ fn living_lbutton_down(point: Point) -> bool {
         LEFT_PENDING.store(true, Ordering::SeqCst);
         return true;
     }
-    match overlay::interactive_area_at(app, point) {
-        Some(area) => {
-            if overlay::raise_area(app, area.id)
-                && let Err(error) = overlay::emit_areas(app)
-            {
-                eprintln!("placement: raised an area but could not emit the new set: {error}");
-            }
-            LEFT_PENDING.store(true, Ordering::SeqCst);
-            true
-        }
-        None => false,
+    // Task 1.17(a): a press on an interactive area begins a real gesture here,
+    // not just a raise. The routing for this already existed — the hook runs in
+    // every visible state (ADR-0016) and this function already resolved and
+    // raised the area under the cursor — so the only thing missing was calling
+    // the classifier. That is why needing `Placement` to nudge an area felt
+    // arbitrary: it was an unfinished edge, not a design position.
+    //
+    // **Two deliberate differences from `classify_press`.** It resolves against
+    // *interactive* areas only, because a pass-through area's pixels belong to
+    // the app underneath in `Living`; and a press that lands on no area returns
+    // `false` rather than falling through to `Gesture::Create`, because empty
+    // overlay in `Living` is the user's desktop and creating there would steal
+    // a click from it. Creating areas stays a `Placement` gesture.
+    let Some((id, bounds, handle)) = overlay::interactive_area_handle_at(app, point) else {
+        return false;
+    };
+    // **The drag anchor, and it is not optional.** `gesture_rect` computes every
+    // move and resize as `pointer - anchor`, reading it from these statics; the
+    // `Placement` arm of the hook stores them before classifying. The first cut
+    // of this function did not, so a Living drag differenced the live pointer
+    // against whatever anchor the *last Placement drag* had left behind — a
+    // constant offset, which is why every area jumped the same way on the first
+    // click instead of following the cursor.
+    START_X.store(point.x, Ordering::SeqCst);
+    START_Y.store(point.y, Ordering::SeqCst);
+    CUR_X.store(point.x, Ordering::SeqCst);
+    CUR_Y.store(point.y, Ordering::SeqCst);
+    // Raise first, so the gesture acts on an area that is already topmost —
+    // §3.2a's "the area you last touched is on top" (ADR-0016), unchanged.
+    if overlay::raise_area(app, id)
+        && let Err(error) = overlay::emit_areas(app)
+    {
+        eprintln!("placement: raised an area but could not emit the new set: {error}");
     }
+    *lock(&GESTURE) = Some(match handle {
+        Handle::Close => Gesture::Close {
+            id,
+            control: overlay::close_control_of(bounds),
+        },
+        Handle::Resize(resize) => Gesture::Resize {
+            id,
+            resize,
+            start: bounds,
+        },
+        Handle::Body => Gesture::Move { id, start: bounds },
+    });
+    DRAGGING.store(true, Ordering::SeqCst);
+    LEFT_PENDING.store(true, Ordering::SeqCst);
+    true
+}
+
+/// How far up the z-order [`shadowed_by_another_window`] will walk before giving
+/// up. The bound exists **only** so a corrupted z-order chain cannot spin inside
+/// a hook callback, where time spent is time Windows counts against
+/// `LowLevelHooksTimeout`. It is not a performance knob.
+///
+/// # ⚠️ Both the original estimate and the "optimisation" that replaced it were wrong
+///
+/// The first value was 512, justified as *"a desktop has tens of top-level
+/// windows, not thousands"*. Counted on the dev rig: **384–418** windows in the
+/// desktop chain, only ~30 of them visible — hidden top-level windows sit in the
+/// same chain and `GetWindow` returns them like any other. So "tens" was off by
+/// more than 10×, and the margin against 512 was ~1.2×. That part was a real
+/// problem: exceeding the limit makes [`shadowed_by_another_window`] answer
+/// `false`, silently restoring the Start-menu-swallowing bug it exists to
+/// prevent.
+///
+/// The fix attempted first was to walk from *our* window instead of from the hit
+/// target, on the argument that both are in one chain so either end answers the
+/// same question at very different cost. **It does not work, and the rig said so
+/// within minutes: clicks inside the Start menu were swallowed again.** The
+/// equivalence argument was made from `GetWindow`'s documentation and never
+/// tested; whatever the mechanism (`GW_HWNDPREV` from a topmost window is
+/// documented to identify *a topmost window*, and the shell's Start surface does
+/// not reliably appear in the upward chain from ours), the two directions are not
+/// interchangeable in practice. Reverted to the direction that was verified
+/// working on hardware.
+///
+/// **What was actually needed was just a bigger number, and the cost data says
+/// that is free.** Timed on the rig, the worst case — a full walk from the
+/// bottom-most window of a 418-long chain — is **417 steps in 2.77 ms**, i.e.
+/// ~1 % of the default 300 ms `LowLevelHooksTimeout`, and it runs on presses
+/// only, never on moves. 8192 leaves ~20× headroom over the observed chain while
+/// still bounding a corrupted one at roughly 54 ms.
+///
+/// The lesson worth keeping: **a cheaper algorithm that has not been run is not
+/// an optimisation, it is an untested rewrite** — and this one traded a verified
+/// behaviour for a 2.8 ms saving nobody had asked for.
+const Z_ORDER_WALK_LIMIT: usize = 8192;
+
+/// Whether some other window sits **above** the overlay at `point`, and should
+/// therefore receive this press instead of us.
+///
+/// # The bug this exists for
+///
+/// The hook claims input by **screen position**, and was written assuming our
+/// areas are the topmost thing at their coordinates — true, because the overlay
+/// is always-on-top. **Shell surfaces break that assumption**: the Start and
+/// search popups sit above even topmost windows, so a click over an area that
+/// happens to be behind Start was swallowed by us and never reached it. With an
+/// area covering the screen, Start became entirely unusable. Found on the rig
+/// 2026-07-26.
+///
+/// Deliberately general rather than a check for Start specifically: any window
+/// that gets above us has the same claim, and a class-name test would fix one
+/// instance of the bug and rot across Windows builds. Same family as F-25 — a
+/// hook claiming input it has no right to.
+///
+/// # Why the obvious test does not work
+///
+/// `WindowFromPoint` **skips `WS_EX_TRANSPARENT` windows**, and the overlay is
+/// transparent in every visible state (ADR-0016). So it never returns our
+/// window, and "is the window under the cursor ours?" can only ever answer no.
+/// What it does return is the window that *would* receive the click — so the
+/// real question is whether that window is above us or below us, which is a
+/// z-order walk: step upward **from the hit window** and see whether we are
+/// passed on the way.
+///
+/// # Walk from the hit window, not from ours
+///
+/// This looks like it should be reversible — the two windows are in one chain, so
+/// either end could answer "which is higher?" — and starting from our own
+/// (topmost, so near the top) window looks much cheaper. **It was tried during
+/// the task 1.9b review and it broke the fix**: clicks inside the Start menu were
+/// swallowed again within minutes of a rig pass. `GW_HWNDPREV` from a topmost
+/// window is documented to identify *a topmost window*, and the shell's Start
+/// surface does not reliably show up in the upward chain from ours, so the
+/// symmetry is only apparent. See [`Z_ORDER_WALK_LIMIT`] for the full account and
+/// for why the cost this direction pays is affordable (worst case measured at
+/// 2.77 ms, on presses only).
+///
+/// **Do not "optimise" this direction again without a rig pass on the Start
+/// menu.** Nothing in a unit test can see it.
+///
+/// Returns `false` when anything cannot be resolved, and `false` if the walk
+/// runs past its bound. A press that fails this check is a press we handle as
+/// before — degrading to the previous behaviour beats dropping the user's input
+/// on the floor.
+fn shadowed_by_another_window(point: Point) -> bool {
+    let Some(app) = APP.get() else {
+        return false;
+    };
+    let Ok(window) = overlay::overlay_window(app) else {
+        return false;
+    };
+    let Ok(ours) = window.hwnd() else {
+        return false;
+    };
+    let ours: HWND = ours.0;
+    // SAFETY: `WindowFromPoint` takes a POINT by value and returns a handle or
+    // null; `GetAncestor`/`GetWindow` take a handle and are null-tolerant. None
+    // of them dereference anything we own.
+    unsafe {
+        let hit = WindowFromPoint(POINT {
+            x: point.x,
+            y: point.y,
+        });
+        if hit.is_null() {
+            return false;
+        }
+        // Compare top-level windows: `WindowFromPoint` can land on a child
+        // control, which has no position in the top-level z-order at all.
+        let mut current = GetAncestor(hit, GA_ROOT);
+        if current.is_null() || std::ptr::eq(current, ours) {
+            return false;
+        }
+        // Walk upward. Reaching our overlay means the hit window is below it and
+        // the press is ours; running off the top means it is above us.
+        for _ in 0..Z_ORDER_WALK_LIMIT {
+            let above = GetWindow(current, GW_HWNDPREV);
+            if above.is_null() {
+                return true;
+            }
+            if std::ptr::eq(above, ours) {
+                return false;
+            }
+            current = above;
+        }
+    }
+    // The walk ran long — treat it as inconclusive and keep the press, rather
+    // than silently handing input away because a z-order chain was odd.
+    false
 }
 
 /// Decides what a left-button press at `point` begins.
@@ -1367,7 +1855,16 @@ fn finish_gesture(release: Point) {
             let Some((x, y, width, height)) = pending else {
                 return;
             };
-            let created = overlay::create_default_area(app, x, y, width, height);
+            // The armed type is consumed here, and `disarm` runs on **every**
+            // outcome including a rejected drag: ADR-0018 §2 clears arming "when
+            // an area is created", and a sliver drag that creates nothing is
+            // still the user having taken their shot. Leaving it armed would
+            // make the *next* drag — possibly minutes later, possibly meant as
+            // a plain Default area — silently produce a Screenshot, which is
+            // exactly the "which mode am I in?" failure the ADR is avoiding.
+            let kind = armed().unwrap_or(AreaType::Default);
+            disarm();
+            let created = overlay::create_area(app, kind, x, y, width, height);
             // Logged so a placement problem is an observation rather than a
             // guess (the F-15 lesson) — and logged *after* the attempt, with its
             // outcome. Printing "created area" before the call claimed a
@@ -1381,12 +1878,20 @@ fn finish_gesture(release: Point) {
             // store and click-through regions use — across every monitor, the
             // 125% primary included.
             #[cfg(debug_assertions)]
-            if created {
-                eprintln!("placement: created area {width}x{height} at ({x}, {y})");
+            if created.is_some() {
+                eprintln!("placement: created {kind:?} area {width}x{height} at ({x}, {y})");
             } else {
                 eprintln!("placement: drag at ({x}, {y}) was {width}x{height} — nothing created");
             }
-            created
+            if let Some((id, bounds)) = created {
+                // Order matters. The capture is dispatched first so its ~200 ms
+                // runs while the mode transition happens rather than after it,
+                // and neither blocks this callback: `capture_on_create` spawns
+                // and `area_created` posts to the event loop.
+                capture_on_create(app, kind, id, bounds);
+                overlay::area_created(app, kind);
+            }
+            created.is_some()
         }
         Gesture::Move { id, .. } | Gesture::Resize { id, .. } => {
             let Some((x, y, width, height)) = pending else {
@@ -1405,6 +1910,25 @@ fn finish_gesture(release: Point) {
     };
     if changed && let Err(error) = overlay::emit_areas(app) {
         eprintln!("placement: applied a gesture but could not emit the new set: {error}");
+    }
+}
+
+/// Dispatches the capture a freshly created area needs, if its type has one.
+///
+/// Only `Screenshot` captures on create — ADR-0018 settles that for the one type
+/// it decided, and the rest have no gesture yet. Written as an explicit match
+/// rather than as another `AreaType` method because "does creating this capture
+/// pixels?" has exactly one answer today, and inventing a fourth per-type axis
+/// on one data point is how the other three got harder to change.
+fn capture_on_create(app: &AppHandle, kind: AreaType, id: AreaId, bounds: Rect) {
+    match kind {
+        AreaType::Screenshot => crate::output::capture_into_area(app, id, bounds),
+        AreaType::Default
+        | AreaType::Record
+        | AreaType::Ocr
+        | AreaType::Upscale
+        | AreaType::Analysis
+        | AreaType::Filter => {}
     }
 }
 
@@ -1519,9 +2043,22 @@ fn open_menu(app: &AppHandle, point: Point) {
     };
     let mut spec: Vec<(MenuAction, &'static str)> = Vec::with_capacity(7);
     // Copy/Save lead the menu — the primary actions, ahead of the layout
-    // settings below them — and are scoped to `Default` areas only (task
-    // 1.9; a typed capture area with its own menu is 1.9b's).
-    if area.kind == AreaType::Default {
+    // settings below them — and are scoped to **`Screenshot` areas only**.
+    //
+    // Task 1.9 scoped them to `Default` instead, as a placeholder: `Screenshot`
+    // did not exist yet and its own menu was named as 1.9b's job. That got
+    // inverted rather than extended, on the rig, 2026-07-26 — the rows belong to
+    // the type that *has* a capture, not to the primitive that does not. A
+    // `Default` area is a plain claimed rectangle; offering "Save image" on one
+    // implies it holds an image it does not have.
+    //
+    // These actions export **the area's pinned capture**, not a fresh grab of
+    // whatever is under it — see `captures::pinned_capture`. They used to capture
+    // live, and this comment used to predict the consequence and defer it:
+    // "wrong the moment an area is moved after capture". Task 1.17(a) made areas
+    // movable in the same PR, so the moment arrived immediately, and the rig
+    // found it on 2026-07-27. A predicted defect left in place is still a defect.
+    if area.kind == AreaType::Screenshot {
         spec.push((MenuAction::Copy, "Copy"));
         spec.push((MenuAction::SaveToFile, "Save image"));
     }
@@ -1618,14 +2155,14 @@ fn activate_menu_item(app: &AppHandle, index: usize, release: Point) {
         MenuAction::Copy => {
             if let Some(bounds) = overlay::area_bounds(app, area) {
                 let app = app.clone();
-                std::thread::spawn(move || crate::output::copy_to_clipboard(&app, bounds));
+                std::thread::spawn(move || crate::output::copy_to_clipboard(&app, area, bounds));
             }
             false
         }
         MenuAction::SaveToFile => {
             if let Some(bounds) = overlay::area_bounds(app, area) {
                 let app = app.clone();
-                std::thread::spawn(move || crate::output::save_to_file(&app, bounds));
+                std::thread::spawn(move || crate::output::save_to_file(&app, area, bounds));
             }
             false
         }
