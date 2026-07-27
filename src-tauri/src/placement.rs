@@ -476,6 +476,23 @@ const LATENCY_SAMPLE_EVERY: u64 = 8;
 /// How many selection frames have been emitted, for the sampling stride.
 static SELECTION_FRAMES: AtomicU64 = AtomicU64::new(0);
 
+/// Whether to stamp probes at all this run.
+///
+/// Split on `cfg` rather than tested with `cfg!`, because `dev_harness` does not
+/// exist in a release build — a `cfg!` test compiles both arms and would fail to
+/// resolve the path.
+#[cfg(debug_assertions)]
+fn probe_enabled() -> bool {
+    crate::dev_harness::pacing_enabled()
+}
+
+/// Release builds never stamp a probe, so nothing echoes and
+/// [`record_latency`] is never reached.
+#[cfg(not(debug_assertions))]
+fn probe_enabled() -> bool {
+    false
+}
+
 /// What the round trip cost, accumulated across one gesture.
 struct LatencySamples {
     count: u32,
@@ -509,6 +526,12 @@ pub fn record_latency(probe_nanos: u64) {
 }
 
 /// Drains the accumulated samples as `(count, mean ms, worst ms)`.
+///
+/// Debug-only: its one caller is the poll's gesture report, which does not exist
+/// in a release build. [`record_latency`] stays compiled in both, because the IPC
+/// command that reaches it is registered unconditionally — in release nothing
+/// stamps a probe, so nothing echoes and it is never called.
+#[cfg(debug_assertions)]
 pub fn take_latency_summary() -> Option<(u32, f64, f64)> {
     let mut guard = lock(&LATENCY);
     if guard.count == 0 {
@@ -905,11 +928,12 @@ fn reinstall_on_main_thread() {
 fn pump_gesture(app: &AppHandle, state: &mut PumpState) {
     if let Some(rect) = pending_rect() {
         let frame = SELECTION_FRAMES.fetch_add(1, Ordering::Relaxed);
-        // Debug builds only. The probe costs an extra IPC round trip per sampled
-        // frame — ~27 a second at the measured 221 Hz — which is load added to
-        // the exact path it measures. Fine while diagnosing, not something to
-        // ship to users who will never read the number.
-        let probe = cfg!(debug_assertions)
+        // Debug builds only, and within those only when `UPTAKE_DEV_PACING` asks
+        // for it. The probe costs an extra IPC round trip per sampled frame —
+        // ~27 a second at the measured 221 Hz — which is load added to the exact
+        // path it measures, so it is not something to leave running in every dev
+        // build either, let alone ship to users who will never read the number.
+        let probe = probe_enabled()
             .then(|| {
                 frame
                     .is_multiple_of(LATENCY_SAMPLE_EVERY)

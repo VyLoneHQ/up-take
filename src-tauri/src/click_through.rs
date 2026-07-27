@@ -145,26 +145,26 @@ const FRAME: Duration = Duration::from_millis(16);
 /// The cost is bounded by construction: this applies only while a mouse button
 /// is down, so it cannot touch the idle or resting-overlay CPU budgets.
 ///
-/// # ⚠️ Measured 2026-07-26 — this constant currently does nothing
+/// # ⚠️ Measured 2026-07-26 — inert on a condvar, delivered on the timer
 ///
 /// Across **36 gestures** on the dev rig the achieved rate was **62–63 Hz**,
-/// every time, against the 250 Hz asked for here. The predicted clamp is real:
+/// every time, against the 250 Hz asked for here. The predicted clamp was real:
 /// `Condvar::wait_timeout` rounds up to the system timer granularity (~15.6 ms
-/// ⇒ ~64 Hz), so this is indistinguishable from [`FRAME`] and always has been.
+/// ⇒ ~64 Hz), so while this constant was paced on the condvar it was
+/// indistinguishable from [`FRAME`] and always had been.
 ///
-/// **The smoothness improvement reported from the build that introduced this was
-/// therefore not caused by it.** Nothing else in that build touches rendering,
+/// **The smoothness improvement reported from the build that introduced it was
+/// therefore not caused by it.** Nothing else in that build touched rendering,
 /// so the improvement was expectation rather than effect — recorded because a
 /// change that appears to work while provably doing nothing is worse than one
 /// that plainly fails.
 ///
-/// Raising the rate for real needs a **high-resolution waitable timer**
-/// (`CreateWaitableTimerExW` + `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`, Win10
-/// 1803+, comfortably under the build 19041 floor in `MASTER-PLAN.md` §4.1).
-/// That is per-object and affects only this process. **Do not reach for
-/// `timeBeginPeriod`** — it is a *global* resolution change that raises power
-/// draw for every process on the machine, which an always-on tray app has no
-/// business doing.
+/// It is **not** inert now: [`HighResTimer`] paces the gesture path instead
+/// (see the wait in [`poll_loop`]), and the achieved rate measured **221 Hz**.
+/// Whether *that* is what makes a drag feel smooth is a separate question the
+/// rate alone cannot answer, which is why the emit→painted probe exists —
+/// mean 3.7–4.3 ms, worst 7.7 ms over ~1200 samples, now a `quality-bars.md`
+/// §1 row.
 const FRAME_GESTURE: Duration = Duration::from_millis(4);
 
 /// Shared poll state, managed via `app.manage`.
@@ -229,6 +229,9 @@ fn poll_loop(app: &AppHandle) -> ! {
     // in which case pacing simply stays where it was — a missing optimisation,
     // not a failure.
     let high_res = HighResTimer::new();
+    // Not gated on `UPTAKE_DEV_PACING`: this one reports a real degradation of
+    // the shipping path rather than an instrumentation number, and it prints at
+    // most once per process, only when the OS refused the timer.
     #[cfg(debug_assertions)]
     if high_res.is_none() {
         eprintln!("poll: no high-resolution timer available — gesture pacing stays at ~63 Hz");
@@ -249,8 +252,12 @@ fn poll_loop(app: &AppHandle) -> ! {
         let mut pump = crate::placement::PumpState::default();
         // Measures what the OS actually delivered during a gesture, so a request
         // the timer resolution silently refused is visible instead of assumed.
-        let mut gesture_ticks: u32 = 0;
-        let mut gesture_started: Option<std::time::Instant> = None;
+        //
+        // Debug builds only, and inside those only while `UPTAKE_DEV_PACING` is
+        // set — so a release build carries neither the state nor the branch, and
+        // an ordinary dev build does not count ticks it will never print.
+        #[cfg(debug_assertions)]
+        let mut gesture: Option<(u32, std::time::Instant)> = None;
         loop {
             tick(app, &state);
             // Drive the placement pump at the poll's cadence: the live gesture
@@ -263,42 +270,29 @@ fn poll_loop(app: &AppHandle) -> ! {
             // A live gesture is the only thing on screen that tracks the mouse
             // continuously, so it is the only thing that can look stepped.
             let dragging = crate::placement::is_dragging();
-            match (dragging, gesture_started) {
-                (true, None) => {
-                    gesture_started = Some(std::time::Instant::now());
-                    gesture_ticks = 0;
-                }
-                (true, Some(_)) => gesture_ticks = gesture_ticks.saturating_add(1),
-                (false, Some(start)) => {
-                    // Reported per gesture rather than per tick: one line at the
-                    // end says what the OS delivered, where a per-tick line
-                    // would itself perturb what is being measured.
-                    #[cfg(debug_assertions)]
-                    if gesture_ticks > 0 {
-                        let elapsed = start.elapsed().as_secs_f64();
-                        eprintln!(
-                            "poll: gesture ran {gesture_ticks} ticks in {:.0} ms — {:.0} Hz achieved (asked for {:.0} Hz)",
-                            elapsed * 1000.0,
-                            f64::from(gesture_ticks) / elapsed,
-                            1.0 / FRAME_GESTURE.as_secs_f64(),
-                        );
-                        // The number that actually matters. Rate says how often
-                        // we *tried*; this says how long each attempt took to
-                        // reach the screen — the two are independent, and only
-                        // the second is what "laggy" describes.
-                        if let Some((n, mean, worst)) = crate::placement::take_latency_summary() {
-                            eprintln!(
-                                "poll: emit→painted over {n} samples — mean {mean:.1} ms, worst {worst:.1} ms"
-                            );
-                        } else {
-                            eprintln!(
-                                "poll: emit→painted — no samples returned (the frontend echo is not arriving)"
-                            );
+            // A live gesture is the only thing on screen that tracks the mouse
+            // continuously, so it is the only thing that can look stepped.
+            //
+            // Opt-in via `UPTAKE_DEV_PACING` (see `dev_harness`): a line per
+            // gesture is a line per drag, and the probe that feeds the second
+            // line adds IPC to the path it measures — so the default dev build
+            // is both silent and unweighted.
+            #[cfg(debug_assertions)]
+            if crate::dev_harness::pacing_enabled() {
+                match (dragging, gesture) {
+                    (true, None) => gesture = Some((0, std::time::Instant::now())),
+                    (true, Some((ref mut ticks, _))) => *ticks = ticks.saturating_add(1),
+                    (false, Some((ticks, start))) => {
+                        // Reported per gesture rather than per tick: one line at
+                        // the end says what the OS delivered, where a per-tick
+                        // line would itself perturb what is being measured.
+                        if ticks > 0 {
+                            report_gesture(ticks, start);
                         }
+                        gesture = None;
                     }
-                    gesture_started = None;
+                    (false, None) => {}
                 }
-                (false, None) => {}
             }
 
             // A live gesture paces on the high-resolution timer, which is the
@@ -339,6 +333,32 @@ fn poll_loop(app: &AppHandle) -> ! {
         {
             eprintln!("click-through: could not reset on hide: {error}");
         }
+    }
+}
+
+/// Prints what one completed gesture actually delivered: the achieved poll rate,
+/// and the emit→painted round trip that the rate does not describe.
+///
+/// The two are independent and only the second is what "laggy" means — a rate
+/// says how often we *tried* to put a frame on screen, not how long each attempt
+/// took to get there. Reporting the rate alone is how a change that provably did
+/// nothing was once read as an improvement (see [`FRAME_GESTURE`]).
+#[cfg(debug_assertions)]
+fn report_gesture(ticks: u32, start: std::time::Instant) {
+    let elapsed = start.elapsed().as_secs_f64();
+    eprintln!(
+        "poll: gesture ran {ticks} ticks in {:.0} ms — {:.0} Hz achieved (asked for {:.0} Hz)",
+        elapsed * 1000.0,
+        f64::from(ticks) / elapsed,
+        1.0 / FRAME_GESTURE.as_secs_f64(),
+    );
+    match crate::placement::take_latency_summary() {
+        Some((n, mean, worst)) => eprintln!(
+            "poll: emit→painted over {n} samples — mean {mean:.1} ms, worst {worst:.1} ms"
+        ),
+        None => eprintln!(
+            "poll: emit→painted — no samples returned (the frontend echo is not arriving)"
+        ),
     }
 }
 
