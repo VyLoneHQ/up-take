@@ -967,6 +967,63 @@ mod tests {
     }
 
     #[test]
+    fn every_area_a_resize_can_produce_keeps_a_hittable_close_control() {
+        // UP-TAKE backlog I-1: a side dragged toward its opposite one left an area
+        // that could not be closed. Dismiss is the one gesture with no undo and no
+        // alternative route, so this sweeps the whole space a resize can reach —
+        // every span from the MIN_AREA_SPAN floor up past CHROME_INSIDE_SPAN, on
+        // both axes, at positions including the screen corners where the outside
+        // control has the least room.
+        let monitors = vec![Rect::new(0, 0, 1920, 1080)];
+        let spans = [
+            MIN_AREA_SPAN,
+            MIN_AREA_SPAN + 1,
+            12,
+            17,
+            18,
+            19,
+            30,
+            CHROME_INSIDE_SPAN - 1,
+            CHROME_INSIDE_SPAN,
+            CHROME_INSIDE_SPAN + 1,
+            200,
+        ];
+        let origins = [
+            (0, 0),
+            (1, 1),
+            (960, 540),
+            (1919 - 200, 0),
+            (0, 1079 - 200),
+            (1919 - 200, 1079 - 200),
+        ];
+        for (x, y) in origins {
+            for w in spans {
+                for h in spans {
+                    let bounds = Rect::new(x, y, w, h);
+                    let control = close_control(bounds, &monitors);
+                    // Centre of the control, which is what a user aims at.
+                    let aim = Point::new(
+                        control.origin.x + i32::try_from(control.size.width / 2).unwrap(),
+                        control.origin.y + i32::try_from(control.size.height / 2).unwrap(),
+                    );
+                    assert_eq!(
+                        handle_at(bounds, aim, &monitors),
+                        Some(Handle::Close),
+                        "a {w}x{h} area at ({x}, {y}) cannot be closed: control {control:?}, aim {aim:?}"
+                    );
+                    // And the control has to be somewhere the user can actually
+                    // put a cursor — off the desktop is drawn nowhere.
+                    assert!(
+                        is_on_desktop(control, &monitors)
+                            || bounds.intersection(control) == Some(control),
+                        "a {w}x{h} area at ({x}, {y}) put its control off-desktop: {control:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn a_small_area_in_a_screen_corner_moves_its_control_to_a_corner_that_exists() {
         // The failure this rule prevents: an area in the top-right of a monitor
         // would put a top-right control past the edge, drawn nowhere and clicked
