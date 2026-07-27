@@ -55,7 +55,41 @@ const LCS_S_RGB: u32 = 0x7352_4742;
 const BUDGET_TARGET_MS: u128 = 300;
 const BUDGET_HARD_FAIL_MS: u128 = 600;
 
-/// Captures `bounds` and publishes it to the clipboard alone.
+/// The pixels an export should use for `area`: its pinned capture if it has one,
+/// otherwise a fresh capture of `bounds`.
+///
+/// # A pinned area exports what it is showing, not what is under it
+///
+/// **This is the fix for a defect found on the rig 2026-07-27.** Both export
+/// actions used to capture live, unconditionally. While areas could not move that
+/// was indistinguishable from correct — a passive `Screenshot` pins the instant it
+/// is created, so its rectangle still held the same pixels. Task 1.17(a) added
+/// move and resize in LIVING, and from then on Copy on a moved Screenshot area
+/// returned **the desktop underneath its new position**, cropped to the area's
+/// size: a screenshot of whatever the area happened to be sitting on.
+///
+/// The failure is quiet, which is what makes it bad. The result is a plausible
+/// image of the right dimensions, so nothing looks broken until you look at what
+/// you pasted.
+///
+/// A `Default` area has no capture and falls through to the live path, which is
+/// the only thing Copy can mean for a bare claimed rectangle.
+fn export_source(
+    app: &AppHandle,
+    area: AreaId,
+    bounds: Rect,
+    split: &mut Split,
+) -> Result<(RgbaBitmap, Vec<u8>), String> {
+    if let Some(pinned) = crate::captures::pinned_capture(app, area) {
+        // Capture and encode both stay at 0 ms, which is the honest reading: this
+        // path does neither. It also keeps the §1 budget lines meaningful — a
+        // pinned export is not a measurement of the capture pipeline.
+        return Ok(pinned);
+    }
+    capture(bounds, split)
+}
+
+/// Publishes an area's image to the clipboard alone.
 ///
 /// PRODUCT-VISION §8: an area's source is still on screen, so re-copying is
 /// one gesture — the justification ShareX/Snipping Tool have for also
@@ -65,7 +99,7 @@ const BUDGET_HARD_FAIL_MS: u128 = 600;
 pub(crate) fn copy_to_clipboard(app: &AppHandle, area: AreaId, bounds: Rect) {
     let started = Instant::now();
     let mut split = Split::default();
-    let outcome = capture(bounds, &mut split).and_then(|(bitmap, png)| {
+    let outcome = export_source(app, area, bounds, &mut split).and_then(|(bitmap, png)| {
         // Both buffers are built *before* the clipboard is opened. The
         // clipboard is a global system resource — every other process's
         // access blocks while it is held — so no per-pixel work belongs
@@ -84,13 +118,13 @@ pub(crate) fn copy_to_clipboard(app: &AppHandle, area: AreaId, bounds: Rect) {
     report("copy", started, &split, outcome);
 }
 
-/// Captures `bounds` and writes it to `Pictures\UP-TAKE\`, creating the
-/// directory on first use. A separate, explicit action (PRODUCT-VISION §8) —
-/// does not also touch the clipboard.
+/// Writes an area's image to `Pictures\UP-TAKE\`, creating the directory on first
+/// use. A separate, explicit action (PRODUCT-VISION §8) — does not also touch the
+/// clipboard.
 pub(crate) fn save_to_file(app: &AppHandle, area: AreaId, bounds: Rect) {
     let started = Instant::now();
     let mut split = Split::default();
-    let outcome = capture(bounds, &mut split).and_then(|(_bitmap, png)| {
+    let outcome = export_source(app, area, bounds, &mut split).and_then(|(_bitmap, png)| {
         let publish = Instant::now();
         let result = write_file(app, &png);
         split.publish_ms = publish.elapsed().as_millis();
@@ -181,7 +215,7 @@ pub(crate) fn capture_into_area(app: &AppHandle, id: AreaId, bounds: Rect) {
             let version = {
                 let store = app.state::<Mutex<CaptureStore>>();
                 let mut guard = store.lock().unwrap_or_else(PoisonError::into_inner);
-                guard.insert(id, png.clone())
+                guard.insert(id, bitmap.clone(), png.clone())
             };
             if let Err(error) = crate::overlay::emit_pin(&app, id, version) {
                 eprintln!("output: pinned the capture but could not announce it: {error}");

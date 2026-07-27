@@ -14,8 +14,9 @@
 //!
 //! A capture lives exactly as long as its area. [`remove`] is called from the
 //! dismiss path, so nothing here outlives the thing that displays it — a
-//! `HashMap` that only ever grows would leak a PNG per dismissed area, which the
-//! 8-hour soak (M-20) would find and nothing else would.
+//! `HashMap` that only ever grows would leak a PNG **and** a raw bitmap per
+//! dismissed area (see [`Pinned`] for why both are held), which the 8-hour soak
+//! (M-20) would find and nothing else would.
 //!
 //! # A trap for whoever adds a CSP
 //!
@@ -38,6 +39,7 @@ use std::sync::{Mutex, PoisonError};
 use tauri::http::{Request, Response, StatusCode};
 use tauri::{AppHandle, Manager, UriSchemeContext};
 use uptake_core::area::AreaId;
+use uptake_core::bitmap::RgbaBitmap;
 
 /// The scheme name, as registered in `lib.rs`.
 ///
@@ -46,10 +48,25 @@ use uptake_core::area::AreaId;
 /// that should ever build one.
 pub const SCHEME: &str = "uptake-area";
 
-/// One area's pinned capture: the PNG bytes and the version its URL carries.
+/// One area's pinned capture: the version its URL carries, the PNG the WebView
+/// renders, and the raw bitmap its clipboard DIB needs.
+///
+/// # Why both representations are kept
+///
+/// The two consumers want different bytes and neither can cheaply produce the
+/// other's. The WebView needs PNG — that is what an `<img>` loads. `CF_DIBV5`
+/// needs raw RGBA, and recovering it from the PNG would mean adding a WIC decoder
+/// this crate has no other use for. Both are already computed at capture time, so
+/// keeping both costs memory rather than work: `w × h × 4` bytes on top of the
+/// PNG, roughly 1 MB for a 500×400 area and 33 MB for one the size of a 4K screen.
+///
+/// That is the number worth watching under the 8-hour soak (M-20), and it is
+/// accepted deliberately. The alternative is that Copy on a pinned area cannot
+/// export the picture the area is showing — the defect this replaced.
 struct Pinned {
     version: u64,
     png: Vec<u8>,
+    bitmap: RgbaBitmap,
 }
 
 /// Every area's pinned capture, keyed by area id.
@@ -66,13 +83,20 @@ pub struct CaptureStore {
 }
 
 impl CaptureStore {
-    /// Stores `png` as `id`'s capture, returning the version its URL must use.
+    /// Stores a capture for `id`, returning the version its URL must use.
     /// Replaces any previous capture for that area (a re-capture is a new
     /// version, not a second entry).
-    pub fn insert(&mut self, id: AreaId, png: Vec<u8>) -> u64 {
+    pub fn insert(&mut self, id: AreaId, bitmap: RgbaBitmap, png: Vec<u8>) -> u64 {
         let version = self.next_version;
         self.next_version = self.next_version.wrapping_add(1);
-        self.pinned.insert(id.get(), Pinned { version, png });
+        self.pinned.insert(
+            id.get(),
+            Pinned {
+                version,
+                png,
+                bitmap,
+            },
+        );
         version
     }
 
@@ -173,6 +197,34 @@ pub fn serve(
         .unwrap_or_else(|_| not_found())
 }
 
+/// The capture `id` is currently displaying, as `(bitmap, png)`.
+///
+/// # This is what makes Copy and Save export the picture, not the screen
+///
+/// Task 1.9 wired Copy/Save to capture the region **live**, every time. That was
+/// correct by coincidence while an area could not move: a passive `Screenshot`
+/// pins the instant it is created, so re-capturing its rectangle produced the
+/// same pixels. Task 1.17(a) added move and resize in LIVING and broke the
+/// coincidence — reported from the rig 2026-07-27, Copy on a moved Screenshot
+/// area returned **the desktop underneath its new position**, cropped to the
+/// area's size.
+///
+/// The failure is quiet, which is what makes it serious: the result is a
+/// plausible image of exactly the right dimensions, so nothing looks wrong until
+/// you examine what you pasted. `open_menu` had predicted it in a comment and
+/// deferred it — a prediction in a comment is not a fix.
+///
+/// Returns `None` for an area with no capture (a `Default` area), where capturing
+/// live is the only thing Copy could mean.
+pub(crate) fn pinned_capture(app: &AppHandle, id: AreaId) -> Option<(RgbaBitmap, Vec<u8>)> {
+    let state = app.state::<Mutex<CaptureStore>>();
+    let guard = state.lock().unwrap_or_else(PoisonError::into_inner);
+    guard
+        .pinned
+        .get(&id.get())
+        .map(|pinned| (pinned.bitmap.clone(), pinned.png.clone()))
+}
+
 /// Drops the capture belonging to a dismissed area.
 pub(crate) fn forget(app: &AppHandle, id: AreaId) {
     let state = app.state::<Mutex<CaptureStore>>();
@@ -190,9 +242,15 @@ pub(crate) fn forget(app: &AppHandle, id: AreaId) {
 )]
 mod tests {
     use uptake_core::area::{AreaStore, AreaType};
-    use uptake_core::geometry::Rect;
+    use uptake_core::geometry::{Rect, Size};
 
     use super::*;
+
+    /// A 1×1 bitmap, standing in for the raw pixels a real pin carries. Only the
+    /// clipboard path reads them, and nothing here decodes one.
+    fn pixels() -> RgbaBitmap {
+        RgbaBitmap::transparent(Size::new(1, 1)).unwrap()
+    }
 
     /// Real ids from a real [`AreaStore`] — `AreaId` has no public constructor
     /// on purpose, and reaching for one here would erode that rather than test
@@ -213,7 +271,7 @@ mod tests {
     fn a_stored_capture_is_served_at_its_own_version_only() {
         let mut store = CaptureStore::default();
         let areas = ids(2);
-        let version = store.insert(areas[0], vec![1, 2, 3]);
+        let version = store.insert(areas[0], pixels(), vec![1, 2, 3]);
 
         assert_eq!(store.get(areas[0].get(), version), Some(&[1, 2, 3][..]));
         // A stale URL must 404 rather than silently receive the newer pixels —
@@ -226,8 +284,8 @@ mod tests {
     fn re_capturing_an_area_replaces_it_under_a_new_version() {
         let mut store = CaptureStore::default();
         let area = ids(1)[0];
-        let first = store.insert(area, vec![0xAA]);
-        let second = store.insert(area, vec![0xBB]);
+        let first = store.insert(area, pixels(), vec![0xAA]);
+        let second = store.insert(area, pixels(), vec![0xBB]);
 
         assert_ne!(first, second, "a re-capture needs a distinct URL");
         assert_eq!(store.get(area.get(), second), Some(&[0xBB][..]));
@@ -235,11 +293,28 @@ mod tests {
     }
 
     #[test]
+    fn a_pin_keeps_the_raw_bitmap_its_clipboard_format_needs() {
+        // The regression this guards is the rig finding of 2026-07-27: Copy
+        // re-captured the screen instead of exporting the pin, which looked
+        // correct only while areas could not move. Exporting the pin needs the
+        // raw pixels as well as the PNG, so losing the bitmap here would silently
+        // send Copy back down the live-capture path.
+        let mut store = CaptureStore::default();
+        let area = ids(1)[0];
+        let bitmap = RgbaBitmap::transparent(Size::new(3, 2)).unwrap();
+        store.insert(area, bitmap.clone(), vec![1]);
+
+        let held = store.pinned.get(&area.get()).unwrap();
+        assert_eq!(held.bitmap, bitmap, "the raw pixels must survive the store");
+        assert_eq!((held.bitmap.width(), held.bitmap.height()), (3, 2));
+    }
+
+    #[test]
     fn dismissing_an_area_drops_its_capture() {
         // The leak M-20 would eventually find: one 33 MB pin per dismissed area.
         let mut store = CaptureStore::default();
         let area = ids(1)[0];
-        let version = store.insert(area, vec![9]);
+        let version = store.insert(area, pixels(), vec![9]);
         store.remove(area);
 
         assert_eq!(store.get(area.get(), version), None);

@@ -282,9 +282,28 @@ onMount(() => {
             <!-- Acknowledges a completed Copy or Save. `{#key}` on the nonce
                  recreates the element, which is what restarts the animation
                  when the same action runs twice — otherwise the second Copy
-                 would be as silent as no Copy at all. -->
+                 would be as silent as no Copy at all.
+
+                 `onanimationend` drops the entry, and that is a fix rather than
+                 tidiness. A flash is a one-shot *event*, but `flashes` stored it
+                 as durable state that nothing ever removed — so the entry
+                 outlived its meaning and any remount of this div replayed the
+                 animation. The div remounts on every drag, because `{#if
+                 !area.source}` above stops rendering an area while it is being
+                 dragged (the preview is the area for the duration). Net effect,
+                 reported from the rig 2026-07-27: once an area had been copied,
+                 finishing *any* later move or resize of it fired the Copy flash
+                 again, claiming an export that never happened.
+
+                 Deleting on animation end means the entry exists for exactly as
+                 long as the animation it drives, so there is nothing left to
+                 replay. A remount *during* those 420 ms legitimately continues
+                 the acknowledgement. -->
             {#key flashes.get(area.id)}
-              <span class="flash"></span>
+              <span
+                class="flash"
+                onanimationend={() => flashes.delete(area.id)}
+              ></span>
             {/key}
           {/if}
           {#if area.layer !== 'auto'}

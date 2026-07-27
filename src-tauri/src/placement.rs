@@ -1663,29 +1663,43 @@ fn living_lbutton_down(point: Point) -> bool {
 }
 
 /// How far up the z-order [`shadowed_by_another_window`] will walk before giving
-/// up. The bound exists so a corrupted z-order chain cannot spin inside a hook
-/// callback, where time spent is time Windows counts against
-/// `LowLevelHooksTimeout`.
+/// up. The bound exists **only** so a corrupted z-order chain cannot spin inside
+/// a hook callback, where time spent is time Windows counts against
+/// `LowLevelHooksTimeout`. It is not a performance knob.
 ///
-/// # ⚠️ Measured, because the first estimate was wrong by an order of magnitude
+/// # ⚠️ Both the original estimate and the "optimisation" that replaced it were wrong
 ///
-/// This constant's first version was 512, justified as *"a desktop has tens of
-/// top-level windows, not thousands"*. Counted on the dev rig during the task
-/// 1.9b review: **384** windows in the desktop's z-order chain, of which only 30
-/// were visible. Hidden top-level windows sit in the same chain and are returned
-/// by `GetWindow` like any other, so "tens" was off by more than 10× and the
-/// margin against 512 was 1.3×, not the comfortable headroom the comment
-/// implied. On a busier machine the limit is reachable — and exceeding it makes
-/// [`shadowed_by_another_window`] answer `false`, silently restoring the
-/// Start-menu-swallowing bug it exists to prevent.
+/// The first value was 512, justified as *"a desktop has tens of top-level
+/// windows, not thousands"*. Counted on the dev rig: **384–418** windows in the
+/// desktop chain, only ~30 of them visible — hidden top-level windows sit in the
+/// same chain and `GetWindow` returns them like any other. So "tens" was off by
+/// more than 10×, and the margin against 512 was ~1.2×. That part was a real
+/// problem: exceeding the limit makes [`shadowed_by_another_window`] answer
+/// `false`, silently restoring the Start-menu-swallowing bug it exists to
+/// prevent.
 ///
-/// The walk was **re-pointed rather than the number raised**, which removes the
-/// question instead of moving it: it now starts at our own window rather than at
-/// the hit target, so the bound applies to *windows above the overlay* rather
-/// than *windows above an arbitrary app window*. Measured on the same rig, the
-/// visible topmost windows sit at depths **3, 9, 11 and 19** in that 384-long
-/// chain — so 512 is now three orders of magnitude of headroom rather than 1.3×.
-const Z_ORDER_WALK_LIMIT: usize = 512;
+/// The fix attempted first was to walk from *our* window instead of from the hit
+/// target, on the argument that both are in one chain so either end answers the
+/// same question at very different cost. **It does not work, and the rig said so
+/// within minutes: clicks inside the Start menu were swallowed again.** The
+/// equivalence argument was made from `GetWindow`'s documentation and never
+/// tested; whatever the mechanism (`GW_HWNDPREV` from a topmost window is
+/// documented to identify *a topmost window*, and the shell's Start surface does
+/// not reliably appear in the upward chain from ours), the two directions are not
+/// interchangeable in practice. Reverted to the direction that was verified
+/// working on hardware.
+///
+/// **What was actually needed was just a bigger number, and the cost data says
+/// that is free.** Timed on the rig, the worst case — a full walk from the
+/// bottom-most window of a 418-long chain — is **417 steps in 2.77 ms**, i.e.
+/// ~1 % of the default 300 ms `LowLevelHooksTimeout`, and it runs on presses
+/// only, never on moves. 8192 leaves ~20× headroom over the observed chain while
+/// still bounding a corrupted one at roughly 54 ms.
+///
+/// The lesson worth keeping: **a cheaper algorithm that has not been run is not
+/// an optimisation, it is an untested rewrite** — and this one traded a verified
+/// behaviour for a 2.8 ms saving nobody had asked for.
+const Z_ORDER_WALK_LIMIT: usize = 8192;
 
 /// Whether some other window sits **above** the overlay at `point`, and should
 /// therefore receive this press instead of us.
@@ -1712,21 +1726,24 @@ const Z_ORDER_WALK_LIMIT: usize = 512;
 /// window, and "is the window under the cursor ours?" can only ever answer no.
 /// What it does return is the window that *would* receive the click — so the
 /// real question is whether that window is above us or below us, which is a
-/// z-order walk.
+/// z-order walk: step upward **from the hit window** and see whether we are
+/// passed on the way.
 ///
-/// # Which end to walk from, which is not arbitrary
+/// # Walk from the hit window, not from ours
 ///
-/// The walk climbs from **our** window, asking "do I meet the hit window on the
-/// way to the top?", not from the hit window asking "do I meet the overlay?".
-/// Both answer the same question — the two windows are in one chain and one is
-/// above the other — but the costs are nothing alike. The overlay is topmost, so
-/// the windows above it are the handful of other topmost ones; the hit window is
-/// usually an ordinary app window with the entire non-topmost pile above it.
-/// Measured on the dev rig: 384 windows in the chain, visible topmost ones at
-/// depths 3–19. Walking from the hit target was up to ~380 `GetWindow` calls
-/// inside a hook callback, on every press, in every mode; walking from ours is
-/// tens. See [`Z_ORDER_WALK_LIMIT`], whose first value was set against a
-/// 10×-too-small estimate of that chain.
+/// This looks like it should be reversible — the two windows are in one chain, so
+/// either end could answer "which is higher?" — and starting from our own
+/// (topmost, so near the top) window looks much cheaper. **It was tried during
+/// the task 1.9b review and it broke the fix**: clicks inside the Start menu were
+/// swallowed again within minutes of a rig pass. `GW_HWNDPREV` from a topmost
+/// window is documented to identify *a topmost window*, and the shell's Start
+/// surface does not reliably show up in the upward chain from ours, so the
+/// symmetry is only apparent. See [`Z_ORDER_WALK_LIMIT`] for the full account and
+/// for why the cost this direction pays is affordable (worst case measured at
+/// 2.77 ms, on presses only).
+///
+/// **Do not "optimise" this direction again without a rig pass on the Start
+/// menu.** Nothing in a unit test can see it.
 ///
 /// Returns `false` when anything cannot be resolved, and `false` if the walk
 /// runs past its bound. A press that fails this check is a press we handle as
@@ -1756,21 +1773,19 @@ fn shadowed_by_another_window(point: Point) -> bool {
         }
         // Compare top-level windows: `WindowFromPoint` can land on a child
         // control, which has no position in the top-level z-order at all.
-        let hit = GetAncestor(hit, GA_ROOT);
-        if hit.is_null() || std::ptr::eq(hit, ours) {
+        let mut current = GetAncestor(hit, GA_ROOT);
+        if current.is_null() || std::ptr::eq(current, ours) {
             return false;
         }
-        // Climb from our own window. Meeting the hit window means it is above us
-        // and the press is not ours; reaching the top of the chain without
-        // meeting it means it is below us and the press is.
-        let mut current = ours;
+        // Walk upward. Reaching our overlay means the hit window is below it and
+        // the press is ours; running off the top means it is above us.
         for _ in 0..Z_ORDER_WALK_LIMIT {
             let above = GetWindow(current, GW_HWNDPREV);
             if above.is_null() {
-                return false;
-            }
-            if std::ptr::eq(above, hit) {
                 return true;
+            }
+            if std::ptr::eq(above, ours) {
+                return false;
             }
             current = above;
         }
@@ -2037,11 +2052,12 @@ fn open_menu(app: &AppHandle, point: Point) {
     // `Default` area is a plain claimed rectangle; offering "Save image" on one
     // implies it holds an image it does not have.
     //
-    // Note what these actions still do: they capture the region *live* rather
-    // than re-exporting the pin the area already holds. Correct for now (the
-    // pixels match, since a passive Screenshot pins the moment it was made) but
-    // wasteful, and wrong the moment an area is moved after capture. Revisit
-    // when the pin becomes the source of truth for its own export.
+    // These actions export **the area's pinned capture**, not a fresh grab of
+    // whatever is under it — see `captures::pinned_capture`. They used to capture
+    // live, and this comment used to predict the consequence and defer it:
+    // "wrong the moment an area is moved after capture". Task 1.17(a) made areas
+    // movable in the same PR, so the moment arrived immediately, and the rig
+    // found it on 2026-07-27. A predicted defect left in place is still a defect.
     if area.kind == AreaType::Screenshot {
         spec.push((MenuAction::Copy, "Copy"));
         spec.push((MenuAction::SaveToFile, "Save image"));
