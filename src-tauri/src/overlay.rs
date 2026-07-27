@@ -942,22 +942,55 @@ pub(crate) fn emit_pin(app: &AppHandle, id: AreaId, version: u64) -> Result<(), 
 
 /// Applies a type's ADR-0018 §6 after-create behaviour, on the event loop.
 ///
-/// **Queued rather than run inline, and that is the point.** The only caller is
-/// `placement::finish_gesture`, which runs inside the `WH_MOUSE_LL` callback;
-/// the transition it triggers shows and hides windows, reloads the system cursor
-/// scheme and emits to the WebView. `run_on_main_thread` from the event-loop
-/// thread posts rather than calls, so the hook returns immediately and the work
-/// happens on the next iteration — the same discipline every other mode
-/// transition in `placement` already follows, and the failure class F-33 found
-/// by spending too long in a hook callback.
+/// # `run_on_main_thread` does **not** defer when you are already on it
+///
+/// This function's first version called `app.run_on_main_thread` directly and
+/// documented the hop as "queued rather than run inline, and that is the point".
+/// **That is the opposite of what happens.** `tauri-runtime-wry`'s
+/// `send_user_message` (2.11.4, `src/lib.rs:239`) begins:
+///
+/// ```text
+/// if current_thread().id() == context.main_thread_id {
+///   handle_user_message(...);   // executed inline, right here
+/// } else {
+///   context.proxy.send_event(message)   // actually queued
+/// }
+/// ```
+///
+/// The only caller is `placement::finish_gesture`, which runs inside the
+/// `WH_MOUSE_LL` callback — and that callback runs on the thread that installed
+/// the hook, which is the event-loop thread. So the identity test passes and the
+/// closure ran **synchronously inside the mouse hook**, which is precisely what
+/// the comment claimed it avoided.
+///
+/// What that actually cost, stated rather than implied: [`drive`] calls
+/// [`apply`] unconditionally, even when `next` returns the state it was already
+/// in — so every `Screenshot` create ran `apply(Placement)` in the hook, i.e.
+/// `show` (which re-enumerates monitors into the cache), `placement::enter`
+/// (inline for the same reason), a `window.inner_position()` Win32 call, and two
+/// IPC emits. Nothing broke on the rig, and it stays far inside the 300 ms
+/// `LowLevelHooksTimeout`. It still mattered twice over: that work lands inside
+/// the mouse-up interval `quality-bars.md` §1 measures and task 1.9c has to
+/// shrink, and the moment task 1.14 makes [`AfterCreate::ExitPlacement`]
+/// reachable the inline path becomes `apply(Living)` →
+/// `placement::enter_living` → `restore_system_cursors`, a **global**
+/// `SPI_SETCURSORS` scheme reload that broadcasts `WM_SETTINGCHANGE`, executed
+/// from within a low-level mouse hook. That is F-33's failure class exactly.
+///
+/// So the hop starts from a spawned thread, where the identity test fails and
+/// the message is genuinely posted. One short-lived thread per area creation,
+/// next to the capture thread `capture_on_create` already spawns.
 pub(crate) fn area_created(app: &AppHandle, kind: AreaType) {
     let exits_placement = kind.after_create() == AfterCreate::ExitPlacement;
-    let handle = app.clone();
-    if let Err(error) = app.run_on_main_thread(move || {
-        drive(&handle, Event::AreaCreated { exits_placement });
-    }) {
-        eprintln!("overlay: could not apply the after-create transition: {error}");
-    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let handle = app.clone();
+        if let Err(error) = app.run_on_main_thread(move || {
+            drive(&handle, Event::AreaCreated { exits_placement });
+        }) {
+            eprintln!("overlay: could not apply the after-create transition: {error}");
+        }
+    });
 }
 
 /// Locks a mutex, treating poisoning as recoverable — the state under it is a

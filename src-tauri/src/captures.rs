@@ -14,8 +14,8 @@
 //!
 //! A capture lives exactly as long as its area. [`remove`] is called from the
 //! dismiss path, so nothing here outlives the thing that displays it — a
-//! `HashMap` that only ever grows would be a leak measured in tens of megabytes
-//! per pin, which the 8-hour soak (M-20) would find and nothing else would.
+//! `HashMap` that only ever grows would leak a PNG per dismissed area, which the
+//! 8-hour soak (M-20) would find and nothing else would.
 //!
 //! # A trap for whoever adds a CSP
 //!
@@ -136,9 +136,11 @@ fn parse_path(path: &str) -> Option<(u64, u64)> {
 
 /// Serves a pinned capture, or a 404 with an empty body.
 ///
-/// Registered as an **async** protocol handler: it runs on the WebView's
-/// request thread, and taking the store lock there must not block the event
-/// loop for a 33 MB copy. The lock is held only for the clone.
+/// Runs on the WebView2 UI thread — see the registration in `lib.rs` for why the
+/// async handler does not change that, and why it is acceptable here. The lock is
+/// held only for the clone, which is PNG bytes (a few hundred KB for a typical
+/// area), **not** the 33 MB an earlier version of this comment claimed; that
+/// figure is the raw BGRA size in `output.rs`'s DIB path.
 pub fn serve(
     ctx: UriSchemeContext<'_, tauri::Wry>,
     request: Request<Vec<u8>>,

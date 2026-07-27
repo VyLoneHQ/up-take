@@ -1002,9 +1002,17 @@ fn pump_hover(app: &AppHandle, state: &mut PumpState) {
         // **The cursor is deliberately not touched.** `set_cursor` drives a
         // *global* `SetSystemCursor` override, and `enter_living_on_main_thread`
         // drops it on purpose: Living does not own the pointer, so changing the
-        // shape would change it inside the user's apps too. Shape feedback in
-        // Living, if it is wanted, belongs in the WebView — the window is not
-        // click-through over an interactive area, so CSS can reach it there.
+        // shape would change it inside the user's apps too.
+        //
+        // This comment used to end "...belongs in the WebView — the window is
+        // not click-through over an interactive area, so CSS can reach it
+        // there." **That is false, and `css_cursor`'s own docs above say so** —
+        // the window is `WS_EX_TRANSPARENT` in *every* visible state (ADR-0016),
+        // receives no `WM_SETCURSOR` anywhere, and the rig confirmed no cursor
+        // change in Living on 2026-07-26. Two comments in one file disagreeing
+        // about that is worse than either being wrong alone, because the LIVING
+        // cursor is an open decision and a reader who lands on the wrong one
+        // re-derives the dead option. The two live routes are in `css_cursor`.
         let grabbed = lock(&MENU)
             .is_none()
             .then(|| overlay::interactive_area_handle_at(app, point))
@@ -1655,9 +1663,28 @@ fn living_lbutton_down(point: Point) -> bool {
 }
 
 /// How far up the z-order [`shadowed_by_another_window`] will walk before giving
-/// up. A desktop has tens of top-level windows, not thousands; the bound exists
-/// so a corrupted z-order chain cannot spin inside a hook callback, where time
-/// spent is time Windows counts against `LowLevelHooksTimeout`.
+/// up. The bound exists so a corrupted z-order chain cannot spin inside a hook
+/// callback, where time spent is time Windows counts against
+/// `LowLevelHooksTimeout`.
+///
+/// # ⚠️ Measured, because the first estimate was wrong by an order of magnitude
+///
+/// This constant's first version was 512, justified as *"a desktop has tens of
+/// top-level windows, not thousands"*. Counted on the dev rig during the task
+/// 1.9b review: **384** windows in the desktop's z-order chain, of which only 30
+/// were visible. Hidden top-level windows sit in the same chain and are returned
+/// by `GetWindow` like any other, so "tens" was off by more than 10× and the
+/// margin against 512 was 1.3×, not the comfortable headroom the comment
+/// implied. On a busier machine the limit is reachable — and exceeding it makes
+/// [`shadowed_by_another_window`] answer `false`, silently restoring the
+/// Start-menu-swallowing bug it exists to prevent.
+///
+/// The walk was **re-pointed rather than the number raised**, which removes the
+/// question instead of moving it: it now starts at our own window rather than at
+/// the hit target, so the bound applies to *windows above the overlay* rather
+/// than *windows above an arbitrary app window*. Measured on the same rig, the
+/// visible topmost windows sit at depths **3, 9, 11 and 19** in that 384-long
+/// chain — so 512 is now three orders of magnitude of headroom rather than 1.3×.
 const Z_ORDER_WALK_LIMIT: usize = 512;
 
 /// Whether some other window sits **above** the overlay at `point`, and should
@@ -1685,11 +1712,26 @@ const Z_ORDER_WALK_LIMIT: usize = 512;
 /// window, and "is the window under the cursor ours?" can only ever answer no.
 /// What it does return is the window that *would* receive the click — so the
 /// real question is whether that window is above us or below us, which is a
-/// z-order walk: step upward from it and see whether we are passed on the way.
+/// z-order walk.
 ///
-/// Returns `false` when anything cannot be resolved. A press that fails this
-/// check is a press we handle as before — degrading to the previous behaviour
-/// beats dropping the user's input on the floor.
+/// # Which end to walk from, which is not arbitrary
+///
+/// The walk climbs from **our** window, asking "do I meet the hit window on the
+/// way to the top?", not from the hit window asking "do I meet the overlay?".
+/// Both answer the same question — the two windows are in one chain and one is
+/// above the other — but the costs are nothing alike. The overlay is topmost, so
+/// the windows above it are the handful of other topmost ones; the hit window is
+/// usually an ordinary app window with the entire non-topmost pile above it.
+/// Measured on the dev rig: 384 windows in the chain, visible topmost ones at
+/// depths 3–19. Walking from the hit target was up to ~380 `GetWindow` calls
+/// inside a hook callback, on every press, in every mode; walking from ours is
+/// tens. See [`Z_ORDER_WALK_LIMIT`], whose first value was set against a
+/// 10×-too-small estimate of that chain.
+///
+/// Returns `false` when anything cannot be resolved, and `false` if the walk
+/// runs past its bound. A press that fails this check is a press we handle as
+/// before — degrading to the previous behaviour beats dropping the user's input
+/// on the floor.
 fn shadowed_by_another_window(point: Point) -> bool {
     let Some(app) = APP.get() else {
         return false;
@@ -1714,19 +1756,21 @@ fn shadowed_by_another_window(point: Point) -> bool {
         }
         // Compare top-level windows: `WindowFromPoint` can land on a child
         // control, which has no position in the top-level z-order at all.
-        let mut current = GetAncestor(hit, GA_ROOT);
-        if current.is_null() || std::ptr::eq(current, ours) {
+        let hit = GetAncestor(hit, GA_ROOT);
+        if hit.is_null() || std::ptr::eq(hit, ours) {
             return false;
         }
-        // Walk upward. Reaching our overlay means the hit window is below it and
-        // the press is ours; running off the top means it is above us.
+        // Climb from our own window. Meeting the hit window means it is above us
+        // and the press is not ours; reaching the top of the chain without
+        // meeting it means it is below us and the press is.
+        let mut current = ours;
         for _ in 0..Z_ORDER_WALK_LIMIT {
             let above = GetWindow(current, GW_HWNDPREV);
             if above.is_null() {
-                return true;
-            }
-            if std::ptr::eq(above, ours) {
                 return false;
+            }
+            if std::ptr::eq(above, hit) {
+                return true;
             }
             current = above;
         }

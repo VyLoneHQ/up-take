@@ -384,11 +384,6 @@ export async function armAreaType(
 }
 
 /**
- * Removes the area under the cursor. Never throws, for the same reason
- * {@link escapeOverlay} does not: an unhandled rejection in a key handler is a
- * silent failure the user reads as the overlay having hung.
- */
-/**
  * Returns a latency probe once the frame carrying it has actually painted.
  *
  * **Two nested `requestAnimationFrame` calls, not one.** A rAF callback runs

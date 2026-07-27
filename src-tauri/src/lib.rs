@@ -80,10 +80,24 @@ pub fn run() -> tauri::Result<()> {
     builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        // The pinned-capture transport (task 1.9b). **Async** on purpose: the
-        // handler takes the capture-store lock and copies up to tens of MB, and
-        // the synchronous variant would do that on the WebView's request path
-        // with the event loop waiting behind it.
+        // The pinned-capture transport (task 1.9b).
+        //
+        // Registered with the **asynchronous** API, and the honest note is that
+        // as used it buys nothing over the synchronous one. wry calls a custom
+        // protocol handler from inside its `WebResourceRequested` handler, on the
+        // WebView2 UI thread (`wry-0.55.1/src/webview2/mod.rs:955-1027`), and
+        // responding inline as below keeps the lock and the copy on that thread.
+        // This comment previously claimed the async form moved that work off the
+        // request path; it does not, and only `responder.respond` from another
+        // thread would.
+        //
+        // Left inline deliberately: the store holds **PNG** bytes, a few hundred
+        // KB for a typical area rather than the tens of MB an earlier comment
+        // here claimed (that figure is the *raw* BGRA size in `output.rs`), and
+        // the versioned immutable URL means one fetch per capture, not one per
+        // repaint. The async registration stays because it is the form that can
+        // be made to defer without a signature change if a pin ever gets big
+        // enough to need it.
         .register_asynchronous_uri_scheme_protocol(captures::SCHEME, |ctx, request, responder| {
             responder.respond(captures::serve(ctx, request));
         })

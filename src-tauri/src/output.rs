@@ -167,22 +167,30 @@ pub(crate) fn capture_into_area(app: &AppHandle, id: AreaId, bounds: Rect) {
         let mut split = Split::default();
         let outcome = capture(bounds, &mut split).and_then(|(bitmap, png)| {
             let publish = Instant::now();
-            // The pin is stored *before* the clipboard is touched: it is the
-            // thing the user can see, and a clipboard failure should still
-            // leave a visible capture on screen rather than an empty area.
+            // The pin is stored *and announced* before the clipboard is touched:
+            // it is the thing the user can see, and a clipboard failure should
+            // still leave a visible capture on screen rather than an empty area.
+            //
+            // **The announcement used to come after the clipboard work, which
+            // silently voided that promise.** `dibv5_bytes(&bitmap)?` and
+            // `overlay_hwnd(&app)?` both return early from this closure, so
+            // either failure stored the bytes and never told the frontend they
+            // existed — an area left permanently blank, with the pixels sitting
+            // in the store, and a comment below asserting the opposite. Ordering
+            // the emit first makes the promise structural instead of a claim.
             let version = {
                 let store = app.state::<Mutex<CaptureStore>>();
                 let mut guard = store.lock().unwrap_or_else(PoisonError::into_inner);
                 guard.insert(id, png.clone())
             };
-            let dib = dibv5_bytes(&bitmap)?;
-            let published = publish_clipboard(overlay_hwnd(&app)?, &dib, &png);
-            split.publish_ms = publish.elapsed().as_millis();
-            // Announced whether or not the clipboard worked, for the same
-            // reason: the pin exists either way.
             if let Err(error) = crate::overlay::emit_pin(&app, id, version) {
                 eprintln!("output: pinned the capture but could not announce it: {error}");
             }
+            // Recorded before the `?`s below, so a failure *inside* publishing is
+            // not reported as "publish 0 ms".
+            let published = dibv5_bytes(&bitmap)
+                .and_then(|dib| publish_clipboard(overlay_hwnd(&app)?, &dib, &png));
+            split.publish_ms = publish.elapsed().as_millis();
             published
         });
         report("capture", started, &split, outcome);
