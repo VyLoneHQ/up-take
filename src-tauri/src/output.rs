@@ -157,6 +157,34 @@ struct Split {
     /// Whatever the action does with the bytes: the DIB conversion plus the
     /// clipboard bracket for Copy, the file write for Save.
     publish_ms: u128,
+    /// Where the pixels came from. Reported on every line, because
+    /// `capture 0 ms` is ambiguous on its own — it is what both the fast path
+    /// and a pinned export produce — and "which path ran" is the first question
+    /// asked of any 1.9c latency number.
+    source: Source,
+}
+
+/// Which of the routes to a Screenshot's pixels actually ran.
+#[derive(Default, Clone, Copy)]
+enum Source {
+    /// A live `capture_region` with no fast path attempted: the pinned export,
+    /// and every action that is not a create.
+    #[default]
+    Live,
+    /// Cropped out of the frame held since mouse-down (task 1.9c).
+    Held,
+    /// The fast path was attempted and declined; the reason is why.
+    Fell(crate::precapture::Fallback),
+}
+
+impl std::fmt::Display for Source {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Live => write!(f, "live capture"),
+            Self::Held => write!(f, "held frame"),
+            Self::Fell(reason) => write!(f, "live capture — fell back: {reason}"),
+        }
+    }
 }
 
 /// Captures `bounds` and encodes it as PNG, returning both the raw bitmap
@@ -172,18 +200,53 @@ fn capture(bounds: Rect, split: &mut Split) -> Result<(RgbaBitmap, Vec<u8>), Str
     Ok((captured.bitmap, png))
 }
 
+/// Task 1.9c's fast path: crop the frame held since mouse-down, or capture.
+///
+/// **The fallback is the same `capture` call, unchanged.** That is deliberate
+/// and is what keeps 1B's exit-gate row — "the paths that can produce a
+/// Screenshot's pixels produce identical results" — something the code enforces
+/// rather than something a test has to chase: there is one capture path and one
+/// crop, and the crop is a byte-for-byte copy of a sub-rectangle
+/// (`RgbaBitmap::crop`, which refuses anything that does not fit rather than
+/// clamping). The two differ only in *when* the pixels were taken, which is the
+/// semantic ADR-0022 §3 bounded at 200 ms and nothing else.
+///
+/// Every decline is logged with its reason. A silent fall back to the slow path
+/// would show up as nothing worse than "1.9c did not help much", which is the
+/// hardest kind of regression to notice.
+fn capture_or_crop(bounds: Rect, split: &mut Split) -> Result<(RgbaBitmap, Vec<u8>), String> {
+    match crate::precapture::take(bounds) {
+        Ok(bitmap) => {
+            // Capture stays at 0 ms, and that is the honest reading rather than
+            // a flattering one: the §1 row measures selection release → the
+            // clipboard, and on this path no capture happens inside it. The
+            // pre-capture's own cost is real but was paid during the drag,
+            // before the interval starts.
+            split.source = Source::Held;
+            let encode = Instant::now();
+            let png = encode_png(&bitmap)?;
+            split.encode_ms = encode.elapsed().as_millis();
+            Ok((bitmap, png))
+        }
+        Err(reason) => {
+            split.source = Source::Fell(reason);
+            capture(bounds, split)
+        }
+    }
+}
+
 /// Captures `bounds` for a newly created area: publishes to the clipboard
 /// (PRODUCT-VISION §8 — clipboard only) **and** pins the PNG for the area to
 /// render (ADR-0014 §6, the Snipaste pin).
 ///
-/// # The seam task 1.9c changes
+/// # The seam task 1.9c changed
 ///
 /// [ADR-0022] settles that §1's selection→clipboard budget is met by *holding a
-/// full-monitor frame and cropping it*, not by making capture faster — and 1.9c
-/// builds that. **The frame acquisition is deliberately confined to
-/// [`capture`]**, so 1.9c replaces one function's insides (or gives it an
-/// already-captured frame to crop) rather than restructuring this one. Nothing
-/// below assumes the pixels were captured *now*.
+/// full-monitor frame and cropping it*, not by making capture faster. Task 1.9b
+/// confined frame acquisition to [`capture`] so that 1.9c would be a seam change
+/// and not surgery, and it was: this function's only change was calling
+/// [`capture_or_crop`] instead, and nothing below ever assumed the pixels were
+/// captured *now*. The pre-capture itself is `crate::precapture`.
 ///
 /// # Threading
 ///
@@ -199,7 +262,7 @@ pub(crate) fn capture_into_area(app: &AppHandle, id: AreaId, bounds: Rect) {
     std::thread::spawn(move || {
         let started = Instant::now();
         let mut split = Split::default();
-        let outcome = capture(bounds, &mut split).and_then(|(bitmap, png)| {
+        let outcome = capture_or_crop(bounds, &mut split).and_then(|(bitmap, png)| {
             let publish = Instant::now();
             // The pin is stored *and announced* before the clipboard is touched:
             // it is the thing the user can see, and a clipboard failure should
@@ -252,8 +315,8 @@ fn report(action: &str, started: Instant, split: &Split, outcome: Result<(), Str
     // the whole point (ADR-0022) is that "it was 320 ms" is not actionable and
     // "capture 210, encode 25, publish 80" is.
     let stages = format!(
-        "capture {} ms, encode {} ms, publish {} ms",
-        split.capture_ms, split.encode_ms, split.publish_ms
+        "capture {} ms, encode {} ms, publish {} ms ({})",
+        split.capture_ms, split.encode_ms, split.publish_ms, split.source
     );
     match outcome {
         Ok(()) => {

@@ -9,6 +9,10 @@ mod overlay_state;
 #[cfg(windows)]
 mod overlay_wndproc;
 mod placement;
+// Not `cfg(windows)`-gated, for the same reason `output` is not: it calls
+// `uptake_capture::capture_region`, which is itself Windows-only, and the
+// modules that consume it are unconditional. The crate is Windows-only today.
+mod precapture;
 mod tray;
 
 use std::sync::Mutex;
