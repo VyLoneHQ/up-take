@@ -125,12 +125,12 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CopyIcon, GA_ROOT, GW_HWNDPREV, GetAncestor, GetWindow, HCURSOR, HHOOK,
-    IDC_CROSS, IDC_HAND, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE,
-    LoadCursorW, MSLLHOOKSTRUCT, OCR_APPSTARTING, OCR_CROSS, OCR_HAND, OCR_IBEAM, OCR_NO,
-    OCR_NORMAL, OCR_SIZEALL, OCR_SIZENESW, OCR_SIZENS, OCR_SIZENWSE, OCR_SIZEWE, OCR_UP, OCR_WAIT,
-    SPI_SETCURSORS, SetSystemCursor, SetWindowsHookExW, SystemParametersInfoW, UnhookWindowsHookEx,
-    WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP,
-    WindowFromPoint,
+    IDC_ARROW, IDC_CROSS, IDC_HAND, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE,
+    IDC_SIZEWE, LoadCursorW, MSLLHOOKSTRUCT, OCR_APPSTARTING, OCR_CROSS, OCR_HAND, OCR_IBEAM,
+    OCR_NO, OCR_NORMAL, OCR_SIZEALL, OCR_SIZENESW, OCR_SIZENS, OCR_SIZENWSE, OCR_SIZEWE, OCR_UP,
+    OCR_WAIT, SPI_SETCURSORS, SetSystemCursor, SetWindowsHookExW, SystemParametersInfoW,
+    UnhookWindowsHookEx, WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WindowFromPoint,
 };
 
 use crate::overlay;
@@ -371,8 +371,24 @@ enum CursorShape {
     SizeNWSE,
     /// Over a north-east or south-west corner.
     SizeNESW,
-    /// Over a close control or a menu row.
+    /// Over a close control, or over a menu row **in PLACEMENT**.
+    ///
+    /// The mode qualifier is real, not pedantry: `pump_hover`'s LIVING branch
+    /// resolves nothing while a menu is open, so a menu row there keeps the
+    /// ordinary arrow. That matches how native Windows menus behave, and the row
+    /// still highlights, so it is a deliberate difference rather than a gap — but
+    /// this doc used to claim otherwise for both modes.
     Hand,
+    /// **The user's own arrow** — not a shape UP-TAKE ever wants to *show*, but
+    /// the one it must be able to put back.
+    ///
+    /// [ADR-0025](../../../Projects/UP-TAKE/DECISIONS/ADR-0025-living-cursor-via-a-narrow-override.md)
+    /// needs this. LIVING overrides `OCR_NORMAL` alone and undoes it by
+    /// overriding again with the genuine arrow, because the alternative —
+    /// `SPI_SETCURSORS` — measures 7.9 ms and broadcasts `WM_SETTINGCHANGE`
+    /// desktop-wide, which is unaffordable on a per-hover path. Nothing else in
+    /// this enum is a "restore" value; this one exists only to be restored to.
+    Arrow,
 }
 
 impl CursorShape {
@@ -387,6 +403,7 @@ impl CursorShape {
             Self::SizeNWSE => 4,
             Self::SizeNESW => 5,
             Self::Hand => 6,
+            Self::Arrow => 7,
         }
     }
 
@@ -400,6 +417,7 @@ impl CursorShape {
             Self::SizeNWSE => IDC_SIZENWSE,
             Self::SizeNESW => IDC_SIZENESW,
             Self::Hand => IDC_HAND,
+            Self::Arrow => IDC_ARROW,
         }
     }
 
@@ -586,50 +604,6 @@ struct MenuItemView {
 #[derive(Serialize, Clone)]
 struct HoverPayload {
     id: Option<u64>,
-    /// Which part of it — the CSS `cursor` keyword the frontend should apply,
-    /// or `null` when the cursor is over no area.
-    ///
-    /// **Sent as a cursor keyword rather than a handle name on purpose.** The
-    /// frontend has no business re-deriving "north-east edge ⇒ `nesw-resize`"
-    /// from a geometric fact Rust already resolved; a second mapping is a second
-    /// thing to drift. Rust owns the hit test, so it owns the answer.
-    cursor: Option<&'static str>,
-}
-
-/// The CSS `cursor` keyword for a handle — the WebView's counterpart to
-/// [`CursorShape::for_handle`]'s system cursor.
-///
-/// # ⚠️ Currently inert — the premise this was written on is false
-///
-/// This was added believing the overlay stops being click-through over an
-/// interactive area, so the WebView would receive `WM_SETCURSOR` there. **It
-/// does not.** `click_through`'s module docs are explicit: the window is
-/// **never** interactive, `WS_EX_TRANSPARENT` stays applied in every visible
-/// state (ADR-0016), and the per-area routing that once existed was *deleted*
-/// with that ADR rather than disabled. A window that receives no mouse messages
-/// receives no `WM_SETCURSOR`, so a CSS cursor cannot apply at any position.
-///
-/// Verified on the rig 2026-07-26: no cursor change in `Living`.
-///
-/// The value is still computed and emitted because Rust owns the hit test
-/// either way, and both remaining routes need this answer. The routes are:
-/// scope `SetSystemCursor` to "cursor is over one of our areas" (the same
-/// mechanism `Placement` already uses, applied narrowly — but its restore is a
-/// global cursor-scheme reload, so hover-in/hover-out cost needs measuring), or
-/// re-open ADR-0016 to let the window take input over areas, which that ADR
-/// names as an ADR-level decision and not a flag. Pending that choice, delete
-/// the frontend half rather than leave it looking functional.
-const fn css_cursor(handle: Handle) -> &'static str {
-    match handle {
-        Handle::Close => "pointer",
-        Handle::Body => "move",
-        Handle::Resize(resize) => match resize {
-            Resize::North | Resize::South => "ns-resize",
-            Resize::East | Resize::West => "ew-resize",
-            Resize::NorthWest | Resize::SouthEast => "nwse-resize",
-            Resize::NorthEast | Resize::SouthWest => "nesw-resize",
-        },
-    }
 }
 
 /// Enters placement: install the mouse hook and override the cursor, on the
@@ -761,10 +735,6 @@ pub struct PumpState {
     /// Ticks left before the health check may act again, so a reinstall is not
     /// retried every frame while an elevated window holds the foreground.
     reinstall_cooldown: u32,
-    /// The CSS cursor the previous tick reported, so the emit fires on a change
-    /// of *shape* and not only of area — crossing from an area's body to its
-    /// edge is the same area but a different grab.
-    hovered_cursor: Option<&'static str>,
     /// The monitor the previous tick reported as holding the cursor.
     ///
     /// **Doubly optional on purpose.** The outer `None` means "nothing reported
@@ -993,48 +963,30 @@ fn pump_hover(app: &AppHandle, state: &mut PumpState) {
         // Forget the reported monitor so the next entry into Placement re-emits
         // it — see `PumpState::active_monitor`.
         state.active_monitor = None;
-        // Living still needs hover chrome (task 1.17(a)): areas are grabbable
-        // here now, and a handle the user cannot see is a handle they will not
-        // reach for. Resolved against *interactive* areas only, matching what
-        // `living_lbutton_down` will actually act on — chrome that appears on
-        // an area the press then ignores is worse than no chrome.
-        //
-        // **The cursor is deliberately not touched.** `set_cursor` drives a
-        // *global* `SetSystemCursor` override, and `enter_living_on_main_thread`
-        // drops it on purpose: Living does not own the pointer, so changing the
-        // shape would change it inside the user's apps too.
-        //
-        // This comment used to end "...belongs in the WebView — the window is
-        // not click-through over an interactive area, so CSS can reach it
-        // there." **That is false, and `css_cursor`'s own docs above say so** —
-        // the window is `WS_EX_TRANSPARENT` in *every* visible state (ADR-0016),
-        // receives no `WM_SETCURSOR` anywhere, and the rig confirmed no cursor
-        // change in Living on 2026-07-26. Two comments in one file disagreeing
-        // about that is worse than either being wrong alone, because the LIVING
-        // cursor is an open decision and a reader who lands on the wrong one
-        // re-derives the dead option. The two live routes are in `css_cursor`.
+        // Living needs hover chrome (task 1.17(a)): areas are grabbable here now,
+        // and a handle the user cannot see is a handle they will not reach for.
+        // Resolved through the same call `living_lbutton_down` acts on, so chrome
+        // never appears on an area the press would then ignore — which since
+        // task 1.17(b) includes a pass-through area's chrome but not its body.
         let grabbed = lock(&MENU)
             .is_none()
             .then(|| overlay::interactive_area_handle_at(app, point))
             .flatten();
         let hovered_area = grabbed.map(|(id, _, _)| id.get());
-        // A live gesture holds its shape for the duration, matching Placement:
-        // the cursor must not flicker between move and resize as the pointer
-        // crosses an edge mid-drag.
-        let cursor = match *lock(&GESTURE) {
-            Some(gesture) => Some(gesture_css_cursor(gesture)),
-            None => grabbed.map(|(_, _, handle)| css_cursor(handle)),
-        };
-        if state.hovered_area != hovered_area || state.hovered_cursor != cursor {
+        // The cursor *is* the affordance (ADR-0025). A live gesture holds its
+        // shape for the duration, matching Placement: it must not flicker between
+        // move and resize as the pointer crosses an edge mid-drag.
+        //
+        // `None` hands the user's own arrow back — this is an `OCR_NORMAL`-only
+        // override, so nothing else in their cursor table is touched. See
+        // `set_living_cursor` for why the restore is not `SPI_SETCURSORS`.
+        set_living_cursor(match *lock(&GESTURE) {
+            Some(gesture) => Some(gesture_cursor(gesture)),
+            None => grabbed.map(|(_, _, handle)| CursorShape::for_handle(handle)),
+        });
+        if state.hovered_area != hovered_area {
             state.hovered_area = hovered_area;
-            state.hovered_cursor = cursor;
-            let _ = app.emit(
-                HOVER_EVENT,
-                HoverPayload {
-                    id: hovered_area,
-                    cursor,
-                },
-            );
+            let _ = app.emit(HOVER_EVENT, HoverPayload { id: hovered_area });
         }
         return;
     }
@@ -1073,29 +1025,9 @@ fn pump_hover(app: &AppHandle, state: &mut PumpState) {
         None => shape,
     };
     set_cursor(shape);
-    if state.hovered_area != hovered_area || state.hovered_cursor.is_some() {
+    if state.hovered_area != hovered_area {
         state.hovered_area = hovered_area;
-        // Placement drives the *system* cursor, so the WebView must not also
-        // set one — two authorities on one pointer is how they disagree.
-        state.hovered_cursor = None;
-        let _ = app.emit(
-            HOVER_EVENT,
-            HoverPayload {
-                id: hovered_area,
-                cursor: None,
-            },
-        );
-    }
-}
-
-/// The CSS cursor a gesture in progress holds for its duration — the WebView
-/// counterpart of [`gesture_cursor`].
-const fn gesture_css_cursor(gesture: Gesture) -> &'static str {
-    match gesture {
-        Gesture::Move { .. } => "move",
-        Gesture::Resize { resize, .. } => css_cursor(Handle::Resize(resize)),
-        Gesture::Close { .. } | Gesture::MenuItem { .. } => "pointer",
-        Gesture::Create | Gesture::Inert => "default",
+        let _ = app.emit(HOVER_EVENT, HoverPayload { id: hovered_area });
     }
 }
 
@@ -1204,6 +1136,10 @@ fn enter_placement_on_main_thread() {
     {
         close_menu(app);
     }
+    // Placement's own override covers `OCR_NORMAL` too, so anything Living left
+    // there is superseded rather than leaked — but the cache has to agree, or the
+    // next return to Living would skip the write that corrects it.
+    *lock(&LIVING_CURSOR) = None;
 }
 
 /// Enters `Living` mode: hook kept for per-area routing (ADR-0016), cursor
@@ -1231,12 +1167,20 @@ fn enter_living_on_main_thread() {
     if let Some(app) = APP.get() {
         close_menu(app);
     }
-    // Living does not own the pointer: the override would change the cursor
-    // inside the user's apps. Restore only if one is actually applied — the
-    // registry reload is global state other apps see, not a free no-op.
+    // Drop Placement's all-slots override: Living does not own the pointer, so
+    // pinning `OCR_IBEAM` and friends would change the cursor inside the user's
+    // apps. Restore only if one is actually applied — the registry reload is
+    // global state other apps see, not a free no-op.
+    //
+    // Living then takes its *own*, far narrower override on hover: `OCR_NORMAL`
+    // alone, via `set_living_cursor` (ADR-0025). The two are deliberately not the
+    // same mechanism, and this is the boundary between them — the wide one has to
+    // be gone before the narrow one starts, or the narrow one's cache would
+    // describe a slot the wide one is still holding.
     if lock(&APPLIED_CURSOR).take().is_some() {
         restore_system_cursors();
     }
+    *lock(&LIVING_CURSOR) = None;
 }
 
 /// Marks the mode `Hidden` and clears the visual drag, then either tears the
@@ -1287,11 +1231,16 @@ fn teardown_now() {
     // but `teardown_now` is also reached from the deferred path, and arming
     // surviving a teardown would be exactly the mode state ADR-0009 §3 deleted.
     *lock(&ARMED) = None;
+    // `SPI_SETCURSORS` is the right call *here* — it runs once, on the way out,
+    // and puts every slot back including the `OCR_NORMAL` the Living path may
+    // have overridden (ADR-0025). Its 7.9 ms only disqualifies it from the
+    // per-hover path, not from teardown.
     restore_system_cursors();
-    // The override is gone, so the cache must forget what it believes the OS
-    // has — otherwise the next entry into Placement would skip re-applying a
-    // shape that is no longer set.
+    // The override is gone, so both caches must forget what they believe the OS
+    // has — otherwise the next entry would skip re-applying a shape that is no
+    // longer set.
     *lock(&APPLIED_CURSOR) = None;
+    *lock(&LIVING_CURSOR) = None;
 }
 
 /// Performs the deferred uninstall from [`leave_on_main_thread`] once nothing
@@ -1321,6 +1270,42 @@ fn set_cursor(shape: CursorShape) {
     *applied = Some(shape);
 }
 
+/// What the LIVING path currently has installed in `OCR_NORMAL`, or `None` when
+/// the user's own arrow is in place. Separate from [`APPLIED_CURSOR`], which
+/// tracks PLACEMENT's all-slots override — the two modes own different amounts of
+/// the cursor table and must not share a cache.
+static LIVING_CURSOR: Mutex<Option<CursorShape>> = Mutex::new(None);
+
+/// Shows `shape` while the pointer is over an area's chrome in LIVING, or returns
+/// the user's arrow when `shape` is `None`
+/// ([ADR-0025](../../../Projects/UP-TAKE/DECISIONS/ADR-0025-living-cursor-via-a-narrow-override.md)).
+///
+/// # Two ways this is narrower than [`set_cursor`], both deliberate
+///
+/// **Only `OCR_NORMAL`.** PLACEMENT pins all of [`OVERRIDDEN_CURSORS`] to one
+/// shape because it owns the whole surface and a text caret appearing over a
+/// field underneath would read as the overlay losing the pointer. In LIVING the
+/// user's apps own the pointer: an I-beam over their text or a wait cursor in
+/// another process is theirs, and ours to leave alone.
+///
+/// **Restored by another `SetSystemCursor`, never by `SPI_SETCURSORS`.** Measured
+/// on the dev rig: the registry reload is **7.9 ms** and broadcasts
+/// `WM_SETTINGCHANGE` desktop-wide, against **0.072 ms** for a single slot
+/// override. This runs from the poll thread on every hover transition — at 221 Hz
+/// during a gesture — so the reload would spend half of every tick on a global
+/// broadcast and make the whole desktop stutter. That is the cost the old
+/// `css_cursor` doc comment said had to be measured before taking this route.
+fn set_living_cursor(shape: Option<CursorShape>) {
+    let mut applied = lock(&LIVING_CURSOR);
+    if *applied == shape {
+        return;
+    }
+    // `None` is not "install nothing" — it is "install the genuine arrow", which
+    // is the whole reason `CursorShape::Arrow` exists.
+    apply_cursor_to(shape.unwrap_or(CursorShape::Arrow), OCR_NORMAL);
+    *applied = shape;
+}
+
 /// Private copies of the real system cursors, taken **before** the first
 /// override and reused for every shape after it.
 ///
@@ -1336,10 +1321,21 @@ fn set_cursor(shape: CursorShape) {
 /// failed to load and leaves the cursor alone. These handles are only ever
 /// `CopyIcon`d, never passed to `SetSystemCursor` directly — the system destroys
 /// what it is given, and destroying the snapshot would leave nothing to copy.
-static CURSOR_SNAPSHOT: OnceLock<[isize; 7]> = OnceLock::new();
+static CURSOR_SNAPSHOT: OnceLock<[isize; CURSOR_SNAPSHOT_LEN]> = OnceLock::new();
+
+/// How many cursors the snapshot holds — **derived** from [`ALL_SHAPES`], never
+/// written out.
+///
+/// The two used to be independent literals (`[isize; 7]` beside
+/// `[CursorShape; 7]`). That is a mapping the compiler does not check: adding a
+/// shape to one and not the other is a runtime index panic, and reordering
+/// either silently hands every shape the wrong cursor image. ADR-0025 widened
+/// both by hand and got it right; this makes getting it wrong impossible rather
+/// than merely unlikely.
+const CURSOR_SNAPSHOT_LEN: usize = ALL_SHAPES.len();
 
 /// Every shape, in [`CursorShape::index`] order.
-const ALL_SHAPES: [CursorShape; 7] = [
+const ALL_SHAPES: [CursorShape; 8] = [
     CursorShape::Cross,
     CursorShape::Move,
     CursorShape::SizeNS,
@@ -1347,6 +1343,7 @@ const ALL_SHAPES: [CursorShape; 7] = [
     CursorShape::SizeNWSE,
     CursorShape::SizeNESW,
     CursorShape::Hand,
+    CursorShape::Arrow,
 ];
 
 /// The real cursor for a shape, loading the whole set on first use.
@@ -1364,7 +1361,7 @@ fn snapshot_cursor(shape: CursorShape) -> HCURSOR {
         // kill leaves exactly that state, and so does every hot restart under
         // `tauri dev`.
         restore_system_cursors();
-        let mut handles = [0_isize; 7];
+        let mut handles = [0_isize; CURSOR_SNAPSHOT_LEN];
         for (slot, shape) in handles.iter_mut().zip(ALL_SHAPES) {
             let loaded = unsafe { LoadCursorW(ptr::null_mut(), shape.idc()) };
             // Our own copy: the shared handle belongs to the system, and this one
@@ -1401,15 +1398,52 @@ fn apply_cursor(shape: CursorShape) {
         return;
     }
     for id in OVERRIDDEN_CURSORS {
-        let copy = unsafe { CopyIcon(cursor) };
-        if !copy.is_null() {
-            // Ignoring the BOOL: a failed override on one id leaves that cursor
-            // at its default, which is a cosmetic imperfection during placement,
-            // not a correctness problem.
-            unsafe {
-                SetSystemCursor(copy, id);
-            }
-        }
+        install_cursor(cursor, id);
+    }
+}
+
+/// Overrides a **single** cursor slot — the LIVING path's unit of work
+/// (ADR-0025), where PLACEMENT's [`apply_cursor`] overrides the whole set.
+fn apply_cursor_to(shape: CursorShape, id: u32) {
+    let cursor: HCURSOR = snapshot_cursor(shape);
+    if cursor.is_null() {
+        eprintln!(
+            "placement: could not load the {shape:?} cursor; leaving the system cursor as-is"
+        );
+        return;
+    }
+    install_cursor(cursor, id);
+}
+
+/// Installs a **copy** of `cursor` into slot `id`.
+///
+/// Always a `CopyIcon`: `SetSystemCursor` destroys the handle it is given, and
+/// these come from [`CURSOR_SNAPSHOT`], which must survive to be installed again.
+/// Handing it the snapshot directly would work exactly once and then leave
+/// nothing to restore to.
+fn install_cursor(cursor: HCURSOR, id: u32) {
+    let copy = unsafe { CopyIcon(cursor) };
+    if copy.is_null() {
+        return;
+    }
+    // Ignoring the BOOL, and the justification is **weaker here than where it was
+    // written**. It was written for `apply_cursor`, which runs on a mode
+    // transition: a failure there leaves one slot at its default for the duration
+    // of a placement session, which is cosmetic. Since ADR-0025 this helper also
+    // serves `set_living_cursor`, which fires on every hover-in and hover-out of
+    // chrome in LIVING — the app's *resting* state — so the same failure recurs
+    // per crossing rather than per session.
+    //
+    // What is **not** established is who owns `copy` when the call fails.
+    // `SetSystemCursor` is documented as destroying the handle it is given; the
+    // documentation does not say whether it still does so on failure. Adding a
+    // `DestroyCursor` here would leak nothing if it does not — and double-destroy
+    // a handle the system may already have freed and reused if it does. That is
+    // exactly the sort of unrun equivalence argument that cost this project a
+    // working feature on 2026-07-27, so it is recorded as `BACKLOG.md` I-6 to be
+    // settled by experiment rather than guessed at in a review.
+    unsafe {
+        SetSystemCursor(copy, id);
     }
 }
 
@@ -2200,4 +2234,40 @@ fn emit_menu(app: &AppHandle) {
 /// forbids `unwrap`.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ALL_SHAPES, CURSOR_SNAPSHOT_LEN};
+
+    /// [`super::CursorShape::index`] and [`ALL_SHAPES`] are two hand-maintained
+    /// halves of one mapping: [`super::snapshot_cursor`] fills the array by
+    /// zipping `ALL_SHAPES` and reads it back by `index()`. Nothing in the type
+    /// system ties them together, so a shape added to one and not the other — or
+    /// added to both in a different order — silently hands **every** shape the
+    /// wrong cursor image. No compile error, no panic, no failing test: just a
+    /// pointer that shows the hand where it should show a resize.
+    ///
+    /// Written when ADR-0025 widened the pair from seven entries to eight. The
+    /// widening was correct; the point is that nothing would have said so.
+    /// Confirmed to fail on a deliberate swap before being kept.
+    #[test]
+    fn every_shape_sits_at_its_own_index() {
+        for shape in ALL_SHAPES {
+            assert_eq!(
+                ALL_SHAPES[shape.index()],
+                shape,
+                "{shape:?} reads back as {:?} — `index()` and `ALL_SHAPES` disagree",
+                ALL_SHAPES[shape.index()]
+            );
+        }
+    }
+
+    /// The snapshot array's length is derived from [`ALL_SHAPES`] rather than
+    /// written out, so a ninth shape cannot leave it one slot short. This pins
+    /// that it is still derived.
+    #[test]
+    fn the_snapshot_has_a_slot_for_every_shape() {
+        assert_eq!(CURSOR_SNAPSHOT_LEN, ALL_SHAPES.len());
+    }
 }

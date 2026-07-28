@@ -604,19 +604,22 @@ pub(crate) fn area_at(app: &AppHandle, point: Point) -> Option<AreaSummary> {
     guard.hit_test_any(point).map(AreaSummary::of)
 }
 
-/// The topmost **interactive** area containing `point` — the area that claims
-/// a `Living` mouse event (ADR-0016, V-7). `None` means the event belongs to
-/// the user's apps: the point is over empty overlay, or over areas that are
-/// all pass-through.
+/// The topmost area that claims a `Living` mouse event at `point` (ADR-0016,
+/// V-7). `None` means the event belongs to the user's apps: the point is over
+/// empty overlay, or over the *body* of a pass-through area.
 ///
 /// [`AreaStore::hit_test`], not `hit_test_any` — the difference *is* the input
-/// model: a pass-through area never takes a click in `Living`, however high it
-/// is stacked, including a Filter pinned to `Front` (the property the store's
-/// tests pin).
+/// model. Since [ADR-0024](../../../Projects/UP-TAKE/DECISIONS/ADR-0024-direct-manipulation-in-living.md)
+/// §2 that difference is narrower than it was: a pass-through area no longer
+/// misses every click regardless of stacking, it misses clicks on its **body**
+/// and takes them on its **chrome**. A Filter pinned to `Front` still never
+/// steals a click from the app underneath it, which is the property that
+/// motivated the split.
 pub(crate) fn interactive_area_at(app: &AppHandle, point: Point) -> Option<AreaSummary> {
+    let monitors = monitor_rects();
     let store = app.state::<Mutex<AreaStore>>();
     let guard = lock(&store);
-    guard.hit_test(point).map(AreaSummary::of)
+    guard.hit_test(point, &monitors).map(AreaSummary::of)
 }
 
 /// Raises an area to the top of its tier — §3.2a's "the area you last touched
@@ -659,13 +662,27 @@ pub(crate) fn area_handle_at(
 /// The `Living` counterpart of [`area_handle_at`], and it draws the same
 /// distinction [`AreaStore::hit_test`] and `hit_test_any` already do: in
 /// `Placement` the user is editing the workspace, so every area is grabbable
-/// whatever its [`Input`]; in `Living` a pass-through area's pixels belong to
-/// the app underneath, so it must be invisible to the cursor here.
+/// whatever its [`Input`]; in `Living` a pass-through area's *body* belongs to
+/// the app underneath.
 ///
-/// **This is what makes a pass-through area ungrabbable in `Living` today** —
-/// the gap task 1.17(b) closes by giving such areas grabbable chrome. Until
-/// then, `Filter` and `Record` areas (pass-through by default) can only be
-/// manipulated from `Placement`.
+/// # Task 1.17(b): chrome is grabbable, the body is not
+///
+/// This used to filter pass-through areas out entirely, which is what made them
+/// **ungrabbable in `Living`** — a `Filter` or `Record` area (pass-through by
+/// default) could only be touched by re-entering `Placement`, and flipping any
+/// area to pass-through stranded it there. [ADR-0024](../../../Projects/UP-TAKE/DECISIONS/ADR-0024-direct-manipulation-in-living.md)
+/// §2 redefines the property: the body passes clicks through, the chrome does
+/// not.
+///
+/// The resolution deliberately mirrors [`AreaStore::hit_test`] rather than
+/// re-deriving it — same rule, expressed once per side of the IPC boundary,
+/// because two copies of "what takes input" drifting apart is how a click gets
+/// swallowed by an area that would not have handled it.
+///
+/// **A pass-through area still cannot be *moved* in `Living`.** Its chrome is the
+/// resize band and the close control; `Handle::Body` is the move grab, and that is
+/// precisely what passes through. Moving arrives with 1.17(c)'s `Win+Shift` drag
+/// or 1.17(b2)'s control bar, whichever lands first.
 pub(crate) fn interactive_area_handle_at(
     app: &AppHandle,
     point: Point,
@@ -673,13 +690,17 @@ pub(crate) fn interactive_area_handle_at(
     let monitors = monitor_rects();
     let store = app.state::<Mutex<AreaStore>>();
     let guard = lock(&store);
-    guard
-        .iter_top_down()
-        .filter(|area| area.is_interactive())
-        .find_map(|area| {
-            interaction::handle_at(area.bounds, point, &monitors)
-                .map(|handle| (area.id, area.bounds, handle))
-        })
+    guard.iter_top_down().find_map(|area| {
+        let handle = interaction::handle_at(area.bounds, point, &monitors)?;
+        // An interactive area answers for any handle; a pass-through one only for
+        // chrome. `find_map` stops at the first area that answers, so a
+        // pass-through area's body does not shadow an interactive area beneath it.
+        if area.is_interactive() || !matches!(handle, interaction::Handle::Body) {
+            Some((area.id, area.bounds, handle))
+        } else {
+            None
+        }
+    })
 }
 
 /// The close control's rectangle for an area, against the current monitors.

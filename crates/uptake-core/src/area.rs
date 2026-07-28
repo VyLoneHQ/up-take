@@ -42,13 +42,19 @@
 //!   stacking is implicit recency plus a per-area [`Layer`] tier. The tier and
 //!   the ordering rule live here; the gesture that sets it — the per-area Layer
 //!   menu — is task 1.6's.
-//! - **No wiring.** Nothing here is connected to `ClickThrough` yet; that is
-//!   task 1.6c. [`AreaStore::interactive_regions`] is shaped to be the input to
-//!   `overlay_set_interactive_regions`'s physical side when it is.
+//! - **No wiring, and no longer any prospect of it.** This bullet used to read
+//!   "Nothing here is connected to `ClickThrough` yet; that is task 1.6c", with
+//!   [`AreaStore::interactive_regions`] shaped to feed
+//!   `overlay_set_interactive_regions`. **That consumer was deleted**, not
+//!   deferred: ADR-0016 routes per-area input through the global mouse hook and
+//!   removed the frontend-reported region store entirely. `interactive_regions`
+//!   survives as the thing the hit test is checked against, not as anybody's
+//!   input — see its own docs.
 
 use serde::{Deserialize, Serialize};
 
 use crate::geometry::{Point, Rect};
+use crate::interaction;
 
 /// A stable identity for an area, unique within the [`AreaStore`] that issued
 /// it.
@@ -528,10 +534,27 @@ impl AreaStore {
     /// including a Filter the user has pinned to `Front`, which is the
     /// combination ADR-0013's motivating case actually produces. `None` means
     /// the click belongs to whatever is behind the overlay.
+    /// # Pass-through means body-only, not invisible (ADR-0024 §2)
+    ///
+    /// A pass-through area is **not** skipped outright any more: its *body* lets
+    /// clicks through, and its *chrome* does not. Before this, flipping an area to
+    /// pass-through stranded it — `Filter` and `Record` are pass-through by
+    /// default, so they could never be grabbed, moved or dismissed without
+    /// re-entering PLACEMENT. §3.2a's "skipped entirely regardless of z-order" now
+    /// reads as *the body* being skipped.
+    ///
+    /// The `monitors` argument is what that costs: chrome geometry includes the
+    /// close control, which on a small area sits **outside** the bounds and has to
+    /// be placed against a monitor.
     #[must_use]
-    pub fn hit_test(&self, point: Point) -> Option<&Area> {
-        self.iter_top_down()
-            .find(|area| area.is_interactive() && area.bounds.contains(point))
+    pub fn hit_test(&self, point: Point, monitors: &[Rect]) -> Option<&Area> {
+        self.iter_top_down().find(|area| {
+            if area.is_interactive() {
+                area.bounds.contains(point)
+            } else {
+                interaction::is_chrome_at(area.bounds, point, monitors)
+            }
+        })
     }
 
     /// The topmost area containing `point`, **whatever its [`Input`]** — the
@@ -551,23 +574,41 @@ impl AreaStore {
             .find(|area| area.bounds.contains(point))
     }
 
-    /// The bounds of every interactive area, topmost first — the set the
-    /// click-through poll tests the cursor against (task 1.6c).
+    /// Every rectangle that takes input, topmost first — an interactive area's
+    /// whole bounds, and a pass-through area's **chrome only** (ADR-0024 §2).
     ///
-    /// Pass-through areas are absent by construction rather than filtered
-    /// downstream, which is what makes §3.2a's "skipped entirely regardless of
-    /// z-order" true for free.
+    /// **No longer one rect per area**, and that is the point: a pass-through
+    /// area contributes its close control and its four edge bands, so the list
+    /// describes an input *surface* rather than a set of areas. Nothing needs the
+    /// area→rect correspondence; what needs to hold is that this surface and
+    /// [`AreaStore::hit_test`] agree, which
+    /// `hit_testing_and_the_region_list_agree` checks.
     ///
-    /// **An empty result means no area takes input**, which is a real state
-    /// (every area is pass-through, or there are none) and not a failure. Note
-    /// that `ClickThrough` reads an empty region list as its fail-safe —
-    /// "regions cannot be trusted, take input everywhere" — so task 1.6c must
-    /// not hand this straight through without distinguishing the two.
+    /// **An empty result means no rectangle takes input**, which is a real state
+    /// (no areas at all, or only pass-through areas whose chrome is off-screen)
+    /// and not a failure. Note that `ClickThrough` reads an empty region list as
+    /// its fail-safe — "regions cannot be trusted, take input everywhere" — so a
+    /// caller must not hand this straight through without distinguishing the two.
+    ///
+    /// # It has no production caller today
+    ///
+    /// Its consumer — the frontend-reported region store the click-through poll
+    /// tested the cursor against — was **deleted** by
+    /// [ADR-0016](../../../Projects/UP-TAKE/DECISIONS/ADR-0016-living-input-via-the-global-hook.md),
+    /// which routes per-area input through the global mouse hook instead. It is
+    /// kept because the property test over it is the one place the two halves of
+    /// "what takes input" are forced to answer alike; deleting it would remove the
+    /// check, not the requirement.
     #[must_use]
-    pub fn interactive_regions(&self) -> Vec<Rect> {
+    pub fn interactive_regions(&self, monitors: &[Rect]) -> Vec<Rect> {
         self.iter_top_down()
-            .filter(|area| area.is_interactive())
-            .map(|area| area.bounds)
+            .flat_map(|area| {
+                if area.is_interactive() {
+                    vec![area.bounds]
+                } else {
+                    interaction::chrome_rects(area.bounds, monitors)
+                }
+            })
             .collect()
     }
 
@@ -640,6 +681,18 @@ mod tests {
 
     fn rect(x: i32, y: i32, w: u32, h: u32) -> Rect {
         Rect::new(x, y, w, h)
+    }
+
+    /// One monitor large enough to hold every rectangle these tests use,
+    /// including the negative-coordinate ones.
+    ///
+    /// Hit testing needs a monitor list because a pass-through area's chrome
+    /// includes its close control, and a small area's control is placed *outside*
+    /// it against a screen ([`interaction::close_control`]). An interactive area's
+    /// hit test ignores the list entirely, so most of these tests only need it to
+    /// exist.
+    fn screens() -> Vec<Rect> {
+        vec![Rect::new(-3000, -3000, 6000, 6000)]
     }
 
     fn store_with(kinds: &[AreaType]) -> (AreaStore, Vec<AreaId>) {
@@ -871,7 +924,10 @@ mod tests {
             .unwrap();
         assert!(store.set_layer(tint, Layer::Front));
         assert_eq!(store.iter_top_down().next().unwrap().id, tint);
-        assert_eq!(store.hit_test(Point::new(50, 50)).unwrap().id, below);
+        assert_eq!(
+            store.hit_test(Point::new(50, 50), &screens()).unwrap().id,
+            below
+        );
     }
 
     #[test]
@@ -887,7 +943,7 @@ mod tests {
             .create(AreaType::Filter, rect(0, 0, 100, 100))
             .unwrap();
         let point = Point::new(50, 50);
-        assert_ne!(store.hit_test(point).unwrap().id, tint);
+        assert_ne!(store.hit_test(point, &screens()).unwrap().id, tint);
         assert_eq!(store.hit_test_any(point).unwrap().id, tint);
     }
 
@@ -909,8 +965,11 @@ mod tests {
             .unwrap();
         assert!(store.set_layer(front, Layer::Front));
         assert!(store.bring_to_front(auto));
-        assert_eq!(store.hit_test(Point::new(50, 50)).unwrap().id, front);
-        assert_eq!(store.interactive_regions().len(), 2);
+        assert_eq!(
+            store.hit_test(Point::new(50, 50), &screens()).unwrap().id,
+            front
+        );
+        assert_eq!(store.interactive_regions(&screens()).len(), 2);
     }
 
     #[test]
@@ -925,7 +984,10 @@ mod tests {
         store
             .create(AreaType::Filter, rect(0, 0, 100, 100))
             .unwrap();
-        assert_eq!(store.hit_test(Point::new(50, 50)).unwrap().id, below);
+        assert_eq!(
+            store.hit_test(Point::new(50, 50), &screens()).unwrap().id,
+            below
+        );
     }
 
     #[test]
@@ -937,11 +999,17 @@ mod tests {
         let top = store
             .create(AreaType::Default, rect(50, 50, 100, 100))
             .unwrap();
-        assert_eq!(store.hit_test(Point::new(60, 60)).unwrap().id, top);
+        assert_eq!(
+            store.hit_test(Point::new(60, 60), &screens()).unwrap().id,
+            top
+        );
         // And raising the lower one flips it.
         let lower: AreaId = store.iter().next().unwrap().id;
         assert!(store.bring_to_front(lower));
-        assert_eq!(store.hit_test(Point::new(60, 60)).unwrap().id, lower);
+        assert_eq!(
+            store.hit_test(Point::new(60, 60), &screens()).unwrap().id,
+            lower
+        );
         assert_ne!(lower, top);
     }
 
@@ -955,8 +1023,11 @@ mod tests {
         let right = store
             .create(AreaType::Default, rect(10, 0, 10, 10))
             .unwrap();
-        assert_eq!(store.hit_test(Point::new(10, 5)).unwrap().id, right);
-        assert!(store.hit_test(Point::new(20, 5)).is_none());
+        assert_eq!(
+            store.hit_test(Point::new(10, 5), &screens()).unwrap().id,
+            right
+        );
+        assert!(store.hit_test(Point::new(20, 5), &screens()).is_none());
     }
 
     #[test]
@@ -967,7 +1038,13 @@ mod tests {
         let id = store
             .create(AreaType::Default, rect(-1920, -200, 300, 300))
             .unwrap();
-        assert_eq!(store.hit_test(Point::new(-1800, -100)).unwrap().id, id);
+        assert_eq!(
+            store
+                .hit_test(Point::new(-1800, -100), &screens())
+                .unwrap()
+                .id,
+            id
+        );
     }
 
     #[test]
@@ -1000,29 +1077,64 @@ mod tests {
     }
 
     #[test]
-    fn interactive_regions_holds_only_the_interactive_areas() {
+    fn an_interactive_area_contributes_its_bounds_and_a_pass_through_one_its_chrome() {
+        // Rewritten for ADR-0024 §2. This test used to be
+        // `interactive_regions_holds_only_the_interactive_areas` and asserted that
+        // pass-through areas contribute *nothing* — which was the behaviour that
+        // stranded them.
         let mut store = AreaStore::new();
-        store.create(AreaType::Default, rect(0, 0, 10, 10)).unwrap();
-        store.create(AreaType::Filter, rect(20, 0, 10, 10)).unwrap();
-        store.create(AreaType::Record, rect(40, 0, 10, 10)).unwrap();
-        let top = store
-            .create(AreaType::Default, rect(60, 0, 10, 10))
-            .unwrap();
-        // Topmost first.
+        let interactive = rect(0, 0, 80, 80);
+        let passing = rect(200, 0, 80, 80);
+        store.create(AreaType::Default, interactive).unwrap();
+        store.create(AreaType::Filter, passing).unwrap();
+
+        let regions = store.interactive_regions(&screens());
+        // Topmost first: the Filter was created last, so its chrome leads.
         assert_eq!(
-            store.interactive_regions(),
-            vec![rect(60, 0, 10, 10), rect(0, 0, 10, 10)]
+            regions.first().copied(),
+            Some(interaction::close_control(passing, &screens())),
+            "a pass-through area leads with its close control"
         );
-        assert_eq!(store.hit_test(Point::new(65, 5)).unwrap().id, top);
+        assert!(
+            regions.contains(&interactive),
+            "an interactive area still contributes its whole bounds"
+        );
+        // The pass-through area's *body* is in no region.
+        let body = Point::new(240, 40);
+        assert!(
+            !crate::geometry::point_in_any(&regions, body),
+            "the body of a pass-through area takes no input"
+        );
+        // Its edge does.
+        let edge = Point::new(201, 40);
+        assert!(crate::geometry::point_in_any(&regions, edge));
     }
 
     #[test]
-    fn a_store_of_only_pass_through_areas_reports_no_interactive_regions() {
-        // The state task 1.6c must not confuse with `ClickThrough`'s fail-safe
+    fn a_small_pass_through_area_offers_its_close_control_and_nothing_else() {
+        // Below `CHROME_INSIDE_SPAN` an area has no resize band at all
+        // (`handle_at` answers `Body` everywhere inside it), so its chrome is the
+        // close control alone. That is the gap task 1.17(b2)'s outside handles
+        // close, recorded here so shrinking it is a deliberate change.
+        let mut store = AreaStore::new();
+        let small = rect(0, 0, 20, 20);
+        store.create(AreaType::Filter, small).unwrap();
+
+        let regions = store.interactive_regions(&screens());
+        assert_eq!(regions, vec![interaction::close_control(small, &screens())]);
+        assert!(
+            store.hit_test(Point::new(10, 10), &screens()).is_none(),
+            "its interior is body, so it passes through"
+        );
+    }
+
+    #[test]
+    fn an_empty_store_reports_no_regions_at_all() {
+        // The state a caller must not confuse with `ClickThrough`'s fail-safe
         // empty set, which means the opposite ("take input everywhere").
-        let (store, _) = store_with(&[AreaType::Filter, AreaType::Record]);
-        assert!(store.interactive_regions().is_empty());
-        assert!(!store.is_empty());
+        let store = AreaStore::new();
+        assert!(store.interactive_regions(&screens()).is_empty());
+        assert!(store.is_empty());
     }
 
     #[test]
@@ -1086,6 +1198,19 @@ mod tests {
             .all(|pair| pair[0] <= pair[1])
     }
 
+    /// ADR-0024 §2's rule, restated independently of [`AreaStore::hit_test`].
+    ///
+    /// The property tests below must not just call the function they are checking,
+    /// so the rule is written out once here: an interactive area takes input
+    /// anywhere inside itself, a pass-through area only on its chrome.
+    fn takes_input_at(area: &Area, point: Point) -> bool {
+        if area.is_interactive() {
+            area.bounds.contains(point)
+        } else {
+            interaction::is_chrome_at(area.bounds, point, &screens())
+        }
+    }
+
     proptest! {
         #[test]
         fn ids_are_unique_across_the_store(store in any_store()) {
@@ -1096,15 +1221,35 @@ mod tests {
         }
 
         #[test]
-        fn a_hit_is_always_an_interactive_area_containing_the_point(
+        fn a_hit_is_an_interactive_body_or_a_pass_through_areas_chrome(
             store in any_store(),
             x in -250i32..250,
             y in -250i32..250,
         ) {
+            // ADR-0024 §2 split this invariant in two. It used to read
+            // `prop_assert!(area.is_interactive())` — true only while a
+            // pass-through area was invisible to input.
+            //
+            // Note the asymmetry in the bounds check: an interactive area is hit
+            // only *inside* itself, but a pass-through area can be hit outside its
+            // bounds, because a small area's close control sits outside them.
             let point = Point::new(x, y);
-            if let Some(area) = store.hit_test(point) {
-                prop_assert!(area.is_interactive());
-                prop_assert!(area.bounds.contains(point));
+            if let Some(area) = store.hit_test(point, &screens()) {
+                if area.is_interactive() {
+                    prop_assert!(area.bounds.contains(point));
+                } else {
+                    prop_assert!(
+                        interaction::is_chrome_at(area.bounds, point, &screens()),
+                        "a pass-through hit must be on chrome"
+                    );
+                    prop_assert!(
+                        !matches!(
+                            interaction::handle_at(area.bounds, point, &screens()),
+                            Some(interaction::Handle::Body)
+                        ),
+                        "and never on the body"
+                    );
+                }
             }
         }
 
@@ -1115,9 +1260,9 @@ mod tests {
             y in -250i32..250,
         ) {
             let point = Point::new(x, y);
-            if store.hit_test(point).is_none() {
+            if store.hit_test(point, &screens()).is_none() {
                 prop_assert!(
-                    !store.iter().any(|a| a.is_interactive() && a.bounds.contains(point))
+                    !store.iter().any(|a| takes_input_at(a, point))
                 );
             }
         }
@@ -1135,9 +1280,9 @@ mod tests {
             // the ordering rule itself instead of restating the implementation.
             let expected = store
                 .iter()
-                .rfind(|a| a.is_interactive() && a.bounds.contains(point))
+                .rfind(|a| takes_input_at(a, point))
                 .map(|a| a.id);
-            prop_assert_eq!(store.hit_test(point).map(|a| a.id), expected);
+            prop_assert_eq!(store.hit_test(point, &screens()).map(|a| a.id), expected);
         }
 
         #[test]
@@ -1152,10 +1297,10 @@ mod tests {
             // an area that would have handled the click, or the overlay
             // swallows a click nothing wants.
             let point = Point::new(x, y);
-            let regions = store.interactive_regions();
+            let regions = store.interactive_regions(&screens());
             prop_assert_eq!(
                 crate::geometry::point_in_any(&regions, point),
-                store.hit_test(point).is_some()
+                store.hit_test(point, &screens()).is_some()
             );
         }
 
@@ -1222,7 +1367,7 @@ mod tests {
                 prop_assert!(store.remove(*id).is_some());
             }
             prop_assert!(store.is_empty());
-            prop_assert!(store.interactive_regions().is_empty());
+            prop_assert!(store.interactive_regions(&screens()).is_empty());
             // And every id is now stale rather than pointing at anything.
             for id in &ids {
                 prop_assert!(store.get(*id).is_none());
