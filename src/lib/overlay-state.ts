@@ -90,24 +90,18 @@ export interface PinPayload {
   url: string;
 }
 
-/** The payload of the `overlay://hover` event: the area under the cursor. */
+/**
+ * The payload of the `overlay://hover` event: the area under the cursor.
+ *
+ * **It carries no cursor**, and that is settled rather than missing. This
+ * interface briefly had a `cursor` keyword for the frontend to apply; it never
+ * did anything, because the overlay is `WS_EX_TRANSPARENT` in every visible
+ * state (ADR-0016) and so receives no `WM_SETCURSOR` at any position. ADR-0025
+ * chose the surviving route — a narrow `SetSystemCursor` override on the Rust
+ * side — and deleted this half rather than leave it looking functional.
+ */
 export interface HoverPayload {
   id: number | null;
-  /**
-   * The CSS `cursor` keyword to apply, or `null` for none.
-   *
-   * Rust sends a keyword rather than a handle name because it owns the hit
-   * test — re-deriving "north-east edge ⇒ `nesw-resize`" here would be a second
-   * mapping to keep in step. It is `null` in Placement, where the *system*
-   * cursor is overridden instead (`SetSystemCursor`); two authorities on one
-   * pointer is how they end up disagreeing.
-   *
-   * ⚠️ **Applying this currently has no effect.** The overlay window is
-   * `WS_EX_TRANSPARENT` in every visible state (ADR-0016), so it receives no
-   * mouse messages and therefore no `WM_SETCURSOR` — a CSS cursor cannot apply
-   * anywhere on it. See `css_cursor` in `placement.rs` for the two routes out.
-   */
-  cursor: string | null;
 }
 
 /** One row of the per-area menu, positioned by Rust. */

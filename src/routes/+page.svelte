@@ -52,11 +52,6 @@ let areas: AreaView[] = $state([]);
 let selection: PhysRect | null = $state(null);
 let draggedArea: number | null = $state(null);
 let hoveredArea: number | null = $state(null);
-// The CSS cursor Rust resolved for whatever is under the pointer (task 1.17a).
-// Only ever set in Living: Placement overrides the *system* cursor instead,
-// because there it owns the whole surface and the shape must hold over the
-// user's apps too.
-let hoverCursor: string | null = $state(null);
 let menu: MenuView | null = $state(null);
 // What the next drag will make, or null for Default (ADR-0018 §3). Rust owns
 // this — arming is placement state living beside the mouse hook — and re-emits
@@ -192,7 +187,6 @@ onMount(() => {
   );
   const unlistenHover = listen<HoverPayload>('overlay://hover', (event) => {
     hoveredArea = event.payload.id;
-    hoverCursor = event.payload.cursor;
   });
   const unlistenMenu = listen<MenuPayload>('overlay://menu', (event) => {
     menu = event.payload.menu;
@@ -224,16 +218,11 @@ onMount(() => {
 
 <svelte:window onkeydown={onKeydown} />
 
-<!-- The cursor is set inline from Rust's answer rather than by a CSS rule per
-     handle: the shape depends on a hit test only Rust performs, and the areas
-     themselves are `pointer-events: none`, so a `:hover` rule on them could
-     never fire. Applied to the root because that is the element the window
-     actually hit-tests against. -->
-<main
-  class="overlay"
-  class:active={showsTint(overlayState)}
-  style={hoverCursor ? `cursor: ${hoverCursor}` : undefined}
->
+<!-- No `cursor` style here, deliberately. This element carried one until
+     ADR-0025: a click-through window receives no `WM_SETCURSOR`, so a CSS cursor
+     on the overlay never applied at any position. Cursor feedback is a narrow
+     `SetSystemCursor` override on the Rust side instead. -->
+<main class="overlay" class:active={showsTint(overlayState)}>
   {#if showsTint(overlayState)}
     {#each frames as frame, i (`${frame.x},${frame.y},${frame.width},${frame.height}`)}
       <div
