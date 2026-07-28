@@ -134,6 +134,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::overlay;
+use crate::precapture;
 
 /// The Tauri event the frontend listens on for the live selection rectangle.
 const SELECTION_EVENT: &str = "placement://selection";
@@ -688,6 +689,11 @@ pub fn is_dragging() -> bool {
 pub fn cancel_drag() {
     DRAGGING.store(false, Ordering::SeqCst);
     *lock(&GESTURE) = None;
+    // The pre-capture this drag may have started is now waste — ADR-0022 calls
+    // it "wasted but harmless", which is true of the *work* and not of the
+    // memory: a held 4K frame is 33 MB, and leaving it would keep that resident
+    // until the next drag happened to replace it.
+    precapture::discard();
 }
 
 /// Arms `kind` for the next drag (ADR-0018 §1), replacing anything already
@@ -1538,6 +1544,11 @@ fn handle_mouse(wparam: WPARAM, lparam: LPARAM) -> bool {
                 // itself, and nesting those inside this one would be a lock
                 // order to reason about rather than one that cannot exist.
                 let gesture = classify_press(point);
+                // Task 1.9c: a drag that will capture on release starts its
+                // capture *now*, so the ~200 ms is spent during the drag rather
+                // than after it (ADR-0022). Spawns — never captures here; this
+                // is the `WH_MOUSE_LL` callback (F-33).
+                start_precapture(gesture, point);
                 *lock(&GESTURE) = Some(gesture);
                 DRAGGING.store(true, Ordering::SeqCst);
                 LEFT_PENDING.store(true, Ordering::SeqCst);
@@ -1607,6 +1618,35 @@ fn handle_mouse(wparam: WPARAM, lparam: LPARAM) -> bool {
             true
         }
         _ => false,
+    }
+}
+
+/// Starts the pre-capture, if this press begins a drag that will capture.
+///
+/// Three conditions, all of them necessary. The gesture must be [`Gesture::Create`]
+/// — a move, a resize, a close or a menu press produces no capture, and
+/// pre-capturing for one would spend a full-monitor capture on every click in
+/// Placement. The armed type must be one that captures on create, read through
+/// the same [`captures_on_create`] predicate the release path uses. And the
+/// cursor must be on a monitor: in a dead zone between mismatched monitors there
+/// is nothing to pre-capture, and picking a neighbour would hold a frame that
+/// every crop then declines.
+///
+/// Reads the overlay's cached monitor list rather than enumerating: this runs in
+/// the hook callback, where a `EnumDisplayMonitors` round trip on every press is
+/// exactly the cost that path exists to avoid. The cache is refreshed on display
+/// changes; a stale entry costs a declined crop and a normal capture, not a
+/// wrong image, because [`precapture::take`] validates containment against the
+/// rectangle the capture crate **reports** rather than the one requested.
+fn start_precapture(gesture: Gesture, point: Point) {
+    if !matches!(gesture, Gesture::Create) {
+        return;
+    }
+    if !armed().is_some_and(captures_on_create) {
+        return;
+    }
+    if let Some(monitor) = precapture::monitor_holding(&overlay::monitor_rects(), point) {
+        precapture::begin(monitor);
     }
 }
 
@@ -1924,6 +1964,12 @@ fn finish_gesture(release: Point) {
                 // and `area_created` posts to the event loop.
                 capture_on_create(app, kind, id, bounds);
                 overlay::area_created(app, kind);
+            } else {
+                // An empty or rejected drag creates nothing, so nothing will
+                // consume the frame it may have pre-captured. Dropped here
+                // rather than left for the next gesture to clear, which would
+                // hold a full-monitor bitmap for as long as the user hesitates.
+                precapture::discard();
             }
             created.is_some()
         }
@@ -1955,14 +2001,36 @@ fn finish_gesture(release: Point) {
 /// pixels?" has exactly one answer today, and inventing a fourth per-type axis
 /// on one data point is how the other three got harder to change.
 fn capture_on_create(app: &AppHandle, kind: AreaType, id: AreaId, bounds: Rect) {
+    if captures_on_create(kind) {
+        crate::output::capture_into_area(app, id, bounds);
+    }
+}
+
+/// Whether creating an area of `kind` captures pixels.
+///
+/// # Why this is one predicate and not two matches
+///
+/// Task 1.9c added a **second** reader of this fact: the pre-capture fires on
+/// mouse-down only for a drag that is going to capture on release. Written as a
+/// second `match` beside [`capture_on_create`]'s, the two would be a
+/// hand-maintained pair that agree today and drift the moment a type is added —
+/// and the drift is silent in the worse direction. A type added here but not
+/// there merely loses the fast path; added *there* but not here, every drag of
+/// every other type pays for a full-monitor capture nobody reads. The PR #24
+/// review found the same shape as a three-way cursor mapping and the fix was the
+/// same: derive it, do not restate it.
+///
+/// Exhaustive rather than `matches!` with a `_` arm, so adding an `AreaType`
+/// fails to compile here instead of defaulting to "captures nothing".
+const fn captures_on_create(kind: AreaType) -> bool {
     match kind {
-        AreaType::Screenshot => crate::output::capture_into_area(app, id, bounds),
+        AreaType::Screenshot => true,
         AreaType::Default
         | AreaType::Record
         | AreaType::Ocr
         | AreaType::Upscale
         | AreaType::Analysis
-        | AreaType::Filter => {}
+        | AreaType::Filter => false,
     }
 }
 
