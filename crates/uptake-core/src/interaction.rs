@@ -134,6 +134,94 @@ pub fn chrome_is_outside(bounds: Rect) -> bool {
     bounds.size.width < CHROME_INSIDE_SPAN || bounds.size.height < CHROME_INSIDE_SPAN
 }
 
+/// The width of the resize band on this area, or `None` when it has none.
+///
+/// Extracted from [`handle_at`] rather than duplicated, because
+/// [`chrome_rects`] has to describe the *same* band or the two disagree about
+/// where an area can be grabbed — the exact class of drift `hit_testing_and_the_region_list_agree`
+/// exists to catch.
+fn resize_band(bounds: Rect) -> Option<i64> {
+    if chrome_is_outside(bounds) {
+        // A small area is all body; see `handle_at`.
+        return None;
+    }
+    Some(i64::from(
+        RESIZE_BAND
+            .min(bounds.size.width / 3)
+            .min(bounds.size.height / 3)
+            .max(1),
+    ))
+}
+
+/// Every rectangle of an area's **chrome** — the parts that are not its body.
+///
+/// # What this is for
+///
+/// [ADR-0024](../../../Projects/UP-TAKE/DECISIONS/ADR-0024-direct-manipulation-in-living.md) §2
+/// redefines `Input::PassThrough` from *"invisible to the cursor"* to **"the body
+/// passes clicks through; the chrome does not"**. Without that, an area flipped
+/// to pass-through — which `Filter` and `Record` are by default — could not be
+/// touched at all until the user re-entered PLACEMENT, so making one
+/// pass-through stranded it.
+///
+/// # It must agree with `handle_at`, exactly
+///
+/// This is the same surface [`handle_at`] reports a non-[`Handle::Body`] answer
+/// for, expressed as rectangles instead of as a predicate. The two are derived
+/// from one band ([`resize_band`]) precisely so they cannot drift; a point is in
+/// one of these rects **iff** `handle_at` there is `Some(Close)` or
+/// `Some(Resize(_))`.
+///
+/// Returns the close control plus, when the area is large enough to have one, the
+/// four edge bands. Their union is the ring — the corners are covered twice,
+/// which costs a redundant `contains` test and buys not having to special-case
+/// eight rects instead of four.
+///
+/// A small area's chrome is its close control alone: it has no resize band to
+/// grab (`handle_at` returns `Body` everywhere inside it), which is the gap task
+/// 1.17(b2)'s outside handles close.
+#[must_use]
+pub fn chrome_rects(bounds: Rect, monitors: &[Rect]) -> Vec<Rect> {
+    let mut rects = Vec::with_capacity(5);
+    rects.push(close_control(bounds, monitors));
+    let Some(band) = resize_band(bounds) else {
+        return rects;
+    };
+    let span = clamp_to_u32(band);
+    let (w, h) = (bounds.size.width, bounds.size.height);
+    // North and south run the full width; east and west the full height. The
+    // corners therefore belong to two rects each, which is harmless for a
+    // containment test.
+    rects.push(Rect::new(bounds.origin.x, bounds.origin.y, w, span));
+    rects.push(Rect::new(
+        bounds.origin.x,
+        clamp_to_i32(bounds.bottom() - band),
+        w,
+        span,
+    ));
+    rects.push(Rect::new(bounds.origin.x, bounds.origin.y, span, h));
+    rects.push(Rect::new(
+        clamp_to_i32(bounds.right() - band),
+        bounds.origin.y,
+        span,
+        h,
+    ));
+    rects
+}
+
+/// Whether `point` grabs this area's chrome rather than its body — the test a
+/// pass-through area's hit test uses (ADR-0024 §2).
+///
+/// Reads [`handle_at`] rather than [`chrome_rects`] so the authority is the
+/// predicate and the rect list is the derived view, not the other way round.
+#[must_use]
+pub fn is_chrome_at(bounds: Rect, point: Point, monitors: &[Rect]) -> bool {
+    matches!(
+        handle_at(bounds, point, monitors),
+        Some(Handle::Close | Handle::Resize(_))
+    )
+}
+
 /// The close control's rectangle — inside the area's top-right corner when
 /// there is room, otherwise just outside one of its four corners.
 ///
@@ -240,21 +328,17 @@ pub fn handle_at(bounds: Rect, point: Point, monitors: &[Rect]) -> Option<Handle
     if !bounds.contains(point) {
         return None;
     }
-    if chrome_is_outside(bounds) {
-        // A small area is all body. Resize bands carved out of the inside would
-        // leave nothing to drag, and at a few pixels across there is no room to
-        // aim at one edge rather than another anyway. Outside resize handles
-        // belong with the first area type that needs them (task 1.7); until
-        // then a small area moves and dismisses but does not resize, which is a
-        // gap rather than a dead end — dismiss and redraw is one gesture each.
+    // A small area is all body. Resize bands carved out of the inside would
+    // leave nothing to drag, and at a few pixels across there is no room to aim
+    // at one edge rather than another anyway. Outside resize handles are task
+    // 1.17(b2)'s (deferred from 1.6, then from 1.7); until then a small area
+    // moves and dismisses but does not resize, which is a gap rather than a dead
+    // end — dismiss and redraw is one gesture each. Note the consequence for a
+    // *pass-through* small area under ADR-0024 §2: its chrome is the close
+    // control alone, so it can be dismissed but not resized in LIVING.
+    let Some(band) = resize_band(bounds) else {
         return Some(Handle::Body);
-    }
-    let band = i64::from(
-        RESIZE_BAND
-            .min(bounds.size.width / 3)
-            .min(bounds.size.height / 3)
-            .max(1),
-    );
+    };
     let (x, y) = (i64::from(point.x), i64::from(point.y));
     let north = y - i64::from(bounds.origin.y) < band;
     let west = x - i64::from(bounds.origin.x) < band;
