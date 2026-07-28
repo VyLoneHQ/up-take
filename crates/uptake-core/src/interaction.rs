@@ -1102,6 +1102,22 @@ mod tests {
                             || bounds.intersection(control) == Some(control),
                         "a {w}x{h} area at ({x}, {y}) put its control off-desktop: {control:?}"
                     );
+                    // **The assertion that is not true by construction.** The
+                    // `handle_at` one above is weaker than it looks: that function
+                    // resolves `Close` by testing
+                    // `close_control(bounds, monitors).contains(point)`, and `aim`
+                    // is the centre of that very rectangle — so it reduces to "the
+                    // centre of R is inside R", true for any non-empty R however
+                    // badly placed. This one is independent of the function's own
+                    // output: it checks the contract `close_control`'s docs state,
+                    // that every placement overlaps the area's corner. That is what
+                    // stops a one-pixel seam belonging to neither, which would make
+                    // the control flicker out of existence exactly as the cursor
+                    // reaches for it.
+                    assert!(
+                        bounds.intersection(control).is_some(),
+                        "a {w}x{h} area at ({x}, {y}) left a gap between itself and its control: {control:?}"
+                    );
                 }
             }
         }
