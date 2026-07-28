@@ -371,7 +371,13 @@ enum CursorShape {
     SizeNWSE,
     /// Over a north-east or south-west corner.
     SizeNESW,
-    /// Over a close control or a menu row.
+    /// Over a close control, or over a menu row **in PLACEMENT**.
+    ///
+    /// The mode qualifier is real, not pedantry: `pump_hover`'s LIVING branch
+    /// resolves nothing while a menu is open, so a menu row there keeps the
+    /// ordinary arrow. That matches how native Windows menus behave, and the row
+    /// still highlights, so it is a deliberate difference rather than a gap — but
+    /// this doc used to claim otherwise for both modes.
     Hand,
     /// **The user's own arrow** — not a shape UP-TAKE ever wants to *show*, but
     /// the one it must be able to put back.
@@ -1315,7 +1321,18 @@ fn set_living_cursor(shape: Option<CursorShape>) {
 /// failed to load and leaves the cursor alone. These handles are only ever
 /// `CopyIcon`d, never passed to `SetSystemCursor` directly — the system destroys
 /// what it is given, and destroying the snapshot would leave nothing to copy.
-static CURSOR_SNAPSHOT: OnceLock<[isize; 8]> = OnceLock::new();
+static CURSOR_SNAPSHOT: OnceLock<[isize; CURSOR_SNAPSHOT_LEN]> = OnceLock::new();
+
+/// How many cursors the snapshot holds — **derived** from [`ALL_SHAPES`], never
+/// written out.
+///
+/// The two used to be independent literals (`[isize; 7]` beside
+/// `[CursorShape; 7]`). That is a mapping the compiler does not check: adding a
+/// shape to one and not the other is a runtime index panic, and reordering
+/// either silently hands every shape the wrong cursor image. ADR-0025 widened
+/// both by hand and got it right; this makes getting it wrong impossible rather
+/// than merely unlikely.
+const CURSOR_SNAPSHOT_LEN: usize = ALL_SHAPES.len();
 
 /// Every shape, in [`CursorShape::index`] order.
 const ALL_SHAPES: [CursorShape; 8] = [
@@ -1344,7 +1361,7 @@ fn snapshot_cursor(shape: CursorShape) -> HCURSOR {
         // kill leaves exactly that state, and so does every hot restart under
         // `tauri dev`.
         restore_system_cursors();
-        let mut handles = [0_isize; 8];
+        let mut handles = [0_isize; CURSOR_SNAPSHOT_LEN];
         for (slot, shape) in handles.iter_mut().zip(ALL_SHAPES) {
             let loaded = unsafe { LoadCursorW(ptr::null_mut(), shape.idc()) };
             // Our own copy: the shared handle belongs to the system, and this one
@@ -1409,8 +1426,22 @@ fn install_cursor(cursor: HCURSOR, id: u32) {
     if copy.is_null() {
         return;
     }
-    // Ignoring the BOOL: a failed override on one id leaves that cursor at its
-    // default, which is a cosmetic imperfection, not a correctness problem.
+    // Ignoring the BOOL, and the justification is **weaker here than where it was
+    // written**. It was written for `apply_cursor`, which runs on a mode
+    // transition: a failure there leaves one slot at its default for the duration
+    // of a placement session, which is cosmetic. Since ADR-0025 this helper also
+    // serves `set_living_cursor`, which fires on every hover-in and hover-out of
+    // chrome in LIVING — the app's *resting* state — so the same failure recurs
+    // per crossing rather than per session.
+    //
+    // What is **not** established is who owns `copy` when the call fails.
+    // `SetSystemCursor` is documented as destroying the handle it is given; the
+    // documentation does not say whether it still does so on failure. Adding a
+    // `DestroyCursor` here would leak nothing if it does not — and double-destroy
+    // a handle the system may already have freed and reused if it does. That is
+    // exactly the sort of unrun equivalence argument that cost this project a
+    // working feature on 2026-07-27, so it is recorded as `BACKLOG.md` I-6 to be
+    // settled by experiment rather than guessed at in a review.
     unsafe {
         SetSystemCursor(copy, id);
     }
@@ -2203,4 +2234,40 @@ fn emit_menu(app: &AppHandle) {
 /// forbids `unwrap`.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ALL_SHAPES, CURSOR_SNAPSHOT_LEN};
+
+    /// [`super::CursorShape::index`] and [`ALL_SHAPES`] are two hand-maintained
+    /// halves of one mapping: [`super::snapshot_cursor`] fills the array by
+    /// zipping `ALL_SHAPES` and reads it back by `index()`. Nothing in the type
+    /// system ties them together, so a shape added to one and not the other — or
+    /// added to both in a different order — silently hands **every** shape the
+    /// wrong cursor image. No compile error, no panic, no failing test: just a
+    /// pointer that shows the hand where it should show a resize.
+    ///
+    /// Written when ADR-0025 widened the pair from seven entries to eight. The
+    /// widening was correct; the point is that nothing would have said so.
+    /// Confirmed to fail on a deliberate swap before being kept.
+    #[test]
+    fn every_shape_sits_at_its_own_index() {
+        for shape in ALL_SHAPES {
+            assert_eq!(
+                ALL_SHAPES[shape.index()],
+                shape,
+                "{shape:?} reads back as {:?} — `index()` and `ALL_SHAPES` disagree",
+                ALL_SHAPES[shape.index()]
+            );
+        }
+    }
+
+    /// The snapshot array's length is derived from [`ALL_SHAPES`] rather than
+    /// written out, so a ninth shape cannot leave it one slot short. This pins
+    /// that it is still derived.
+    #[test]
+    fn the_snapshot_has_a_slot_for_every_shape() {
+        assert_eq!(CURSOR_SNAPSHOT_LEN, ALL_SHAPES.len());
+    }
 }
