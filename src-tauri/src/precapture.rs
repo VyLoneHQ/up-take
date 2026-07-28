@@ -20,13 +20,28 @@
 //!
 //! # The moment that gets captured, which is a semantic choice
 //!
-//! The pixels are from **drag-start, not drag-release**. That is defensible —
-//! the user saw the content when they began the drag — but it is a decision
-//! rather than an implementation detail, so it carries a [`FRESHNESS`] bound: a
-//! frame older than that at mouse-up is discarded and the capture is taken
-//! normally. The degradation is benign in shape. A short drag gets a fresh frame
-//! and the fast path; a long drag means the user already spent the time, so a
-//! full-cost re-capture is proportionally invisible.
+//! The pixels are from **during the drag, not from drag-release**, and they
+//! carry a [`FRESHNESS`] bound saying how old they may be when the user lets go.
+//!
+//! ADR-0022 §3 framed this as "drag-start" with a 200 ms bound and a fallback
+//! for anything slower. **Both halves of that were wrong on the rig**, and in
+//! opposite directions. The bound was unsatisfiable — a capture takes ~240 ms,
+//! so a frame is older than 200 ms before it exists — and "drag-start" was never
+//! accurate either, because the frame's content is from roughly a capture's
+//! length *after* mouse-down. Three ordinary drags fell back at 333, 840 and
+//! 6381 ms and the fast path never ran.
+//!
+//! So the frame is **re-taken during the drag** ([`refresh`]) rather than the
+//! drag being abandoned to the slow path. A gesture of any length is served, and
+//! the pixels are never older than [`FRESHNESS`] at release. The user's call,
+//! 2026-07-28, over simply widening the bound: a long drag gets *fresh* pixels
+//! rather than merely *permitted* ones.
+//!
+//! The cost is bounded and paid where it is invisible — at most one capture in
+//! flight, one per [`REFRESH_AFTER`] while a capturing drag is being drawn, and
+//! none at any other time. This is the narrow version of the continuous-capture
+//! cost ADR-0022 point 7 rejected for a *persistent* service: bounded by the
+//! gesture instead of by the process's lifetime.
 //!
 //! # Three ways this declines, all of them logged
 //!
@@ -51,7 +66,7 @@
 //! [ADR-0022]: the private planning repo's
 //! `DECISIONS/ADR-0022-hold-a-frame-and-crop.md`
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -60,13 +75,45 @@ use uptake_core::geometry::Rect;
 
 /// How old a held frame may be at mouse-up and still be used.
 ///
-/// ADR-0022 §3 chose 200 ms by argument, and says so: it is short enough that
-/// nothing on screen has meaningfully moved, and long enough to cover the
-/// ordinary flick-sized drag the fast path exists for. **It is a number owed a
-/// measurement** — the ADR's own *Revisit if* names both directions it could be
-/// wrong in (routinely exceeded by normal drags, or too loose to prevent a
-/// visibly stale capture).
-pub const FRESHNESS: Duration = Duration::from_millis(200);
+/// # 200 ms was unachievable by construction, and the rig proved it
+///
+/// ADR-0022 §3 chose 200 ms by argument and flagged it as owed a measurement.
+/// The measurement (2026-07-28, dev rig) fired the ADR's own first *Revisit if*:
+/// **three consecutive ordinary drags fell back on staleness**, at ages of 333,
+/// 840 and 6381 ms. The fast path never ran once.
+///
+/// The reason is arithmetic rather than tuning. A capture takes **~240 ms**, and
+/// a frame is only stamped once it exists, so a held frame is *already* ~240 ms
+/// old the instant it lands. A 200 ms bound is therefore past its limit before
+/// any dragging happens at all — the feature was inert on every realistic
+/// gesture, and would have shipped that way.
+///
+/// **The general rule this yields, which outlives the number: the freshness
+/// bound must exceed the capture duration.** No scheme can keep a frame younger
+/// than the time it takes to produce one. Any future edit of this constant that
+/// puts it near or below [`CAPTURE_ALLOWANCE`] makes the fast path unreachable
+/// again, which is what `the_bound_must_exceed_what_a_capture_costs` fails on.
+///
+/// 750 ms is then chosen so a refresh (see [`refresh`]) always lands before the
+/// frame it replaces goes stale: a frame is re-taken at [`REFRESH_AFTER`], and
+/// the replacement has [`CAPTURE_ALLOWANCE`] to arrive.
+pub const FRESHNESS: Duration = Duration::from_millis(750);
+
+/// What a capture is allowed to cost before the refresh scheme stops keeping up.
+///
+/// Measured at 239–244 ms on the dev rig across the 2026-07-28 pass, and 183–313
+/// ms across 1.9b's four-sample instrumentation. 300 ms is the observed worst
+/// case rounded up — not a target, a **budget for the refresh arithmetic**. A
+/// capture slower than this does not break anything: the held frame goes stale,
+/// and mouse-up falls back to a normal capture exactly as it did before.
+const CAPTURE_ALLOWANCE: Duration = Duration::from_millis(300);
+
+/// When a held frame is re-taken mid-drag, so the drag never has to fall back.
+///
+/// Derived, never written as its own number: the whole point is that a
+/// replacement must be *finished* before the frame it replaces expires, and
+/// hand-maintaining two constants that have to agree is how they stop agreeing.
+const REFRESH_AFTER: Duration = FRESHNESS.saturating_sub(CAPTURE_ALLOWANCE);
 
 /// A frame captured at drag-start, waiting to be cropped.
 ///
@@ -135,8 +182,26 @@ static HELD: Mutex<Option<Held>> = Mutex::new(None);
 /// ended can tell that it is no longer wanted.
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
+/// The monitor this drag pre-captures, for [`refresh`] to re-take.
+///
+/// **The monitor chosen at mouse-down, deliberately, and not the one the cursor
+/// is on now.** A refresh exists to keep serving the *same* crop, and a drag
+/// that has wandered onto a second monitor must still be answered from the one
+/// the area is being drawn on — re-capturing under the current cursor would
+/// swap the frame for one the crop then cannot use, turning a working fast path
+/// into a straddle fallback halfway through a gesture.
+static TARGET: Mutex<Option<Rect>> = Mutex::new(None);
+
+/// Whether a capture is already running, so a 60–221 Hz poll cannot stack
+/// hundreds of them. Cleared by the capture thread on both paths out.
+static IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
 fn held() -> std::sync::MutexGuard<'static, Option<Held>> {
     HELD.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn target() -> std::sync::MutexGuard<'static, Option<Rect>> {
+    TARGET.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Starts capturing `monitor` for the drag beginning now.
@@ -160,8 +225,62 @@ fn held() -> std::sync::MutexGuard<'static, Option<Held>> {
 pub(crate) fn begin(monitor: Rect) {
     let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     *held() = None;
+    *target() = Some(monitor);
+    spawn_capture(monitor, generation);
+}
+
+/// Re-takes the held frame if it is old enough that this drag would otherwise
+/// fall back at mouse-up.
+///
+/// Called from the placement poll while a capturing drag is in flight. **This is
+/// what makes the fast path reachable for a drag of any length**: without it,
+/// only a gesture completed within [`FRESHNESS`] of the first capture landing
+/// could ever be served, which the rig showed is a flick and not a drag.
+///
+/// # Why this is not a busy loop
+///
+/// It looks like one — the poll ticks at 60 Hz idle and 221 Hz mid-gesture — but
+/// at most one capture runs at a time ([`IN_FLIGHT`]), and a fresh frame stops
+/// the next one from starting for another [`REFRESH_AFTER`]. So the real rate is
+/// one capture per ~450 ms *while a capturing drag is being drawn*, and none at
+/// any other time. That is the narrow version of the continuous-capture cost
+/// ADR-0022 rejected for a persistent service: bounded by the gesture rather
+/// than by the process's lifetime, and paid only when the user is already
+/// spending the time.
+pub(crate) fn refresh() {
+    let Some(monitor) = *target() else {
+        return;
+    };
+    if IN_FLIGHT.load(Ordering::SeqCst) {
+        return;
+    }
+    // A missing frame is refreshed too, not only an ageing one: the first
+    // capture of the drag may have failed outright, and a drag long enough to
+    // notice is long enough to try again.
+    let due = held()
+        .as_ref()
+        .is_none_or(|frame| frame.taken.elapsed() >= REFRESH_AFTER);
+    if due {
+        spawn_capture(monitor, GENERATION.load(Ordering::SeqCst));
+    }
+}
+
+/// Captures `monitor` on a spawned thread and stores it if `generation` is still
+/// the live drag. Shared by [`begin`] and [`refresh`] so the two cannot diverge
+/// on what "store a frame" means.
+fn spawn_capture(monitor: Rect, generation: u64) {
+    // Claimed before the thread exists: setting it inside the thread would leave
+    // a window in which the poll ticks again and spawns a second capture.
+    if IN_FLIGHT.swap(true, Ordering::SeqCst) {
+        return;
+    }
     std::thread::spawn(move || {
-        let captured = match uptake_capture::capture_region(monitor) {
+        let captured = uptake_capture::capture_region(monitor);
+        // Released before the store rather than after, and on every path out —
+        // an early `return` that skipped it would wedge the flag set and stop
+        // every later refresh in the process's life, silently.
+        IN_FLIGHT.store(false, Ordering::SeqCst);
+        let captured = match captured {
             Ok(captured) => captured,
             Err(error) => {
                 // Not a user-facing failure: the gesture still produces a
@@ -198,6 +317,11 @@ pub(crate) fn begin(monitor: Rect) {
 pub(crate) fn discard() {
     GENERATION.fetch_add(1, Ordering::SeqCst);
     *held() = None;
+    // Clearing the target is what stops [`refresh`] — an in-flight capture is
+    // left to finish and discard itself on the generation check rather than
+    // being cancelled, because `capture_region` has no cancellation and waiting
+    // on it here would block whatever is ending the drag.
+    *target() = None;
 }
 
 /// The pixels for `bounds`, cropped out of the held frame — or why not.
@@ -206,6 +330,10 @@ pub(crate) fn discard() {
 /// alternative (leaving it for a later gesture to find) is how a stale image
 /// reaches the clipboard without any single step looking wrong.
 pub(crate) fn take(bounds: Rect) -> Result<RgbaBitmap, Fallback> {
+    // The drag is over either way, so stop refreshing before anything else can
+    // return early — every path below ends this gesture, and a target left set
+    // would keep re-capturing a monitor nobody is dragging on.
+    *target() = None;
     let Some(frame) = held().take() else {
         return Err(Fallback::NoFrame);
     };
@@ -388,6 +516,87 @@ mod tests {
         hold(Rect::new(0, 0, 800, 600), Instant::now());
         discard();
         assert_eq!(take(Rect::new(0, 0, 10, 10)), Err(Fallback::NoFrame));
+    }
+
+    #[test]
+    fn the_bound_must_exceed_what_a_capture_costs() {
+        // The rule the rig taught on 2026-07-28, pinned so it cannot be undone
+        // by someone tightening the bound for good-sounding reasons.
+        //
+        // A frame is stamped when it *exists*, so it is already one capture old
+        // the moment it lands. A bound at or below the capture cost is therefore
+        // unsatisfiable by construction — which is precisely what 200 ms was,
+        // and the whole feature sat inert behind it with every gate green.
+        assert!(
+            FRESHNESS > CAPTURE_ALLOWANCE,
+            "a frame cannot be younger than the time it takes to produce one"
+        );
+        // And the refresh must *complete* before the frame it replaces expires,
+        // or a long drag still falls back — the failure this scheme exists to
+        // remove.
+        assert!(
+            REFRESH_AFTER + CAPTURE_ALLOWANCE <= FRESHNESS,
+            "a refresh started at {REFRESH_AFTER:?} and costing up to \
+             {CAPTURE_ALLOWANCE:?} would land after {FRESHNESS:?}"
+        );
+        // Non-zero, or every tick of a 221 Hz poll would qualify as due and the
+        // in-flight guard would be the only thing between this and a capture
+        // storm.
+        assert!(!REFRESH_AFTER.is_zero());
+    }
+
+    #[test]
+    fn a_frame_is_refreshed_only_once_it_is_due() {
+        let _guard = serial();
+        discard();
+        *target() = Some(Rect::new(0, 0, 100, 100));
+
+        // Fresh: nothing should start. Asserted through the in-flight flag,
+        // which is what a spawned capture claims — the capture itself needs a
+        // desktop and cannot run under test.
+        hold(Rect::new(0, 0, 100, 100), Instant::now());
+        refresh();
+        assert!(
+            !IN_FLIGHT.load(Ordering::SeqCst),
+            "a frame inside the refresh window must not be re-taken"
+        );
+
+        // Due: one capture starts, and a second tick must not stack another.
+        hold(
+            Rect::new(0, 0, 100, 100),
+            Instant::now() - REFRESH_AFTER - Duration::from_millis(1),
+        );
+        refresh();
+        assert!(
+            IN_FLIGHT.load(Ordering::SeqCst),
+            "an aged frame is re-taken"
+        );
+        refresh();
+        assert!(
+            IN_FLIGHT.load(Ordering::SeqCst),
+            "the in-flight guard is what stops a 221 Hz poll starting hundreds"
+        );
+
+        // Leave the statics as the other tests expect to find them. The spawned
+        // capture will clear the flag itself, but not before this test ends.
+        IN_FLIGHT.store(false, Ordering::SeqCst);
+        discard();
+    }
+
+    #[test]
+    fn nothing_refreshes_once_the_drag_is_over() {
+        let _guard = serial();
+        discard();
+        IN_FLIGHT.store(false, Ordering::SeqCst);
+        // No target: the drag ended, by `take` or by `discard`. An aged frame
+        // must not keep the monitor being re-captured forever.
+        hold(
+            Rect::new(0, 0, 100, 100),
+            Instant::now() - REFRESH_AFTER - Duration::from_millis(1),
+        );
+        refresh();
+        assert!(!IN_FLIGHT.load(Ordering::SeqCst));
+        *held() = None;
     }
 
     #[test]

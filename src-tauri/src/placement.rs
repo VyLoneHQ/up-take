@@ -769,7 +769,35 @@ pub struct PumpState {
 pub fn pump(app: &AppHandle, state: &mut PumpState) {
     pump_hook_health(app, state);
     pump_gesture(app, state);
+    pump_precapture();
     pump_hover(app, state);
+}
+
+/// Keeps the held frame fresh while a capturing drag is being drawn (task 1.9c).
+///
+/// # Why the poll drives this and not the hook
+///
+/// The refresh has to happen *during* the drag, and the only thing that runs
+/// during a drag is this poll — the `WH_MOUSE_LL` callback sees discrete events,
+/// and the one it would key off (`WM_MOUSEMOVE`) stops firing the moment the
+/// user holds the cursor still, which is exactly when a frame is quietly ageing
+/// toward a fallback.
+///
+/// Cheap enough to sit on a 221 Hz path: two atomic loads and a lock in the
+/// common case, and [`precapture::refresh`] itself does nothing until the frame
+/// is [`REFRESH_AFTER`](precapture) old. Guarded on the gesture so a move, a
+/// resize or a menu drag never starts a capture.
+fn pump_precapture() {
+    if !DRAGGING.load(Ordering::SeqCst) {
+        return;
+    }
+    if !matches!(*lock(&GESTURE), Some(Gesture::Create)) {
+        return;
+    }
+    if !armed().is_some_and(captures_on_create) {
+        return;
+    }
+    precapture::refresh();
 }
 
 /// Ticks the health check may skip after a reinstall (~1 s at the poll's
