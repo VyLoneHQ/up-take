@@ -232,17 +232,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     };
 
-    // The gap that decides it. Measured from the first frame onward, so the
-    // session-setup wait (~90–340 ms before any frame can arrive) is not counted
-    // as compositor silence — that would manufacture a long gap on every run,
-    // including a continuously-delivering one, and the statistic would then
-    // confirm ADR-0022 no matter what the compositor did.
-    let longest_gap = at.windows(2).map(|w| w[1] - w[0]).max().unwrap_or_default();
-    let one_second_or_more = at
+    // The gap that decides it, measured from the first frame to the **end of
+    // the run** — the trailing silence included.
+    //
+    // # The trailing gap is not a detail, it is usually the whole answer
+    //
+    // The first cut of this measured gaps *between* frames only, and the rig run
+    // of 2026-07-28 showed why that is worse than useless. A static desktop
+    // delivered **2 frames and then nothing for eight seconds**, and this line
+    // reported `longest silent gap: 28 ms over a 0.03s window` — the 28 ms
+    // between the only two frames — which reads as *continuous delivery*, the
+    // exact opposite of what happened, and the opposite verdict on ADR-0022.
+    // The frame count gave the right answer while the headline statistic gave
+    // the wrong one.
+    //
+    // Same family as F-17/F-33/F-38, and this time in an instrument written
+    // *specifically* to avoid drawing a conclusion from an ambiguous number: a
+    // check that silently measures the wrong thing is worse than no check,
+    // because it converts "unknown" into "confirmed" in the reader's mind.
+    //
+    // The session-setup wait before the first frame stays excluded — nothing can
+    // arrive during it, so counting it would manufacture a long gap on every
+    // run and confirm ADR-0022 no matter what the compositor did. The trailing
+    // silence is the opposite case: it is time the session was live, ready, and
+    // handed nothing over.
+    let ended = started + elapsed;
+    let gaps: Vec<Duration> = at
         .windows(2)
-        .filter(|w| w[1] - w[0] >= Duration::from_secs(1))
+        .map(|w| w[1] - w[0])
+        .chain(at.last().map(|last| ended.saturating_duration_since(*last)))
+        .collect();
+    let longest_gap = gaps.iter().copied().max().unwrap_or_default();
+    let one_second_or_more = gaps
+        .iter()
+        .filter(|g| **g >= Duration::from_secs(1))
         .count();
-    let sampled = at.last().map_or(Duration::ZERO, |last| *last - first);
+    let trailing = at.last().map_or(Duration::ZERO, |last| {
+        ended.saturating_duration_since(*last)
+    });
 
     println!(
         "{count} frames in {:.2}s = {rate:.1} fps (first frame after {:.1} ms)",
@@ -250,10 +277,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ms(first - started),
     );
     println!(
-        "longest silent gap after the first frame: {:.0} ms over a {:.2}s window \
-         ({one_second_or_more} gaps of 1s or more)",
+        "longest silent gap: {:.0} ms ({one_second_or_more} gaps of 1s or more); \
+         silent for the last {:.0} ms of the run",
         ms(longest_gap),
-        sampled.as_secs_f64(),
+        ms(trailing),
     );
     println!();
     println!("Reading it — the gap decides, not the rate:");
