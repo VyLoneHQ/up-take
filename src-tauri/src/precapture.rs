@@ -99,6 +99,28 @@ use uptake_core::geometry::Rect;
 /// the replacement has [`CAPTURE_ALLOWANCE`] to arrive.
 pub const FRESHNESS: Duration = Duration::from_millis(750);
 
+/// Whether a frame of this age is too old to serve. **Exclusive**: a frame aged
+/// exactly to [`FRESHNESS`] is still fresh.
+///
+/// # Why this is a function and not two characters inside [`take`]
+///
+/// It was `age > FRESHNESS` inline, with a test claiming to pin the `>` against
+/// a later tidy-up to `>=`. The test could not do that and never could: `take`
+/// reads a wall clock, so a frame cannot be presented to it at *exactly* the
+/// bound, and the assertion had to accept both "served" and "stale" to avoid
+/// flaking. Changing the comparison left all 45 tests green — confirmed by
+/// making the change, in the independent review of [PR #26].
+///
+/// The boundary is only testable once the decision is separated from the clock
+/// that makes it untestable. Same family as F-17/F-33/F-38 and UT-F-41 one
+/// commit ago: a check that cannot fail reads exactly like one that passed.
+///
+/// [PR #26]: https://github.com/VyLoneHQ/up-take/pull/26
+const fn is_stale(age: Duration) -> bool {
+    // `Duration` has no const comparison operator, so this is `>` written out.
+    age.as_nanos() > FRESHNESS.as_nanos()
+}
+
 /// What a capture is allowed to cost before the refresh scheme stops keeping up.
 ///
 /// Measured at 239–244 ms on the dev rig across the 2026-07-28 pass, and 183–313
@@ -118,9 +140,10 @@ const REFRESH_AFTER: Duration = FRESHNESS.saturating_sub(CAPTURE_ALLOWANCE);
 /// A frame captured at drag-start, waiting to be cropped.
 ///
 /// Deliberately carries **no** generation of its own. The drag a frame belongs
-/// to is enforced entirely on the storing side (see [`begin`]): both [`begin`]
-/// and [`discard`] clear the slot, so anything found in it belongs to the
-/// current drag by construction. An earlier cut of this struct held the
+/// to is enforced entirely on the storing side (see [`begin`]): [`begin`] and
+/// [`discard`] clear the slot, [`end_drag`] retires the generation the moment a
+/// gesture ends, and between them nothing found in the slot can belong to a drag
+/// that is over. An earlier cut of this struct held the
 /// generation and re-checked it in [`take`] as a belt-and-braces assertion — and
 /// that check was **wrong**, not merely redundant. [`discard`] bumps the counter
 /// and clears the slot as two operations, so a `take` running between them (the
@@ -308,6 +331,39 @@ fn spawn_capture(monitor: Rect, generation: u64) {
     });
 }
 
+/// Ends the current drag **without** touching the held frame.
+///
+/// Called on the one path [`discard`] cannot serve: a drag that created an area
+/// which is about to consume the frame. [`crate::output::capture_into_area`]
+/// spawns, so [`take`] runs on a thread that has not read the slot yet —
+/// clearing it here would kill the fast path outright on every successful
+/// capture, which is the trap in the obvious fix.
+///
+/// # What this is actually for
+///
+/// Retiring the generation. `begin` and `discard` bump it; a drag that *succeeds*
+/// bumped it nowhere, so a [`refresh`] capture still in flight at mouse-up passed
+/// its own generation check and stored a full-monitor frame into the slot **after
+/// the gesture was over**. Nothing consumed it and nothing cleared it until the
+/// next `begin` or `discard`, so 14.7 MB at 1440p — 33 MB at 4K — stayed resident
+/// against `quality-bars.md` §1's 80 MB idle-RAM target for as long as the user
+/// left the app alone.
+///
+/// The timing is not exotic: a refresh is due at [`REFRESH_AFTER`] and costs up
+/// to [`CAPTURE_ALLOWANCE`], so **every drag released between ~690 ms and ~930 ms
+/// left a frame behind** — the ordinary and slow drags in 1.9c's own rig table.
+/// Found in the independent review of [PR #26] (F-16), where the `Held` doc
+/// comment asserted the invariant this restores.
+///
+/// [PR #26]: https://github.com/VyLoneHQ/up-take/pull/26
+pub(crate) fn end_drag() {
+    GENERATION.fetch_add(1, Ordering::SeqCst);
+    // Same reason as `discard`: a target left set keeps re-capturing a monitor
+    // nobody is dragging on. `take` clears it too, but it runs on the spawned
+    // thread — this is the hook thread, and it gets there first.
+    *target() = None;
+}
+
 /// Drops any held frame, because the drag that asked for it is not going to use
 /// it — a mid-drag `Esc`, or a drag that created nothing.
 ///
@@ -340,7 +396,7 @@ pub(crate) fn take(bounds: Rect) -> Result<RgbaBitmap, Fallback> {
     // No generation check here — see [`Held`] for why re-checking it would be
     // wrong rather than merely redundant.
     let age = frame.taken.elapsed();
-    if age > FRESHNESS {
+    if is_stale(age) {
         return Err(Fallback::Stale {
             age_ms: age.as_millis(),
         });
@@ -441,20 +497,63 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_at_exactly_the_bound_is_still_served() {
-        let _guard = serial();
+    fn the_staleness_boundary_is_exclusive() {
         // The boundary is `>`, not `>=`: a frame is stale once it is *older*
-        // than the bound. Pinned so a later "tidy-up" of the comparison has to
-        // fail a test rather than silently move the boundary.
-        hold(Rect::new(0, 0, 800, 600), Instant::now() - FRESHNESS);
-        // Time passes between the two lines, so this can only be asserted in
-        // the direction that does not race: it must be *served or stale*, never
-        // straddle or missing, and a frame aged exactly to the bound at the
-        // moment of the call is served.
-        assert!(matches!(
-            take(Rect::new(0, 0, 100, 100)),
-            Ok(_) | Err(Fallback::Stale { .. })
-        ));
+        // than the bound, not once it has reached it.
+        //
+        // Asserted against [`is_stale`] rather than through `take`, and that is
+        // the whole point of the function existing. The predecessor of this test
+        // held a frame at `Instant::now() - FRESHNESS` and called `take` — but a
+        // wall clock advances between those two lines, so the frame was always
+        // *just past* the bound by the time it was read, and the assertion had
+        // to accept `Ok(_) | Err(Stale)` to avoid flaking. That accepts every
+        // outcome the comparison can produce: flipping `>` to `>=` left all 45
+        // tests green (independent review of PR #26). A boundary cannot be
+        // pinned through the clock that makes it unreachable.
+        assert!(
+            !is_stale(FRESHNESS),
+            "a frame aged exactly to the bound is still fresh"
+        );
+        assert!(
+            is_stale(FRESHNESS + Duration::from_nanos(1)),
+            "one nanosecond past the bound is stale"
+        );
+        assert!(!is_stale(FRESHNESS - Duration::from_nanos(1)));
+        assert!(!is_stale(Duration::ZERO));
+    }
+
+    #[test]
+    fn ending_a_drag_retires_its_captures_but_leaves_the_frame_to_be_taken() {
+        let _guard = serial();
+        discard();
+        // A drag that is about to create an area: a refresh capture is still in
+        // flight and carries this generation.
+        let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+        *target() = Some(Rect::new(0, 0, 800, 600));
+        hold(Rect::new(0, 0, 800, 600), Instant::now());
+
+        end_drag();
+
+        // Half one: the frame survives. `capture_into_area` spawns, so `take`
+        // runs on a thread that has not read the slot yet — clearing it here
+        // (the obvious `discard`) would kill the fast path on every successful
+        // capture, which is why this is not `discard`.
+        assert!(
+            take(Rect::new(10, 10, 20, 20)).is_ok(),
+            "the drag that just ended is the one about to crop this frame"
+        );
+        // Half two: the in-flight capture can no longer store into the slot it
+        // just vacated. Without this the frame landed after the gesture was over
+        // and stayed resident until the next drag — up to 33 MB at 4K.
+        assert_ne!(
+            GENERATION.load(Ordering::SeqCst),
+            generation,
+            "a capture belonging to the finished drag must not still be storable"
+        );
+        assert!(
+            target().is_none(),
+            "a target left set keeps re-capturing a monitor nobody is dragging on"
+        );
     }
 
     #[test]

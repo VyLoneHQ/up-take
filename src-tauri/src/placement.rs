@@ -2031,6 +2031,16 @@ fn finish_gesture(release: Point) {
 fn capture_on_create(app: &AppHandle, kind: AreaType, id: AreaId, bounds: Rect) {
     if captures_on_create(kind) {
         crate::output::capture_into_area(app, id, bounds);
+        // The spawned capture is what consumes the held frame, so the drag is
+        // ended *without* clearing it — see [`precapture::end_drag`]. Retiring
+        // the generation here is what stops a refresh capture still in flight
+        // from landing after the gesture is over and sitting there unread.
+        precapture::end_drag();
+    } else {
+        // Nothing will consume a frame for an area of this type. A leftover from
+        // an earlier gesture would otherwise stay resident until the next
+        // capturing drag happened to replace it.
+        precapture::discard();
     }
 }
 
