@@ -58,6 +58,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
+use std::time::Instant;
 
 use uptake_core::bitmap::RgbaBitmap;
 use uptake_core::geometry::Rect;
@@ -109,6 +110,44 @@ static STILLS: Mutex<Vec<Still>> = Mutex::new(Vec::new());
 /// current moment" is the promise it would quietly break.
 static VERSION: AtomicU64 = AtomicU64::new(0);
 
+/// Whether a freeze is in flight, so a second toggle cannot start another.
+///
+/// A freeze takes ~420 ms on the four-monitor rig, which is comfortably long
+/// enough for a user to press the toggle again — and without this, the second
+/// press read [`is_frozen`] as `false` (the first freeze has not stored
+/// anything yet) and started a **second concurrent freeze**. Eight capture
+/// threads, two `VERSION` bumps, and the first freeze's emitted URLs already
+/// stale by the time the frontend fetched them, which serves a 404 for every
+/// still and leaves a `frozen` badge over a monitor showing live pixels.
+static FREEZING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Bumped by every [`thaw`], so a freeze that was overtaken cannot publish.
+///
+/// **A freeze takes ~420 ms and a state transition takes none.** Press
+/// `Ctrl+Space` and then `Esc` inside that window — which is exactly what a user
+/// does when the freeze feels unresponsive — and without this the capture
+/// threads land *after* [`set_state`](crate::overlay)'s thaw has run: the stills
+/// are stored into a state that is no longer Placement, ~60 MB of them, with no
+/// toggle left on screen to dismiss them. It is the failure the `thaw`-on-every-
+/// transition rule exists to prevent, arriving by the one route that rule cannot
+/// see.
+///
+/// Read and compared **under the stills lock**, which is what makes the check
+/// race-free rather than merely narrow: `thaw` clears and bumps under the same
+/// lock, so a freeze either publishes before the thaw or observes it. Same
+/// shape as `precapture`'s generation and for the same reason.
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Releases [`FREEZING`] however [`freeze`] leaves — including by panic, which
+/// would otherwise wedge the feature off for the life of the process.
+struct FreezingGuard;
+
+impl Drop for FreezingGuard {
+    fn drop(&mut self) {
+        FREEZING.store(false, Ordering::SeqCst);
+    }
+}
+
 fn stills() -> std::sync::MutexGuard<'static, Vec<Still>> {
     STILLS.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -141,10 +180,15 @@ fn still_url(index: usize, version: u64) -> String {
 /// to hold a stale URL, and answering it with fresh pixels would hide a caching
 /// bug instead of surfacing it.
 pub(crate) fn still_png(index: usize, version: u64) -> Option<Vec<u8>> {
+    // Version read *under* the stills lock, not beside it. `VERSION` and
+    // `STILLS` are one fact in two variables, and reading them separately lets a
+    // freeze land between the two reads — see `stills_for_display`, where the
+    // same split had the worse consequence.
+    let stills = stills();
     if version != VERSION.load(Ordering::SeqCst) {
         return None;
     }
-    stills().get(index).map(|still| still.png.clone())
+    stills.get(index).map(|still| still.png.clone())
 }
 
 /// Every frozen still as `(rect, url)`, for the frontend to lay out.
@@ -152,9 +196,21 @@ pub(crate) fn still_png(index: usize, version: u64) -> Option<Vec<u8>> {
 /// Physical virtual-desktop pixels, unconverted — the WebView owns its own
 /// scale factor (ADR-0011), and pre-converting here is the exact mistake that
 /// ADR made a rule about.
+///
+/// # Why the version is read under the lock
+///
+/// `VERSION` and `STILLS` are **one fact stored in two variables**, and this
+/// function is where reading them apart does visible damage: load the version,
+/// have a freeze land, then lock the stills, and every URL returned names the
+/// previous freeze while the stills are the new one. [`still_png`] answers a
+/// stale version with `None` — correctly — so the frontend renders a `frozen`
+/// badge over a monitor whose image 404'd, which is a live desktop labelled
+/// frozen. Holding the lock across both makes the pair atomic; [`freeze`]
+/// publishes them the same way.
 pub(crate) fn stills_for_display() -> Vec<(Rect, String)> {
+    let stills = stills();
     let version = VERSION.load(Ordering::SeqCst);
-    stills()
+    stills
         .iter()
         .enumerate()
         .map(|(index, still)| (still.rect, still_url(index, version)))
@@ -166,66 +222,214 @@ pub(crate) fn is_frozen() -> bool {
     !stills().is_empty()
 }
 
+/// What a freeze cost, for the caller to log.
+///
+/// The stage figures are **maxima across monitors, not sums**, and they may come
+/// from different monitors. Every monitor is captured on its own thread, so what
+/// the user waits for is the last one to land; a sum would report a cost nobody
+/// experiences. They exist to answer one question — which stage dominates — and
+/// are reported rather than asserted: the measured split is what decides whether
+/// this feature's latency has anywhere left to go.
+/// Why a [`freeze`] produced nothing. Both are correct outcomes, not errors —
+/// they are distinguished because a log that conflates them cannot be read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Skipped {
+    /// A freeze was already capturing; this toggle did nothing.
+    InFlight,
+    /// The screen left Placement mid-capture, so the stills were discarded.
+    Retired,
+}
+
+impl std::fmt::Display for Skipped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InFlight => write!(f, "a freeze is already in flight"),
+            Self::Retired => write!(f, "the screen left Placement mid-capture"),
+        }
+    }
+}
+
+pub(crate) struct FreezeReport {
+    /// How many monitors were actually captured — see [`freeze`].
+    pub count: usize,
+    /// Wall-clock for the whole freeze, capture through encode.
+    pub elapsed_ms: u128,
+    /// The slowest single monitor's capture.
+    pub slowest_capture_ms: u128,
+    /// The slowest single monitor's PNG encode.
+    pub slowest_encode_ms: u128,
+}
+
 /// Captures `monitors` and holds the stills, replacing any already held.
 ///
-/// Returns the number of monitors actually captured, which is **not** always
-/// `monitors.len()`: a monitor WGC and GDI both decline is skipped rather than
-/// failing the whole freeze, because freezing three of four screens is more
-/// useful than freezing none. The count is what the caller logs.
+/// [`FreezeReport::count`] is **not** always `monitors.len()`: a monitor WGC and
+/// GDI both decline is skipped rather than failing the whole freeze, because
+/// freezing three of four screens is more useful than freezing none. The count is
+/// what the caller logs.
+///
+/// # What this does *not* do: capture the moment the user asked for
+///
+/// **The pixels are the desktop as it was ~350 ms after the keypress, not at
+/// it** — measured on the rig 2026-07-29 against an on-screen stopwatch, and
+/// recorded as `UT-F-45`. Nothing here is slow in the sense of being fixable by
+/// tuning: [`uptake_capture::capture_region`] builds a D3D11 device, a capture
+/// item, a frame pool and a session *before* WGC starts looking, so the setup
+/// happens ahead of the frame rather than behind it.
+///
+/// ADR-0014 §4 justifies this feature with "a video frame, a notification sliding
+/// away" — moments this path misses. What it delivers is the weaker and still
+/// useful *stop a slowly-changing screen so it can be selected at leisure*, and
+/// the ADRs now say so rather than the reader inferring the stronger claim.
+///
+/// The route to the stronger one is a **warm capture session held open while
+/// PLACEMENT is visible**, which makes the toggle a readback rather than a
+/// capture. That is a settings-gated follow-up whose default is owed a
+/// measurement (roadmap 1.9f), not a change to this function.
 ///
 /// # Threading
 ///
-/// **Blocks for roughly one capture per monitor** — 183–313 ms each on the dev
-/// rig, so approaching a second on a four-monitor desktop. It must not run on
-/// the event-loop thread or inside the `WH_MOUSE_LL` callback; the caller
-/// spawns. That is the same constraint `precapture` documents at length and the
-/// failure class F-33 found the hard way.
+/// **One thread per monitor, so the freeze costs one capture rather than one
+/// per monitor.** It still blocks its caller for that time — roughly 183–313 ms
+/// on the dev rig plus the PNG encode — so it must not run on the event-loop
+/// thread or inside the `WH_MOUSE_LL` callback; the caller spawns. That is the
+/// same constraint `precapture` documents at length and the failure class F-33
+/// found the hard way.
+///
+/// The serial version of this measured **1139–1367 ms on the four-monitor rig**
+/// (2026-07-29), which is four full first-frame latencies end to end and reads
+/// as a hang rather than a beat. [`uptake_capture::capture_region`] has always
+/// spawned every monitor's shot before waiting on any — a multi-monitor region
+/// costs one first-frame latency — and this function was the one caller not
+/// getting that, because it asked for a monitor at a time. Each `capture_region`
+/// call already runs its WGC session on its own pump thread with its own message
+/// queue, so calling four of them concurrently is the same resource shape that
+/// one straddling capture already produces, not a new one.
 ///
 /// The overlay is permanently excluded from capture ([ADR-0019]), so a freeze
 /// never captures UP-TAKE's own chrome and re-freezing cannot compound it.
 ///
 /// [ADR-0019]: the private planning repo's
 /// `DECISIONS/ADR-0019-overlay-excluded-from-capture.md`
-pub(crate) fn freeze(monitors: &[Rect]) -> usize {
-    let captured: Vec<Still> = monitors
-        .iter()
-        .filter_map(|monitor| {
-            let shot = match uptake_capture::capture_region(*monitor) {
-                Ok(shot) => shot,
-                Err(error) => {
-                    eprintln!("freeze: could not capture {monitor:?}: {error}");
-                    return None;
-                }
-            };
-            // A still that cannot be encoded is dropped rather than kept, so
-            // the display and the crop source cannot disagree about which
-            // monitors are frozen. Keeping it would mean a monitor whose
-            // pixels a drag would use but which shows live content — the
-            // see-one-thing-get-another failure this feature exists to avoid.
-            let png = match crate::output::encode_png(&shot.bitmap) {
-                Ok(png) => png,
-                Err(error) => {
-                    eprintln!("freeze: could not encode {monitor:?}: {error}");
-                    return None;
-                }
-            };
-            Some(Still {
-                // What the capture crate reports it took, never what was asked
-                // for: it clamps to the virtual desktop, and trusting the
-                // request would offset every crop by the clamp distance.
-                rect: shot.rect,
-                bitmap: shot.bitmap,
-                png,
-            })
-        })
-        .collect();
+pub(crate) fn freeze(monitors: &[Rect]) -> Result<FreezeReport, Skipped> {
+    // Claimed before any work: `InFlight` means this call must do nothing at
+    // all — not even capture and discard, which would cost four WGC sessions to
+    // reach the same place.
+    if FREEZING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err(Skipped::InFlight);
+    }
+    let _releases_the_claim = FreezingGuard;
+    let generation = GENERATION.load(Ordering::SeqCst);
+    let started = Instant::now();
+    // Scoped rather than detached: the stills must all be in hand before the
+    // state is emitted, and a scope makes "every thread has finished" a property
+    // of the type rather than something the caller has to remember to join.
+    let captured: Vec<(Still, u128, u128)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = monitors
+            .iter()
+            .map(|monitor| scope.spawn(move || capture_still(*monitor)))
+            .collect();
+        handles
+            .into_iter()
+            // A panicked capture thread is treated exactly as a failed one: the
+            // monitor is dropped and the rest of the freeze stands. Joining in
+            // spawn order is what keeps the stills' indices — and therefore
+            // their URLs — matching the monitor list.
+            .filter_map(|handle| handle.join().unwrap_or(None))
+            .collect()
+    });
+    let slowest_capture_ms = captured.iter().map(|(_, capture, _)| *capture).max();
+    let slowest_encode_ms = captured.iter().map(|(_, _, encode)| *encode).max();
+    let captured: Vec<Still> = captured.into_iter().map(|(still, _, _)| still).collect();
     let count = captured.len();
-    // Bumped even when nothing was captured: a failed freeze must still
-    // invalidate the previous freeze's URLs, or the WebView would happily
+    // Published under one lock, because the version and the stills are one fact:
+    // a reader that catches the bump without the new stills builds URLs the
+    // store will refuse. See `stills_for_display`.
+    //
+    // The version is bumped even when nothing was captured: a failed freeze must
+    // still invalidate the previous freeze's URLs, or the WebView would happily
+    // redisplay an older still for a freeze that produced none.
+    publish(captured, generation)?;
+    Ok(FreezeReport {
+        count,
+        elapsed_ms: started.elapsed().as_millis(),
+        slowest_capture_ms: slowest_capture_ms.unwrap_or_default(),
+        slowest_encode_ms: slowest_encode_ms.unwrap_or_default(),
+    })
+}
+
+/// Stores `captured` as the frozen stills, unless `generation` has been retired.
+///
+/// A separate function because it is the whole of the overtaken-freeze fix and
+/// the only part of a freeze that can be driven without a desktop: `freeze`
+/// reads the generation at entry, so a test calling `thaw` around it can never
+/// reproduce the interleaving that matters. Here the stale generation is an
+/// argument, which is the interleaving, stated directly.
+///
+/// # Why the version is not bumped on the retired path
+///
+/// Nothing was published, so nothing needs invalidating — and bumping would
+/// retire the URLs of whatever the *thaw* left behind, which is a live screen.
+fn publish(captured: Vec<Still>, generation: u64) -> Result<(), Skipped> {
+    // One lock across the check and both writes. `thaw` takes the same lock to
+    // clear and bump, so a freeze either publishes before it or observes it —
+    // the check is race-free rather than merely narrow.
+    let mut stills = stills();
+    if GENERATION.load(Ordering::SeqCst) != generation {
+        return Err(Skipped::Retired);
+    }
+    // Published under that same lock, because the version and the stills are one
+    // fact: a reader that catches the bump without the new stills builds URLs
+    // the store will refuse. See `stills_for_display`.
+    //
+    // The version is bumped even when nothing was captured: a failed freeze must
+    // still invalidate the previous freeze's URLs, or the WebView would happily
     // redisplay an older still for a freeze that produced none.
     VERSION.fetch_add(1, Ordering::SeqCst);
-    *stills() = captured;
-    count
+    *stills = captured;
+    Ok(())
+}
+
+/// Captures and encodes one monitor, with each stage's cost.
+///
+/// Returns `None` for a monitor that could not be captured *or* could not be
+/// encoded. A still that cannot be encoded is dropped rather than kept, so the
+/// display and the crop source cannot disagree about which monitors are frozen:
+/// keeping it would mean a monitor whose pixels a drag would use but which shows
+/// live content — the see-one-thing-get-another failure this feature exists to
+/// avoid.
+fn capture_still(monitor: Rect) -> Option<(Still, u128, u128)> {
+    let capture_started = Instant::now();
+    let shot = match uptake_capture::capture_region(monitor) {
+        Ok(shot) => shot,
+        Err(error) => {
+            eprintln!("freeze: could not capture {monitor:?}: {error}");
+            return None;
+        }
+    };
+    let capture_ms = capture_started.elapsed().as_millis();
+    let encode_started = Instant::now();
+    let png = match crate::output::encode_png(&shot.bitmap) {
+        Ok(png) => png,
+        Err(error) => {
+            eprintln!("freeze: could not encode {monitor:?}: {error}");
+            return None;
+        }
+    };
+    Some((
+        Still {
+            // What the capture crate reports it took, never what was asked for:
+            // it clamps to the virtual desktop, and trusting the request would
+            // offset every crop by the clamp distance.
+            rect: shot.rect,
+            bitmap: shot.bitmap,
+            png,
+        },
+        capture_ms,
+        encode_started.elapsed().as_millis(),
+    ))
 }
 
 /// Returns to live, dropping every still.
@@ -233,7 +437,11 @@ pub(crate) fn freeze(monitors: &[Rect]) -> usize {
 /// Called on the toggle's way out **and on every entry to PLACEMENT**, which is
 /// what makes ADR-0026's "reset to live" true rather than merely intended.
 pub(crate) fn thaw() {
-    stills().clear();
+    // Both under the one lock, so a freeze publishing concurrently either gets
+    // in first or sees the bump and discards. See [`GENERATION`].
+    let mut stills = stills();
+    GENERATION.fetch_add(1, Ordering::SeqCst);
+    stills.clear();
 }
 
 /// The pixels for `bounds`, cropped out of the frozen still that contains it.
@@ -394,6 +602,99 @@ mod tests {
         assert!(crop(Rect::new(60, 10, 10, 10)).is_none());
         // ...while a rectangle wholly inside the second still is served.
         assert!(crop(Rect::new(70, 10, 10, 10)).is_some());
+    }
+
+    /// The toggle's in-flight guard, driven through `freeze` itself.
+    ///
+    /// An empty monitor list is what makes this testable without a desktop: it
+    /// captures nothing, so the claim, the publish and the release are the only
+    /// things that run. The claim is what the test is about, and the second half
+    /// matters as much as the first — a guard that never releases would pass an
+    /// "it refuses" assertion while wedging the feature off permanently.
+    #[test]
+    fn a_freeze_started_while_one_is_in_flight_does_nothing() {
+        let _guard = crate::precapture::frame_store_guard();
+        assert!(
+            FREEZING
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok(),
+            "the flag must start clear, or this test is asserting nothing"
+        );
+        assert_eq!(
+            freeze(&[]).err(),
+            Some(Skipped::InFlight),
+            "a freeze must not start while another is in flight"
+        );
+        FREEZING.store(false, Ordering::SeqCst);
+        assert!(freeze(&[]).is_ok(), "the claim must be released");
+    }
+
+    /// A freeze overtaken by a state transition must publish nothing.
+    ///
+    /// The generation is passed to [`publish`] rather than read inside it, which
+    /// is what makes the interleaving expressible: on the rig this is
+    /// `Ctrl+Space` followed by `Esc`, where the capture threads are still
+    /// running when the overlay leaves Placement and `set_state` calls `thaw`.
+    #[test]
+    fn a_freeze_overtaken_by_a_thaw_publishes_nothing() {
+        let _guard = crate::precapture::frame_store_guard();
+        let generation = GENERATION.load(Ordering::SeqCst);
+        hold(vec![(
+            Rect::new(0, 0, 64, 48),
+            patterned(Size::new(64, 48)),
+        )]);
+        let version = VERSION.load(Ordering::SeqCst);
+        // The transition lands: `thaw` is what `set_state` calls, and it is the
+        // bump rather than the clear that the publish below has to notice.
+        thaw();
+        assert_eq!(
+            publish(Vec::new(), generation).err(),
+            Some(Skipped::Retired),
+            "a freeze whose generation was retired must discard its stills"
+        );
+        assert_eq!(
+            VERSION.load(Ordering::SeqCst),
+            version,
+            "a discarded freeze must not bump the version either"
+        );
+        // ...and the same publish succeeds against the current generation, so
+        // the assertion above is about the generation and not about `publish`
+        // refusing everything.
+        assert!(publish(Vec::new(), GENERATION.load(Ordering::SeqCst)).is_ok());
+    }
+
+    /// A freeze that captured nothing still invalidates the previous freeze's
+    /// URLs, so a stale still cannot be redisplayed for it.
+    #[test]
+    fn a_freeze_that_captures_nothing_still_retires_the_old_urls() {
+        let _guard = crate::precapture::frame_store_guard();
+        hold(vec![(
+            Rect::new(0, 0, 64, 48),
+            patterned(Size::new(64, 48)),
+        )]);
+        let stale = stills_for_display();
+        assert_eq!(stale.len(), 1);
+        let (_, url) = &stale[0];
+        let (index, version) =
+            crate::captures::parse_frozen_path(url.rsplit_once('/').expect("the url has a path").1)
+                .expect("a frozen url parses");
+        assert!(still_png(index, version).is_some());
+        // A freeze over no monitors: captures nothing, and must still retire it.
+        assert!(freeze(&[]).is_ok());
+        // Re-install a still at the same index. Without this the assertion below
+        // passes for the wrong reason — the stills are empty, so the lookup
+        // fails on the *index* and the version is never consulted. Confirmed by
+        // mutation: with the `VERSION` bump removed, the first cut of this test
+        // stayed green. It is backlog I-1 / UT-F-44's shape, which is that a
+        // test can only be trusted once the thing it names has been broken.
+        hold(vec![(
+            Rect::new(0, 0, 64, 48),
+            patterned(Size::new(64, 48)),
+        )]);
+        assert!(
+            still_png(index, version).is_none(),
+            "the previous freeze's url must not resolve after a re-freeze"
+        );
     }
 
     #[test]

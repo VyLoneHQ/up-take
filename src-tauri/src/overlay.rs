@@ -563,11 +563,35 @@ pub fn toggle_freeze(app: &AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {
         let monitors = monitor_rects();
-        let frozen = crate::freeze::freeze(&monitors);
+        // Timed because the wait between the key and the still appearing is the
+        // whole felt cost of this feature and nothing else reported it. Logged
+        // in the same shape `output.rs` uses for the export path, with the
+        // stage split, because "slow" is not actionable and "the capture is
+        // slow" is. The stage figures are per-monitor maxima and the total is
+        // wall-clock, so they do not add up — see `FreezeReport`.
+        let report = match crate::freeze::freeze(&monitors) {
+            Ok(report) => report,
+            // Nothing was published, so nothing is emitted: the state the
+            // frontend already holds is the correct one in both cases. Logged
+            // rather than silent — from the user's side the key did nothing, and
+            // a ~420 ms window where that is the right behaviour is exactly what
+            // a session reads a log to explain.
+            Err(skipped) => {
+                eprintln!("freeze: no stills published — {skipped}");
+                return;
+            }
+        };
         // Reported as a ratio, not as a success: a freeze that captured three of
         // four monitors is a real state the user is about to select on, and
         // "frozen" alone would hide which screens are still live.
-        eprintln!("freeze: froze {frozen}/{} monitor(s)", monitors.len());
+        eprintln!(
+            "freeze: froze {}/{} monitor(s) in {} ms — slowest monitor: capture {} ms, encode {} ms",
+            report.count,
+            monitors.len(),
+            report.elapsed_ms,
+            report.slowest_capture_ms,
+            report.slowest_encode_ms
+        );
         if let Err(error) = emit_state(&app, OverlayState::Placement) {
             eprintln!("overlay: could not emit state after freezing: {error}");
         }
