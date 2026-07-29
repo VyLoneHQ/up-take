@@ -56,18 +56,37 @@
 //! [ADR-0026]: the private planning repo's
 //! `DECISIONS/ADR-0026-freeze-on-demand-trigger.md`
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 use uptake_core::bitmap::RgbaBitmap;
 use uptake_core::geometry::Rect;
 
-/// One monitor's still, and where on the virtual desktop it came from.
+/// One monitor's still: where it came from, the pixels a crop is cut out of,
+/// and the PNG the WebView displays.
 ///
 /// The rectangle is not decoration: a bitmap does not know its own position, and
 /// without it a screen-space crop cannot be computed at all.
+///
+/// # Why both representations, and why the PNG is made now
+///
+/// The same reason [`crate::captures::CaptureStore`] holds both: a crop needs
+/// raw RGBA and an `<img>` needs PNG, and neither cheaply produces the other.
+/// Encoding happens **at freeze time**, on the thread that already spawned for
+/// the captures, rather than inside the URI-scheme handler — that handler runs
+/// on the WebView2 UI thread, and a full-monitor PNG encode there would stall
+/// the very repaint it is feeding.
+///
+/// The cost is memory, and it is the largest this feature carries: a 1440p
+/// monitor is ~14.7 MB raw plus its PNG, and a 4K one ~33 MB. Four monitors
+/// frozen is therefore well past `quality-bars.md` §1's 80 MB idle-RAM row —
+/// **which is why [`thaw`] runs on every state transition and not only on the
+/// toggle.** Frozen is a transient state by construction; if it ever becomes a
+/// resting one, this is the number that has to be revisited first.
 struct Still {
     rect: Rect,
     bitmap: RgbaBitmap,
+    png: Vec<u8>,
 }
 
 /// The stills currently displayed, one per frozen monitor. Empty means live.
@@ -80,8 +99,66 @@ struct Still {
 /// findings ledger.
 static STILLS: Mutex<Vec<Still>> = Mutex::new(Vec::new());
 
+/// Bumped by every [`freeze`], and carried in each still's URL.
+///
+/// **Cache-busting, and it is load-bearing rather than tidy.** WebView2 caches
+/// by URL, so a second freeze re-using `frozen-0.png` would redisplay the
+/// *first* freeze's pixels — a still of a moment the user deliberately replaced,
+/// with nothing on screen to say so. Exactly the defect the pin store's own
+/// version counter exists for, and ADR-0014 §4's "each freeze re-captures the
+/// current moment" is the promise it would quietly break.
+static VERSION: AtomicU64 = AtomicU64::new(0);
+
 fn stills() -> std::sync::MutexGuard<'static, Vec<Still>> {
     STILLS.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The URL a frozen still is served at. The only thing that builds one.
+///
+/// Shares [`crate::captures::SCHEME`] rather than registering a second protocol:
+/// one scheme means one handler, one `img-src` entry for whoever adds the CSP
+/// this app still lacks, and one place the Windows `http://<scheme>.localhost`
+/// form is got right (see [`crate::captures::pin_url`], where getting it wrong
+/// cost a session).
+///
+/// The `frozen-` prefix is what keeps the two namespaces apart: an area's URL is
+/// `<id>-<version>.png` and an id is a number, so no area can ever produce a
+/// path that starts with `frozen-`.
+#[must_use]
+fn still_url(index: usize, version: u64) -> String {
+    let path = format!("frozen-{index}-{version}.png");
+    if cfg!(windows) {
+        format!("http://{}.localhost/{path}", crate::captures::SCHEME)
+    } else {
+        format!("{}://localhost/{path}", crate::captures::SCHEME)
+    }
+}
+
+/// The PNG for one frozen still, if `version` is still the live freeze.
+///
+/// A version mismatch is `None` rather than the current bytes, for the same
+/// reason the pin store refuses one: the only way to ask for a stale version is
+/// to hold a stale URL, and answering it with fresh pixels would hide a caching
+/// bug instead of surfacing it.
+pub(crate) fn still_png(index: usize, version: u64) -> Option<Vec<u8>> {
+    if version != VERSION.load(Ordering::SeqCst) {
+        return None;
+    }
+    stills().get(index).map(|still| still.png.clone())
+}
+
+/// Every frozen still as `(rect, url)`, for the frontend to lay out.
+///
+/// Physical virtual-desktop pixels, unconverted — the WebView owns its own
+/// scale factor (ADR-0011), and pre-converting here is the exact mistake that
+/// ADR made a rule about.
+pub(crate) fn stills_for_display() -> Vec<(Rect, String)> {
+    let version = VERSION.load(Ordering::SeqCst);
+    stills()
+        .iter()
+        .enumerate()
+        .map(|(index, still)| (still.rect, still_url(index, version)))
+        .collect()
 }
 
 /// Whether the screen is currently frozen.
@@ -112,21 +189,41 @@ pub(crate) fn is_frozen() -> bool {
 pub(crate) fn freeze(monitors: &[Rect]) -> usize {
     let captured: Vec<Still> = monitors
         .iter()
-        .filter_map(|monitor| match uptake_capture::capture_region(*monitor) {
-            Ok(shot) => Some(Still {
+        .filter_map(|monitor| {
+            let shot = match uptake_capture::capture_region(*monitor) {
+                Ok(shot) => shot,
+                Err(error) => {
+                    eprintln!("freeze: could not capture {monitor:?}: {error}");
+                    return None;
+                }
+            };
+            // A still that cannot be encoded is dropped rather than kept, so
+            // the display and the crop source cannot disagree about which
+            // monitors are frozen. Keeping it would mean a monitor whose
+            // pixels a drag would use but which shows live content — the
+            // see-one-thing-get-another failure this feature exists to avoid.
+            let png = match crate::output::encode_png(&shot.bitmap) {
+                Ok(png) => png,
+                Err(error) => {
+                    eprintln!("freeze: could not encode {monitor:?}: {error}");
+                    return None;
+                }
+            };
+            Some(Still {
                 // What the capture crate reports it took, never what was asked
                 // for: it clamps to the virtual desktop, and trusting the
                 // request would offset every crop by the clamp distance.
                 rect: shot.rect,
                 bitmap: shot.bitmap,
-            }),
-            Err(error) => {
-                eprintln!("freeze: could not capture {monitor:?}: {error}");
-                None
-            }
+                png,
+            })
         })
         .collect();
     let count = captured.len();
+    // Bumped even when nothing was captured: a failed freeze must still
+    // invalidate the previous freeze's URLs, or the WebView would happily
+    // redisplay an older still for a freeze that produced none.
+    VERSION.fetch_add(1, Ordering::SeqCst);
     *stills() = captured;
     count
 }
@@ -162,8 +259,12 @@ pub(crate) fn crop(bounds: Rect) -> Option<RgbaBitmap> {
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
-    reason = "architecture §5 bans unwrap outside tests; inside them a failed \
-              setup should abort the test loudly"
+    clippy::expect_used,
+    reason = "architecture §5 bans both outside tests; inside them a failed \
+              setup should abort the test loudly. `expect` earns its place in \
+              the URL tests: the path is derived from the URL rather than \
+              written out, because a hard-coded prefix is exactly what let \
+              F-38's round-trip test pass over an unresolvable URL"
 )]
 mod tests {
     use uptake_core::geometry::Size;
@@ -198,8 +299,54 @@ mod tests {
     fn hold(stills_to_set: Vec<(Rect, RgbaBitmap)>) {
         *stills() = stills_to_set
             .into_iter()
-            .map(|(rect, bitmap)| Still { rect, bitmap })
+            .map(|(rect, bitmap)| Still {
+                rect,
+                bitmap,
+                // These tests are about the crop decision and the arithmetic,
+                // neither of which reads the PNG. A real encode here would buy
+                // nothing and make every test depend on the encoder.
+                png: Vec::new(),
+            })
             .collect();
+    }
+
+    /// The URL a still is served at must parse back to the same still through
+    /// the **scheme handler's own parser**, not through a copy of it here.
+    ///
+    /// This is the F-38 lesson pinned as a test: `pin_url` had a round-trip
+    /// test that passed while the URL was unresolvable, because it trimmed a
+    /// hard-coded prefix and so checked the function against the same wrong
+    /// assumption the function was built on. Driving `parse_frozen_path` is
+    /// what makes this an independent check rather than a mirror.
+    #[test]
+    fn a_still_url_parses_back_through_the_scheme_handler() {
+        let url = still_url(2, 7);
+        let path = url
+            .rsplit_once('/')
+            .map(|(_, tail)| format!("/{tail}"))
+            .expect("a still url always has a path");
+        assert_eq!(crate::captures::parse_frozen_path(&path), Some((2, 7)));
+    }
+
+    #[test]
+    fn a_still_url_is_not_mistaken_for_an_area_pin() {
+        // The two namespaces share one scheme, so a frozen path reaching the
+        // area parser would 404 as "missing capture" and send the next reader
+        // looking in the wrong store entirely.
+        let url = still_url(0, 1);
+        let path = url
+            .rsplit_once('/')
+            .map(|(_, tail)| format!("/{tail}"))
+            .expect("a still url always has a path");
+        assert_eq!(crate::captures::parse_path(&path), None);
+    }
+
+    #[test]
+    fn a_stale_version_is_refused_rather_than_answered_with_current_pixels() {
+        let _guard = crate::precapture::frame_store_guard();
+        hold(vec![(Rect::new(0, 0, 8, 8), patterned(Size::new(8, 8)))]);
+        let live = VERSION.load(Ordering::SeqCst);
+        assert!(still_png(0, live.wrapping_sub(1)).is_none());
     }
 
     #[test]

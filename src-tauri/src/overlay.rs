@@ -298,6 +298,14 @@ struct StatePayload {
     /// of a fact Rust already owns is how the stale-menu and replayed-flash
     /// defects of 1.9b happened.
     frozen: bool,
+    /// Each frozen still as `(x, y, width, height, url)` — physical
+    /// virtual-desktop px plus the URL the WebView fetches the PNG from.
+    ///
+    /// Empty whenever [`Self::frozen`] is false, and the two are derived from
+    /// the same call rather than assembled separately: a payload claiming
+    /// frozen with no stills would render as a live screen the app believes is
+    /// frozen.
+    stills: Vec<(i32, i32, u32, u32, String)>,
 }
 
 const fn state_name(state: OverlayState) -> &'static str {
@@ -490,6 +498,20 @@ fn emit_state(app: &AppHandle, state: OverlayState) -> Result<(), String> {
     } else {
         None
     };
+    // One read, two fields: `frozen` is "are there stills" by construction
+    // rather than a flag that could disagree with the list beside it.
+    let stills: Vec<(i32, i32, u32, u32, String)> = crate::freeze::stills_for_display()
+        .into_iter()
+        .map(|(bounds, url)| {
+            (
+                bounds.origin.x,
+                bounds.origin.y,
+                bounds.size.width,
+                bounds.size.height,
+                url,
+            )
+        })
+        .collect();
     app.emit(
         STATE_EVENT,
         StatePayload {
@@ -497,7 +519,8 @@ fn emit_state(app: &AppHandle, state: OverlayState) -> Result<(), String> {
             origin,
             monitors,
             armed,
-            frozen: crate::freeze::is_frozen(),
+            frozen: !stills.is_empty(),
+            stills,
         },
     )
     .map_err(|e| format!("Could not emit overlay state: {e}"))

@@ -15,6 +15,7 @@ import {
   dismissFocusedArea,
   escapeOverlay,
   type FlashPayload,
+  type FrozenStill,
   type HoverPayload,
   isFreezeKey,
   isRemoveKey,
@@ -33,6 +34,7 @@ import {
   type StatePayload,
   showsMenu,
   showsTint,
+  stillsFromWire,
   toggleFreeze,
 } from '$lib/overlay-state';
 import { type CssRect, isDismissKey } from '$lib/regions';
@@ -59,6 +61,11 @@ let menu: MenuView | null = $state(null);
 // this — arming is placement state living beside the mouse hook — and re-emits
 // the state whenever it changes.
 let armed: ArmableType | null = $state(null);
+/**
+ * The frozen stills to render, or empty when the screen is live (task 1.9d).
+ * Rust is the only authority on this; nothing here infers it from a keypress.
+ */
+let stills: FrozenStill[] = $state([]);
 // Which monitor holds the cursor — an index into `monitors`, both from Rust's
 // one cached list. Null in a dead zone between mismatched monitors, in which
 // case no badge is drawn at all rather than one guessed onto a screen.
@@ -76,6 +83,26 @@ let flashes = $state(new SvelteMap<number, number>());
 let dpr = $state(1);
 
 const frames: CssRect[] = $derived(monitorFramesCss(monitors, origin, dpr));
+/**
+ * Whether the screen is frozen — derived from the stills rather than tracked
+ * beside them, so the badge cannot appear over a monitor showing live content.
+ */
+const frozen: boolean = $derived(stills.length > 0);
+/**
+ * The stills with their rects converted to CSS, through the same helper every
+ * other overlay rectangle uses (ADR-0011: the WebView owns its scale factor).
+ */
+const stillFrames: { url: string; frame: CssRect }[] = $derived(
+  stills.flatMap((still) => {
+    const frame = physRectToCss(still.rect, origin, dpr);
+    // A rect that will not convert is dropped rather than rendered at a
+    // fallback position: a still pinned to 0,0 would cover the wrong monitor
+    // with the wrong pixels, which is worse than that monitor staying live —
+    // and staying live is at least visibly not frozen, since the badge is
+    // derived from the same list.
+    return frame === null ? [] : [{ url: still.url, frame }];
+  }),
+);
 // Hover chrome — the close control, the brighter border — shows in every
 // visible state as of task 1.17(a).
 //
@@ -147,6 +174,15 @@ onMount(() => {
     monitors = event.payload.monitors;
     origin = event.payload.origin;
     armed = event.payload.armed;
+    stills = stillsFromWire(
+      event.payload.stills as unknown as [
+        number,
+        number,
+        number,
+        number,
+        string,
+      ][],
+    );
     dpr = window.devicePixelRatio;
     // A hidden overlay is drawing nothing; drop any half-finished selection so
     // it cannot reappear on the next show before the poll clears it.
@@ -233,6 +269,24 @@ onMount(() => {
      on the overlay never applied at any position. Cursor feedback is a narrow
      `SetSystemCursor` override on the Rust side instead. -->
 <main class="overlay" class:active={showsTint(overlayState)}>
+  <!-- The frozen stills, first in the DOM so every piece of chrome below draws
+       over them. Each one covers exactly its own monitor: a single desktop-wide
+       image would be wrong on any mixed-DPI rig, and F-13's rule is that overlay
+       content is positioned per-monitor and never against the virtual desktop.
+
+       `draggable={false}` because a native image drag inside the overlay would
+       hand the WebView a gesture the placement hook has already claimed. -->
+  {#each stillFrames as still (still.url)}
+    <img
+      class="frozen-still"
+      src={still.url}
+      alt=""
+      draggable={false}
+      style="left: {still.frame.x}px; top: {still.frame.y}px; width: {still
+        .frame.width}px; height: {still.frame.height}px"
+    />
+  {/each}
+
   {#if showsTint(overlayState)}
     {#each frames as frame, i (`${frame.x},${frame.y},${frame.width},${frame.height}`)}
       <div
@@ -250,6 +304,17 @@ onMount(() => {
              buries the single fact it exists to convey. -->
         {#if armed && i === activeMonitor}
           <span class="armed-badge">{armed}</span>
+        {/if}
+        <!-- FROZEN goes on EVERY monitor, unlike the armed badge above, and the
+             difference is deliberate rather than an inconsistency. The armed
+             type is one fact about the next gesture, so repeating it reads as
+             "every screen is armed" (F-13). Frozen is a fact about *each
+             screen*: they are all showing a still, and a screen whose still is
+             indistinguishable from live content — a static desktop — has no
+             other cue that it is frozen. Omitting it anywhere would leave the
+             user reading a live monitor as frozen, or the reverse. -->
+        {#if frozen}
+          <span class="frozen-badge">frozen</span>
         {/if}
       </div>
     {/each}
@@ -492,6 +557,39 @@ onMount(() => {
   letter-spacing: 0.06em;
   text-transform: uppercase;
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
+}
+
+/* The FROZEN badge sits opposite the armed one — top-left against top-centre —
+   so that a screen which is both armed and frozen shows two legible labels
+   rather than one on top of the other. Amber rather than the armed badge's
+   blue: they say different kinds of thing, and colour is the fastest way to
+   tell "what the next drag makes" from "what you are looking at". */
+.frozen-badge {
+  position: absolute;
+  left: 12px;
+  top: 12px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: rgba(255, 190, 90, 0.94);
+  color: rgba(35, 22, 5, 0.95);
+  font: 600 13px/1 system-ui, sans-serif;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
+}
+
+/* A frozen monitor's still, covering exactly that monitor. Behind every piece
+   of chrome by DOM order rather than by z-index, so nothing has to be kept in
+   sync with it as chrome is added.
+
+   `object-fit: fill`, for the same reason the pin below uses it: the still was
+   captured *at* this monitor's rectangle, so any difference from the element's
+   size is a rounding artefact, and letterboxing would show it as a black band
+   instead of a sub-pixel stretch. */
+.frozen-still {
+  position: absolute;
+  object-fit: fill;
+  pointer-events: none;
 }
 
 /* A Screenshot area's captured pixels, filling the area exactly (ADR-0014 §6).

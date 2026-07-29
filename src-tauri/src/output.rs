@@ -323,7 +323,7 @@ pub(crate) fn capture_into_area(app: &AppHandle, id: AreaId, bounds: Rect) {
 /// Encodes RGBA8 pixels as PNG via the same WIC-backed encoder
 /// `uptake-capture`'s own hardware-verification driver uses
 /// (`examples/grab.rs`) — reused rather than adding a second PNG codec to vet.
-fn encode_png(bitmap: &RgbaBitmap) -> Result<Vec<u8>, String> {
+pub(crate) fn encode_png(bitmap: &RgbaBitmap) -> Result<Vec<u8>, String> {
     ImageEncoder::new(ImageFormat::Png, ImageEncoderPixelFormat::Rgba8)
         .map_err(|error| format!("could not create the PNG encoder: {error}"))?
         .encode(bitmap.pixels(), bitmap.width(), bitmap.height())

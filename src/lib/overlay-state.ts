@@ -31,6 +31,41 @@ export interface StatePayload {
    * is armed, rather than naming the resting state as if it were a choice.
    */
   armed: ArmableType | null;
+  /**
+   * Whether the screen is frozen (task 1.9d, ADR-0026). Only true in placement.
+   */
+  frozen: boolean;
+  /**
+   * Each frozen still: its monitor rect in physical px, plus the URL its PNG is
+   * served at. Empty whenever {@link frozen} is false.
+   *
+   * Rust derives both from one read, so a payload cannot claim frozen with no
+   * stills — which would render as a live screen the app believes is frozen.
+   */
+  stills: FrozenStill[];
+}
+
+/** One monitor's frozen still: where it is, and where to fetch it. */
+export interface FrozenStill {
+  rect: PhysRect;
+  url: string;
+}
+
+/**
+ * Turns the wire form of the stills — `[x, y, w, h, url]` tuples, which is what
+ * serde produces for a Rust tuple — into rects the layout helpers accept.
+ *
+ * Kept as a tuple on the wire rather than a struct because the monitor list
+ * beside it already travels that way; converting in one place here is cheaper
+ * than a second convention.
+ */
+export function stillsFromWire(
+  wire: [number, number, number, number, string][],
+): FrozenStill[] {
+  return wire.map(([x, y, width, height, url]) => ({
+    rect: [x, y, width, height],
+    url,
+  }));
 }
 
 /** An area's stacking tier (ADR-0013). */

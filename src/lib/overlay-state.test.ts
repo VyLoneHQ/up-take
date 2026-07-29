@@ -17,6 +17,7 @@ import {
   physRectToCss,
   showsMenu,
   showsTint,
+  stillsFromWire,
 } from './overlay-state';
 import type { Invoke } from './regions';
 
@@ -228,6 +229,39 @@ describe('isRemoveKey', () => {
     // Deliberate: Backspace is the reflexive "undo that" key, and dismissing an
     // area has no undo.
     expect(isRemoveKey('Backspace')).toBe(false);
+  });
+});
+
+describe('stillsFromWire', () => {
+  it('keeps each still with its own rect and url', () => {
+    const stills = stillsFromWire([
+      [-1920, -200, 1920, 1080, 'http://s.localhost/frozen-0-7.png'],
+      [0, 0, 2560, 1440, 'http://s.localhost/frozen-1-7.png'],
+    ]);
+    expect(stills).toEqual([
+      {
+        rect: [-1920, -200, 1920, 1080],
+        url: 'http://s.localhost/frozen-0-7.png',
+      },
+      { rect: [0, 0, 2560, 1440], url: 'http://s.localhost/frozen-1-7.png' },
+    ]);
+  });
+
+  it('does not pair a rect with another still url', () => {
+    // The tuple order is the whole contract, and getting it wrong would show
+    // monitor 0's pixels over monitor 1 — plausible on screen and wrong.
+    const [first, second] = stillsFromWire([
+      [10, 20, 30, 40, 'a'],
+      [50, 60, 70, 80, 'b'],
+    ]);
+    expect(first.url).toBe('a');
+    expect(first.rect).toEqual([10, 20, 30, 40]);
+    expect(second.url).toBe('b');
+    expect(second.rect).toEqual([50, 60, 70, 80]);
+  });
+
+  it('is empty for a live screen', () => {
+    expect(stillsFromWire([])).toEqual([]);
   });
 });
 
