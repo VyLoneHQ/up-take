@@ -140,6 +140,47 @@ impl RgbaBitmap {
         }
         Self::from_pixels(rect.size, pixels)
     }
+
+    /// Copies out `wanted`, given in **screen space**, from a frame whose
+    /// top-left sits at `frame_origin` in that same space.
+    ///
+    /// This is [`crop`](Self::crop) plus the one subtraction that turns a
+    /// screen rectangle into a bitmap-local one, and it exists so that
+    /// subtraction has exactly one implementation.
+    ///
+    /// # Why this is a function rather than four lines at each call site
+    ///
+    /// Two independent paths crop a held full-monitor frame to a drawn
+    /// rectangle — the pre-capture held during a drag (task 1.9c) and the
+    /// still held while the screen is frozen (task 1.9d) — and **1B's exit
+    /// gate requires that every path producing a Screenshot's pixels produce
+    /// identical results for the same rectangle.** Written inline twice, that
+    /// is a property a test has to chase and a later edit can silently break in
+    /// one copy. Written once, it is a property of the code: both callers do
+    /// the same arithmetic and the same byte-exact row copy, because they call
+    /// the same function.
+    ///
+    /// Containment policy is [`crop`](Self::crop)'s, unchanged: a rectangle
+    /// that does not lie wholly inside the frame yields `None`, so a caller
+    /// takes its fallback rather than a short image.
+    #[must_use]
+    pub fn crop_screen(
+        &self,
+        frame_origin: crate::geometry::Point,
+        wanted: crate::geometry::Rect,
+    ) -> Option<Self> {
+        // Widened to `i64` before subtracting: two `i32` screen coordinates on
+        // a multi-monitor virtual desktop can legitimately be far enough apart
+        // that the difference overflows `i32`, and a wrapped value would index
+        // a plausible-looking wrong region instead of failing.
+        let local = crate::geometry::Rect::new(
+            i32::try_from(i64::from(wanted.origin.x) - i64::from(frame_origin.x)).ok()?,
+            i32::try_from(i64::from(wanted.origin.y) - i64::from(frame_origin.y)).ok()?,
+            wanted.size.width,
+            wanted.size.height,
+        );
+        self.crop(local)
+    }
 }
 
 /// `width × height × 4` as a `usize`, or `None` on overflow.

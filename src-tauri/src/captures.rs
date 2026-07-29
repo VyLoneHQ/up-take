@@ -152,10 +152,25 @@ pub fn pin_url(id: AreaId, version: u64) -> String {
 /// Deliberately strict — a path that is not exactly this shape is a 404 rather
 /// than a best-effort guess, because every URL this scheme ever serves is one
 /// [`pin_url`] generated.
-fn parse_path(path: &str) -> Option<(u64, u64)> {
+pub(crate) fn parse_path(path: &str) -> Option<(u64, u64)> {
     let stem = path.trim_start_matches('/').strip_suffix(".png")?;
     let (id, version) = stem.split_once('-')?;
     Some((id.parse().ok()?, version.parse().ok()?))
+}
+
+/// Parses `frozen-<index>-<version>.png` — a frozen still rather than an area's
+/// pin (task 1.9d).
+///
+/// The two namespaces cannot collide: an area's path begins with its id, which
+/// is a number, so nothing an area produces starts with `frozen-`. Checked
+/// **before** [`parse_path`] in [`serve`], because `frozen-0-3` would otherwise
+/// reach it and fail on `"frozen".parse::<u64>()` — a 404 that looks like a
+/// missing capture rather than a namespace that was never routed.
+pub(crate) fn parse_frozen_path(path: &str) -> Option<(usize, u64)> {
+    let stem = path.trim_start_matches('/').strip_suffix(".png")?;
+    let rest = stem.strip_prefix("frozen-")?;
+    let (index, version) = rest.split_once('-')?;
+    Some((index.parse().ok()?, version.parse().ok()?))
 }
 
 /// Serves a pinned capture, or a 404 with an empty body.
@@ -175,11 +190,15 @@ pub fn serve(
             .body(Vec::new())
             .unwrap_or_else(|_| Response::new(Vec::new()))
     };
-    let Some((id, version)) = parse_path(request.uri().path()) else {
-        return not_found();
-    };
-    let state = ctx.app_handle().state::<Mutex<CaptureStore>>();
-    let bytes = {
+    let path = request.uri().path();
+    // Frozen stills first — see `parse_frozen_path` for why the order matters.
+    let bytes = if let Some((index, version)) = parse_frozen_path(path) {
+        crate::freeze::still_png(index, version)
+    } else {
+        let Some((id, version)) = parse_path(path) else {
+            return not_found();
+        };
+        let state = ctx.app_handle().state::<Mutex<CaptureStore>>();
         let guard = state.lock().unwrap_or_else(PoisonError::into_inner);
         guard.get(id, version).map(<[u8]>::to_vec)
     };
@@ -191,7 +210,8 @@ pub fn serve(
         .header("Content-Type", "image/png")
         // The URL is versioned, so the bytes behind it never change and the
         // WebView may keep them as long as it likes. This is what makes a pin
-        // cost one fetch rather than one per repaint.
+        // cost one fetch rather than one per repaint — and what makes a
+        // re-freeze show new pixels, since it mints a new version.
         .header("Cache-Control", "public, max-age=31536000, immutable")
         .body(bytes)
         .unwrap_or_else(|_| not_found())

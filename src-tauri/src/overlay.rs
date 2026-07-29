@@ -291,6 +291,21 @@ struct StatePayload {
     /// naming the resting state is the "which mode am I in?" noise the design
     /// avoids.
     armed: Option<&'static str>,
+    /// Whether the screen is frozen (task 1.9d). Only ever true in Placement.
+    ///
+    /// Sent on every state so the frontend has one source for it rather than
+    /// inferring it from the last toggle it happened to see — an inferred copy
+    /// of a fact Rust already owns is how the stale-menu and replayed-flash
+    /// defects of 1.9b happened.
+    frozen: bool,
+    /// Each frozen still as `(x, y, width, height, url)` — physical
+    /// virtual-desktop px plus the URL the WebView fetches the PNG from.
+    ///
+    /// Empty whenever [`Self::frozen`] is false, and the two are derived from
+    /// the same call rather than assembled separately: a payload claiming
+    /// frozen with no stills would render as a live screen the app believes is
+    /// frozen.
+    stills: Vec<(i32, i32, u32, u32, String)>,
 }
 
 const fn state_name(state: OverlayState) -> &'static str {
@@ -410,6 +425,14 @@ fn apply(app: &AppHandle, state: OverlayState) -> Result<(), String> {
     // current state is an observation instead of an assumption.
     #[cfg(debug_assertions)]
     eprintln!("overlay: state -> {state:?}");
+    // Every state transition returns the screen to live (ADR-0026 decision 4).
+    // Placed here, at the one point every transition funnels through, rather
+    // than at each entry: freeze exists only inside Placement, so "reset on
+    // entry" and "never frozen outside Placement" are the same rule, and
+    // writing it once means a state added later cannot forget it. A frozen
+    // screen surviving into Living would be the worst version of this feature —
+    // a still the user cannot dismiss and did not ask to keep.
+    crate::freeze::thaw();
     match state {
         OverlayState::Hidden => {
             // Emit first so the frontend clears its indicator, then hide.
@@ -475,6 +498,20 @@ fn emit_state(app: &AppHandle, state: OverlayState) -> Result<(), String> {
     } else {
         None
     };
+    // One read, two fields: `frozen` is "are there stills" by construction
+    // rather than a flag that could disagree with the list beside it.
+    let stills: Vec<(i32, i32, u32, u32, String)> = crate::freeze::stills_for_display()
+        .into_iter()
+        .map(|(bounds, url)| {
+            (
+                bounds.origin.x,
+                bounds.origin.y,
+                bounds.size.width,
+                bounds.size.height,
+                url,
+            )
+        })
+        .collect();
     app.emit(
         STATE_EVENT,
         StatePayload {
@@ -482,9 +519,83 @@ fn emit_state(app: &AppHandle, state: OverlayState) -> Result<(), String> {
             origin,
             monitors,
             armed,
+            frozen: !stills.is_empty(),
+            stills,
         },
     )
     .map_err(|e| format!("Could not emit overlay state: {e}"))
+}
+
+/// Toggles the frozen view — `Ctrl+Space` in Placement (task 1.9d, ADR-0026).
+///
+/// # Placement-only, and it says so rather than going quiet
+///
+/// ADR-0026 decision 2 scopes freeze to Placement. Called from any other state
+/// this logs and does nothing: the frontend does not send the key outside
+/// Placement, so reaching here from Living means the two disagree about the
+/// state, which is worth a line rather than a silent return.
+///
+/// # Why freezing spawns and thawing does not
+///
+/// A freeze is one capture per monitor — approaching a second on a four-monitor
+/// desktop — and this runs on the event-loop thread. Blocking it would hang the
+/// window it is about to redraw. Thawing only drops the stills, so it is
+/// immediate and emits inline.
+///
+/// The state is emitted **after** the captures land, so the frontend never shows
+/// a frozen indicator over live pixels. The visible cost is that a freeze takes
+/// effect a beat after the key; the alternative is a lie on screen for the same
+/// beat, and this project has already recorded what a green-looking wrong state
+/// costs.
+pub fn toggle_freeze(app: &AppHandle) {
+    let state = *lock(&app.state::<Mutex<OverlayState>>());
+    if !matches!(state, OverlayState::Placement) {
+        eprintln!("overlay: freeze toggle ignored outside Placement (state {state:?})");
+        return;
+    }
+    if crate::freeze::is_frozen() {
+        crate::freeze::thaw();
+        if let Err(error) = emit_state(app, state) {
+            eprintln!("overlay: could not emit state after thawing: {error}");
+        }
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let monitors = monitor_rects();
+        // Timed because the wait between the key and the still appearing is the
+        // whole felt cost of this feature and nothing else reported it. Logged
+        // in the same shape `output.rs` uses for the export path, with the
+        // stage split, because "slow" is not actionable and "the capture is
+        // slow" is. The stage figures are per-monitor maxima and the total is
+        // wall-clock, so they do not add up — see `FreezeReport`.
+        let report = match crate::freeze::freeze(&monitors) {
+            Ok(report) => report,
+            // Nothing was published, so nothing is emitted: the state the
+            // frontend already holds is the correct one in both cases. Logged
+            // rather than silent — from the user's side the key did nothing, and
+            // a ~420 ms window where that is the right behaviour is exactly what
+            // a session reads a log to explain.
+            Err(skipped) => {
+                eprintln!("freeze: no stills published — {skipped}");
+                return;
+            }
+        };
+        // Reported as a ratio, not as a success: a freeze that captured three of
+        // four monitors is a real state the user is about to select on, and
+        // "frozen" alone would hide which screens are still live.
+        eprintln!(
+            "freeze: froze {}/{} monitor(s) in {} ms — slowest monitor: capture {} ms, encode {} ms",
+            report.count,
+            monitors.len(),
+            report.elapsed_ms,
+            report.slowest_capture_ms,
+            report.slowest_encode_ms
+        );
+        if let Err(error) = emit_state(&app, OverlayState::Placement) {
+            eprintln!("overlay: could not emit state after freezing: {error}");
+        }
+    });
 }
 
 /// Whether any areas exist — read from the managed [`AreaStore`]. When it is
@@ -1048,6 +1159,21 @@ fn armable_type(name: &str) -> Option<AreaType> {
         "screenshot" => Some(AreaType::Screenshot),
         _ => None,
     }
+}
+
+/// IPC surface: `Ctrl+Space` toggles the frozen view (task 1.9d, ADR-0026).
+///
+/// Returns `Ok` even when the toggle is ignored for being outside Placement.
+/// **That is deliberate and is the opposite of `overlay_arm_type`'s choice
+/// above**, because the two keys mean different things when they miss: arming
+/// outside Placement is the frontend asking for something incoherent, while
+/// `Ctrl+Space` outside Placement is a user pressing a key that simply does not
+/// apply there. Surfacing the second as an IPC error would put a rejection in
+/// the console every time someone taps it in Living, which is how a log stops
+/// being read.
+#[tauri::command]
+pub fn overlay_toggle_freeze(app: AppHandle) {
+    toggle_freeze(&app);
 }
 
 /// IPC surface: a direct key arms the type of the **next** drag (ADR-0018 §1).

@@ -173,6 +173,13 @@ enum Source {
     Live,
     /// Cropped out of the frame held since mouse-down (task 1.9c).
     Held,
+    /// Cropped out of the frozen still the user was looking at (task 1.9d).
+    ///
+    /// Distinct from [`Self::Held`] in the log even though both are crops of a
+    /// full-monitor frame, because they answer different questions: `Held` may
+    /// legitimately decline on staleness and `Frozen` never can, so a run where
+    /// the two are conflated cannot be read.
+    Frozen,
     /// The fast path was attempted and declined; the reason is why.
     Fell(crate::precapture::Fallback),
 }
@@ -182,6 +189,7 @@ impl std::fmt::Display for Source {
         match self {
             Self::Live => write!(f, "live capture"),
             Self::Held => write!(f, "held frame"),
+            Self::Frozen => write!(f, "frozen still"),
             Self::Fell(reason) => write!(f, "live capture — fell back: {reason}"),
         }
     }
@@ -215,6 +223,24 @@ fn capture(bounds: Rect, split: &mut Split) -> Result<(RgbaBitmap, Vec<u8>), Str
 /// would show up as nothing worse than "1.9c did not help much", which is the
 /// hardest kind of regression to notice.
 fn capture_or_crop(bounds: Rect, split: &mut Split) -> Result<(RgbaBitmap, Vec<u8>), String> {
+    // The frozen still wins when the screen is frozen, and this ordering is
+    // ADR-0026 decision 6: **what you see at release is what you get.** The
+    // frame source is resolved here, at mouse-up, rather than at mouse-down —
+    // so a user who freezes part-way through a drag gets the pixels they are
+    // now looking at. Resolving it earlier would hand back the pre-capture's
+    // live pixels while the screen showed a still, which is precisely the
+    // divergence 1B's exit-gate row 2 exists to catch.
+    //
+    // There is no staleness test on this branch and that is not an oversight:
+    // the user is selecting *on* the displayed image, so it cannot disagree
+    // with what they see however long they take (ADR-0022 §5).
+    if let Some(bitmap) = crate::freeze::crop(bounds) {
+        split.source = Source::Frozen;
+        let encode = Instant::now();
+        let png = encode_png(&bitmap)?;
+        split.encode_ms = encode.elapsed().as_millis();
+        return Ok((bitmap, png));
+    }
     match crate::precapture::take(bounds) {
         Ok(bitmap) => {
             // Capture stays at 0 ms, and that is the honest reading rather than
@@ -297,7 +323,7 @@ pub(crate) fn capture_into_area(app: &AppHandle, id: AreaId, bounds: Rect) {
 /// Encodes RGBA8 pixels as PNG via the same WIC-backed encoder
 /// `uptake-capture`'s own hardware-verification driver uses
 /// (`examples/grab.rs`) — reused rather than adding a second PNG codec to vet.
-fn encode_png(bitmap: &RgbaBitmap) -> Result<Vec<u8>, String> {
+pub(crate) fn encode_png(bitmap: &RgbaBitmap) -> Result<Vec<u8>, String> {
     ImageEncoder::new(ImageFormat::Png, ImageEncoderPixelFormat::Rgba8)
         .map_err(|error| format!("could not create the PNG encoder: {error}"))?
         .encode(bitmap.pixels(), bitmap.width(), bitmap.height())
