@@ -16,6 +16,7 @@ import {
   escapeOverlay,
   type FlashPayload,
   type HoverPayload,
+  isFreezeKey,
   isRemoveKey,
   type MenuFrame,
   type MenuPayload,
@@ -32,6 +33,7 @@ import {
   type StatePayload,
   showsMenu,
   showsTint,
+  toggleFreeze,
 } from '$lib/overlay-state';
 import { type CssRect, isDismissKey } from '$lib/regions';
 
@@ -111,6 +113,14 @@ const menuFrame: MenuFrame | null = $derived(
 function onKeydown(event: KeyboardEvent) {
   if (isDismissKey(event.key)) {
     void escapeOverlay(invoke);
+    return;
+  }
+  if (isFreezeKey(event)) {
+    // `preventDefault` for the same reason the remove key does: the overlay
+    // renders no editable content today, and this keeps that true if it ever
+    // does. Rust decides whether the toggle applies — it is Placement-only.
+    event.preventDefault();
+    void toggleFreeze(invoke);
     return;
   }
   if (isRemoveKey(event.key)) {

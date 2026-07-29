@@ -7,6 +7,7 @@ import {
   armedTypeForKey,
   dismissFocusedArea,
   escapeOverlay,
+  isFreezeKey,
   isRemoveKey,
   type MenuView,
   menuFrameCss,
@@ -227,6 +228,47 @@ describe('isRemoveKey', () => {
     // Deliberate: Backspace is the reflexive "undo that" key, and dismissing an
     // area has no undo.
     expect(isRemoveKey('Backspace')).toBe(false);
+  });
+});
+
+describe('isFreezeKey', () => {
+  const key = (over: Partial<KeyboardEvent> & { key: string }) => ({
+    ctrlKey: false,
+    altKey: false,
+    metaKey: false,
+    ...over,
+  });
+
+  it('fires on Ctrl+Space', () => {
+    expect(isFreezeKey(key({ key: ' ', ctrlKey: true }))).toBe(true);
+  });
+
+  it('does not fire on Space alone', () => {
+    // Space is deliberately unclaimed (ADR-0026 decision 8). If this ever
+    // starts passing, a future area-level binding has been taken by accident.
+    expect(isFreezeKey(key({ key: ' ' }))).toBe(false);
+  });
+
+  it('does not fire when Alt or Meta are also held', () => {
+    // Alt already suppresses snapping during placement, and Win+Space is the
+    // Windows layout switcher — neither chord is ours to claim.
+    expect(isFreezeKey(key({ key: ' ', ctrlKey: true, altKey: true }))).toBe(
+      false,
+    );
+    expect(isFreezeKey(key({ key: ' ', ctrlKey: true, metaKey: true }))).toBe(
+      false,
+    );
+  });
+
+  it('tests event.key and not event.code', () => {
+    // The space bar's `key` is a single space; `'Space'` is its `code`. Testing
+    // the wrong one gives a binding that never fires and reads as a dead
+    // feature — I-11's shape, where silence and working look identical.
+    expect(isFreezeKey(key({ key: 'Space', ctrlKey: true }))).toBe(false);
+  });
+
+  it('does not swallow Ctrl+S or other Ctrl chords', () => {
+    expect(isFreezeKey(key({ key: 's', ctrlKey: true }))).toBe(false);
   });
 });
 

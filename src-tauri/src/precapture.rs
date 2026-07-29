@@ -401,19 +401,53 @@ pub(crate) fn take(bounds: Rect) -> Result<RgbaBitmap, Fallback> {
             age_ms: age.as_millis(),
         });
     }
-    // Screen space → frame-local space. The subtraction is the only coordinate
-    // arithmetic in the fast path, and `crop` refuses anything that does not fit
-    // rather than clamping, so a straddling drag lands in `Straddle` instead of
+    // Screen space → frame-local space, then a byte-exact row copy. Both halves
+    // live in `crop_screen` rather than here, and that is deliberate: task
+    // 1.9d's frozen still crops through the identical call, so "every path
+    // produces identical pixels for the same rectangle" (1B's exit-gate row 2)
+    // is a property of there being one implementation rather than something a
+    // test has to keep chasing. It refuses anything that does not fit rather
+    // than clamping, so a straddling drag lands in `Straddle` instead of
     // producing a short image.
-    let local = Rect::new(
-        i32::try_from(i64::from(bounds.origin.x) - i64::from(frame.rect.origin.x))
-            .map_err(|_| Fallback::Straddle)?,
-        i32::try_from(i64::from(bounds.origin.y) - i64::from(frame.rect.origin.y))
-            .map_err(|_| Fallback::Straddle)?,
-        bounds.size.width,
-        bounds.size.height,
-    );
-    frame.bitmap.crop(local).ok_or(Fallback::Straddle)
+    frame
+        .bitmap
+        .crop_screen(frame.rect.origin, bounds)
+        .ok_or(Fallback::Straddle)
+}
+
+/// Serializes every test that touches a process-global frame store — this
+/// module's [`HELD`] and [`crate::freeze`]'s stills.
+///
+/// **One lock covering both stores, not one per module.** The exit-gate test in
+/// `freeze` drives both in a single test, and two locks would introduce an
+/// acquisition order that has to be got right forever. `libtest` runs tests
+/// concurrently in one process, and a test that mutates a global can silently
+/// disable another — F-33, found here the hard way when a cross-module test
+/// took the frame this module's own tests had just installed. It failed loudly
+/// rather than passing for the wrong reason, which is the good version of that
+/// failure and is why this lock is widened rather than the test being weakened.
+#[cfg(test)]
+pub(crate) fn frame_store_guard() -> std::sync::MutexGuard<'static, ()> {
+    static SERIAL: Mutex<()> = Mutex::new(());
+    SERIAL.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Installs a frame as though a pre-capture had just completed, for tests in
+/// **other** modules that need this path driven rather than simulated.
+///
+/// `freeze`'s exit-gate test uses it to compare the held path against the frozen
+/// one through both modules' real entry points. Re-implementing the crop in that
+/// test instead would make it assert that a function equals itself — the defect
+/// class this project has recorded as F-17/F-33/I-1, where a check aims at the
+/// thing it is checking and cannot fail.
+#[cfg(test)]
+pub(crate) fn install_for_test(rect: Rect, bitmap: RgbaBitmap) {
+    GENERATION.fetch_add(1, Ordering::SeqCst);
+    *held() = Some(Held {
+        rect,
+        bitmap,
+        taken: Instant::now(),
+    });
 }
 
 /// The monitor of `monitors` containing `point`, for [`begin`] to capture.
@@ -456,10 +490,12 @@ mod tests {
     /// F-33. A mutex around the ones that touch the global keeps them ordered;
     /// it is held for the whole test rather than per-call, because each test is
     /// a sequence of operations on that state, not a single one.
-    static SERIAL: Mutex<()> = Mutex::new(());
-
+    ///
+    /// **It now lives at module scope** as [`frame_store_guard`], because
+    /// `freeze`'s tests touch this same store and a lock only this module could
+    /// reach did not actually serialize them.
     fn serial() -> std::sync::MutexGuard<'static, ()> {
-        SERIAL.lock().unwrap_or_else(PoisonError::into_inner)
+        frame_store_guard()
     }
 
     #[test]

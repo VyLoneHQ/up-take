@@ -328,6 +328,32 @@ export function isRemoveKey(key: string): boolean {
   return key === 'Delete';
 }
 
+/**
+ * Whether this event is the freeze toggle — `Ctrl+Space` (ADR-0026).
+ *
+ * # Why a chord where arming uses a bare letter
+ *
+ * Bare single letters are the *arming* namespace: `s` is Screenshot today, and
+ * OCR, Analysis, Record, Filter and Upscale each want their initial. A view
+ * toggle taking one would spend a slot the type system needs. `armedTypeForKey`
+ * below rejects every `Ctrl`/`Alt`/`Meta` chord by construction, so this chord
+ * **cannot** collide with arming however many types are added.
+ *
+ * `Space` alone was the better key on ergonomics and was deliberately left
+ * unclaimed for a future area-level action (ADR-0026 decision 8).
+ *
+ * `Alt` is excluded because it already means "suppress snapping" during
+ * placement; `Meta` because `Win+Space` is the Windows layout switcher.
+ */
+export function isFreezeKey(
+  event: Pick<KeyboardEvent, 'key' | 'ctrlKey' | 'altKey' | 'metaKey'>,
+): boolean {
+  // `event.key` for the space bar is a single space, not `'Space'` — that is
+  // `event.code`. Testing the wrong one is a binding that never fires and looks
+  // like a dead feature.
+  return event.key === ' ' && event.ctrlKey && !event.altKey && !event.metaKey;
+}
+
 /** An area type a direct key can arm for the next drag (ADR-0018 §1). */
 export type ArmableType = 'screenshot';
 
@@ -371,6 +397,24 @@ export async function armAreaType(
 ): Promise<boolean> {
   try {
     await invoke('overlay_arm_type', { kind });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Toggles the frozen view (task 1.9d, ADR-0026). Never throws, for the same
+ * reason {@link armAreaType} does not.
+ *
+ * Rust decides whether the toggle applies — it is Placement-only — so this
+ * sends the intent unconditionally rather than gating on a state the frontend
+ * holds a copy of. Two places deciding one thing is how the stale-menu defect
+ * of 1.6c happened.
+ */
+export async function toggleFreeze(invoke: Invoke): Promise<boolean> {
+  try {
+    await invoke('overlay_toggle_freeze');
     return true;
   } catch {
     return false;
