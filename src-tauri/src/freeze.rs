@@ -56,7 +56,7 @@
 //! [ADR-0026]: the private planning repo's
 //! `DECISIONS/ADR-0026-freeze-on-demand-trigger.md`
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
 
@@ -137,6 +137,179 @@ static FREEZING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::
 /// lock, so a freeze either publishes before the thaw or observes it. Same
 /// shape as `precapture`'s generation and for the same reason.
 static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// The clock the `Ctrl+Space` → painted probe runs on.
+///
+/// Its own epoch rather than `placement`'s, deliberately: that one is reached
+/// through `probe_enabled`, which gates on `UPTAKE_DEV_PACING` — the variable
+/// **`I-11`** records as producing no output under two launch mechanisms. An
+/// instrument wired to a switch nobody can show is on is `I-11` again, so this
+/// one is gated on `debug_assertions` alone and has no switch to fail.
+///
+/// The cost that buys is one IPC round trip per freeze. The poll probe samples
+/// one frame in eight precisely because it fires at ~220 Hz; a freeze is a
+/// discrete event a user asks for, so there is nothing here to sample down.
+#[cfg(debug_assertions)]
+static PROBE_EPOCH: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(Instant::now);
+
+/// The in-flight `Ctrl+Space` → painted probe, in nanoseconds since
+/// [`PROBE_EPOCH`]. Zero means none, which is why a stamp is forced to 1.
+#[cfg(debug_assertions)]
+static PAINT_PROBE: AtomicU64 = AtomicU64::new(0);
+
+/// Starts the `Ctrl+Space` → painted clock.
+///
+/// Called at the **keypress**, before any capture, because that is what
+/// `quality-bars.md` §1's row measures — the user pressed a key and is waiting
+/// for a view. Stamping later would measure a stage rather than the promise.
+#[cfg(debug_assertions)]
+pub(crate) fn stamp_paint_probe() {
+    let now = u64::try_from(PROBE_EPOCH.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    // Zero is the sentinel for "no probe", so a stamp landing exactly on the
+    // epoch is nudged rather than lost.
+    PAINT_PROBE.store(now.max(1), Ordering::SeqCst);
+}
+
+/// Release builds never stamp, so nothing echoes and nothing is recorded.
+#[cfg(not(debug_assertions))]
+pub(crate) const fn stamp_paint_probe() {}
+
+/// Takes the in-flight probe, if there is one, and clears it.
+///
+/// **Taking rather than reading** is what keeps the probe attached to the one
+/// payload carrying the new stills. A freeze emits state once; any later emit —
+/// an arming change, an area added — would otherwise re-report the same
+/// keypress against a paint it had nothing to do with, and that number would
+/// look like an improvement.
+#[cfg(debug_assertions)]
+pub(crate) fn take_paint_probe() -> Option<u64> {
+    match PAINT_PROBE.swap(0, Ordering::SeqCst) {
+        0 => None,
+        probe => Some(probe),
+    }
+}
+
+#[cfg(not(debug_assertions))]
+pub(crate) const fn take_paint_probe() -> Option<u64> {
+    None
+}
+
+/// Reports one completed `Ctrl+Space` → painted round trip.
+///
+/// # What this measures, and what it does not
+///
+/// Keypress → capture → encode → IPC → Svelte → **every still decoded** → the
+/// following frame painted. The decode is the reason this exists: `72–78 ms`
+/// was capture-through-encode, and §1's row is about pixels on screen. A
+/// `requestAnimationFrame` pair alone resolves as soon as the DOM has updated,
+/// while four full-monitor PNGs are still decoding — a comfortable number that
+/// excludes the one cost nobody has measured, which is `UT-F-41`'s failure
+/// exactly. So the frontend awaits `img.decode()` on every still first.
+///
+/// It still **excludes DWM's final composite**, like the poll probe, so it is a
+/// lower bound on what the eye sees rather than a claim about photons.
+#[cfg(debug_assertions)]
+pub(crate) fn record_paint_latency(probe: u64) {
+    let now = u64::try_from(PROBE_EPOCH.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "milliseconds for a log line; one freeze's nanoseconds are far below 2^53"
+    )]
+    let elapsed_ms = now.saturating_sub(probe) as f64 / 1_000_000.0;
+    // The bars are printed beside the figure so a rig operator reads a verdict
+    // rather than a number they have to go and look up.
+    let verdict = if elapsed_ms < 100.0 {
+        "meets the < 100 ms target"
+    } else if elapsed_ms < 200.0 {
+        "OVER the 100 ms target, inside the 200 ms hard fail"
+    } else {
+        "HARD FAIL - over 200 ms"
+    };
+    eprintln!("freeze: Ctrl+Space->painted {elapsed_ms:.1} ms - {verdict}");
+}
+
+/// Whether the warm capture path (roadmap 1.9f) is enabled. **Default off.**
+///
+/// # Why this is a setting and not simply the behaviour
+///
+/// Measured on the four-monitor rig 2026-07-30 and recorded in ADR-0026's second
+/// amendment: holding a session per monitor costs **+0.62 pp of one core** with
+/// the desktop mostly still and **+0.94 pp with video playing**, against the
+/// 0.87 pp `quality-bars.md` §1 leaves after the click-through poll — so the
+/// video case misses §1's target — plus ~175 MiB of private commit. The release
+/// condition for making it the default was *"cheap at idle"*, and 71 % of the
+/// remaining budget is not that. Whoever wants the instant freeze pays for it;
+/// whoever does not, does not.
+///
+/// # How it is set, and why that is temporary
+///
+/// Task **1.14** owns the settings UI and does not exist yet, so this reads
+/// `UPTAKE_WARM_CAPTURE` once at startup. When 1.14 lands, the env read is
+/// replaced by the stored setting and **this static stays the one place the
+/// answer lives** — the point of routing every reader through
+/// [`warm_capture_enabled`] rather than checking the variable at each site.
+static WARM_CAPTURE: AtomicBool = AtomicBool::new(false);
+
+/// Reads `UPTAKE_WARM_CAPTURE` and reports what it decided.
+///
+/// **The report is not decoration — it is the `I-11` fix.** A warm path that is
+/// enabled but never becomes warm behaves *exactly* like one that was never
+/// switched on: every capture falls back, everything works, slowly, forever. So
+/// the setting states itself at startup and [`freeze`] states how many stills
+/// the warm path actually served, rather than a reader inferring either from the
+/// absence of a complaint.
+pub(crate) fn init_warm_capture() {
+    let enabled = std::env::var("UPTAKE_WARM_CAPTURE")
+        .is_ok_and(|value| matches!(value.trim(), "1" | "true" | "on"));
+    WARM_CAPTURE.store(enabled, Ordering::SeqCst);
+    if enabled {
+        eprintln!(
+            "freeze: warm capture ENABLED (UPTAKE_WARM_CAPTURE) — sessions are held \
+             while Placement is visible; expect higher idle CPU and ~175 MB more RAM"
+        );
+    }
+}
+
+/// Whether the warm capture path is enabled. The only reader of [`WARM_CAPTURE`].
+pub(crate) fn warm_capture_enabled() -> bool {
+    WARM_CAPTURE.load(Ordering::SeqCst)
+}
+
+/// Starts or stops the held sessions to match `is_placement`.
+///
+/// Called from the one point every state transition funnels through, beside
+/// [`thaw`] and for the same reason: warm sessions exist only while Placement is
+/// visible, so "start on entry" and "never held outside Placement" are one rule,
+/// and writing it once means a state added later cannot forget it. Holding four
+/// full-monitor sessions into Living would be this feature's version of the
+/// undismissable-stills defect — an ongoing CPU and RAM cost for a state that
+/// cannot freeze.
+///
+/// A no-op when the setting is off, and [`uptake_capture::warm::stop`] is safe
+/// with nothing running, so the disabled path costs a bool read and the enabled
+/// path cannot leak.
+pub(crate) fn sync_warm_sessions(is_placement: bool) {
+    if !warm_capture_enabled() {
+        return;
+    }
+    if is_placement {
+        let held = uptake_capture::warm::start();
+        // Reports what is *warm*, not only what is held, because `start` keeps
+        // sessions that already cover the desktop — so a Placement → Placement
+        // transition prints `4 warm` while a fresh entry prints `0 warm` and
+        // stays that way for ~330 ms. A fixed "not warm yet" would have been
+        // wrong on one of those two paths, and `I-11` is this project's row
+        // about a probe whose output cannot distinguish the states it reports.
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "freeze: warm sessions held for {held} monitor(s) — {} warm",
+            uptake_capture::warm::status().warm
+        );
+        let _ = held;
+    } else {
+        uptake_capture::warm::stop();
+    }
+}
 
 /// Releases [`FREEZING`] however [`freeze`] leaves — including by panic, which
 /// would otherwise wedge the feature off for the life of the process.
@@ -252,6 +425,16 @@ impl std::fmt::Display for Skipped {
 pub(crate) struct FreezeReport {
     /// How many monitors were actually captured — see [`freeze`].
     pub count: usize,
+    /// How many of those came from a **warm** session rather than a fresh
+    /// capture.
+    ///
+    /// **The positive signal `I-11` says to build in.** With the setting on, a
+    /// warm path that never becomes warm is indistinguishable from one that was
+    /// never enabled: every monitor silently falls back and the feature works,
+    /// slowly. `0/4` here is the difference, and it is the first thing to read
+    /// on a rig pass — a fast freeze with `warm 0` means something else got
+    /// faster and the warm path is still doing nothing.
+    pub warm_served: usize,
     /// Wall-clock for the whole freeze, capture through encode.
     pub elapsed_ms: u128,
     /// The slowest single monitor's capture.
@@ -326,7 +509,7 @@ pub(crate) fn freeze(monitors: &[Rect]) -> Result<FreezeReport, Skipped> {
     // Scoped rather than detached: the stills must all be in hand before the
     // state is emitted, and a scope makes "every thread has finished" a property
     // of the type rather than something the caller has to remember to join.
-    let captured: Vec<(Still, u128, u128)> = std::thread::scope(|scope| {
+    let captured: Vec<(Still, u128, u128, bool)> = std::thread::scope(|scope| {
         let handles: Vec<_> = monitors
             .iter()
             .map(|monitor| scope.spawn(move || capture_still(*monitor)))
@@ -340,9 +523,10 @@ pub(crate) fn freeze(monitors: &[Rect]) -> Result<FreezeReport, Skipped> {
             .filter_map(|handle| handle.join().unwrap_or(None))
             .collect()
     });
-    let slowest_capture_ms = captured.iter().map(|(_, capture, _)| *capture).max();
-    let slowest_encode_ms = captured.iter().map(|(_, _, encode)| *encode).max();
-    let captured: Vec<Still> = captured.into_iter().map(|(still, _, _)| still).collect();
+    let slowest_capture_ms = captured.iter().map(|(_, capture, _, _)| *capture).max();
+    let slowest_encode_ms = captured.iter().map(|(_, _, encode, _)| *encode).max();
+    let warm_served = captured.iter().filter(|(_, _, _, warm)| *warm).count();
+    let captured: Vec<Still> = captured.into_iter().map(|(still, _, _, _)| still).collect();
     let count = captured.len();
     // Published under one lock, because the version and the stills are one fact:
     // a reader that catches the bump without the new stills builds URLs the
@@ -354,6 +538,7 @@ pub(crate) fn freeze(monitors: &[Rect]) -> Result<FreezeReport, Skipped> {
     publish(captured, generation)?;
     Ok(FreezeReport {
         count,
+        warm_served,
         elapsed_ms: started.elapsed().as_millis(),
         slowest_capture_ms: slowest_capture_ms.unwrap_or_default(),
         slowest_encode_ms: slowest_encode_ms.unwrap_or_default(),
@@ -400,14 +585,30 @@ fn publish(captured: Vec<Still>, generation: u64) -> Result<(), Skipped> {
 /// keeping it would mean a monitor whose pixels a drag would use but which shows
 /// live content — the see-one-thing-get-another failure this feature exists to
 /// avoid.
-fn capture_still(monitor: Rect) -> Option<(Still, u128, u128)> {
+fn capture_still(monitor: Rect) -> Option<(Still, u128, u128, bool)> {
     let capture_started = Instant::now();
-    let shot = match uptake_capture::capture_region(monitor) {
-        Ok(shot) => shot,
-        Err(error) => {
-            eprintln!("freeze: could not capture {monitor:?}: {error}");
-            return None;
-        }
+    // The warm path first, when it is on and has something to hand over.
+    //
+    // **`None` here is ordinary and must stay cheap.** A session is not warm for
+    // its first ~330 ms (measured on the rig 2026-07-30), so a `Ctrl+Space`
+    // pressed straight after entering Placement takes the cold path — which is
+    // the pre-1.9f behaviour, not a failure. The window is close enough to
+    // `UT-F-45`'s own ~350 ms lateness to be worth naming in those terms: for
+    // that first third of a second the feature is exactly as late as it was
+    // before, and no message says so because there is nothing the user could do.
+    let warm = warm_capture_enabled()
+        .then(|| uptake_capture::warm::capture_monitor(monitor))
+        .flatten();
+    let served_warm = warm.is_some();
+    let shot = match warm {
+        Some(shot) => shot,
+        None => match uptake_capture::capture_region(monitor) {
+            Ok(shot) => shot,
+            Err(error) => {
+                eprintln!("freeze: could not capture {monitor:?}: {error}");
+                return None;
+            }
+        },
     };
     let capture_ms = capture_started.elapsed().as_millis();
     let encode_started = Instant::now();
@@ -429,6 +630,7 @@ fn capture_still(monitor: Rect) -> Option<(Still, u128, u128)> {
         },
         capture_ms,
         encode_started.elapsed().as_millis(),
+        served_warm,
     ))
 }
 

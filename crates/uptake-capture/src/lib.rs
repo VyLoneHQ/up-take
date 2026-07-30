@@ -62,6 +62,8 @@ mod gdi;
 #[cfg(windows)]
 mod monitors;
 #[cfg(windows)]
+pub mod warm;
+#[cfg(windows)]
 mod wgc;
 
 pub use error::CaptureError;

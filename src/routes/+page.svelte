@@ -29,6 +29,7 @@ import {
   type PhysRect,
   type PinPayload,
   physRectToCss,
+  reportFreezeLatency,
   reportLatency,
   type SelectionPayload,
   type StatePayload,
@@ -88,6 +89,35 @@ const frames: CssRect[] = $derived(monitorFramesCss(monitors, origin, dpr));
  * beside them, so the badge cannot appear over a monitor showing live content.
  */
 const frozen: boolean = $derived(stills.length > 0);
+/**
+ * The `Ctrl+Space` → painted probe awaiting its echo, or null.
+ *
+ * Debug builds only — Rust stamps none in release. Cleared as it is echoed, so
+ * a later state event cannot resend a keypress against a paint it did not
+ * cause.
+ */
+let freezeProbe: number | null = $state(null);
+
+/**
+ * Echoes the freeze probe once the stills have decoded and painted.
+ *
+ * An effect rather than part of the event handler because the `<img>` elements
+ * do not exist until Svelte has rendered the stills the same event delivered —
+ * an effect runs after that, which is the earliest point the images can be
+ * found at all.
+ */
+$effect(() => {
+  const probe = freezeProbe;
+  if (probe === null || stillFrames.length === 0) return;
+  // Cleared before awaiting, not after: the decode is asynchronous, and a
+  // second freeze arriving mid-await must start its own measurement rather
+  // than find this one still pending.
+  freezeProbe = null;
+  const images = [
+    ...document.querySelectorAll<HTMLImageElement>('img.frozen-still'),
+  ];
+  void reportFreezeLatency(invoke, probe, images);
+});
 /**
  * The stills with their rects converted to CSS, through the same helper every
  * other overlay rectangle uses (ADR-0011: the WebView owns its scale factor).
@@ -184,6 +214,10 @@ onMount(() => {
       ][],
     );
     dpr = window.devicePixelRatio;
+    // Held rather than echoed here: the images do not exist until Svelte has
+    // rendered the stills just assigned above, and the probe has to outlive
+    // their decode. The effect below owns the rest of it.
+    freezeProbe = event.payload.freeze_probe;
     // A hidden overlay is drawing nothing; drop any half-finished selection so
     // it cannot reappear on the next show before the poll clears it.
     if (overlayState === 'hidden') {

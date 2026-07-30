@@ -120,6 +120,22 @@ pub fn sync_bounds(app: &AppHandle) -> Result<(), String> {
     // An area snapped to a monitor that no longer exists would be contained
     // against a rectangle that is no longer there.
     refresh_monitor_cache(&window);
+    // The warm sessions hold a *copy* of the monitor list too, and until
+    // 2026-07-30 nothing resynced it: `sync_warm_sessions` was called only from
+    // `apply`, i.e. on a state transition, so a display moved during a Placement
+    // visit left the sessions keyed to entry-time bounds while `freeze` asked
+    // with fresh ones. `capture_monitor` matches by centre containment, so after
+    // a monitor swap one display's pixels were served and reported as another's
+    // — published as the frozen still and croppable to the clipboard. Found as
+    // `Vuln 2` in PR #28's security review.
+    //
+    // `start` re-runs its own `covers` check and returns early when nothing
+    // moved, so this costs one monitor enumeration on a display change and
+    // rebuilds only when the desktop actually differs.
+    crate::freeze::sync_warm_sessions(matches!(
+        *lock(&app.state::<Mutex<OverlayState>>()),
+        OverlayState::Placement
+    ));
     Ok(())
 }
 
@@ -306,6 +322,16 @@ struct StatePayload {
     /// frozen with no stills would render as a live screen the app believes is
     /// frozen.
     stills: Vec<(i32, i32, u32, u32, String)>,
+    /// The in-flight `Ctrl+Space` → painted probe, or `null`.
+    ///
+    /// Present on exactly one payload per freeze — the one carrying the new
+    /// stills — because [`crate::freeze::take_paint_probe`] clears as it reads.
+    /// Always `null` in a release build, where nothing stamps one.
+    ///
+    /// The frontend echoes it back through `overlay_report_freeze_latency`
+    /// **after every still has decoded**, which is the half of
+    /// `quality-bars.md` §1's row that 1.9f's `72–78 ms` never covered.
+    freeze_probe: Option<u64>,
 }
 
 const fn state_name(state: OverlayState) -> &'static str {
@@ -433,6 +459,10 @@ fn apply(app: &AppHandle, state: OverlayState) -> Result<(), String> {
     // screen surviving into Living would be the worst version of this feature —
     // a still the user cannot dismiss and did not ask to keep.
     crate::freeze::thaw();
+    // Warm capture sessions live and die with Placement, placed here beside the
+    // thaw and for the same reason: one funnel, so a state added later cannot
+    // forget to stop them. A no-op unless the setting is on (roadmap 1.9f).
+    crate::freeze::sync_warm_sessions(matches!(state, OverlayState::Placement));
     match state {
         OverlayState::Hidden => {
             // Emit first so the frontend clears its indicator, then hide.
@@ -520,6 +550,15 @@ fn emit_state(app: &AppHandle, state: OverlayState) -> Result<(), String> {
             monitors,
             armed,
             frozen: !stills.is_empty(),
+            // Taken only when this payload actually carries stills. A thaw or an
+            // unrelated re-emit must not consume a probe a freeze is still
+            // waiting to attach to — and must not report one against a paint
+            // that drew nothing.
+            freeze_probe: if stills.is_empty() {
+                None
+            } else {
+                crate::freeze::take_paint_probe()
+            },
             stills,
         },
     )
@@ -560,6 +599,11 @@ pub fn toggle_freeze(app: &AppHandle) {
         }
         return;
     }
+    // Stamped here — on the key, on the calling thread, before the capture
+    // thread is even spawned — because `quality-bars.md` §1's row measures what
+    // the user waits for. Anything later would time a stage and call it the
+    // promise.
+    crate::freeze::stamp_paint_probe();
     let app = app.clone();
     std::thread::spawn(move || {
         let monitors = monitor_rects();
@@ -585,10 +629,13 @@ pub fn toggle_freeze(app: &AppHandle) {
         // four monitors is a real state the user is about to select on, and
         // "frozen" alone would hide which screens are still live.
         eprintln!(
-            "freeze: froze {}/{} monitor(s) in {} ms — slowest monitor: capture {} ms, encode {} ms",
+            "freeze: froze {}/{} monitor(s) in {} ms — warm {}/{}, slowest monitor: \
+             capture {} ms, encode {} ms",
             report.count,
             monitors.len(),
             report.elapsed_ms,
+            report.warm_served,
+            report.count,
             report.slowest_capture_ms,
             report.slowest_encode_ms
         );
@@ -1139,6 +1186,24 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[tauri::command]
 pub fn overlay_report_latency(probe: u64) {
     placement::record_latency(probe);
+}
+
+/// IPC surface: the frontend returns the freeze probe once every still has
+/// decoded **and** the following frame has painted.
+///
+/// Separate from [`overlay_report_latency`] rather than sharing its collector:
+/// the poll probe accumulates ~1,200 samples across a drag and reports a mean,
+/// while a freeze is one event whose single number is the answer. Pooling them
+/// would average two different rows of `quality-bars.md` §1 into one figure
+/// belonging to neither.
+///
+/// A no-op in release, where nothing stamps a probe to echo.
+#[tauri::command]
+pub fn overlay_report_freeze_latency(probe: u64) {
+    #[cfg(debug_assertions)]
+    crate::freeze::record_paint_latency(probe);
+    #[cfg(not(debug_assertions))]
+    let _ = probe;
 }
 
 /// IPC surface: `Esc` from the overlay emits this intent.
