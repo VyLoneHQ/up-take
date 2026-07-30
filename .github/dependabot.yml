@@ -1,4 +1,13 @@
 version: 2
+
+# Majors are deliberately excluded from every group below, so each one arrives
+# as its own PR. A group of `"*"` with no `update-types` is all-or-nothing: PR
+# #21 bundled three major jumps (TypeScript 5→7, Vite 6→8, vite-plugin-svelte
+# 5→7) with three patch bumps, TypeScript 7 broke `svelte-check` on
+# `useCaseSensitiveFileNames`, and the whole PR sat red for eight sessions —
+# taking five safe updates down with it. One red major must not be able to
+# block a patch, and a major that needs code changes deserves a PR of its own
+# to review it in.
 updates:
   # Root of the Cargo workspace: manifest and Cargo.lock moved here in the
   # F-4 restructure (066942f); scanning /src-tauri would miss the lockfile.
@@ -10,6 +19,9 @@ updates:
       cargo-dependencies:
         patterns:
           - "*"
+        update-types:
+          - "minor"
+          - "patch"
 
   - package-ecosystem: "npm"
     directory: "/"
@@ -26,6 +38,9 @@ updates:
       npm-dependencies:
         patterns:
           - "*"
+        update-types:
+          - "minor"
+          - "patch"
 
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -35,3 +50,6 @@ updates:
       actions-dependencies:
         patterns:
           - "*"
+        update-types:
+          - "minor"
+          - "patch"
