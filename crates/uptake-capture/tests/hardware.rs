@@ -3,7 +3,7 @@
 //! run on the rig with:
 //!
 //! ```text
-//! cargo test -p uptake-capture -- --ignored
+//! cargo test -p uptake-capture --test hardware -- --ignored --nocapture
 //! ```
 //!
 //! quality-bars.md §2 scopes this crate to "thin integration tests only" for
@@ -22,6 +22,25 @@ use uptake_core::geometry::{Rect, Size};
 use windows_sys::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
+
+/// Serialises the tests that drive `warm`'s process-global `SESSIONS`.
+///
+/// **libtest runs tests in one process, concurrently.** Two tests calling
+/// `warm::start`/`warm::stop` therefore share one set of sessions: one test's
+/// `stop` tears down the sessions the other is mid-assertion on, and one's
+/// `start` can satisfy the other's warm-up wait. The failure would be
+/// intermittent and would read as a defect in the feature.
+///
+/// This became reachable on 2026-07-30, when a second warm rig test was added;
+/// with only one there was nothing to collide with. It is `F-33`'s family — a
+/// test reaching another through process-global state — with the difference
+/// that `SESSIONS` is the production design rather than a testing seam, so the
+/// fix is to serialise rather than to parameterise.
+///
+/// Taken with `unwrap_or_else(PoisonError::into_inner)` so one failing test
+/// does not cascade into a poisoned-lock panic in the next, which would report
+/// the wrong test as broken.
+static WARM_SESSIONS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Physical coordinates require per-monitor-DPI awareness (see the crate
 /// docs). Idempotent: the second call in the same process fails harmlessly.
@@ -333,6 +352,11 @@ fn differing_bytes(left: &[u8], right: &[u8]) -> Option<String> {
 #[test]
 #[ignore = "needs a real desktop and a static, textured region: holds warm WGC sessions"]
 fn a_warm_readback_and_a_fresh_capture_agree_byte_for_byte() {
+    // Held for the whole test: `warm`'s sessions are process-global, so a
+    // sibling test's `stop` would tear down what this one is asserting on.
+    let _serial = WARM_SESSIONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     ensure_dpi_aware();
 
     let sessions = uptake_capture::warm::start();
@@ -428,6 +452,11 @@ fn a_warm_readback_and_a_fresh_capture_agree_byte_for_byte() {
 #[test]
 #[ignore = "needs a real desktop: holds warm WGC sessions across a simulated re-entry"]
 fn re_entering_placement_keeps_the_sessions_already_warm() {
+    // Held for the whole test: `warm`'s sessions are process-global, so a
+    // sibling test's `stop` would tear down what this one is asserting on.
+    let _serial = WARM_SESSIONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     ensure_dpi_aware();
 
     let sessions = uptake_capture::warm::start();
