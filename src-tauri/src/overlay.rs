@@ -120,6 +120,22 @@ pub fn sync_bounds(app: &AppHandle) -> Result<(), String> {
     // An area snapped to a monitor that no longer exists would be contained
     // against a rectangle that is no longer there.
     refresh_monitor_cache(&window);
+    // The warm sessions hold a *copy* of the monitor list too, and until
+    // 2026-07-30 nothing resynced it: `sync_warm_sessions` was called only from
+    // `apply`, i.e. on a state transition, so a display moved during a Placement
+    // visit left the sessions keyed to entry-time bounds while `freeze` asked
+    // with fresh ones. `capture_monitor` matches by centre containment, so after
+    // a monitor swap one display's pixels were served and reported as another's
+    // — published as the frozen still and croppable to the clipboard. Found as
+    // `Vuln 2` in PR #28's security review.
+    //
+    // `start` re-runs its own `covers` check and returns early when nothing
+    // moved, so this costs one monitor enumeration on a display change and
+    // rebuilds only when the desktop actually differs.
+    crate::freeze::sync_warm_sessions(matches!(
+        *lock(&app.state::<Mutex<OverlayState>>()),
+        OverlayState::Placement
+    ));
     Ok(())
 }
 

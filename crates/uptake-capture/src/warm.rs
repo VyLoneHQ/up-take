@@ -141,6 +141,22 @@ impl Slot {
             .unwrap_or_else(PoisonError::into_inner)
             .is_some()
     }
+
+    /// Whether this slot's pump thread is still running.
+    ///
+    /// Exact rather than approximate, and only because of the publish handshake:
+    /// [`spawn_session`] does not add a slot to `SESSIONS` until its pump has
+    /// published an id, and [`ThreadIdGuard`] clears the id as the pump's last
+    /// act. So for any slot a reader can reach, `Some` means alive and `None`
+    /// means the pump has gone — there is no third "not yet" state to confuse
+    /// with death. Before the handshake, `None` meant either, which is exactly
+    /// why liveness could not be tested here.
+    fn is_pumped(&self) -> bool {
+        self.thread_id
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some()
+    }
 }
 
 /// What the warm path is currently doing, for a caller that wants to report it.
@@ -184,10 +200,19 @@ impl WarmStatus {
 /// pressed in. A rig pass cannot see it: enter Placement fresh, wait, freeze,
 /// and the path is warm every time.
 ///
-/// The comparison is the full enumeration rather than a count, so a display
-/// unplugged, added or moved while Placement is up still rebuilds — the held
-/// bounds are what [`capture_monitor`] matches on and reports at, and serving a
-/// monitor that moved would offset every crop by the disagreement.
+/// The comparison is the full enumeration rather than a count, so a rebuild
+/// happens whenever the desktop this call sees differs from the one held.
+///
+/// **What that does and does not cover — corrected 2026-07-30 after the PR #28
+/// review, whose first version of this paragraph claimed more than the code
+/// does.** `covers` is evaluated *when `start` is called*, and nothing polls.
+/// The callers are the overlay's state-transition funnel and its display-change
+/// path (`sync_bounds`), so a topology change is picked up when Windows reports
+/// it — **not** continuously, and not by `capture_monitor` noticing at freeze
+/// time. If a display moves and neither path runs, the slots keep entry-time
+/// bounds for the rest of the visit. Saying otherwise was `bug_003`'s defect —
+/// a comment asserting a property the code lacks — committed in the same change
+/// that fixed it.
 pub fn start() -> usize {
     let Ok(monitors) = crate::monitors::enumerate() else {
         // We cannot show that what is held still describes the desktop, so we
@@ -212,21 +237,37 @@ pub fn start() -> usize {
             stop: AtomicBool::new(false),
             thread_id: Mutex::new(None),
         });
-        spawn_session(Arc::clone(&slot));
-        sessions.push(slot);
+        // Published *before* the slot joins `SESSIONS`, so `thread_id` is
+        // `Some` for every slot a reader can reach — see `spawn_session`.
+        if spawn_session(Arc::clone(&slot)) {
+            sessions.push(slot);
+        }
     }
     sessions.len()
 }
 
-/// Whether the held sessions describe exactly the monitors enumerated now.
+/// Whether the held sessions describe exactly the monitors enumerated now
+/// **and** are all still being pumped.
 ///
-/// Both halves are load-bearing. The length check catches a monitor **removed**,
-/// which the per-monitor search cannot see; the search catches one added, moved
-/// or resized. Handle *and* bounds must agree: a handle alone would accept a
-/// monitor that changed resolution under a held session, whose retained texture
-/// is sized to the old frame.
+/// Three parts, each catching something the others cannot. The length check
+/// catches a monitor **removed**, which the per-monitor search cannot see. The
+/// search catches one added, moved or resized — handle *and* bounds must agree,
+/// because a handle alone would accept a monitor that changed resolution under a
+/// held session, whose retained texture is sized to the old frame.
+///
+/// **`is_pumped` is the third, added 2026-07-30 from the PR #28 review, and it
+/// exists because the other two made a pre-existing weakness durable.** A slot
+/// whose pump has exited still matches on handle and bounds and still reports
+/// `is_warm`, because its last texture is retained. Before `start` learned to
+/// keep sessions, re-entering Placement rebuilt such a slot by accident; keeping
+/// them turned that accident into a policy of preserving a dead session, which
+/// serves a frame frozen at the moment the pump died as though it were the
+/// screen. A pump exits for reasons nobody chose — the capture item closing when
+/// a monitor sleeps, a driver reset, a `retain` failure — so this is ordinary,
+/// not exotic.
 fn covers(sessions: &[Arc<Slot>], monitors: &[crate::plan::MonitorInfo]) -> bool {
     sessions.len() == monitors.len()
+        && sessions.iter().all(|slot| slot.is_pumped())
         && monitors.iter().all(|monitor| {
             sessions
                 .iter()
@@ -377,14 +418,27 @@ fn readback(slot: &Slot) -> Option<Vec<u8>> {
     .ok()?;
 
     let row_pitch = mapped.RowPitch as usize;
-    let height = retained.size.height as usize;
-    // SAFETY: the mapping stays valid until `Unmap` below, and D3D11 guarantees
-    // the mapped region covers `RowPitch × Height` bytes for a 2D texture with
-    // one mip level. Taking it as a slice here rather than doing pointer
-    // arithmetic in the copy is what lets `pack_rows` be an ordinary tested
-    // function instead of unsafe code nothing can exercise without a desktop.
-    let mapped_bytes =
-        unsafe { std::slice::from_raw_parts(mapped.pData.cast::<u8>(), row_pitch * height) };
+    // **`DepthPitch`, not `RowPitch × Height`** — corrected 2026-07-30 from the
+    // PR #28 review. D3D11 reports the total size of the mapped region for a 2D
+    // subresource here, so the length comes from the API rather than from a
+    // product we recomputed out of the same numbers `pack_rows` then checks
+    // against. With the old form its length guard compared a value with itself
+    // and could not fail by arithmetic identity; it is now a comparison of two
+    // independent quantities and can.
+    //
+    // It is also the safety-relevant one. `from_raw_parts` commits to the length
+    // *before* any validation exists, so a mapping shorter than claimed was
+    // already undefined behaviour on this line and `pack_rows` never got the
+    // chance to refuse. Taking the size from the mapping removes the guess.
+    let mapped_len = mapped.DepthPitch as usize;
+    // SAFETY: the mapping stays valid until `Unmap` below, and `DepthPitch` is
+    // D3D11's own count of the bytes it just mapped. Taking it as a slice here
+    // rather than doing pointer arithmetic in the copy is what lets `pack_rows`
+    // be an ordinary tested function instead of unsafe code nothing can exercise
+    // without a desktop. A driver reporting `0` here costs a fall to the cold
+    // path (`pack_rows` refuses a mapping shorter than the image) rather than a
+    // bad read, which is the right way round for a value we do not control.
+    let mapped_bytes = unsafe { std::slice::from_raw_parts(mapped.pData.cast::<u8>(), mapped_len) };
     let packed = pack_rows(mapped_bytes, row_pitch, retained.size);
     // SAFETY: the staging texture was mapped immediately above and no early
     // return happens in between, so this unmaps exactly what was mapped.
@@ -545,26 +599,73 @@ fn create_texture(
     texture.ok_or_else(|| "CreateTexture2D succeeded but returned nothing".to_string())
 }
 
-/// Clears a slot's published thread id as the pump thread leaves, so [`stop`]
-/// can never post to an id the OS has handed to someone else.
+/// Marks a slot dead as its pump thread leaves: clears the published thread id
+/// **and** releases the retained frame.
 ///
-/// A `Drop` rather than a statement at the end of the closure because a panic in
-/// the pump must clear it too — an unwound thread is exactly as dead as a
-/// returned one, and its id is exactly as reusable.
+/// A `Drop` rather than statements at the end of the closure because a panic in
+/// the pump must do both too — an unwound thread is exactly as dead as a
+/// returned one, its id is exactly as reusable, and its last frame is exactly as
+/// stale.
+///
+/// # The two things this closes, which are one thing
+///
+/// * **The id** must not outlive the thread, or [`stop`] posts `WM_QUIT` to
+///   whatever the OS gave that number to next. See [`stop`].
+/// * **The frame** must not outlive the pump, or [`capture_monitor`] keeps
+///   serving it as the current screen. A pump ends for reasons nobody chose —
+///   the capture item closing when a monitor sleeps or is unplugged, a driver
+///   reset, a `retain` failure — and `windows-capture` reports none of them to
+///   us in a form we act on. Without this, `is_warm` stays true forever and a
+///   freeze publishes the desktop as it was when the pump died, under a badge
+///   saying frozen and croppable to the clipboard. Found in the PR #28 security
+///   review as `Vuln 1`; the frame is also the larger of the two leaks, since it
+///   is a full-monitor GPU texture held until the process exits.
 struct ThreadIdGuard(Arc<Slot>);
 
 impl Drop for ThreadIdGuard {
     fn drop(&mut self) {
+        // Order matters only for a reader that takes both locks, and none does;
+        // taken separately so neither wait is held across the other.
         *self
             .0
             .thread_id
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = None;
+        *self
+            .0
+            .retained
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
     }
 }
 
-/// Spawns `slot`'s pump thread.
-fn spawn_session(slot: Arc<Slot>) {
+/// Spawns `slot`'s pump thread and waits for it to publish its thread id.
+///
+/// Returns whether the pump reported for duty. **The caller must not add a slot
+/// to `SESSIONS` when this is `false`** — a slot nothing pumps is a slot
+/// [`covers`] would treat as dead and [`capture_monitor`] would serve nothing
+/// from.
+///
+/// # Why the wait, rather than spawn-and-push
+///
+/// Added 2026-07-30 from the PR #28 review, copying [`crate::wgc::spawn`]'s
+/// handshake, which exists for exactly this and says so. Without it there is a
+/// window between the spawn and the publish in which `thread_id` is `None`
+/// **because the pump has not got there yet** rather than because it has gone.
+/// [`stop`] landing in that window reads `None`, posts nothing, and drops the
+/// slot from `SESSIONS` — leaving a live WGC session and its full-monitor
+/// texture with no handle left to stop them. Its only remaining exit is the stop
+/// flag inside `on_frame_arrived`, which on a still monitor may never run again;
+/// that is precisely why `WM_QUIT` exists here.
+///
+/// It also buys the property [`Slot::is_pumped`] rests on: for any slot a reader
+/// can reach, `thread_id` is `None` **only** when the pump has exited.
+///
+/// One second, matching `wgc.rs`: the preamble is a `PeekMessageW` and a
+/// `GetCurrentThreadId`, so this is a "the thread never ran at all" detector
+/// rather than a tuning knob.
+fn spawn_session(slot: Arc<Slot>) -> bool {
+    let (tid_tx, tid_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         // Force the message queue into existence *before* publishing the thread
         // id: `PostThreadMessageW` fails against a thread that has none yet, and
@@ -593,6 +694,9 @@ fn spawn_session(slot: Arc<Slot>) {
         // fails to start, one unwound by the stop flag, one unwound by WM_QUIT,
         // and a panic. See `stop`, whose correctness is this guard's other half.
         let _clear_id_on_exit = ThreadIdGuard(Arc::clone(&slot));
+        // Announced only after the guard is armed, so a slot the caller accepts
+        // is one whose death is guaranteed to be reported.
+        let _ = tid_tx.send(());
 
         // The handle re-becomes a Monitor only here, on the thread that uses it —
         // the same manual `Send` `wgc.rs` performs, for the same reason.
@@ -625,6 +729,9 @@ fn spawn_session(slot: Arc<Slot>) {
             let _ = &error;
         }
     });
+    tid_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .is_ok()
 }
 
 #[cfg(test)]
@@ -715,13 +822,15 @@ mod tests {
         );
     }
 
+    /// A slot with a live pump, which is the only kind `SESSIONS` can hold —
+    /// `spawn_session` waits for the id before the caller pushes the slot.
     fn slot_at(handle: isize, bounds: Rect) -> Arc<Slot> {
         Arc::new(Slot {
             bounds,
             handle,
             retained: Mutex::new(None),
             stop: AtomicBool::new(false),
-            thread_id: Mutex::new(None),
+            thread_id: Mutex::new(Some(1000 + handle as u32)),
         })
     }
 
@@ -795,6 +904,28 @@ mod tests {
         assert!(
             !covers(&sessions, &resized),
             "same handle, new resolution — the retained texture is the old size"
+        );
+    }
+
+    /// A slot whose pump has exited matches on handle and bounds and still
+    /// reports `is_warm`, because its last texture is retained. Keeping such a
+    /// slot means serving a frame frozen at the moment the pump died as though
+    /// it were the screen — PR #28's security review, `Vuln 1`.
+    ///
+    /// **This is the case `start`'s early return introduced**: before it, a
+    /// re-entry rebuilt a dead slot by accident.
+    #[test]
+    fn a_slot_whose_pump_has_exited_is_not_covered() {
+        let (sessions, monitors) = four_monitors();
+        assert!(covers(&sessions, &monitors), "control: all pumps live");
+        // Exactly what `ThreadIdGuard` does on the way out.
+        *sessions[2]
+            .thread_id
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        assert!(
+            !covers(&sessions, &monitors),
+            "a dead pump must force a rebuild, not be preserved"
         );
     }
 
