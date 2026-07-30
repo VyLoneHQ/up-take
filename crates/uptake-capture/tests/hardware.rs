@@ -311,3 +311,99 @@ fn differing_bytes(left: &[u8], right: &[u8]) -> Option<String> {
         first / 4
     ))
 }
+
+/// The warm path is a **fifth** source of a Screenshot's pixels, so 1B's
+/// exit-gate row 2 — every path producing identical results for the same
+/// rectangle — has to cover it.
+///
+/// # What this can and cannot assert
+///
+/// A warm readback and a fresh capture are taken at **different instants** from
+/// **different sessions**, so byte equality is only meaningful over a part of
+/// the screen that is genuinely still. That is the same constraint
+/// `a_cropped_capture_and_a_direct_capture_agree_byte_for_byte` works under, and
+/// this test borrows its machinery: find a sub-rectangle that is both textured
+/// and unchanged across two captures, then sandwich the comparison so the region
+/// is shown to have held still *across* it rather than merely before it.
+///
+/// **The staticness failures are reported as preconditions, not as the
+/// invariant.** A rig run where the scanned area is animating proves nothing
+/// about pixel identity, and saying so is the difference between this test and
+/// one that passes for the wrong reason (`UT-F-40`).
+#[test]
+#[ignore = "needs a real desktop and a static, textured region: holds warm WGC sessions"]
+fn a_warm_readback_and_a_fresh_capture_agree_byte_for_byte() {
+    ensure_dpi_aware();
+
+    let sessions = uptake_capture::warm::start();
+    assert!(sessions > 0, "no monitors were enumerated to warm");
+
+    // The ~330 ms warm-up measured on the rig, with room. Polled rather than
+    // slept-through so the test reports how the sessions actually came up.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::time::Instant::now() < deadline && !uptake_capture::warm::status().fully_warm() {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let status = uptake_capture::warm::status();
+    assert!(
+        status.fully_warm(),
+        "precondition failed, not the invariant: only {}/{} sessions became warm \
+         within 3 s, so there is nothing to compare",
+        status.warm,
+        status.sessions
+    );
+
+    // Away from the origin, for the reason UT-F-45 records: the top-left of a
+    // desktop is where notifications and window chrome live.
+    let surrounding = Rect::new(640, 480, 640, 480);
+    let before = uptake_capture::capture_region(surrounding).unwrap();
+    let settled = uptake_capture::capture_region(surrounding).unwrap();
+    let wanted = textured_subrect(&before, &settled, surrounding).expect(
+        "precondition failed, not the invariant: no region found that is both \
+         textured and unchanged across two captures. Re-run with a still, \
+         detailed window in the scanned area.",
+    );
+
+    // The whole monitor holding that rectangle, read back off the warm session.
+    let warm = uptake_capture::warm::capture_monitor(surrounding)
+        .expect("a warm session covers the monitor the scanned region is on");
+    let warm_crop = warm
+        .bitmap
+        .crop_screen(warm.rect.origin, wanted)
+        .expect("the found rectangle lies inside the monitor the warm frame covers");
+
+    let direct = uptake_capture::capture_region(wanted).unwrap();
+
+    // Sandwiched, exactly as the cold-path test is: re-read the warm session
+    // *after* the direct capture and require the same pixels, which is what
+    // shows the region held still across the comparison rather than only before
+    // it. A warm session updates on every compositor frame, so this is a real
+    // check and not a re-read of a frozen buffer.
+    let warm_after =
+        uptake_capture::warm::capture_monitor(surrounding).expect("the warm session is still held");
+    let warm_crop_after = warm_after
+        .bitmap
+        .crop_screen(warm_after.rect.origin, wanted)
+        .expect("the found rectangle lies inside the monitor the warm frame covers");
+    assert_eq!(
+        differing_bytes(warm_crop.pixels(), warm_crop_after.pixels()),
+        None,
+        "precondition failed, not the invariant: the region changed while the \
+         fresh capture was taken, so byte equality below would prove nothing."
+    );
+
+    assert_eq!(warm_crop.size(), direct.bitmap.size());
+    assert_eq!(
+        differing_bytes(warm_crop.pixels(), direct.bitmap.pixels()),
+        None,
+        "a warm readback and a fresh capture of the same rectangle must agree — \
+         1B exit-gate row 2, extended to the warm path (task 1.9f)"
+    );
+
+    uptake_capture::warm::stop();
+    assert_eq!(
+        uptake_capture::warm::status().sessions,
+        0,
+        "stop must release every session, or Placement would leak them"
+    );
+}

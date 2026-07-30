@@ -433,6 +433,10 @@ fn apply(app: &AppHandle, state: OverlayState) -> Result<(), String> {
     // screen surviving into Living would be the worst version of this feature —
     // a still the user cannot dismiss and did not ask to keep.
     crate::freeze::thaw();
+    // Warm capture sessions live and die with Placement, placed here beside the
+    // thaw and for the same reason: one funnel, so a state added later cannot
+    // forget to stop them. A no-op unless the setting is on (roadmap 1.9f).
+    crate::freeze::sync_warm_sessions(matches!(state, OverlayState::Placement));
     match state {
         OverlayState::Hidden => {
             // Emit first so the frontend clears its indicator, then hide.
@@ -585,10 +589,13 @@ pub fn toggle_freeze(app: &AppHandle) {
         // four monitors is a real state the user is about to select on, and
         // "frozen" alone would hide which screens are still live.
         eprintln!(
-            "freeze: froze {}/{} monitor(s) in {} ms — slowest monitor: capture {} ms, encode {} ms",
+            "freeze: froze {}/{} monitor(s) in {} ms — warm {}/{}, slowest monitor: \
+             capture {} ms, encode {} ms",
             report.count,
             monitors.len(),
             report.elapsed_ms,
+            report.warm_served,
+            report.count,
             report.slowest_capture_ms,
             report.slowest_encode_ms
         );

@@ -45,21 +45,19 @@ windows-sys = { workspace = true, features = [
   "Win32_UI_HiDpi",
   "Win32_UI_WindowsAndMessaging",
 ] }
+# The COM-flavoured bindings, as distinct from windows-sys' raw ones. warm.rs
+# retains a WGC frame as a GPU texture, which means handling the D3D11
+# interfaces windows-capture hands out — and those are `windows` types, so the
+# version must resolve to the same one it uses or they are not the same types.
+windows = { workspace = true, features = [
+  "Win32_Graphics_Direct3D11",
+  "Win32_Graphics_Dxgi_Common",
+] }
 
 [dev-dependencies]
 # quality-bars.md §2: coordinate math gets property tests. The capture plan
 # (region ∩ monitors → per-monitor crops and output offsets) is coordinate math.
 proptest = { workspace = true }
-
-[target."cfg(windows)".dev-dependencies]
-# examples/warm_session.rs only (task 1.9f's spike): retaining a WGC frame as a
-# GPU texture means handling the D3D11 interfaces windows-capture exposes, and
-# those are COM types from the `windows` crate rather than windows-sys. Not a
-# dependency of the library itself — nothing in src/ touches D3D11 directly.
-windows = { workspace = true, features = [
-  "Win32_Graphics_Direct3D11",
-  "Win32_Graphics_Dxgi_Common",
-] }
 
 [lints]
 workspace = true
