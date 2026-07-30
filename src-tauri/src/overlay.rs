@@ -119,7 +119,6 @@ pub fn sync_bounds(app: &AppHandle) -> Result<(), String> {
     // this is the function every display change routes through while visible.
     // An area snapped to a monitor that no longer exists would be contained
     // against a rectangle that is no longer there.
-    refresh_monitor_cache(&window);
     // The warm sessions hold a *copy* of the monitor list too, and until
     // 2026-07-30 nothing resynced it: `sync_warm_sessions` was called only from
     // `apply`, i.e. on a state transition, so a display moved during a Placement
@@ -129,13 +128,18 @@ pub fn sync_bounds(app: &AppHandle) -> Result<(), String> {
     // — published as the frozen still and croppable to the clipboard. Found as
     // `Vuln 2` in PR #28's security review.
     //
-    // `start` re-runs its own `covers` check and returns early when nothing
-    // moved, so this costs one monitor enumeration on a display change and
-    // rebuilds only when the desktop actually differs.
-    crate::freeze::sync_warm_sessions(matches!(
-        *lock(&app.state::<Mutex<OverlayState>>()),
-        OverlayState::Placement
-    ));
+    // **Gated on the cache having actually changed**, not on the event: this
+    // function is re-entered by its own `apply_bounds` corrections (see the
+    // window-event handler in `lib.rs`), so an unconditional call resynced twice
+    // per real change and on every no-op pass besides. `start` would short-
+    // circuit those, but a rebuild is not free — it blocks on each pump's
+    // handshake — and this path runs on the event-loop thread.
+    if refresh_monitor_cache(&window) {
+        crate::freeze::sync_warm_sessions(matches!(
+            *lock(&app.state::<Mutex<OverlayState>>()),
+            OverlayState::Placement
+        ));
+    }
     Ok(())
 }
 
@@ -951,11 +955,29 @@ pub(crate) fn area_bounds(app: &AppHandle, id: AreaId) -> Option<Rect> {
 /// rather than polled.
 static MONITOR_CACHE: Mutex<Vec<Rect>> = Mutex::new(Vec::new());
 
-/// Refreshes [`MONITOR_CACHE`] from the window's current monitor list.
-fn refresh_monitor_cache(window: &WebviewWindow) {
-    if let Ok(list) = monitors(window) {
-        *lock(&MONITOR_CACHE) = list.iter().map(|monitor| monitor.bounds).collect();
+/// Refreshes [`MONITOR_CACHE`] from the window's current monitor list, and
+/// reports whether the list actually changed.
+///
+/// The return value exists for [`sync_bounds`]'s warm-session resync. Every
+/// `apply_bounds` raises `Moved`/`Resized`, which route back here, so a real
+/// display change produces a convergence pass behind it where nothing differs.
+/// Acting on the change rather than on the event keeps the resync to one per
+/// change (PR #28 review, finding B).
+fn refresh_monitor_cache(window: &WebviewWindow) -> bool {
+    let Ok(list) = monitors(window) else {
+        // The list could not be read, so nothing is known to have changed and
+        // the cache keeps what it had. Reporting `true` here would rebuild the
+        // warm sessions on a failure to observe, which is the opposite of what
+        // an unreadable list justifies.
+        return false;
+    };
+    let fresh: Vec<Rect> = list.iter().map(|monitor| monitor.bounds).collect();
+    let mut cached = lock(&MONITOR_CACHE);
+    if *cached == fresh {
+        return false;
     }
+    *cached = fresh;
+    true
 }
 
 /// The cached monitor rectangles, for snapping and containment.
@@ -1197,13 +1219,15 @@ pub fn overlay_report_latency(probe: u64) {
 /// would average two different rows of `quality-bars.md` §1 into one figure
 /// belonging to neither.
 ///
-/// A no-op in release, where nothing stamps a probe to echo.
+/// **Debug builds only.** Nothing stamps a probe in release, so the command
+/// used to compile to an empty body and register anyway — an endpoint that
+/// existed for no reason (PR #28 review, finding D). It is now absent from a
+/// release build entirely, along with its registration in `lib.rs`; verified by
+/// searching the release binary for this function's name.
+#[cfg(debug_assertions)]
 #[tauri::command]
 pub fn overlay_report_freeze_latency(probe: u64) {
-    #[cfg(debug_assertions)]
     crate::freeze::record_paint_latency(probe);
-    #[cfg(not(debug_assertions))]
-    let _ = probe;
 }
 
 /// IPC surface: `Esc` from the overlay emits this intent.

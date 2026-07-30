@@ -110,15 +110,43 @@ pub fn run() -> tauri::Result<()> {
         // (architecture §4). No frontend capability grants it, so the WebView
         // cannot open dialogs.
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![
-            overlay::overlay_escape,
-            overlay::overlay_arm_type,
-            overlay::overlay_toggle_freeze,
-            overlay::overlay_report_latency,
-            overlay::overlay_report_freeze_latency,
-            overlay::overlay_dismiss_focused,
-            overlay::overlay_request_state
-        ])
+        // The freeze probe's IPC endpoint is registered in debug builds only.
+        // Nothing stamps a probe in release, so the release form was an inert
+        // endpoint with an empty body — harmless, but a command surface that
+        // exists for no reason is still a command surface (PR #28 review,
+        // finding D). Two lists rather than a `#[cfg]` inside the macro,
+        // because `generate_handler!` takes a path list and does not expand
+        // attributes on its items.
+        //
+        // **The frontend half still ships**: `reportFreezeLatency` and its
+        // effect are in the release bundle, inert because `freeze_probe` is
+        // always null. `debug_assertions` is a Rust concept and does not reach
+        // TypeScript, so that is a stated limit rather than an oversight.
+        .invoke_handler({
+            #[cfg(debug_assertions)]
+            {
+                tauri::generate_handler![
+                    overlay::overlay_escape,
+                    overlay::overlay_arm_type,
+                    overlay::overlay_toggle_freeze,
+                    overlay::overlay_report_latency,
+                    overlay::overlay_report_freeze_latency,
+                    overlay::overlay_dismiss_focused,
+                    overlay::overlay_request_state
+                ]
+            }
+            #[cfg(not(debug_assertions))]
+            {
+                tauri::generate_handler![
+                    overlay::overlay_escape,
+                    overlay::overlay_arm_type,
+                    overlay::overlay_toggle_freeze,
+                    overlay::overlay_report_latency,
+                    overlay::overlay_dismiss_focused,
+                    overlay::overlay_request_state
+                ]
+            }
+        })
         .on_window_event(|window, event| {
             if window.label() != overlay::WINDOW_LABEL {
                 return;

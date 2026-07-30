@@ -132,6 +132,19 @@ struct Slot {
     retained: Mutex<Option<Retained>>,
     stop: AtomicBool,
     thread_id: Mutex<Option<u32>>,
+    /// This monitor's session **could not be started**, so rebuilding it will
+    /// not help.
+    ///
+    /// Set by the pump when [`Warm::start`] returns `Err` — a monitor WGC
+    /// cannot serve, which is the case the GDI fallback exists for. Distinct
+    /// from a pump that ran and later ended: that one *should* be rebuilt (a
+    /// display woke, a driver reset), and [`covers`] treats the two
+    /// differently.
+    ///
+    /// **Scope is one PLACEMENT visit.** [`stop`] empties `SESSIONS`, so
+    /// leaving Placement discards this and the next entry tries the monitor
+    /// again — the opt-out cannot outlive the condition that caused it.
+    unservable: AtomicBool,
 }
 
 impl Slot {
@@ -144,18 +157,37 @@ impl Slot {
 
     /// Whether this slot's pump thread is still running.
     ///
-    /// Exact rather than approximate, and only because of the publish handshake:
-    /// [`spawn_session`] does not add a slot to `SESSIONS` until its pump has
-    /// published an id, and [`ThreadIdGuard`] clears the id as the pump's last
-    /// act. So for any slot a reader can reach, `Some` means alive and `None`
-    /// means the pump has gone — there is no third "not yet" state to confuse
-    /// with death. Before the handshake, `None` meant either, which is exactly
-    /// why liveness could not be tested here.
+    /// # What `None` does and does not mean — corrected 2026-07-30
+    ///
+    /// The publish handshake in [`spawn_session`] rules out one reading: a slot
+    /// is not added to `SESSIONS` until its pump has published an id, so `None`
+    /// is never "has not got there yet".
+    ///
+    /// **It does not rule out the pump having died between the handshake and
+    /// the read**, and the first version of this comment claimed it did — "for
+    /// any slot a reader can reach, `Some` means alive and `None` means the pump
+    /// has gone" overstated an invariant the code does not hold. The pump sends
+    /// its handshake *before* [`Warm::start`], which is where an unservable
+    /// monitor fails, so a slot can be accepted and be dead microseconds later.
+    /// That is `bug_003`'s shape a third time: a comment asserting a property
+    /// the code lacks, written by the change that fixed the previous one.
+    ///
+    /// So `None` means **the pump is gone**, for one of two reasons that must
+    /// not be conflated — see [`Slot::is_unservable`] and [`covers`].
     fn is_pumped(&self) -> bool {
         self.thread_id
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .is_some()
+    }
+
+    /// Whether this monitor's session could not be started at all.
+    ///
+    /// Read only after [`Self::is_pumped`] is false, where it separates *the
+    /// session ended* from *the session never began*. Rebuilding is the right
+    /// answer to the first and pointless for the second.
+    fn is_unservable(&self) -> bool {
+        self.unservable.load(Ordering::SeqCst)
     }
 }
 
@@ -236,9 +268,11 @@ pub fn start() -> usize {
             retained: Mutex::new(None),
             stop: AtomicBool::new(false),
             thread_id: Mutex::new(None),
+            unservable: AtomicBool::new(false),
         });
-        // Published *before* the slot joins `SESSIONS`, so `thread_id` is
-        // `Some` for every slot a reader can reach — see `spawn_session`.
+        // The pump publishes its id before the slot joins `SESSIONS`, so
+        // `thread_id` is never "not yet" for a slot a reader can reach. It can
+        // still be `None` because the pump died — see `spawn_session`.
         if spawn_session(Arc::clone(&slot)) {
             sessions.push(slot);
         }
@@ -255,19 +289,34 @@ pub fn start() -> usize {
 /// because a handle alone would accept a monitor that changed resolution under a
 /// held session, whose retained texture is sized to the old frame.
 ///
-/// **`is_pumped` is the third, added 2026-07-30 from the PR #28 review, and it
-/// exists because the other two made a pre-existing weakness durable.** A slot
+/// **The liveness half is the third, and it has two halves of its own.** A slot
 /// whose pump has exited still matches on handle and bounds and still reports
 /// `is_warm`, because its last texture is retained. Before `start` learned to
 /// keep sessions, re-entering Placement rebuilt such a slot by accident; keeping
 /// them turned that accident into a policy of preserving a dead session, which
 /// serves a frame frozen at the moment the pump died as though it were the
 /// screen. A pump exits for reasons nobody chose — the capture item closing when
-/// a monitor sleeps, a driver reset, a `retain` failure — so this is ordinary,
-/// not exotic.
+/// a monitor sleeps, a driver reset, a `retain` failure — so this is ordinary.
+///
+/// **But a monitor WGC cannot serve must not force a rebuild, and the first cut
+/// of this made it force one forever** (PR #28 review, finding A). `Warm::start`
+/// fails for such a monitor *after* the pump has published its handshake, so the
+/// slot is accepted and then immediately has no pump. Requiring `is_pumped` of
+/// every slot then made `covers` permanently false: every state transition tore
+/// the whole set down and rebuilt it, the same monitor failed again, and the
+/// ~330 ms warm-up clock restarted each time — so the warm path never warmed at
+/// all. That is worse than the `bug_001` it was fixing, and it lands on exactly
+/// the configuration the GDI fallback exists for.
+///
+/// So an **unservable** slot counts as covered. Rebuilding it cannot succeed,
+/// the capture path already falls back per monitor, and an absent warm session
+/// there is the correct steady state rather than a fault. The opt-out lasts one
+/// PLACEMENT visit, because `stop` empties `SESSIONS` on the way out.
 fn covers(sessions: &[Arc<Slot>], monitors: &[crate::plan::MonitorInfo]) -> bool {
     sessions.len() == monitors.len()
-        && sessions.iter().all(|slot| slot.is_pumped())
+        && sessions
+            .iter()
+            .all(|slot| slot.is_pumped() || slot.is_unservable())
         && monitors.iter().all(|monitor| {
             sessions
                 .iter()
@@ -658,8 +707,19 @@ impl Drop for ThreadIdGuard {
 /// flag inside `on_frame_arrived`, which on a still monitor may never run again;
 /// that is precisely why `WM_QUIT` exists here.
 ///
-/// It also buys the property [`Slot::is_pumped`] rests on: for any slot a reader
-/// can reach, `thread_id` is `None` **only** when the pump has exited.
+/// It buys one property and not the one first claimed for it: for a slot a
+/// reader can reach, `thread_id == None` is never "not yet". It is **not** a
+/// guarantee that the pump is alive — the handshake is sent before
+/// [`Warm::start`], which is where an unservable monitor fails, so a slot can be
+/// accepted and be dead microseconds later. That gap is why [`Slot::unservable`]
+/// exists; see [`covers`].
+///
+/// The send stays here rather than moving into [`Warm::new`] deliberately.
+/// Later would mean acceptance implied a started session — but a monitor that
+/// fails item conversion never reaches the handler at all, so the parent would
+/// wait the full second, on the event-loop thread, for every unservable
+/// monitor. A cheap handshake plus an explicit unservable flag costs nothing on
+/// the path that matters.
 ///
 /// One second, matching `wgc.rs`: the preamble is a `PeekMessageW` and a
 /// `GetCurrentThreadId`, so this is a "the thread never ran at all" detector
@@ -719,6 +779,10 @@ fn spawn_session(slot: Arc<Slot>) -> bool {
             },
         );
         if let Err(error) = Warm::start(settings) {
+            // Recorded **before** the guard clears `thread_id` on the way out,
+            // so a reader that sees no pump can always see why. `covers` reads
+            // the two in that order and relies on it.
+            slot.unservable.store(true, Ordering::SeqCst);
             // Debug-only, like every other in-process report here; task 1.15
             // owns real logging. A session that never starts is not an error the
             // caller can act on — `capture_monitor` returns `None` and the cold
@@ -831,6 +895,7 @@ mod tests {
             retained: Mutex::new(None),
             stop: AtomicBool::new(false),
             thread_id: Mutex::new(Some(1000 + handle as u32)),
+            unservable: AtomicBool::new(false),
         })
     }
 
@@ -929,6 +994,48 @@ mod tests {
         );
     }
 
+    /// A monitor WGC cannot serve must **not** force a rebuild — PR #28's
+    /// review, finding A, which this test exists to pin.
+    ///
+    /// `Warm::start` fails for such a monitor *after* the pump has published
+    /// its handshake, so the slot is accepted and is immediately pumpless.
+    /// Requiring a live pump of every slot made `covers` permanently false:
+    /// every transition rebuilt the whole set, the same monitor failed again,
+    /// and the ~330 ms warm-up restarted each time — so the warm path never
+    /// warmed at all, on exactly the configuration the GDI fallback is for.
+    #[test]
+    fn a_monitor_that_could_not_be_served_does_not_force_a_rebuild() {
+        let (sessions, monitors) = four_monitors();
+        // Exactly what the pump does when `Warm::start` returns Err: record the
+        // reason, then let the guard clear the id.
+        sessions[1].unservable.store(true, Ordering::SeqCst);
+        *sessions[1]
+            .thread_id
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        assert!(
+            covers(&sessions, &monitors),
+            "an unservable monitor must be treated as covered; rebuilding it              cannot succeed and the capture path already falls back per monitor"
+        );
+    }
+
+    /// The other half, and the reason the two are not one flag: a pump that
+    /// **ran and then ended** — a display slept, a driver reset, `retain`
+    /// failed — must still force a rebuild, because rebuilding it can succeed.
+    #[test]
+    fn a_pump_that_died_after_running_still_forces_a_rebuild() {
+        let (sessions, monitors) = four_monitors();
+        *sessions[1]
+            .thread_id
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        assert!(
+            !sessions[1].is_unservable(),
+            "control: this pump started, so it is not unservable"
+        );
+        assert!(!covers(&sessions, &monitors));
+    }
+
     #[test]
     fn a_different_monitor_at_the_same_bounds_is_not_covered() {
         let (sessions, mut monitors) = four_monitors();
@@ -982,6 +1089,55 @@ mod tests {
                 .unwrap_or_else(PoisonError::into_inner),
             None,
             "an unwound thread is exactly as dead as a returned one"
+        );
+    }
+
+    /// **The test that would have caught finding A**, and the reason it is worth
+    /// having: the flag the two `covers` tests above set by hand is set for real
+    /// here, by the production path, against a monitor handle WGC cannot serve.
+    ///
+    /// Those tests pin what `covers` does with the flag; this one pins that the
+    /// flag ever gets set. The first cut of the handshake had `spawn_session`
+    /// accept a pump that then died in `Warm::start`, and no test could see it
+    /// because every unit test built its slots with a live `thread_id` — the
+    /// suite structurally assumed the invariant it was meant to check.
+    ///
+    /// **No desktop needed**, which is the part that was missed: a bogus
+    /// `HMONITOR` fails item conversion in well under a second and never
+    /// constructs a D3D11 device, so this runs anywhere the crate compiles.
+    #[test]
+    fn a_pump_that_cannot_start_marks_its_slot_unservable() {
+        let slot = slot_at(0xDEAD, Rect::new(0, 0, 100, 100));
+        // Cleared, because the point is to watch the pump publish it and then
+        // take it away again.
+        *slot
+            .thread_id
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+
+        // **`0xDEAD`, and not `0`.** A null handle does *not* fail conversion —
+        // `Warm::start` accepts it and blocks in its message loop, so the test
+        // hangs to its deadline and then fails for the wrong reason. Measured
+        // while writing this: `0` never returned in 5 s, `0xDEAD` fails in
+        // ~0.3 s with `Failed to convert item to GraphicsCaptureItem`. Do not
+        // "simplify" this constant.
+        let accepted = spawn_session(Arc::clone(&slot));
+        assert!(
+            accepted,
+            "the handshake is sent before `Warm::start`, so the pump reports for              duty even when the session then fails — that is exactly the gap              `unservable` exists to describe rather than to hide"
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline && !slot.is_unservable() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            slot.is_unservable(),
+            "a session that could not start must say so, or `covers` sees a              pumpless slot with no reason and rebuilds it forever"
+        );
+        assert!(
+            !slot.is_pumped(),
+            "control: the pump really did exit, so this is the state `covers`              has to tell apart rather than a still-starting one"
         );
     }
 
