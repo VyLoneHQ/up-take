@@ -11,7 +11,12 @@
 //! the WGC path is verified here and via `examples/grab.rs` on the rig.
 
 #![cfg(windows)]
-#![allow(clippy::unwrap_used)]
+// `expect` alongside `unwrap` for the same reason architecture §5 permits both
+// inside tests: a failed setup should abort loudly. It earns its place here
+// specifically — every `expect` message in this file names the *precondition*
+// that was not met, so a rig run that cannot establish one says so instead of
+// reporting it as the invariant failing.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use uptake_core::geometry::{Rect, Size};
 use windows_sys::Win32::UI::HiDpi::{
@@ -86,4 +91,223 @@ fn the_forced_gdi_fallback_captures_an_opaque_frame() {
             .chunks_exact(4)
             .all(|px| px[3] == 0xFF)
     );
+}
+
+/// **1B exit-gate row 2, the capture half.** Two *real* captures of one
+/// rectangle, reached by the two routes the app actually uses, must agree
+/// byte-for-byte.
+///
+/// The transformation half is unit-tested with a synthetic frame on both sides
+/// (`freeze::frozen_and_held_crops_are_byte_identical`), and since task 1.9d put
+/// both frame sources on `RgbaBitmap::crop_screen` it is true by construction.
+/// **That test cannot see this one's failure mode.** The two routes differ
+/// *before* the crop: a live capture asks `plan` for a small region and reads
+/// the source at that offset, while the held and frozen paths capture a large
+/// region and subtract their way back to it. Those are two separate pieces of
+/// coordinate arithmetic, and nothing has ever compared their output on real
+/// pixels.
+///
+/// # Both preconditions are established rather than assumed
+///
+/// Byte equality over real screen pixels means nothing on its own, and this
+/// test needs two separate things to be true first. Each is checked, and each
+/// fails with a message saying it is the precondition rather than the invariant
+/// — a test that cannot tell "the crop is wrong" from "a clock ticked" reports
+/// the second as the first.
+///
+/// 1. **The region held still**, shown by re-capturing the surrounding frame
+///    *after* the direct capture and requiring the same crop back. Checking two
+///    frames taken before it would leave the window that matters unchecked.
+/// 2. **The region has texture**, established by walking the raw pixel buffer
+///    for a candidate whose rows differ from the rows below them. Over flat
+///    wallpaper every crop equals every other, so the assertion below passes for
+///    a crop reading entirely the wrong place — observed, not theorised. The
+///    walk deliberately avoids `crop_screen`: using the function under test to
+///    decide whether the function under test can be tested is how the first two
+///    attempts at this both passed under a one-row mutation.
+///
+/// UT-F-40 is the reason for the shape: a test that constructs its own
+/// precondition cannot discover that the precondition never held.
+#[test]
+#[ignore = "needs a real desktop and a static, textured region: drives three live WGC sessions"]
+fn a_cropped_capture_and_a_direct_capture_agree_byte_for_byte() {
+    ensure_dpi_aware();
+    // Deliberately **not** at the origin: the top-left of a desktop is where
+    // notifications, taskbar chrome and window furniture live, so something
+    // there is nearly always mid-animation. The first cut of this test used
+    // (0, 0), its staticness check fired every run at up to 58% of bytes, and
+    // that read as "WGC is non-deterministic" — which was wrong. Measured
+    // 2026-07-29 away from the origin: two WGC captures, two GDI captures, and
+    // WGC against GDI are all byte-identical.
+    let surrounding = Rect::new(640, 480, 640, 480);
+    let before = uptake_capture::capture_region(surrounding).unwrap();
+    let settled = uptake_capture::capture_region(surrounding).unwrap();
+
+    // The rectangle is **found, not hard-coded.** A fixed choice depends on what
+    // the desktop happens to be showing: at (800, 600) this rig showed a window
+    // one minute and flat wallpaper the next, and over flat wallpaper every crop
+    // equals every other, so a deliberate one-row error in `crop_screen` left
+    // the comparison below green. Scanning for a sub-rectangle whose pixels
+    // change when the crop moves one row is the test establishing its own
+    // discriminating power instead of assuming it — backlog I-1 / UT-F-44's
+    // lesson, which this test has now repeated twice.
+    let wanted = textured_subrect(&before, &settled, surrounding).expect(
+        "precondition failed, not the invariant: no region found that is both \
+         textured and unchanged across two captures. Every textured part of this \
+         screen is animating — Windows' mica and acrylic materials shimmer by a \
+         few levels continuously — so no comparison here could mean anything. \
+         Re-run with a still, detailed window in the scanned area.",
+    );
+    let cropped = before
+        .bitmap
+        .crop_screen(before.rect.origin, wanted)
+        .expect("the found rectangle lies wholly inside the frame it came from");
+
+    let direct = uptake_capture::capture_region(wanted).unwrap();
+
+    // Sandwiched: the frame is re-captured *after* the direct capture, and the
+    // same crop must come back. That is what shows the screen held still across
+    // the direct capture in between — comparing two captures taken before it
+    // would leave the window that actually matters unchecked (UT-F-40: a test
+    // that constructs its own precondition cannot discover it never held).
+    let after = uptake_capture::capture_region(surrounding).unwrap();
+    let cropped_after = after
+        .bitmap
+        .crop_screen(after.rect.origin, wanted)
+        .expect("the found rectangle lies wholly inside the frame it came from");
+    assert_eq!(
+        differing_bytes(cropped.pixels(), cropped_after.pixels()),
+        None,
+        "precondition failed, not the invariant: the region changed while the \
+         direct capture was taken, so byte equality below would prove nothing. \
+         Re-run with that part of the screen holding still."
+    );
+
+    assert_eq!(cropped.size(), direct.bitmap.size());
+    assert_eq!(
+        differing_bytes(cropped.pixels(), direct.bitmap.pixels()),
+        None,
+        "a capture cropped out of a larger frame must equal a direct capture of \
+         the same rectangle — 1B exit-gate row 2"
+    );
+}
+
+/// A 64×48 rectangle inside `frame` whose contents change when the crop moves
+/// one row, or `None` if the whole frame is that uniform.
+///
+/// # It reads the raw buffer, and that is the whole point
+///
+/// The obvious implementation calls [`RgbaBitmap::crop_screen`] twice and
+/// compares — and it is wrong, because `crop_screen` is the function the caller
+/// is about to test. With a deliberate one-row error injected into it, both
+/// crops shift together, the comparison still finds a difference, and the
+/// caller's assertion then passes over a crop reading the wrong place.
+/// **Observed on the rig 2026-07-29**, after which the region a fixed choice had
+/// hidden turned out to be vertically uniform for exactly as many rows as the
+/// check looked at.
+///
+/// Walking the pixel buffer by hand keeps the selection independent of
+/// everything under test. The condition is exactly the failure mode being
+/// guarded against: some row inside the candidate differs from the row below it,
+/// which is what makes a one-row displacement visible.
+fn textured_subrect(
+    frame: &uptake_capture::CapturedRegion,
+    settled: &uptake_capture::CapturedRegion,
+    bounds: Rect,
+) -> Option<Rect> {
+    let size = Size::new(64, 48);
+    let frame_size = frame.bitmap.size();
+    let stride = frame_size.width as usize * 4;
+    let pixels = frame.bitmap.pixels();
+    let settled_pixels = settled.bitmap.pixels();
+    let span = size.width as usize * 4;
+    if settled.bitmap.size() != frame_size {
+        return None;
+    }
+
+    for row in 0..8_i32 {
+        for column in 0..8_i32 {
+            let candidate = Rect::new(
+                bounds.origin.x + 32 + column * 64,
+                bounds.origin.y + 32 + row * 48,
+                size.width,
+                size.height,
+            );
+            // Frame-local, via the frame's *reported* origin: it clamps to the
+            // virtual desktop, so the requested origin is not always the one it
+            // captured.
+            let local_x = (candidate.origin.x - frame.rect.origin.x) as usize;
+            let local_y = (candidate.origin.y - frame.rect.origin.y) as usize;
+            // One row of slack, because the comparison below reads the row under
+            // the candidate's last.
+            if local_x + size.width as usize > frame_size.width as usize
+                || local_y + size.height as usize + 1 > frame_size.height as usize
+            {
+                continue;
+            }
+            let rows = || {
+                (0..size.height as usize)
+                    .map(move |offset| (local_y + offset) * stride + local_x * 4)
+            };
+            // Textured: a one-row displacement is visible somewhere in it.
+            let textured = rows().any(|here| {
+                let below = here + stride;
+                pixels[here..here + span] != pixels[below..below + span]
+            });
+            // ...and still, across two captures. The two conditions pull against
+            // each other on a modern desktop — the detailed regions are windows,
+            // and Windows' mica and acrylic materials shimmer by a few levels
+            // continuously — so a candidate has to be checked for both or the
+            // test trades one precondition failure for the other.
+            let still =
+                rows().all(|here| pixels[here..here + span] == settled_pixels[here..here + span]);
+            if textured && still {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// How two pixel buffers differ, or `None` when they are identical.
+///
+/// A summary rather than the buffers themselves: `assert_eq!` on two
+/// full-monitor pixel slices prints megabytes of numbers, which is
+/// indistinguishable from having no diagnostic at all. The first differing
+/// offset and the count are what separate "one small element animated" from
+/// "the whole crop is at the wrong offset".
+fn differing_bytes(left: &[u8], right: &[u8]) -> Option<String> {
+    if left.len() != right.len() {
+        return Some(format!("lengths differ: {} vs {}", left.len(), right.len()));
+    }
+    let differing = left.iter().zip(right).filter(|(a, b)| a != b).count();
+    if differing == 0 {
+        return None;
+    }
+    let first = left
+        .iter()
+        .zip(right)
+        .position(|(a, b)| a != b)
+        .unwrap_or_default();
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a percentage for a human reading a failure message"
+    )]
+    let share = differing as f64 * 100.0 / left.len() as f64;
+    // The magnitude is what separates the two explanations: a handful of levels
+    // is capture noise or dithering, and a byte-equality criterion built on top
+    // of it is unachievable in principle. Large deltas mean the content moved,
+    // or the crop is reading the wrong place.
+    let worst = left
+        .iter()
+        .zip(right)
+        .map(|(a, b)| a.abs_diff(*b))
+        .max()
+        .unwrap_or_default();
+    Some(format!(
+        "{differing} of {} bytes differ ({share:.3}%), worst delta {worst} levels, \
+         first at byte {first} (pixel {})",
+        left.len(),
+        first / 4
+    ))
 }

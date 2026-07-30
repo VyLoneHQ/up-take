@@ -25,6 +25,47 @@ export interface StatePayload {
   state: OverlayStateName;
   origin: Origin;
   monitors: PhysRect[];
+  /**
+   * The type armed for the next drag, or `null` for none (ADR-0018 §3).
+   * **Absence means `Default`** — the indicator shows no type cue when nothing
+   * is armed, rather than naming the resting state as if it were a choice.
+   */
+  armed: ArmableType | null;
+  /**
+   * Whether the screen is frozen (task 1.9d, ADR-0026). Only true in placement.
+   */
+  frozen: boolean;
+  /**
+   * Each frozen still: its monitor rect in physical px, plus the URL its PNG is
+   * served at. Empty whenever {@link frozen} is false.
+   *
+   * Rust derives both from one read, so a payload cannot claim frozen with no
+   * stills — which would render as a live screen the app believes is frozen.
+   */
+  stills: FrozenStill[];
+}
+
+/** One monitor's frozen still: where it is, and where to fetch it. */
+export interface FrozenStill {
+  rect: PhysRect;
+  url: string;
+}
+
+/**
+ * Turns the wire form of the stills — `[x, y, w, h, url]` tuples, which is what
+ * serde produces for a Rust tuple — into rects the layout helpers accept.
+ *
+ * Kept as a tuple on the wire rather than a struct because the monitor list
+ * beside it already travels that way; converting in one place here is cheaper
+ * than a second convention.
+ */
+export function stillsFromWire(
+  wire: [number, number, number, number, string][],
+): FrozenStill[] {
+  return wire.map(([x, y, width, height, url]) => ({
+    rect: [x, y, width, height],
+    url,
+  }));
 }
 
 /** An area's stacking tier (ADR-0013). */
@@ -49,7 +90,51 @@ export interface AreasPayload {
   areas: AreaView[];
 }
 
-/** The payload of the `overlay://hover` event: the area under the cursor. */
+/**
+ * The payload of `overlay://flash`: a user-initiated action on this area
+ * succeeded, and the area should acknowledge it.
+ *
+ * `nonce` changes on every emit so a repeat of the same action on the same area
+ * restarts the animation instead of being coalesced into no visible change —
+ * which would fail in exactly the way this feature exists to fix.
+ */
+export interface FlashPayload {
+  id: number;
+  nonce: number;
+}
+
+/**
+ * The payload of `overlay://active-monitor`: which monitor holds the cursor.
+ *
+ * An index into the `monitors` array of the last {@link StatePayload}. `null`
+ * when the cursor is in a dead zone between mismatched monitors.
+ */
+export interface ActiveMonitorPayload {
+  index: number | null;
+}
+
+/**
+ * The payload of the `overlay://pin` event: one area's capture is ready.
+ *
+ * Carries a **URL, not bytes**. The `uptake-area://` scheme exists precisely so
+ * a ~270 KB capture never crosses this JSON bridge — see the Rust `captures`
+ * module.
+ */
+export interface PinPayload {
+  id: number;
+  url: string;
+}
+
+/**
+ * The payload of the `overlay://hover` event: the area under the cursor.
+ *
+ * **It carries no cursor**, and that is settled rather than missing. This
+ * interface briefly had a `cursor` keyword for the frontend to apply; it never
+ * did anything, because the overlay is `WS_EX_TRANSPARENT` in every visible
+ * state (ADR-0016) and so receives no `WM_SETCURSOR` at any position. ADR-0025
+ * chose the surviving route — a narrow `SetSystemCursor` override on the Rust
+ * side — and deleted this half rather than leave it looking functional.
+ */
 export interface HoverPayload {
   id: number | null;
 }
@@ -165,6 +250,12 @@ export function menuFrameCss(
 export interface SelectionPayload {
   rect: PhysRect | null;
   /**
+   * A latency probe on sampled frames, or null. Echo it back **after this frame
+   * has painted** and Rust closes the loop on its own clock — the value is
+   * opaque here on purpose, so no epoch has to be reconciled across the bridge.
+   */
+  probe: number | null;
+  /**
    * The area being moved or resized, if any. It is drawn as the drag's *source*
    * — where the area is coming from — rather than as a normal area, so a move
    * does not look like two areas existing at once.
@@ -270,6 +361,119 @@ export async function escapeOverlay(invoke: Invoke): Promise<boolean> {
  */
 export function isRemoveKey(key: string): boolean {
   return key === 'Delete';
+}
+
+/**
+ * Whether this event is the freeze toggle — `Ctrl+Space` (ADR-0026).
+ *
+ * # Why a chord where arming uses a bare letter
+ *
+ * Bare single letters are the *arming* namespace: `s` is Screenshot today, and
+ * OCR, Analysis, Record, Filter and Upscale each want their initial. A view
+ * toggle taking one would spend a slot the type system needs. `armedTypeForKey`
+ * below rejects every `Ctrl`/`Alt`/`Meta` chord by construction, so this chord
+ * **cannot** collide with arming however many types are added.
+ *
+ * `Space` alone was the better key on ergonomics and was deliberately left
+ * unclaimed for a future area-level action (ADR-0026 decision 8).
+ *
+ * `Alt` is excluded because it already means "suppress snapping" during
+ * placement; `Meta` because `Win+Space` is the Windows layout switcher.
+ */
+export function isFreezeKey(
+  event: Pick<KeyboardEvent, 'key' | 'ctrlKey' | 'altKey' | 'metaKey'>,
+): boolean {
+  // `event.key` for the space bar is a single space, not `'Space'` — that is
+  // `event.code`. Testing the wrong one is a binding that never fires and looks
+  // like a dead feature.
+  return event.key === ' ' && event.ctrlKey && !event.altKey && !event.metaKey;
+}
+
+/** An area type a direct key can arm for the next drag (ADR-0018 §1). */
+export type ArmableType = 'screenshot';
+
+/**
+ * Which type this key arms, or `null` if it arms nothing.
+ *
+ * Takes the event rather than the bare key, unlike {@link isRemoveKey} — and
+ * the difference is deliberate. Arming changes what the *next gesture means*,
+ * so a chord the user pressed for some other reason must not trigger it, and
+ * `Alt` in particular already has a meaning during placement (it suppresses
+ * snapping). A guard that lives in the predicate cannot be forgotten at a call
+ * site; one that lives in the handler can.
+ *
+ * `Shift` is not excluded: `Shift+S` is just how a capital `S` is typed.
+ */
+export function armedTypeForKey(
+  event: Pick<KeyboardEvent, 'key' | 'ctrlKey' | 'altKey' | 'metaKey'>,
+): ArmableType | null {
+  if (event.ctrlKey || event.altKey || event.metaKey) {
+    return null;
+  }
+  switch (event.key.toLowerCase()) {
+    case 's':
+      return 'screenshot';
+    default:
+      return null;
+  }
+}
+
+/**
+ * Arms the type of the next drag. Never throws, for the same reason
+ * {@link escapeOverlay} does not.
+ *
+ * Rust rejects arming outside placement, and that rejection is **expected**
+ * rather than exceptional — the key handler is live in `living` too. Logging it
+ * as an error would train the reader to ignore the console.
+ */
+export async function armAreaType(
+  invoke: Invoke,
+  kind: ArmableType,
+): Promise<boolean> {
+  try {
+    await invoke('overlay_arm_type', { kind });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Toggles the frozen view (task 1.9d, ADR-0026). Never throws, for the same
+ * reason {@link armAreaType} does not.
+ *
+ * Rust decides whether the toggle applies — it is Placement-only — so this
+ * sends the intent unconditionally rather than gating on a state the frontend
+ * holds a copy of. Two places deciding one thing is how the stale-menu defect
+ * of 1.6c happened.
+ */
+export async function toggleFreeze(invoke: Invoke): Promise<boolean> {
+  try {
+    await invoke('overlay_toggle_freeze');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Returns a latency probe once the frame carrying it has actually painted.
+ *
+ * **Two nested `requestAnimationFrame` calls, not one.** A rAF callback runs
+ * *before* the paint it belongs to, so measuring there would stop the clock
+ * early and flatter the result. The second callback runs on the following
+ * frame, by which point the first has been painted — the standard way to
+ * observe "after paint" from script.
+ *
+ * Never throws: this is instrumentation, and a failed measurement must not
+ * disturb the thing it measures.
+ */
+export function reportLatency(invoke: Invoke, probe: number): void {
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      void invoke('overlay_report_latency', { probe }).catch(() => {});
+    });
+  });
 }
 
 /**

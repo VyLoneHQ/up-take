@@ -76,6 +76,22 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      # The same lint pass in the release configuration, because the two do not
+      # check the same code. `cfg(debug_assertions)` gates a real amount of this
+      # codebase — the whole dev_harness module, the gesture instrumentation, the
+      # state-transition logging — so anything reachable only from a debug-only
+      # caller is dead code in release and invisible to the step above.
+      #
+      # Added 2026-07-27 after exactly that happened: `start` was unused and
+      # `take_latency_summary` was dead in release from 01587e4 until the task
+      # 1.9b review, and nothing failed. The build job compiles release but does
+      # not pass -D warnings, so warnings there are printed and ignored.
+      #
+      # Cheap in practice: rust-cache keeps the release artefacts warm across
+      # runs, and this shares a checkout and a toolchain with the debug pass.
+      - name: cargo clippy (release)
+        run: cargo clippy --release --all-targets --all-features -- -D warnings
+
       - name: cargo test
         run: cargo test --all-features
 

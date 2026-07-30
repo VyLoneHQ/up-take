@@ -35,8 +35,84 @@ use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use tauri::{AppHandle, Manager};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
+use windows_sys::Win32::System::Threading::{
+    CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW, SetWaitableTimer,
+    TIMER_ALL_ACCESS, WaitForSingleObject,
+};
 
 use crate::overlay::overlay_window;
+
+/// A per-process high-resolution timer, for pacing finer than the system tick.
+///
+/// # Why this exists
+///
+/// The poll paced on `Condvar::wait_timeout`, which rounds up to the system
+/// timer granularity — ~15.6 ms, so **~63 Hz whatever it asked for**. Measured
+/// across 36 gestures on the dev rig: every one landed at 62–63 Hz against a
+/// 250 Hz request. Any faster pacing needs a different waiting primitive, not a
+/// smaller number.
+///
+/// `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION` (Win10 1803+, well under the build
+/// 19041 floor in `MASTER-PLAN.md` §4.1) gives sub-millisecond resolution **for
+/// this object only**. That is the whole reason to prefer it over
+/// `timeBeginPeriod`, which raises the timer resolution *globally* and with it
+/// the power draw of every process on the machine — something an always-on tray
+/// app has no business doing to a laptop on battery.
+///
+/// Used **only while a gesture is live**, so the idle path keeps its condvar and
+/// stays promptly interruptible by `deactivate`. Losing that promptness for up
+/// to one 4 ms tick during a drag costs nothing.
+struct HighResTimer(HANDLE);
+
+// SAFETY: a waitable timer handle is a kernel object, valid across threads; this
+// one is created and waited on by the poll thread alone.
+unsafe impl Send for HighResTimer {}
+
+impl HighResTimer {
+    /// Creates the timer, or `None` if the OS refuses — in which case the caller
+    /// keeps its previous pacing rather than failing.
+    fn new() -> Option<Self> {
+        // SAFETY: all-null arguments are the documented form for an unnamed,
+        // auto-reset timer; the returned handle is checked before use.
+        let handle = unsafe {
+            CreateWaitableTimerExW(
+                std::ptr::null(),
+                std::ptr::null(),
+                CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                TIMER_ALL_ACCESS,
+            )
+        };
+        (!handle.is_null()).then_some(Self(handle))
+    }
+
+    /// Waits `duration`, returning whether the wait actually happened — a `false`
+    /// tells the caller to fall back rather than spin.
+    fn wait(&self, duration: Duration) -> bool {
+        // A negative 100 ns due time means "relative to now", which is the only
+        // form that makes sense for pacing; an absolute time would drift with
+        // the wall clock.
+        let due = -(i64::try_from(duration.as_nanos() / 100).unwrap_or(i64::MAX >> 1));
+        // SAFETY: `self.0` is a live timer handle owned by this struct; both
+        // calls take it by value and touch nothing else of ours.
+        unsafe {
+            if SetWaitableTimer(self.0, &raw const due, 0, None, std::ptr::null(), 0) == 0 {
+                return false;
+            }
+            WaitForSingleObject(self.0, u32::MAX) == WAIT_OBJECT_0
+        }
+    }
+}
+
+impl Drop for HighResTimer {
+    fn drop(&mut self) {
+        // SAFETY: the handle came from `CreateWaitableTimerExW` and is closed
+        // exactly once, here.
+        unsafe {
+            CloseHandle(self.0);
+        }
+    }
+}
 
 /// Target cadence: ~60 fps. The effective rate depends on the Windows timer
 /// resolution (`Sleep` granularity is ~16 ms only when some process holds the
@@ -44,6 +120,52 @@ use crate::overlay::overlay_window;
 /// the CPU budget plus gesture feedback that feels instant, and even a
 /// worst-case ~30 Hz tick keeps the selection box within ~35 ms of the mouse.
 const FRAME: Duration = Duration::from_millis(16);
+
+/// The pacing asked for while a gesture is live (~250 Hz).
+///
+/// # An experiment, not a settled value
+///
+/// A drag looks stepped on a high-refresh display and the poll's ~60 Hz is the
+/// obvious suspect — but the chain is hook → atomic → poll tick → IPC emit →
+/// Svelte reactivity → WebView paint, and the poll is only one term in it.
+/// Raising the rate blind would spend CPU on a guess (F-39's lesson from earlier
+/// today: do not act on an inferred split). So it is raised **only while a
+/// gesture is live**, and the *achieved* interval is measured — which separates
+/// two questions that look like one: did the rate actually change, and did that
+/// make it smoother.
+///
+/// **It may well not change.** `Condvar::wait_timeout` is subject to the system
+/// timer resolution, ~15.6 ms by default on Windows, so a 4 ms request can round
+/// up to a whole tick and deliver nothing. Going finer needs `timeBeginPeriod`
+/// (a **global** setting that raises power draw for every process on the
+/// machine) or a high-resolution waitable timer. If the measurement shows the
+/// interval pinned near 16 ms, that is the answer, and the fix is a timer
+/// change rather than a smaller constant here.
+///
+/// The cost is bounded by construction: this applies only while a mouse button
+/// is down, so it cannot touch the idle or resting-overlay CPU budgets.
+///
+/// # ⚠️ Measured 2026-07-26 — inert on a condvar, delivered on the timer
+///
+/// Across **36 gestures** on the dev rig the achieved rate was **62–63 Hz**,
+/// every time, against the 250 Hz asked for here. The predicted clamp was real:
+/// `Condvar::wait_timeout` rounds up to the system timer granularity (~15.6 ms
+/// ⇒ ~64 Hz), so while this constant was paced on the condvar it was
+/// indistinguishable from [`FRAME`] and always had been.
+///
+/// **The smoothness improvement reported from the build that introduced it was
+/// therefore not caused by it.** Nothing else in that build touched rendering,
+/// so the improvement was expectation rather than effect — recorded because a
+/// change that appears to work while provably doing nothing is worse than one
+/// that plainly fails.
+///
+/// It is **not** inert now: [`HighResTimer`] paces the gesture path instead
+/// (see the wait in [`poll_loop`]), and the achieved rate measured **221 Hz**.
+/// Whether *that* is what makes a drag feel smooth is a separate question the
+/// rate alone cannot answer, which is why the emit→painted probe exists —
+/// mean 3.7–4.3 ms, worst 7.7 ms over ~1200 samples, now a `quality-bars.md`
+/// §1 row.
+const FRAME_GESTURE: Duration = Duration::from_millis(4);
 
 /// Shared poll state, managed via `app.manage`.
 pub struct ClickThrough {
@@ -103,6 +225,17 @@ pub fn spawn_poll_thread(app: AppHandle) {
 
 fn poll_loop(app: &AppHandle) -> ! {
     let state = app.state::<ClickThrough>();
+    // Created once for the thread's lifetime. `None` means the OS refused it,
+    // in which case pacing simply stays where it was — a missing optimisation,
+    // not a failure.
+    let high_res = HighResTimer::new();
+    // Not gated on `UPTAKE_DEV_PACING`: this one reports a real degradation of
+    // the shipping path rather than an instrumentation number, and it prints at
+    // most once per process, only when the OS refused the timer.
+    #[cfg(debug_assertions)]
+    if high_res.is_none() {
+        eprintln!("poll: no high-resolution timer available — gesture pacing stays at ~63 Hz");
+    }
     loop {
         // Park while the overlay is hidden. Zero wakeups until `activate`.
         drop(
@@ -117,6 +250,14 @@ fn poll_loop(app: &AppHandle) -> ! {
         // show starts from "nothing applied yet" rather than from whatever the
         // last cycle left behind.
         let mut pump = crate::placement::PumpState::default();
+        // Measures what the OS actually delivered during a gesture, so a request
+        // the timer resolution silently refused is visible instead of assumed.
+        //
+        // Debug builds only, and inside those only while `UPTAKE_DEV_PACING` is
+        // set — so a release build carries neither the state nor the branch, and
+        // an ordinary dev build does not count ticks it will never print.
+        #[cfg(debug_assertions)]
+        let mut gesture: Option<(u32, std::time::Instant)> = None;
         loop {
             tick(app, &state);
             // Drive the placement pump at the poll's cadence: the live gesture
@@ -125,6 +266,51 @@ fn poll_loop(app: &AppHandle) -> ! {
             // work here caps it at ~60 Hz however fast the mouse reports — see
             // `placement::pump`.
             crate::placement::pump(app, &mut pump);
+
+            // A live gesture is the only thing on screen that tracks the mouse
+            // continuously, so it is the only thing that can look stepped.
+            let dragging = crate::placement::is_dragging();
+            // A live gesture is the only thing on screen that tracks the mouse
+            // continuously, so it is the only thing that can look stepped.
+            //
+            // Opt-in via `UPTAKE_DEV_PACING` (see `dev_harness`): a line per
+            // gesture is a line per drag, and the probe that feeds the second
+            // line adds IPC to the path it measures — so the default dev build
+            // is both silent and unweighted.
+            #[cfg(debug_assertions)]
+            if crate::dev_harness::pacing_enabled() {
+                match (dragging, gesture) {
+                    (true, None) => gesture = Some((0, std::time::Instant::now())),
+                    (true, Some((ref mut ticks, _))) => *ticks = ticks.saturating_add(1),
+                    (false, Some((ticks, start))) => {
+                        // Reported per gesture rather than per tick: one line at
+                        // the end says what the OS delivered, where a per-tick
+                        // line would itself perturb what is being measured.
+                        if ticks > 0 {
+                            report_gesture(ticks, start);
+                        }
+                        gesture = None;
+                    }
+                    (false, None) => {}
+                }
+            }
+
+            // A live gesture paces on the high-resolution timer, which is the
+            // only way the requested rate is actually delivered. The lock is
+            // dropped first: this wait is deliberately *not* interruptible by
+            // `deactivate`, and holding the mutex across it would block the
+            // event-loop thread trying to set it.
+            if dragging && let Some(timer) = high_res.as_ref() {
+                let still_active = *lock(&state.active);
+                if !still_active {
+                    break;
+                }
+                if timer.wait(FRAME_GESTURE) {
+                    continue;
+                }
+                // The timer refused; fall through to the condvar rather than
+                // spinning on a wait that is not happening.
+            }
 
             // Pace to FRAME, but let deactivate cut the sleep short.
             let guard = lock(&state.active);
@@ -147,6 +333,32 @@ fn poll_loop(app: &AppHandle) -> ! {
         {
             eprintln!("click-through: could not reset on hide: {error}");
         }
+    }
+}
+
+/// Prints what one completed gesture actually delivered: the achieved poll rate,
+/// and the emit→painted round trip that the rate does not describe.
+///
+/// The two are independent and only the second is what "laggy" means — a rate
+/// says how often we *tried* to put a frame on screen, not how long each attempt
+/// took to get there. Reporting the rate alone is how a change that provably did
+/// nothing was once read as an improvement (see [`FRAME_GESTURE`]).
+#[cfg(debug_assertions)]
+fn report_gesture(ticks: u32, start: std::time::Instant) {
+    let elapsed = start.elapsed().as_secs_f64();
+    eprintln!(
+        "poll: gesture ran {ticks} ticks in {:.0} ms — {:.0} Hz achieved (asked for {:.0} Hz)",
+        elapsed * 1000.0,
+        f64::from(ticks) / elapsed,
+        1.0 / FRAME_GESTURE.as_secs_f64(),
+    );
+    match crate::placement::take_latency_summary() {
+        Some((n, mean, worst)) => eprintln!(
+            "poll: emit→painted over {n} samples — mean {mean:.1} ms, worst {worst:.1} ms"
+        ),
+        None => eprintln!(
+            "poll: emit→painted — no samples returned (the frontend echo is not arriving)"
+        ),
     }
 }
 

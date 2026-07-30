@@ -14,7 +14,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
-use uptake_core::area::{AreaId, AreaStore, AreaType, Input, Layer};
+use uptake_core::area::{AfterCreate, AreaId, AreaStore, AreaType, Input, Layer};
 use uptake_core::geometry::{Monitor, Point, Rect, Size, virtual_desktop_bounds};
 use uptake_core::interaction;
 
@@ -283,6 +283,29 @@ struct StatePayload {
     /// Each monitor's bounds in physical virtual-desktop px. Empty unless the
     /// state draws per-monitor chrome (Placement).
     monitors: Vec<(i32, i32, u32, u32)>,
+    /// The type armed for the next drag, or `null` for none (ADR-0018 §3).
+    ///
+    /// **Absence means `Default`** — the indicator shows no type cue when
+    /// nothing is armed, rather than showing "Default" as if it were a
+    /// selection. That is the ADR's wording and it matters: a permanent cue
+    /// naming the resting state is the "which mode am I in?" noise the design
+    /// avoids.
+    armed: Option<&'static str>,
+    /// Whether the screen is frozen (task 1.9d). Only ever true in Placement.
+    ///
+    /// Sent on every state so the frontend has one source for it rather than
+    /// inferring it from the last toggle it happened to see — an inferred copy
+    /// of a fact Rust already owns is how the stale-menu and replayed-flash
+    /// defects of 1.9b happened.
+    frozen: bool,
+    /// Each frozen still as `(x, y, width, height, url)` — physical
+    /// virtual-desktop px plus the URL the WebView fetches the PNG from.
+    ///
+    /// Empty whenever [`Self::frozen`] is false, and the two are derived from
+    /// the same call rather than assembled separately: a payload claiming
+    /// frozen with no stills would render as a live screen the app believes is
+    /// frozen.
+    stills: Vec<(i32, i32, u32, u32, String)>,
 }
 
 const fn state_name(state: OverlayState) -> &'static str {
@@ -290,6 +313,20 @@ const fn state_name(state: OverlayState) -> &'static str {
         OverlayState::Hidden => "hidden",
         OverlayState::Placement => "placement",
         OverlayState::Living => "living",
+    }
+}
+
+/// An [`AreaType`] as the frontend names it — the same lowercase wire
+/// convention [`layer_name`] uses for [`Layer`].
+const fn type_name(kind: AreaType) -> &'static str {
+    match kind {
+        AreaType::Default => "default",
+        AreaType::Screenshot => "screenshot",
+        AreaType::Record => "record",
+        AreaType::Ocr => "ocr",
+        AreaType::Upscale => "upscale",
+        AreaType::Analysis => "analysis",
+        AreaType::Filter => "filter",
     }
 }
 
@@ -309,11 +346,17 @@ pub fn toggle(app: &AppHandle) {
 ///
 /// `Esc` backs out of exactly one thing, innermost first: an open area menu, then
 /// a drag in progress (ADR-0012: mid-drag `Esc` = cancel, state unchanged), then
-/// Placement itself. Anything else would make `Esc` skip past a transient thing
-/// the user can see on screen — dismissing the menu *and* leaving Placement on
-/// one keypress is the shape users read as "it did too much".
+/// the armed type (ADR-0018 §4), then Placement itself. Anything else would make
+/// `Esc` skip past a transient thing the user can see on screen — dismissing the
+/// menu *and* leaving Placement on one keypress is the shape users read as "it
+/// did too much".
 ///
-/// Both inner cases are read from the placement module rather than tracked here,
+/// **A cancelled drag deliberately keeps its arming.** The user asked for a
+/// Screenshot and mis-drew the rectangle; making them re-arm before retrying
+/// would punish the correction. That is why the drag rung is strictly inside the
+/// arming rung rather than clearing both.
+///
+/// Every inner case is read from the placement module rather than tracked here,
 /// because the hook is the only thing that knows a gesture is live.
 pub fn escape(app: &AppHandle) {
     if placement::close_menu(app) {
@@ -321,10 +364,26 @@ pub fn escape(app: &AppHandle) {
     }
     if placement::is_dragging() {
         placement::cancel_drag();
-        drive(app, Event::Escape { mid_drag: true });
-    } else {
-        drive(app, Event::Escape { mid_drag: false });
+        drive(
+            app,
+            Event::Escape {
+                mid_drag: true,
+                armed: placement::armed().is_some(),
+            },
+        );
+        return;
     }
+    let armed = placement::armed().is_some();
+    if armed {
+        placement::disarm();
+    }
+    drive(
+        app,
+        Event::Escape {
+            mid_drag: false,
+            armed,
+        },
+    );
 }
 
 /// Applies an event to the current state and performs the resulting effect.
@@ -358,6 +417,22 @@ fn drive(app: &AppHandle, event: Event) {
 /// rather than leak that button's eventual release to the app underneath (see
 /// the `placement` module docs).
 fn apply(app: &AppHandle, state: OverlayState) -> Result<(), String> {
+    // The state the machine settled on, logged where the effect happens rather
+    // than where the decision is made — so the line reports what the overlay
+    // actually became, not what `next` intended. Debug-only; task 1.15 owns
+    // real logging. Added for task 1.9b's rig pass, where every other check
+    // (did arming work, did the Screenshot auto-exit) is only readable if the
+    // current state is an observation instead of an assumption.
+    #[cfg(debug_assertions)]
+    eprintln!("overlay: state -> {state:?}");
+    // Every state transition returns the screen to live (ADR-0026 decision 4).
+    // Placed here, at the one point every transition funnels through, rather
+    // than at each entry: freeze exists only inside Placement, so "reset on
+    // entry" and "never frozen outside Placement" are the same rule, and
+    // writing it once means a state added later cannot forget it. A frozen
+    // screen surviving into Living would be the worst version of this feature —
+    // a still the user cannot dismiss and did not ask to keep.
+    crate::freeze::thaw();
     match state {
         OverlayState::Hidden => {
             // Emit first so the frontend clears its indicator, then hide.
@@ -394,30 +469,133 @@ fn emit_state(app: &AppHandle, state: OverlayState) -> Result<(), String> {
     let origin = (position.x, position.y);
     // The per-monitor focus frames are a Placement-only indicator; every other
     // state sends none.
+    // Read from `MONITOR_CACHE` rather than re-enumerating. `show` refreshes the
+    // cache immediately before this runs, so it is current — and using the one
+    // list means `overlay://active-monitor`'s index cannot address a different
+    // array than the one sent here. A fresh enumeration would be a second
+    // source of truth for the same fact, which is how the badge would end up
+    // highlighting the wrong monitor.
     let monitors = if matches!(state, OverlayState::Placement) {
-        monitors(&window)?
+        monitor_rects()
             .iter()
-            .map(|m| {
+            .map(|bounds| {
                 (
-                    m.bounds.origin.x,
-                    m.bounds.origin.y,
-                    m.bounds.size.width,
-                    m.bounds.size.height,
+                    bounds.origin.x,
+                    bounds.origin.y,
+                    bounds.size.width,
+                    bounds.size.height,
                 )
             })
             .collect()
     } else {
         Vec::new()
     };
+    // Arming is Placement-only state, and reading it in any other state would
+    // report something the user cannot act on. `placement` clears it on exit
+    // anyway, so this guard is the second lock on the same door.
+    let armed = if matches!(state, OverlayState::Placement) {
+        placement::armed().map(type_name)
+    } else {
+        None
+    };
+    // One read, two fields: `frozen` is "are there stills" by construction
+    // rather than a flag that could disagree with the list beside it.
+    let stills: Vec<(i32, i32, u32, u32, String)> = crate::freeze::stills_for_display()
+        .into_iter()
+        .map(|(bounds, url)| {
+            (
+                bounds.origin.x,
+                bounds.origin.y,
+                bounds.size.width,
+                bounds.size.height,
+                url,
+            )
+        })
+        .collect();
     app.emit(
         STATE_EVENT,
         StatePayload {
             state: state_name(state),
             origin,
             monitors,
+            armed,
+            frozen: !stills.is_empty(),
+            stills,
         },
     )
     .map_err(|e| format!("Could not emit overlay state: {e}"))
+}
+
+/// Toggles the frozen view — `Ctrl+Space` in Placement (task 1.9d, ADR-0026).
+///
+/// # Placement-only, and it says so rather than going quiet
+///
+/// ADR-0026 decision 2 scopes freeze to Placement. Called from any other state
+/// this logs and does nothing: the frontend does not send the key outside
+/// Placement, so reaching here from Living means the two disagree about the
+/// state, which is worth a line rather than a silent return.
+///
+/// # Why freezing spawns and thawing does not
+///
+/// A freeze is one capture per monitor — approaching a second on a four-monitor
+/// desktop — and this runs on the event-loop thread. Blocking it would hang the
+/// window it is about to redraw. Thawing only drops the stills, so it is
+/// immediate and emits inline.
+///
+/// The state is emitted **after** the captures land, so the frontend never shows
+/// a frozen indicator over live pixels. The visible cost is that a freeze takes
+/// effect a beat after the key; the alternative is a lie on screen for the same
+/// beat, and this project has already recorded what a green-looking wrong state
+/// costs.
+pub fn toggle_freeze(app: &AppHandle) {
+    let state = *lock(&app.state::<Mutex<OverlayState>>());
+    if !matches!(state, OverlayState::Placement) {
+        eprintln!("overlay: freeze toggle ignored outside Placement (state {state:?})");
+        return;
+    }
+    if crate::freeze::is_frozen() {
+        crate::freeze::thaw();
+        if let Err(error) = emit_state(app, state) {
+            eprintln!("overlay: could not emit state after thawing: {error}");
+        }
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let monitors = monitor_rects();
+        // Timed because the wait between the key and the still appearing is the
+        // whole felt cost of this feature and nothing else reported it. Logged
+        // in the same shape `output.rs` uses for the export path, with the
+        // stage split, because "slow" is not actionable and "the capture is
+        // slow" is. The stage figures are per-monitor maxima and the total is
+        // wall-clock, so they do not add up — see `FreezeReport`.
+        let report = match crate::freeze::freeze(&monitors) {
+            Ok(report) => report,
+            // Nothing was published, so nothing is emitted: the state the
+            // frontend already holds is the correct one in both cases. Logged
+            // rather than silent — from the user's side the key did nothing, and
+            // a ~420 ms window where that is the right behaviour is exactly what
+            // a session reads a log to explain.
+            Err(skipped) => {
+                eprintln!("freeze: no stills published — {skipped}");
+                return;
+            }
+        };
+        // Reported as a ratio, not as a success: a freeze that captured three of
+        // four monitors is a real state the user is about to select on, and
+        // "frozen" alone would hide which screens are still live.
+        eprintln!(
+            "freeze: froze {}/{} monitor(s) in {} ms — slowest monitor: capture {} ms, encode {} ms",
+            report.count,
+            monitors.len(),
+            report.elapsed_ms,
+            report.slowest_capture_ms,
+            report.slowest_encode_ms
+        );
+        if let Err(error) = emit_state(&app, OverlayState::Placement) {
+            eprintln!("overlay: could not emit state after freezing: {error}");
+        }
+    });
 }
 
 /// Whether any areas exist — read from the managed [`AreaStore`]. When it is
@@ -433,6 +611,7 @@ fn has_areas(app: &AppHandle) -> bool {
 /// origin and `devicePixelRatio` (ADR-0011), exactly as it does the monitor
 /// frames and the selection box.
 const AREAS_EVENT: &str = "overlay://areas";
+const PIN_EVENT: &str = "overlay://pin";
 
 /// One area as the frontend draws it.
 #[derive(Serialize, Clone)]
@@ -536,19 +715,22 @@ pub(crate) fn area_at(app: &AppHandle, point: Point) -> Option<AreaSummary> {
     guard.hit_test_any(point).map(AreaSummary::of)
 }
 
-/// The topmost **interactive** area containing `point` — the area that claims
-/// a `Living` mouse event (ADR-0016, V-7). `None` means the event belongs to
-/// the user's apps: the point is over empty overlay, or over areas that are
-/// all pass-through.
+/// The topmost area that claims a `Living` mouse event at `point` (ADR-0016,
+/// V-7). `None` means the event belongs to the user's apps: the point is over
+/// empty overlay, or over the *body* of a pass-through area.
 ///
 /// [`AreaStore::hit_test`], not `hit_test_any` — the difference *is* the input
-/// model: a pass-through area never takes a click in `Living`, however high it
-/// is stacked, including a Filter pinned to `Front` (the property the store's
-/// tests pin).
+/// model. Since [ADR-0024](../../../Projects/UP-TAKE/DECISIONS/ADR-0024-direct-manipulation-in-living.md)
+/// §2 that difference is narrower than it was: a pass-through area no longer
+/// misses every click regardless of stacking, it misses clicks on its **body**
+/// and takes them on its **chrome**. A Filter pinned to `Front` still never
+/// steals a click from the app underneath it, which is the property that
+/// motivated the split.
 pub(crate) fn interactive_area_at(app: &AppHandle, point: Point) -> Option<AreaSummary> {
+    let monitors = monitor_rects();
     let store = app.state::<Mutex<AreaStore>>();
     let guard = lock(&store);
-    guard.hit_test(point).map(AreaSummary::of)
+    guard.hit_test(point, &monitors).map(AreaSummary::of)
 }
 
 /// Raises an area to the top of its tier — §3.2a's "the area you last touched
@@ -586,6 +768,52 @@ pub(crate) fn area_handle_at(
     })
 }
 
+/// The topmost **interactive** area whose interaction surface contains `point`.
+///
+/// The `Living` counterpart of [`area_handle_at`], and it draws the same
+/// distinction [`AreaStore::hit_test`] and `hit_test_any` already do: in
+/// `Placement` the user is editing the workspace, so every area is grabbable
+/// whatever its [`Input`]; in `Living` a pass-through area's *body* belongs to
+/// the app underneath.
+///
+/// # Task 1.17(b): chrome is grabbable, the body is not
+///
+/// This used to filter pass-through areas out entirely, which is what made them
+/// **ungrabbable in `Living`** — a `Filter` or `Record` area (pass-through by
+/// default) could only be touched by re-entering `Placement`, and flipping any
+/// area to pass-through stranded it there. [ADR-0024](../../../Projects/UP-TAKE/DECISIONS/ADR-0024-direct-manipulation-in-living.md)
+/// §2 redefines the property: the body passes clicks through, the chrome does
+/// not.
+///
+/// The resolution deliberately mirrors [`AreaStore::hit_test`] rather than
+/// re-deriving it — same rule, expressed once per side of the IPC boundary,
+/// because two copies of "what takes input" drifting apart is how a click gets
+/// swallowed by an area that would not have handled it.
+///
+/// **A pass-through area still cannot be *moved* in `Living`.** Its chrome is the
+/// resize band and the close control; `Handle::Body` is the move grab, and that is
+/// precisely what passes through. Moving arrives with 1.17(c)'s `Win+Shift` drag
+/// or 1.17(b2)'s control bar, whichever lands first.
+pub(crate) fn interactive_area_handle_at(
+    app: &AppHandle,
+    point: Point,
+) -> Option<(AreaId, Rect, interaction::Handle)> {
+    let monitors = monitor_rects();
+    let store = app.state::<Mutex<AreaStore>>();
+    let guard = lock(&store);
+    guard.iter_top_down().find_map(|area| {
+        let handle = interaction::handle_at(area.bounds, point, &monitors)?;
+        // An interactive area answers for any handle; a pass-through one only for
+        // chrome. `find_map` stops at the first area that answers, so a
+        // pass-through area's body does not shadow an interactive area beneath it.
+        if area.is_interactive() || !matches!(handle, interaction::Handle::Body) {
+            Some((area.id, area.bounds, handle))
+        } else {
+            None
+        }
+    })
+}
+
 /// The close control's rectangle for an area, against the current monitors.
 pub(crate) fn close_control_of(bounds: Rect) -> Rect {
     interaction::close_control(bounds, &monitor_rects())
@@ -610,6 +838,10 @@ pub(crate) fn dismiss_area(app: &AppHandle, id: AreaId) -> bool {
         lock(&store).remove(id).is_some()
     };
     if removed {
+        // The pinned capture goes with the area that displayed it — see
+        // `captures`'s Lifetime note; a map that only grows is a leak the
+        // 8-hour soak (M-20) would find and nothing else would.
+        crate::captures::forget(app, id);
         collapse_living_if_empty(app);
     }
     removed
@@ -700,8 +932,12 @@ pub(crate) fn monitor_bounds_at(app: &AppHandle, point: Point) -> Rect {
     virtual_desktop_bounds(monitors.iter().map(|m| m.bounds)).unwrap_or(fallback)
 }
 
-/// Creates a `Default` area at the given physical bounds, returning whether one
-/// was created. `Default` is the only type task 1.6 ships (R-17).
+/// Creates an area of `kind` at the given physical bounds, returning its id and
+/// stored rectangle, or `None` if nothing was created.
+///
+/// `kind` comes from the arming state (ADR-0018 §1) — `Default` when nothing is
+/// armed. Task 1.6 shipped `Default` alone (R-17); 1.9b adds `Screenshot` as the
+/// first type a gesture can actually select.
 ///
 /// Two rejections, and they are different in kind. `AreaStore::create` refuses
 /// an *empty* rectangle as a model invariant — a zero-pixel area could never be
@@ -713,22 +949,180 @@ pub(crate) fn monitor_bounds_at(app: &AppHandle, point: Point) -> Rect {
 ///
 /// The placement hook calls this from the event-loop thread; it takes the store
 /// lock only for the push.
-pub(crate) fn create_default_area(
+pub(crate) fn create_area(
     app: &AppHandle,
+    kind: AreaType,
     x: i32,
     y: i32,
     width: u32,
     height: u32,
-) -> bool {
+) -> Option<(AreaId, Rect)> {
     let bounds = Rect {
         origin: Point::new(x, y),
         size: Size::new(width, height),
     };
     if !interaction::is_placeable(bounds) {
-        return false;
+        return None;
     }
     let store = app.state::<Mutex<AreaStore>>();
-    lock(&store).create(AreaType::Default, bounds).is_some()
+    let id = lock(&store).create(kind, bounds)?;
+    // The bounds travel back with the id because the capture that follows a
+    // Screenshot create needs the *stored* rectangle, not the one the caller
+    // asked for. They are equal today; returning the store's answer means a
+    // future clamp or snap in `create` cannot silently desynchronise the pin
+    // from the pixels.
+    Some((id, bounds))
+}
+
+const ACTIVE_MONITOR_EVENT: &str = "overlay://active-monitor";
+
+/// The payload of `overlay://active-monitor`: which monitor holds the cursor.
+#[derive(Serialize, Clone)]
+struct ActiveMonitorPayload {
+    /// An index into the `monitors` array of the last `overlay://state` — both
+    /// come from [`monitor_rects`], so they address the same list. `null` when
+    /// the cursor is in a dead zone between mismatched monitors, where any
+    /// answer would be a guess.
+    index: Option<usize>,
+}
+
+/// Which monitor contains `point`, as an index into [`monitor_rects`].
+pub(crate) fn monitor_index_at(point: Point) -> Option<usize> {
+    monitor_rects()
+        .iter()
+        .position(|bounds| bounds.contains(point))
+}
+
+/// Tells the frontend which monitor the per-monitor placement chrome belongs on.
+///
+/// Emitted on change from the placement poll rather than folded into
+/// `overlay://state`: the answer changes as the cursor crosses a monitor edge,
+/// which is not a state transition, and re-emitting the whole state payload for
+/// it would recompute geometry for a one-integer change.
+pub(crate) fn emit_active_monitor(app: &AppHandle, index: Option<usize>) {
+    if let Err(error) = app.emit(ACTIVE_MONITOR_EVENT, ActiveMonitorPayload { index }) {
+        eprintln!("overlay: could not emit the active monitor: {error}");
+    }
+}
+
+const FLASH_EVENT: &str = "overlay://flash";
+
+/// The payload of `overlay://flash`: an action on this area just succeeded.
+#[derive(Serialize, Clone)]
+struct FlashPayload {
+    id: u64,
+    /// Distinguishes one flash from the next so the frontend can restart the
+    /// animation. Two Copies in a row are two events with identical `id`, which
+    /// a reactive framework would otherwise coalesce into no visible change at
+    /// all — the failure being *silence*, which is the very thing this fixes.
+    nonce: u64,
+}
+
+/// Acknowledges a completed user-initiated action by flashing its area.
+///
+/// **The success half of F-35.** That row records the failure half — a failed
+/// Copy or Save reaches nobody once the app is not run from a console — and
+/// concludes the deciding axis is *"did a user ask for this?"*. By that test a
+/// *successful* Copy needs an answer just as much: the user pressed a menu row
+/// and, until now, absolutely nothing happened on screen.
+///
+/// This is the cheap half. The clickable "Image saved — open folder" toast is
+/// task 1.15's, with the rest of F-35: the overlay is `WS_EX_TRANSPARENT`, so a
+/// toast cannot be a clickable DOM element and has to be drawn by the WebView
+/// and hit-tested in Rust the way the area menu already is. Not hard, but not a
+/// two-line change either.
+pub(crate) fn emit_flash(app: &AppHandle, id: AreaId) {
+    static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nonce = NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if let Err(error) = app.emit(
+        FLASH_EVENT,
+        FlashPayload {
+            id: id.get(),
+            nonce,
+        },
+    ) {
+        eprintln!("overlay: could not emit the flash: {error}");
+    }
+}
+
+/// The payload of `overlay://pin`: one area's capture is ready to render.
+#[derive(Serialize, Clone)]
+struct PinPayload {
+    id: u64,
+    /// The URL to load it from — a `uptake-area://` address, **not** the bytes.
+    /// See `captures`'s module docs for why the pixels do not travel over this
+    /// bridge.
+    url: String,
+}
+
+/// Announces that `id`'s capture is pinned and available at its versioned URL.
+///
+/// Emitted rather than folded into `overlay://areas` because the two have
+/// different timing: an area appears the instant the drag ends, and its capture
+/// lands ~200 ms later. Making the area wait for its pixels would put a visible
+/// hole where the user just dragged.
+pub(crate) fn emit_pin(app: &AppHandle, id: AreaId, version: u64) -> Result<(), String> {
+    app.emit(
+        PIN_EVENT,
+        PinPayload {
+            id: id.get(),
+            url: crate::captures::pin_url(id, version),
+        },
+    )
+    .map_err(|e| format!("Could not emit the pin: {e}"))
+}
+
+/// Applies a type's ADR-0018 §6 after-create behaviour, on the event loop.
+///
+/// # `run_on_main_thread` does **not** defer when you are already on it
+///
+/// This function's first version called `app.run_on_main_thread` directly and
+/// documented the hop as "queued rather than run inline, and that is the point".
+/// **That is the opposite of what happens.** `tauri-runtime-wry`'s
+/// `send_user_message` (2.11.4, `src/lib.rs:239`) begins:
+///
+/// ```text
+/// if current_thread().id() == context.main_thread_id {
+///   handle_user_message(...);   // executed inline, right here
+/// } else {
+///   context.proxy.send_event(message)   // actually queued
+/// }
+/// ```
+///
+/// The only caller is `placement::finish_gesture`, which runs inside the
+/// `WH_MOUSE_LL` callback — and that callback runs on the thread that installed
+/// the hook, which is the event-loop thread. So the identity test passes and the
+/// closure ran **synchronously inside the mouse hook**, which is precisely what
+/// the comment claimed it avoided.
+///
+/// What that actually cost, stated rather than implied: [`drive`] calls
+/// [`apply`] unconditionally, even when `next` returns the state it was already
+/// in — so every `Screenshot` create ran `apply(Placement)` in the hook, i.e.
+/// `show` (which re-enumerates monitors into the cache), `placement::enter`
+/// (inline for the same reason), a `window.inner_position()` Win32 call, and two
+/// IPC emits. Nothing broke on the rig, and it stays far inside the 300 ms
+/// `LowLevelHooksTimeout`. It still mattered twice over: that work lands inside
+/// the mouse-up interval `quality-bars.md` §1 measures and task 1.9c has to
+/// shrink, and the moment task 1.14 makes [`AfterCreate::ExitPlacement`]
+/// reachable the inline path becomes `apply(Living)` →
+/// `placement::enter_living` → `restore_system_cursors`, a **global**
+/// `SPI_SETCURSORS` scheme reload that broadcasts `WM_SETTINGCHANGE`, executed
+/// from within a low-level mouse hook. That is F-33's failure class exactly.
+///
+/// So the hop starts from a spawned thread, where the identity test fails and
+/// the message is genuinely posted. One short-lived thread per area creation,
+/// next to the capture thread `capture_on_create` already spawns.
+pub(crate) fn area_created(app: &AppHandle, kind: AreaType) {
+    let exits_placement = kind.after_create() == AfterCreate::ExitPlacement;
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let handle = app.clone();
+        if let Err(error) = app.run_on_main_thread(move || {
+            drive(&handle, Event::AreaCreated { exits_placement });
+        }) {
+            eprintln!("overlay: could not apply the after-create transition: {error}");
+        }
+    });
 }
 
 /// Locks a mutex, treating poisoning as recoverable — the state under it is a
@@ -737,10 +1131,72 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// IPC surface: the frontend returns a latency probe once its frame has painted.
+///
+/// Deliberately does no validation beyond existing: the value is one this
+/// process minted moments earlier, and a nonsense one can only distort a debug
+/// statistic. Rejecting it would be more code guarding less.
+#[tauri::command]
+pub fn overlay_report_latency(probe: u64) {
+    placement::record_latency(probe);
+}
+
 /// IPC surface: `Esc` from the overlay emits this intent.
 #[tauri::command]
 pub fn overlay_escape(app: AppHandle) {
     escape(&app);
+}
+
+/// Parses a wire type name into an [`AreaType`], the inverse of
+/// [`layer_name`]'s convention for [`Layer`].
+///
+/// Only the types a **direct key can arm** are accepted. The rest of
+/// `AreaType` is modelled but has no gesture, and silently accepting a name
+/// nothing can produce would turn a frontend typo into an area of a type the
+/// app cannot render.
+fn armable_type(name: &str) -> Option<AreaType> {
+    match name {
+        "screenshot" => Some(AreaType::Screenshot),
+        _ => None,
+    }
+}
+
+/// IPC surface: `Ctrl+Space` toggles the frozen view (task 1.9d, ADR-0026).
+///
+/// Returns `Ok` even when the toggle is ignored for being outside Placement.
+/// **That is deliberate and is the opposite of `overlay_arm_type`'s choice
+/// above**, because the two keys mean different things when they miss: arming
+/// outside Placement is the frontend asking for something incoherent, while
+/// `Ctrl+Space` outside Placement is a user pressing a key that simply does not
+/// apply there. Surfacing the second as an IPC error would put a rejection in
+/// the console every time someone taps it in Living, which is how a log stops
+/// being read.
+#[tauri::command]
+pub fn overlay_toggle_freeze(app: AppHandle) {
+    toggle_freeze(&app);
+}
+
+/// IPC surface: a direct key arms the type of the **next** drag (ADR-0018 §1).
+///
+/// Only meaningful in `Placement` — the state that has a next drag — and
+/// rejected elsewhere rather than stored for later, because arming that
+/// outlives the state it was set in is precisely the mode state ADR-0009 §3
+/// deleted.
+#[tauri::command]
+pub fn overlay_arm_type(app: AppHandle, kind: String) -> Result<(), String> {
+    let Some(kind) = armable_type(&kind) else {
+        return Err(format!("{kind} is not an armable area type"));
+    };
+    let state = *lock(&app.state::<Mutex<OverlayState>>());
+    if state != OverlayState::Placement {
+        return Err("arming is only meaningful in placement".to_string());
+    }
+    placement::arm(kind);
+    // Re-emit so the indicator picks up the new armed type; ADR-0018 §3 makes
+    // the indicator the thing that buys down the cost of having mode state at
+    // all, so arming without telling the frontend is the failure mode, not a
+    // missing nicety.
+    emit_state(&app, state)
 }
 
 /// IPC surface: `Delete` from the overlay dismisses the area under the cursor.
