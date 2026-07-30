@@ -115,6 +115,7 @@ pub fn run() -> tauri::Result<()> {
             overlay::overlay_arm_type,
             overlay::overlay_toggle_freeze,
             overlay::overlay_report_latency,
+            overlay::overlay_report_freeze_latency,
             overlay::overlay_dismiss_focused,
             overlay::overlay_request_state
         ])

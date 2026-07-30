@@ -322,6 +322,16 @@ struct StatePayload {
     /// frozen with no stills would render as a live screen the app believes is
     /// frozen.
     stills: Vec<(i32, i32, u32, u32, String)>,
+    /// The in-flight `Ctrl+Space` → painted probe, or `null`.
+    ///
+    /// Present on exactly one payload per freeze — the one carrying the new
+    /// stills — because [`crate::freeze::take_paint_probe`] clears as it reads.
+    /// Always `null` in a release build, where nothing stamps one.
+    ///
+    /// The frontend echoes it back through `overlay_report_freeze_latency`
+    /// **after every still has decoded**, which is the half of
+    /// `quality-bars.md` §1's row that 1.9f's `72–78 ms` never covered.
+    freeze_probe: Option<u64>,
 }
 
 const fn state_name(state: OverlayState) -> &'static str {
@@ -540,6 +550,15 @@ fn emit_state(app: &AppHandle, state: OverlayState) -> Result<(), String> {
             monitors,
             armed,
             frozen: !stills.is_empty(),
+            // Taken only when this payload actually carries stills. A thaw or an
+            // unrelated re-emit must not consume a probe a freeze is still
+            // waiting to attach to — and must not report one against a paint
+            // that drew nothing.
+            freeze_probe: if stills.is_empty() {
+                None
+            } else {
+                crate::freeze::take_paint_probe()
+            },
             stills,
         },
     )
@@ -580,6 +599,11 @@ pub fn toggle_freeze(app: &AppHandle) {
         }
         return;
     }
+    // Stamped here — on the key, on the calling thread, before the capture
+    // thread is even spawned — because `quality-bars.md` §1's row measures what
+    // the user waits for. Anything later would time a stage and call it the
+    // promise.
+    crate::freeze::stamp_paint_probe();
     let app = app.clone();
     std::thread::spawn(move || {
         let monitors = monitor_rects();
@@ -1162,6 +1186,24 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[tauri::command]
 pub fn overlay_report_latency(probe: u64) {
     placement::record_latency(probe);
+}
+
+/// IPC surface: the frontend returns the freeze probe once every still has
+/// decoded **and** the following frame has painted.
+///
+/// Separate from [`overlay_report_latency`] rather than sharing its collector:
+/// the poll probe accumulates ~1,200 samples across a drag and reports a mean,
+/// while a freeze is one event whose single number is the answer. Pooling them
+/// would average two different rows of `quality-bars.md` §1 into one figure
+/// belonging to neither.
+///
+/// A no-op in release, where nothing stamps a probe to echo.
+#[tauri::command]
+pub fn overlay_report_freeze_latency(probe: u64) {
+    #[cfg(debug_assertions)]
+    crate::freeze::record_paint_latency(probe);
+    #[cfg(not(debug_assertions))]
+    let _ = probe;
 }
 
 /// IPC surface: `Esc` from the overlay emits this intent.

@@ -43,6 +43,15 @@ export interface StatePayload {
    * stills — which would render as a live screen the app believes is frozen.
    */
   stills: FrozenStill[];
+  /**
+   * The `Ctrl+Space` → painted probe, or `null`.
+   *
+   * Present on exactly one payload per freeze — the one carrying the new
+   * stills — and always `null` in a release build, where Rust stamps none.
+   * Echo it with {@link reportFreezeLatency}, never with
+   * {@link reportLatency}: the two measure different rows.
+   */
+  freeze_probe: number | null;
 }
 
 /** One monitor's frozen still: where it is, and where to fetch it. */
@@ -472,6 +481,44 @@ export function reportLatency(invoke: Invoke, probe: number): void {
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
       void invoke('overlay_report_latency', { probe }).catch(() => {});
+    });
+  });
+}
+
+/**
+ * Returns the freeze probe once every still has **decoded** and the following
+ * frame has painted — `quality-bars.md` §1's *`Ctrl+Space` → frozen view
+ * painted* row.
+ *
+ * **Why this is not {@link reportLatency}.** A double `requestAnimationFrame`
+ * resolves as soon as the DOM has updated, and for freeze the DOM updates the
+ * instant the `<img>` elements are inserted — while four full-monitor PNGs are
+ * still decoding. Decode is precisely the cost this row exists to capture, and
+ * 1.9f's measured `72–78 ms` stops at the encode, so timing the rAF pair alone
+ * would report a comfortable number excluding the only unmeasured stage. That
+ * is `UT-F-41`: an instrument whose summary says the opposite of the thing it
+ * was built to settle.
+ *
+ * So `decode()` is awaited on every image first, and the clock stops after
+ * *decoded and painted* rather than after *inserted*.
+ *
+ * A rejected `decode()` — a still whose PNG 404s — counts as decoded rather
+ * than aborting the measurement. The alternative is silence, and a probe that
+ * reports nothing when something is wrong is indistinguishable from one that is
+ * switched off (`I-11`). A broken still instead shows as an implausibly fast
+ * figure beside a visibly broken screen, which is readable.
+ *
+ * Never throws: instrumentation must not disturb what it measures.
+ */
+export async function reportFreezeLatency(
+  invoke: Invoke,
+  probe: number,
+  images: HTMLImageElement[],
+): Promise<void> {
+  await Promise.all(images.map((image) => image.decode().catch(() => {})));
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      void invoke('overlay_report_freeze_latency', { probe }).catch(() => {});
     });
   });
 }

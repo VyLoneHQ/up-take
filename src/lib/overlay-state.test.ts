@@ -15,6 +15,7 @@ import {
   type PhysRect,
   physRectsToCss,
   physRectToCss,
+  reportFreezeLatency,
   showsMenu,
   showsTint,
   stillsFromWire,
@@ -373,5 +374,78 @@ describe('dismissFocusedArea', () => {
     const invoke = vi.fn<Invoke>().mockRejectedValue(new Error('no window'));
 
     await expect(dismissFocusedArea(invoke)).resolves.toBe(false);
+  });
+});
+
+describe('reportFreezeLatency', () => {
+  /**
+   * The property that makes this function different from `reportLatency`, and
+   * the only reason it exists: the clock must stop after the stills have
+   * **decoded**, not when the DOM updated. `quality-bars.md` §1's *frozen view
+   * painted* row is about pixels on screen, and 1.9f's measured 72–78 ms stops
+   * at the encode — so a probe that echoed before decode would report the one
+   * unmeasured stage as free.
+   */
+  it('does not echo until every still has decoded', async () => {
+    const frames: (() => void)[] = [];
+    vi.stubGlobal('requestAnimationFrame', (fn: () => void) => {
+      frames.push(fn);
+      return frames.length;
+    });
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    let releaseFirst!: () => void;
+    const images = [
+      {
+        decode: () =>
+          new Promise<void>((resolve) => {
+            releaseFirst = resolve;
+          }),
+      },
+      { decode: () => Promise.resolve() },
+    ] as unknown as HTMLImageElement[];
+
+    const done = reportFreezeLatency(invoke, 4242, images);
+    // One decode is still outstanding, so nothing may have been scheduled yet.
+    await Promise.resolve();
+    expect(frames).toHaveLength(0);
+    expect(invoke).not.toHaveBeenCalled();
+
+    releaseFirst();
+    await done;
+    // Two nested frames, and only the inner one echoes.
+    expect(frames).toHaveLength(1);
+    frames[0]?.();
+    expect(frames).toHaveLength(2);
+    expect(invoke).not.toHaveBeenCalled();
+    frames[1]?.();
+    expect(invoke).toHaveBeenCalledWith('overlay_report_freeze_latency', {
+      probe: 4242,
+    });
+    vi.unstubAllGlobals();
+  });
+
+  /**
+   * A still whose PNG 404s must not strand the measurement. Silence is the one
+   * outcome a probe cannot have (`I-11`): it is indistinguishable from the
+   * probe being switched off.
+   */
+  it('still echoes when a decode rejects', async () => {
+    const frames: (() => void)[] = [];
+    vi.stubGlobal('requestAnimationFrame', (fn: () => void) => {
+      frames.push(fn);
+      return frames.length;
+    });
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    const images = [
+      { decode: () => Promise.reject(new Error('404')) },
+    ] as unknown as HTMLImageElement[];
+
+    await reportFreezeLatency(invoke, 7, images);
+    frames[0]?.();
+    frames[1]?.();
+    expect(invoke).toHaveBeenCalledWith('overlay_report_freeze_latency', {
+      probe: 7,
+    });
+    vi.unstubAllGlobals();
   });
 });
