@@ -145,6 +145,26 @@ struct Slot {
     /// leaving Placement discards this and the next entry tries the monitor
     /// again — the opt-out cannot outlive the condition that caused it.
     unservable: AtomicBool,
+    /// Whether this session has ever had a frame in hand.
+    ///
+    /// **The discriminator that keeps [`Slot::unservable`] honest**, added
+    /// 2026-07-30 from PR #33's review. `Warm::start` returns `Err` for two
+    /// different things: a session that never began (item conversion failed — a
+    /// monitor WGC cannot serve) *and* a session that ran and then failed, since
+    /// a `retain` error returned from `on_frame_arrived` surfaces out of
+    /// `start`. Marking both unservable would opt a monitor that pumped
+    /// correctly for minutes out of every rebuild for the rest of the visit —
+    /// which is the case Vuln 1's rebuild exists for, defeated from the other
+    /// side.
+    ///
+    /// A session that produced at least one frame has demonstrated the monitor
+    /// **is** servable, so a later failure is a death and wants a rebuild.
+    ///
+    /// Its own flag rather than reading `retained` at the failure, because
+    /// `retained` is cleared on a resolution change *before* the textures are
+    /// rebuilt — so a rebuild that failed would look like a session that never
+    /// served a frame at all.
+    ever_retained: AtomicBool,
 }
 
 impl Slot {
@@ -189,6 +209,21 @@ impl Slot {
     fn is_unservable(&self) -> bool {
         self.unservable.load(Ordering::SeqCst)
     }
+
+    /// Records that `Warm::start` returned `Err` for this slot.
+    ///
+    /// A seam rather than two lines inline in the pump, so the discriminator
+    /// can be tested in both directions without a desktop — `F-33`'s rule that
+    /// a decision a test needs to reach should be reachable by argument rather
+    /// than only through the machinery around it.
+    ///
+    /// Marks the monitor unservable **only if it never served a frame**. See
+    /// [`Slot::ever_retained`] for why the two cases must not be conflated.
+    fn record_failed_start(&self) {
+        if !self.ever_retained.load(Ordering::SeqCst) {
+            self.unservable.store(true, Ordering::SeqCst);
+        }
+    }
 }
 
 /// What the warm path is currently doing, for a caller that wants to report it.
@@ -205,10 +240,32 @@ pub struct WarmStatus {
     pub sessions: usize,
     /// Of those, how many have a frame retained and can answer a capture.
     pub warm: usize,
+    /// Of those, how many are monitors WGC could not serve at all.
+    ///
+    /// **Added 2026-07-30 from PR #33's review, and it is this type's own
+    /// reason for existing turned on the fix.** Without it `warm 3/4` means
+    /// either *one session is still inside its ~330 ms warm-up* or *one display
+    /// is permanently on the cold path for this visit*, and a rig operator
+    /// cannot tell which. That is exactly the `I-11` failure `WarmStatus` was
+    /// built to prevent, arriving through the door the unservable fix opened.
+    pub unservable: usize,
 }
 
 impl WarmStatus {
     /// Whether every held session can answer a capture.
+    ///
+    /// **Deliberately strict: an unservable monitor makes this false**, and the
+    /// review that added [`Self::unservable`] suggested the opposite — that it
+    /// should stay true, three of three servable monitors being the best
+    /// available state. It is not taken, for one reason: this is asserted as a
+    /// *precondition* by the rig tests that compare warm and cold pixels, and a
+    /// best-available reading would let those pass while one of the displays
+    /// they might compare is silently on the cold path. A precondition that
+    /// weakens itself when the rig degrades is the shape this project keeps
+    /// finding defects in.
+    ///
+    /// The count beside it is what makes the strictness readable rather than
+    /// mysterious, which is why the two landed together.
     #[must_use]
     pub const fn fully_warm(&self) -> bool {
         self.sessions > 0 && self.warm == self.sessions
@@ -269,6 +326,7 @@ pub fn start() -> usize {
             stop: AtomicBool::new(false),
             thread_id: Mutex::new(None),
             unservable: AtomicBool::new(false),
+            ever_retained: AtomicBool::new(false),
         });
         // The pump publishes its id before the slot joins `SESSIONS`, so
         // `thread_id` is never "not yet" for a slot a reader can reach. It can
@@ -377,6 +435,7 @@ pub fn status() -> WarmStatus {
     WarmStatus {
         sessions: sessions.len(),
         warm: sessions.iter().filter(|slot| slot.is_warm()).count(),
+        unservable: sessions.iter().filter(|slot| slot.is_unservable()).count(),
     }
 }
 
@@ -618,6 +677,10 @@ fn retain(slot: &Slot, frame: &mut Frame<'_>) -> Result<(), String> {
             .context
             .CopyResource(&retained.live, frame.as_raw_texture());
     }
+    // Set only here, at the one point a frame is genuinely in hand, and never
+    // cleared: it records that this monitor *was* servable, which stays true
+    // however the session later ends. See `Slot::ever_retained`.
+    slot.ever_retained.store(true, Ordering::SeqCst);
     Ok(())
 }
 
@@ -782,7 +845,14 @@ fn spawn_session(slot: Arc<Slot>) -> bool {
             // Recorded **before** the guard clears `thread_id` on the way out,
             // so a reader that sees no pump can always see why. `covers` reads
             // the two in that order and relies on it.
-            slot.unservable.store(true, Ordering::SeqCst);
+            //
+            // **Only when the session never served a frame.** `Warm::start`
+            // also returns `Err` for a session that ran and then failed — a
+            // `retain` error from `on_frame_arrived` surfaces here — and a
+            // monitor that pumped correctly has proved it is servable. Marking
+            // that unservable would opt it out of every rebuild for the rest of
+            // the visit, which is Vuln 1's case defeated from the other side.
+            slot.record_failed_start();
             // Debug-only, like every other in-process report here; task 1.15
             // owns real logging. A session that never starts is not an error the
             // caller can act on — `capture_monitor` returns `None` and the cold
@@ -866,21 +936,24 @@ mod tests {
         assert!(
             !WarmStatus {
                 sessions: 0,
-                warm: 0
+                warm: 0,
+                unservable: 0
             }
             .fully_warm()
         );
         assert!(
             !WarmStatus {
                 sessions: 4,
-                warm: 3
+                warm: 3,
+                unservable: 0
             }
             .fully_warm()
         );
         assert!(
             WarmStatus {
                 sessions: 4,
-                warm: 4
+                warm: 4,
+                unservable: 0
             }
             .fully_warm()
         );
@@ -896,6 +969,7 @@ mod tests {
             stop: AtomicBool::new(false),
             thread_id: Mutex::new(Some(1000 + handle as u32)),
             unservable: AtomicBool::new(false),
+            ever_retained: AtomicBool::new(false),
         })
     }
 
@@ -1141,8 +1215,88 @@ mod tests {
         );
     }
 
+    /// A session that **never served a frame** and then failed is a monitor WGC
+    /// cannot serve: mark it, so `covers` stops rebuilding it.
+    #[test]
+    fn a_start_failure_with_no_frame_ever_served_marks_the_monitor_unservable() {
+        let slot = slot_at(1, Rect::new(0, 0, 100, 100));
+        assert!(!slot.is_unservable(), "control: starts servable");
+        slot.record_failed_start();
+        assert!(slot.is_unservable());
+    }
+
+    /// A session that **served at least one frame** and then failed is a death,
+    /// not an unservability — and marking it would opt the monitor out of every
+    /// rebuild for the rest of the visit, which is Vuln 1's case defeated from
+    /// the other side. `Warm::start` returns `Err` for both, which is why the
+    /// discriminator exists at all (PR #33 review).
+    #[test]
+    fn a_start_failure_after_a_frame_was_served_is_a_death_not_an_unservability() {
+        let slot = slot_at(1, Rect::new(0, 0, 100, 100));
+        // Exactly what `retain` does once a frame is genuinely in hand.
+        slot.ever_retained.store(true, Ordering::SeqCst);
+        slot.record_failed_start();
+        assert!(
+            !slot.is_unservable(),
+            "a monitor that pumped correctly has proved it is servable; its              later failure must still force a rebuild"
+        );
+    }
+
+    /// `warm 3/4` must not mean two different things — the `I-11` failure
+    /// `WarmStatus` exists to prevent, arriving through the door the unservable
+    /// fix opened.
+    #[test]
+    fn an_unservable_monitor_is_counted_and_keeps_fully_warm_false() {
+        let status = WarmStatus {
+            sessions: 4,
+            warm: 3,
+            unservable: 1,
+        };
+        assert_eq!(status.unservable, 1);
+        assert!(
+            !status.fully_warm(),
+            "deliberately strict: the rig tests assert this as a precondition,              and a best-available reading would let them pass with a display              silently on the cold path"
+        );
+    }
+
+    /// Serialises the unit tests that touch the process-global `SESSIONS`, for
+    /// the same reason the rig tests have one: libtest runs them concurrently
+    /// in one process.
+    static GLOBAL_SESSIONS: Mutex<()> = Mutex::new(());
+
+    /// The count has to be **wired**, not merely defined. Removing it from
+    /// `status` leaves every struct-literal test green, because those assert
+    /// what `WarmStatus` holds rather than what `status` reports — and a count
+    /// that silently stops counting is the `I-11` failure it exists to prevent.
+    #[test]
+    fn status_reports_an_unservable_slot_from_the_live_session_set() {
+        let _serial = GLOBAL_SESSIONS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        stop();
+
+        let dead = slot_at(1, Rect::new(0, 0, 100, 100));
+        dead.record_failed_start();
+        let alive = slot_at(2, Rect::new(100, 0, 100, 100));
+        SESSIONS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .extend([dead, alive]);
+
+        let reported = status();
+        assert_eq!(reported.sessions, 2);
+        assert_eq!(reported.unservable, 1, "the count must come from the slots");
+        assert_eq!(reported.warm, 0, "control: neither has a frame retained");
+
+        stop();
+        assert_eq!(status().sessions, 0);
+    }
+
     #[test]
     fn capturing_and_stopping_without_a_started_session_are_both_safe() {
+        let _serial = GLOBAL_SESSIONS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         // The disabled path and the every-transition placement of `stop` both
         // depend on these being no-ops rather than panics.
         stop();
@@ -1150,7 +1304,8 @@ mod tests {
             status(),
             WarmStatus {
                 sessions: 0,
-                warm: 0
+                warm: 0,
+                unservable: 0
             }
         );
         assert!(capture_monitor(Rect::new(0, 0, 100, 100)).is_none());
