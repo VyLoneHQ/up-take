@@ -4249,6 +4249,7 @@ dependencies = [
  "proptest",
  "thiserror 2.0.19",
  "uptake-core",
+ "windows 0.62.2",
  "windows-capture",
  "windows-sys 0.61.2",
 ]

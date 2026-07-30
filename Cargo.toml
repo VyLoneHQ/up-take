@@ -46,6 +46,11 @@ windows-sys = "0.61"
 # the WIC-backed PNG encoder the output pipeline reuses. Pinned here for the
 # same reason windows-sys is.
 windows-capture = "2.0"
+# The COM-flavoured bindings, as distinct from windows-sys' raw ones. Needed
+# only where D3D11 interfaces cross into our own code: windows-capture hands
+# out `ID3D11Texture2D`/`ID3D11Device` from *this* crate, so the version must
+# resolve to the same 0.62.x it uses or they are not the same types.
+windows = "0.62"
 thiserror = "2"
 proptest = "1"
 
