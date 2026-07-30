@@ -115,6 +115,7 @@ pub fn run() -> tauri::Result<()> {
             overlay::overlay_arm_type,
             overlay::overlay_toggle_freeze,
             overlay::overlay_report_latency,
+            overlay::overlay_report_freeze_latency,
             overlay::overlay_dismiss_focused,
             overlay::overlay_request_state
         ])
@@ -142,6 +143,12 @@ pub fn run() -> tauri::Result<()> {
             // this is the identity every later summon is compared against.
             #[cfg(debug_assertions)]
             dev_harness::record_main_thread();
+            // Read once, here, so the answer cannot change under a running
+            // Placement — a setting that flipped between `sync_warm_sessions`
+            // starting the sessions and `freeze` consulting them would leak
+            // four held sessions. Task 1.14 replaces the env read with the
+            // stored setting; this call site stays.
+            freeze::init_warm_capture();
             // State must be managed and the poll thread parked before the
             // first `overlay::show`, which activates the poll.
             app.manage(click_through::ClickThrough::new());
