@@ -167,18 +167,42 @@ impl WarmStatus {
     }
 }
 
-/// Starts a held session for every monitor, replacing any already running.
+/// Starts a held session for every monitor, or keeps the ones already running
+/// if they still cover the desktop.
 ///
-/// Returns how many sessions were started — **not** how many are warm, which is
-/// zero at this instant and stays zero for ~330 ms. Use [`status`] for that.
+/// Returns how many sessions are held — **not** how many are warm, which is zero
+/// for ~330 ms after a set is actually started. Use [`status`] for that.
 ///
-/// Idempotent in effect: calling it twice stops the first set first, so a caller
-/// funnelling every state transition through it cannot leak sessions.
+/// # Why this checks instead of simply restarting
+///
+/// The caller is [`crate::warm`]'s one funnel: every overlay state transition
+/// calls it, including **Placement → Placement**, which happens on `Esc`
+/// mid-drag and on a summon while already in Placement. An unconditional
+/// `stop()` first would drop every texture and respawn every pump on those
+/// transitions — so the user would land back in Placement with the warm path
+/// silently cold for ~330 ms, which is exactly the window `Ctrl+Space` is
+/// pressed in. A rig pass cannot see it: enter Placement fresh, wait, freeze,
+/// and the path is warm every time.
+///
+/// The comparison is the full enumeration rather than a count, so a display
+/// unplugged, added or moved while Placement is up still rebuilds — the held
+/// bounds are what [`capture_monitor`] matches on and reports at, and serving a
+/// monitor that moved would offset every crop by the disagreement.
 pub fn start() -> usize {
-    stop();
     let Ok(monitors) = crate::monitors::enumerate() else {
+        // We cannot show that what is held still describes the desktop, so we
+        // stop rather than keep sessions we cannot vouch for. The cold path is a
+        // correct answer; stale bounds are not.
+        stop();
         return 0;
     };
+    {
+        let sessions = SESSIONS.lock().unwrap_or_else(PoisonError::into_inner);
+        if covers(&sessions, &monitors) {
+            return sessions.len();
+        }
+    }
+    stop();
     let mut sessions = SESSIONS.lock().unwrap_or_else(PoisonError::into_inner);
     for monitor in monitors {
         let slot = Arc::new(Slot {
@@ -192,6 +216,22 @@ pub fn start() -> usize {
         sessions.push(slot);
     }
     sessions.len()
+}
+
+/// Whether the held sessions describe exactly the monitors enumerated now.
+///
+/// Both halves are load-bearing. The length check catches a monitor **removed**,
+/// which the per-monitor search cannot see; the search catches one added, moved
+/// or resized. Handle *and* bounds must agree: a handle alone would accept a
+/// monitor that changed resolution under a held session, whose retained texture
+/// is sized to the old frame.
+fn covers(sessions: &[Arc<Slot>], monitors: &[crate::plan::MonitorInfo]) -> bool {
+    sessions.len() == monitors.len()
+        && monitors.iter().all(|monitor| {
+            sessions
+                .iter()
+                .any(|slot| slot.handle == monitor.handle && slot.bounds == monitor.bounds)
+        })
 }
 
 /// Stops every held session and releases its textures.
@@ -210,20 +250,33 @@ pub fn stop() {
         // only read inside `on_frame_arrived`, and on a still screen that may
         // never run again. WM_QUIT breaks the message loop itself. Same escape
         // hatch as `wgc.rs`, and required for the same reason.
-        if let Some(id) = *slot
+        // The lock is held **across** the post, deliberately, and it is the whole
+        // of what makes the id safe to use. [`ThreadIdGuard`] clears the id under
+        // this same lock as the last thing the pump thread does, so an id we can
+        // still read belongs to a thread that has not returned yet: either we
+        // hold the lock and the pump is blocked waiting to clear, or the pump
+        // cleared first and we read `None` and post nothing.
+        //
+        // Without that pairing this is not a narrow race but an ordinary one. A
+        // pump whose `Warm::start` fails — a monitor WGC cannot serve, which is
+        // why the GDI fallback exists — returns in milliseconds and leaves its
+        // id in a slot that stays in `SESSIONS` for the whole Placement visit.
+        // `WM_QUIT` to a recycled id is a message loop somewhere else in this
+        // process, or in another one, being told to exit.
+        let held_id = slot
             .thread_id
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-        {
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(id) = *held_id {
             // SAFETY: posting a thread message has no memory-safety
-            // preconditions. The id belongs to a pump thread of ours which has
-            // not been observed to exit; a stale id is the documented risk and
-            // is bounded here by the pump only exiting through this path or a
-            // session failure, both of which happen after the id is set.
+            // preconditions, and the lock held above establishes that `id` names
+            // a live thread of ours rather than whatever the OS gave that number
+            // to next.
             unsafe {
                 PostThreadMessageW(id, WM_QUIT, 0, 0);
             }
         }
+        drop(held_id);
     }
 }
 
@@ -255,10 +308,15 @@ pub fn status() -> WarmStatus {
 pub fn capture_monitor(monitor: Rect) -> Option<CapturedRegion> {
     let slot = {
         let sessions = SESSIONS.lock().unwrap_or_else(PoisonError::into_inner);
-        // Matched on the full rectangle, not on position alone: a monitor that
-        // changed resolution under a held session is a different surface, and
-        // serving its old pixels would be the see-one-thing-get-another failure
-        // freeze exists to avoid.
+        // Matched by which held monitor **contains the centre** of the requested
+        // rectangle, so a caller asking with slightly different bounds — a
+        // rounding, a stale copy — still reaches the right monitor rather than
+        // silently falling back.
+        //
+        // This does not check that the monitor is unchanged, and must not be
+        // read as doing so: the guard against serving a monitor that changed
+        // resolution under a held session lives in `readback`, which compares
+        // the retained frame's size against the slot's bounds and refuses.
         sessions
             .iter()
             .find(|slot| slot.bounds.contains(centre_of(monitor)))
@@ -487,6 +545,24 @@ fn create_texture(
     texture.ok_or_else(|| "CreateTexture2D succeeded but returned nothing".to_string())
 }
 
+/// Clears a slot's published thread id as the pump thread leaves, so [`stop`]
+/// can never post to an id the OS has handed to someone else.
+///
+/// A `Drop` rather than a statement at the end of the closure because a panic in
+/// the pump must clear it too — an unwound thread is exactly as dead as a
+/// returned one, and its id is exactly as reusable.
+struct ThreadIdGuard(Arc<Slot>);
+
+impl Drop for ThreadIdGuard {
+    fn drop(&mut self) {
+        *self
+            .0
+            .thread_id
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+    }
+}
+
 /// Spawns `slot`'s pump thread.
 fn spawn_session(slot: Arc<Slot>) {
     std::thread::spawn(move || {
@@ -511,6 +587,12 @@ fn spawn_session(slot: Arc<Slot>) {
             .unwrap_or_else(PoisonError::into_inner) =
             // SAFETY: no preconditions.
             Some(unsafe { GetCurrentThreadId() });
+        // Declared here, immediately after publishing the id and before anything
+        // else this thread owns, so it is the **last** thing dropped — locals
+        // drop in reverse declaration order. Every exit runs it: a session that
+        // fails to start, one unwound by the stop flag, one unwound by WM_QUIT,
+        // and a panic. See `stop`, whose correctness is this guard's other half.
+        let _clear_id_on_exit = ThreadIdGuard(Arc::clone(&slot));
 
         // The handle re-becomes a Monitor only here, on the thread that uses it —
         // the same manual `Send` `wgc.rs` performs, for the same reason.
@@ -630,6 +712,145 @@ mod tests {
                 warm: 4
             }
             .fully_warm()
+        );
+    }
+
+    fn slot_at(handle: isize, bounds: Rect) -> Arc<Slot> {
+        Arc::new(Slot {
+            bounds,
+            handle,
+            retained: Mutex::new(None),
+            stop: AtomicBool::new(false),
+            thread_id: Mutex::new(None),
+        })
+    }
+
+    const fn monitor_at(handle: isize, bounds: Rect) -> crate::plan::MonitorInfo {
+        crate::plan::MonitorInfo { handle, bounds }
+    }
+
+    /// The rig's shape: four monitors, one of them at a negative origin.
+    fn four_monitors() -> (Vec<Arc<Slot>>, Vec<crate::plan::MonitorInfo>) {
+        let bounds = [
+            Rect::new(0, 0, 2560, 1440),
+            Rect::new(2560, 0, 1920, 1080),
+            Rect::new(-1920, 0, 1920, 1080),
+            Rect::new(0, -1920, 1080, 1920),
+        ];
+        (
+            bounds
+                .iter()
+                .enumerate()
+                .map(|(at, rect)| slot_at(at as isize + 1, *rect))
+                .collect(),
+            bounds
+                .iter()
+                .enumerate()
+                .map(|(at, rect)| monitor_at(at as isize + 1, *rect))
+                .collect(),
+        )
+    }
+
+    /// Placement → Placement — `Esc` mid-drag, or a summon while already in
+    /// Placement — must **not** drop the textures and respawn the pumps, which
+    /// would leave the warm path cold for ~330 ms in the window `Ctrl+Space` is
+    /// pressed in.
+    #[test]
+    fn a_desktop_that_has_not_changed_is_covered_whatever_order_it_enumerates_in() {
+        let (sessions, monitors) = four_monitors();
+        assert!(covers(&sessions, &monitors));
+        let mut reordered = monitors.clone();
+        reordered.reverse();
+        assert!(
+            covers(&sessions, &reordered),
+            "enumeration order is not part of the identity"
+        );
+    }
+
+    #[test]
+    fn a_monitor_unplugged_is_not_covered() {
+        let (sessions, mut monitors) = four_monitors();
+        monitors.pop();
+        // Every remaining monitor still has a slot, so only the length check can
+        // catch this one — which is why both halves exist.
+        assert!(!covers(&sessions, &monitors));
+    }
+
+    #[test]
+    fn a_monitor_added_is_not_covered() {
+        let (sessions, mut monitors) = four_monitors();
+        monitors.push(monitor_at(99, Rect::new(4480, 0, 1920, 1080)));
+        assert!(!covers(&sessions, &monitors));
+    }
+
+    #[test]
+    fn a_monitor_that_moved_or_changed_resolution_is_not_covered() {
+        let (sessions, monitors) = four_monitors();
+        let mut moved = monitors.clone();
+        moved[1].bounds = Rect::new(2560, 200, 1920, 1080);
+        assert!(!covers(&sessions, &moved), "same handle, new position");
+
+        let mut resized = monitors;
+        resized[0].bounds = Rect::new(0, 0, 1920, 1080);
+        assert!(
+            !covers(&sessions, &resized),
+            "same handle, new resolution — the retained texture is the old size"
+        );
+    }
+
+    #[test]
+    fn a_different_monitor_at_the_same_bounds_is_not_covered() {
+        let (sessions, mut monitors) = four_monitors();
+        monitors[2].handle = 77;
+        assert!(
+            !covers(&sessions, &monitors),
+            "the handle is what the pump thread turns back into an HMONITOR"
+        );
+    }
+
+    /// `stop` posts `WM_QUIT` to the id it reads, so an id outliving its thread
+    /// is a message loop somewhere else being told to exit. The guard is what
+    /// makes the id readable only while the thread is alive.
+    #[test]
+    fn the_pump_clears_its_thread_id_on_an_ordinary_exit() {
+        let slot = slot_at(1, Rect::new(0, 0, 100, 100));
+        *slot
+            .thread_id
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(4242);
+        {
+            let _guard = ThreadIdGuard(Arc::clone(&slot));
+        }
+        assert_eq!(
+            *slot
+                .thread_id
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+            None
+        );
+    }
+
+    #[test]
+    fn the_pump_clears_its_thread_id_when_it_panics() {
+        let slot = slot_at(1, Rect::new(0, 0, 100, 100));
+        let on_thread = Arc::clone(&slot);
+        let died = std::thread::spawn(move || {
+            *on_thread
+                .thread_id
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(4242);
+            let _guard = ThreadIdGuard(Arc::clone(&on_thread));
+            panic!("the pump thread unwound");
+        })
+        .join();
+        assert!(died.is_err(), "the thread must actually have panicked");
+        assert_eq!(
+            *slot
+                .thread_id
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+            None,
+            "an unwound thread is exactly as dead as a returned one"
         );
     }
 

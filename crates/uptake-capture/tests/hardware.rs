@@ -407,3 +407,67 @@ fn a_warm_readback_and_a_fresh_capture_agree_byte_for_byte() {
         "stop must release every session, or Placement would leak them"
     );
 }
+
+/// Re-entering Placement must not cool the warm path — the defect bug_001 named
+/// (PR #28 review, 2026-07-30).
+///
+/// `apply` funnels **every** overlay transition into `sync_warm_sessions`,
+/// including Placement → Placement, which is what `Esc` mid-drag and a summon
+/// while already in Placement produce. When `start` began with an unconditional
+/// `stop`, those transitions dropped every texture and respawned every pump, so
+/// the user landed back in Placement with the path silently cold for ~330 ms —
+/// precisely the window `Ctrl+Space` is pressed in.
+///
+/// **The rig pass could not see it**, which is why this test exists rather than
+/// a note: enter Placement fresh, wait, freeze, and the path is warm every time.
+/// Only a *second* entry exposes it, and nothing was driving one.
+///
+/// The assertion is that warmth survives the second `start` **with no wait
+/// after it** — a sleep here would let a respawned set warm up and turn the test
+/// green over the bug it exists to catch.
+#[test]
+#[ignore = "needs a real desktop: holds warm WGC sessions across a simulated re-entry"]
+fn re_entering_placement_keeps_the_sessions_already_warm() {
+    ensure_dpi_aware();
+
+    let sessions = uptake_capture::warm::start();
+    assert!(sessions > 0, "no monitors were enumerated to warm");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::time::Instant::now() < deadline && !uptake_capture::warm::status().fully_warm() {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let warmed = uptake_capture::warm::status();
+    assert!(
+        warmed.fully_warm(),
+        "precondition failed, not the invariant: only {}/{} sessions became warm \
+         within 3 s, so a second entry has nothing to preserve",
+        warmed.warm,
+        warmed.sessions
+    );
+
+    // The second entry. No sleep follows it, deliberately.
+    let held = uptake_capture::warm::start();
+    let after = uptake_capture::warm::status();
+    assert_eq!(
+        held, sessions,
+        "a re-entry must hold the same sessions, not a new set"
+    );
+    assert_eq!(
+        after, warmed,
+        "re-entering Placement dropped the warm frames: {}/{} warm immediately \
+         after the second start, against {}/{} before it. The sessions were \
+         torn down and respawned, so `Ctrl+Space` in the next ~330 ms takes the \
+         cold path and lands ~350 ms late (UT-F-45).",
+        after.warm, after.sessions, warmed.warm, warmed.sessions
+    );
+
+    // And the readback still answers, rather than merely reporting warmth.
+    let primary = uptake_capture::warm::capture_monitor(Rect::new(0, 0, 1, 1));
+    assert!(
+        primary.is_some(),
+        "a session reported warm after a re-entry must still serve a readback"
+    );
+
+    uptake_capture::warm::stop();
+}

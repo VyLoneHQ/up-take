@@ -203,10 +203,19 @@ pub(crate) fn sync_warm_sessions(is_placement: bool) {
         return;
     }
     if is_placement {
-        let started = uptake_capture::warm::start();
+        let held = uptake_capture::warm::start();
+        // Reports what is *warm*, not only what is held, because `start` keeps
+        // sessions that already cover the desktop — so a Placement → Placement
+        // transition prints `4 warm` while a fresh entry prints `0 warm` and
+        // stays that way for ~330 ms. A fixed "not warm yet" would have been
+        // wrong on one of those two paths, and `I-11` is this project's row
+        // about a probe whose output cannot distinguish the states it reports.
         #[cfg(debug_assertions)]
-        eprintln!("freeze: warm sessions started for {started} monitor(s) — not warm yet");
-        let _ = started;
+        eprintln!(
+            "freeze: warm sessions held for {held} monitor(s) — {} warm",
+            uptake_capture::warm::status().warm
+        );
+        let _ = held;
     } else {
         uptake_capture::warm::stop();
     }
