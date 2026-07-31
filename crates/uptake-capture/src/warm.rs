@@ -959,8 +959,20 @@ mod tests {
         );
     }
 
-    /// A slot with a live pump, which is the only kind `SESSIONS` can hold —
-    /// `spawn_session` waits for the id before the caller pushes the slot.
+    /// A slot with a live pump — **one of two kinds `SESSIONS` can hold**, not
+    /// the only one. Corrected 2026-07-31 in PR #33's review.
+    ///
+    /// The claim it replaced ("the only kind … `spawn_session` waits for the id
+    /// before the caller pushes the slot") was the same overstatement
+    /// [`Slot::is_pumped`] documents and rewrites: the handshake rules out *not
+    /// yet*, never *already dead*. `SESSIONS` also holds **unservable** slots,
+    /// whose `thread_id` is `None` from the moment `Warm::start` fails — and
+    /// those are precisely the state [`covers`] was changed to tell apart, so a
+    /// reader who trusted this helper's doc would mis-model the invariant the
+    /// tests below exist to pin.
+    ///
+    /// Build that other kind by clearing `thread_id` and setting `unservable`,
+    /// as `a_monitor_that_could_not_be_served_does_not_force_a_rebuild` does.
     fn slot_at(handle: isize, bounds: Rect) -> Arc<Slot> {
         Arc::new(Slot {
             bounds,

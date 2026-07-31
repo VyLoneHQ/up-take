@@ -953,7 +953,11 @@ pub(crate) fn area_bounds(app: &AppHandle, id: AreaId) -> Option<Rect> {
 /// display. So it is refreshed where the display configuration is already being
 /// read ([`show`] and [`sync_bounds`], the two paths a display change reaches)
 /// rather than polled.
-static MONITOR_CACHE: Mutex<Vec<Rect>> = Mutex::new(Vec::new());
+/// **Holds whole [`Monitor`]s rather than bare rectangles**, so the change
+/// detection below is as sharp as this source allows — see
+/// [`refresh_monitor_cache`]. Bounds alone missed a scale-factor change at
+/// identical bounds, which is a real reconfiguration.
+static MONITOR_CACHE: Mutex<Vec<Monitor>> = Mutex::new(Vec::new());
 
 /// Refreshes [`MONITOR_CACHE`] from the window's current monitor list, and
 /// reports whether the list actually changed.
@@ -963,15 +967,35 @@ static MONITOR_CACHE: Mutex<Vec<Rect>> = Mutex::new(Vec::new());
 /// display change produces a convergence pass behind it where nothing differs.
 /// Acting on the change rather than on the event keeps the resync to one per
 /// change (PR #28 review, finding B).
+///
+/// # What the gate saves, and what it cannot see — corrected 2026-07-31
+///
+/// **It saves an enumeration, not a rebuild.** The first version of this said a
+/// rebuild "is not free — it blocks on each pump's handshake", which is true of
+/// a rebuild and not of what this suppresses: on a no-op pass
+/// [`warm::start`](uptake_capture::warm::start) *short-circuits* on its own
+/// `covers` check and rebuilds nothing. What the gate removes from the
+/// event-loop thread is one monitor enumeration and a `covers` walk per
+/// convergence pass. Worth having on this thread; smaller than it read.
+///
+/// **And it is deliberately coarser than the thing it gates.** `covers` keys on
+/// the Win32 **`HMONITOR` and bounds**; this keys on what Tauri reports, which
+/// carries no handle. So a display **replaced at identical bounds and scale** —
+/// a new `HMONITOR`, everything else equal — looks unchanged here and the
+/// resync does not run. That is a gap this source cannot close, so it is stated
+/// rather than papered over. It is bounded twice: `apply` calls
+/// `sync_warm_sessions` unconditionally on the next state transition, and the
+/// dead handle's pump exits and clears its retained frame, so the outcome is a
+/// monitor stuck on the cold path until then — never one monitor's pixels
+/// served as another's.
 fn refresh_monitor_cache(window: &WebviewWindow) -> bool {
-    let Ok(list) = monitors(window) else {
+    let Ok(fresh) = monitors(window) else {
         // The list could not be read, so nothing is known to have changed and
         // the cache keeps what it had. Reporting `true` here would rebuild the
         // warm sessions on a failure to observe, which is the opposite of what
         // an unreadable list justifies.
         return false;
     };
-    let fresh: Vec<Rect> = list.iter().map(|monitor| monitor.bounds).collect();
     let mut cached = lock(&MONITOR_CACHE);
     if *cached == fresh {
         return false;
@@ -981,8 +1005,14 @@ fn refresh_monitor_cache(window: &WebviewWindow) -> bool {
 }
 
 /// The cached monitor rectangles, for snapping and containment.
+///
+/// Order is the cache's order, which is what makes an index from
+/// [`monitor_at_point`] addressable against this list.
 pub(crate) fn monitor_rects() -> Vec<Rect> {
-    lock(&MONITOR_CACHE).clone()
+    lock(&MONITOR_CACHE)
+        .iter()
+        .map(|monitor| monitor.bounds)
+        .collect()
 }
 
 /// The bounds of the monitor containing `point`, for positioning per-monitor
