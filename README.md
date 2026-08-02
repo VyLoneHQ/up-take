@@ -109,11 +109,31 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). External contributions need a signed
 
 ## How this is built
 
-UP-TAKE is written with AI assistance. Drafting, searching and command execution are machine
-assisted. I set the scope and decide what counts as done. Every claim in this file is traced to a
-source document before it ships. Hardware behaviour is verified by driving the app on a real
-multi-monitor rig, because that is where this project keeps finding the defects its test suite
-passes over.
+Every change goes through the same sequence before it lands.
+
+An agent writes it. Then a second model reviews the change in a fresh context, against the codebase
+and not against the first agent's account of it, and that review has repeatedly found real defects.
+The fixes go back through it. Where a test claims to guard something, the code it guards is broken
+on purpose to confirm the test goes red.
+
+Then it is driven on a real multi-monitor rig, across mixed DPI, a portrait display and negative
+coordinates, because that is where this project's defects actually turn up.
+
+Every claim in this file is traced to a source document before it is published.
+
+I set the scope, decide what counts as done, and decide whether it ships. I do not read every line
+that lands, and the review above is what carries that weight instead.
+<!-- source: WORKFLOW/PREFERENCES.md P-2 (disclosure names both halves); AGENTIC-OS BACKLOG.md I-64
+     (the founder's approved disclosure text, adapted for this surface and approved by him
+     2026-08-02 in session 20260802T1916Z). It is ADAPTED rather than verbatim: I-64's text was
+     written for audit reports and says "Finally I read the corrected version in full", which I-60
+     and D-45 both record as untrue of this repository. P-0 ranks true above consistent, so the
+     sentence was replaced rather than carried across. Do not "restore" the verbatim wording. -->
+<!-- source for the rig sentence: STATUS.md F-9 (4K@150% and ultrawide untestable on this hardware),
+     F-15/F-38 (defects found on hardware that CI passed). It deliberately does NOT claim every
+     combination is covered -- the "What works today" section above says 4K and ultrawide are
+     untested, and a disclosure contradicting the same page is the P-6 failure this file exists
+     under. -->
 
 ## License
 
