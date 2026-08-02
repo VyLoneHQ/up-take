@@ -48,9 +48,16 @@ about it. Also vylone.com, which has no security contact of its own yet.
 
 - **UP-TAKE has no telemetry and does not phone home.** No analytics, no crash reporting.
   <!-- source: PRODUCT-VISION.md; ADR-0010 (VyLone operates no endpoint). This is a design
-       commitment. It has NOT been verified against the built binary, and `reqwest` and `hyper` are
-       present transitively in the dependency tree via the app framework. Before strengthening this
-       to a measured claim, write a probe. -->
+       commitment, and its dependency half is now measured rather than assumed.
+       CORRECTED 2026-08-02: this note previously said `reqwest` and `hyper` are "present
+       transitively in the dependency tree via the app framework". On the target UP-TAKE ships they
+       are not. `cargo tree -p up-take --target x86_64-pc-windows-msvc --edges normal` is 774
+       entries and contains no `reqwest`, `hyper`, `h2`, `ureq` or `sentry`, with `tauri` itself
+       present 6 times. Those crates reach the graph only through `tauri` on OTHER targets, which is
+       why a cross-platform `cargo tree` lists them and the Windows one does not.
+       What is still NOT verified is runtime behaviour: no probe has watched the built binary for
+       outbound connections, and a dependency check says nothing about what the WebView does. Write
+       that probe before strengthening the prose to a measured claim. -->
 - **Captured screen content is never written to a log file.**
 - **The overlay is excluded from screen capture at the window level**, permanently and by design.
   Other capture tools cannot see UP-TAKE's own rendering, and UP-TAKE never captures it either.

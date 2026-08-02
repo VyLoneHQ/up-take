@@ -19,7 +19,7 @@ transfer ownership of your copyright to us.
 You grant VyLone a perpetual, worldwide, non-exclusive, royalty-free, irrevocable license to use,
 reproduce, modify, prepare derivative works of, publicly display, publicly perform, sublicense, and
 distribute your contributions **and such derivative works**, under **any license terms VyLone chooses,
-including proprietary and commercial licenses** — in addition to the project's current open-source
+including proprietary and commercial licenses**, in addition to the project's current open-source
 license (GPL-3.0-or-later).
 
 Plainly stated: this is what lets VyLone offer a commercial ("Pro") version of UP-TAKE that includes

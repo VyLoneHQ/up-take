@@ -66,9 +66,10 @@ they are the destination and not the current state.
        free and never gated) -->
 - **No telemetry, no analytics, no crash reporting.** A tool that reads your screen has to be
   inspectable to be worth trusting, which is most of why it is open source.
-  <!-- source: PRODUCT-VISION.md; SECURITY.md. NOTE: this is a design commitment and has not been
-       independently verified against the built binary. Do not upgrade the wording to a measured
-       claim without a probe. -->
+  <!-- source: PRODUCT-VISION.md; SECURITY.md. NOTE: this is a design commitment. The dependency
+       graph now supports it -- no HTTP client crate on the Windows target, checked 2026-08-02 and
+       recorded in full in SECURITY.md -- but no probe has watched the built binary at runtime. Do
+       not upgrade the wording to a measured claim without one. -->
 
 ## Build from source
 
