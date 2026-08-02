@@ -300,11 +300,22 @@ pub(crate) fn sync_warm_sessions(is_placement: bool) {
         // stays that way for ~330 ms. A fixed "not warm yet" would have been
         // wrong on one of those two paths, and `I-11` is this project's row
         // about a probe whose output cannot distinguish the states it reports.
+        //
+        // `unservable` is printed beside it because that is the whole reason the
+        // field exists. `WarmStatus` documents it as the answer to "does `warm
+        // 3/4` mean one session is still inside its ~330 ms warm-up, or is one
+        // display permanently on the cold path for this visit", a question only
+        // a rig operator asks. Until 2026-08-02 the count was computed, tested
+        // and never printed, so the one reader it was built for could not see
+        // it: `I-11`'s shape again, one field over from where it was fixed.
         #[cfg(debug_assertions)]
-        eprintln!(
-            "freeze: warm sessions held for {held} monitor(s) — {} warm",
-            uptake_capture::warm::status().warm
-        );
+        {
+            let status = uptake_capture::warm::status();
+            eprintln!(
+                "freeze: warm sessions held for {held} monitor(s) — {} warm, {} unservable",
+                status.warm, status.unservable
+            );
+        }
         let _ = held;
     } else {
         uptake_capture::warm::stop();
