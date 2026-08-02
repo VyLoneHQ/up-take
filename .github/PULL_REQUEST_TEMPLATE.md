@@ -8,9 +8,11 @@
 
 ## Checklist
 
-- [ ] I have signed the [Contributor License Agreement](../CLA.md) (the CLA-assistant bot will prompt
-      on this PR if not)
+- [ ] I have accepted the [Contributor License Agreement](../CLA.md) in a comment on this PR (see its
+      "How to sign" section, one line, first PR only)
 - [ ] `cargo fmt` and `cargo clippy --all-targets -- -D warnings` pass clean
+- [ ] `cargo clippy --release --all-targets -- -D warnings` passes clean (CI runs release as well as
+      debug, and a release-only warning fails the build)
 - [ ] `biome ci .` passes clean
 - [ ] `cargo test` and `pnpm test` pass
 - [ ] Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/)

@@ -41,6 +41,18 @@ partnership, or agency relationship.
 
 ## How to sign
 
-Signing happens once, automatically, the first time you open a pull request — a CLA-assistant bot will
-comment with instructions. Your agreement is recorded against your GitHub account for all future
-contributions to this repository.
+Add a comment to your first pull request saying:
+
+> I have read the UP-TAKE Contributor License Agreement and I accept it.
+
+That comment is the record, and it covers your later contributions to this repository as well. Signing
+once is enough.
+
+<!-- CORRECTED 2026-08-02. This section previously said signing happened "automatically" via a
+     CLA-assistant bot. No such bot is installed: the repository has one workflow file, no CLA action,
+     no CLA configuration and no webhooks, checked rather than assumed. A contributor following the
+     old text would have opened a pull request, seen nothing, and had no way to sign a CLA that
+     CONTRIBUTING.md makes mandatory. The manual comment above is the mechanism that works with no
+     infrastructure. If a bot is installed later, this section changes back and the bot's record
+     supersedes it. -->
+

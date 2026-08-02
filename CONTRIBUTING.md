@@ -27,6 +27,13 @@ explains it in plain language and is short.
 The reason is stated in the open rather than buried: UP-TAKE core is GPL-3.0-or-later, and a paid
 tier built on the same codebase is planned for a later phase. That tier does not exist today. The
 CLA is what keeps it possible without a relicensing scramble later.
+
+**To sign, comment on your first pull request** saying you have read the CLA and accept it. There is
+no bot. That comment is the record and it covers everything you send afterwards.
+<!-- CORRECTED 2026-08-02: this file, CLA.md and the pull request template all said a CLA-assistant
+     bot would prompt automatically. None is installed, checked against the repository's workflows,
+     configuration and webhooks. -->
+
 <!-- source: ROADMAP.md Phase 3 (Commercial, unstarted); ADR-0003 (the licence). The previous
      wording said VyLone "also ships" a Pro tier, present tense. Nothing ships. -->
 
