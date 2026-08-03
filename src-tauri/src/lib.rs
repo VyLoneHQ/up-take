@@ -171,6 +171,12 @@ pub fn run() -> tauri::Result<()> {
             // this is the identity every later summon is compared against.
             #[cfg(debug_assertions)]
             dev_harness::record_main_thread();
+            // Scheduled from setup rather than from a state transition: the
+            // check it drives has to fire *while PLACEMENT is up*, and the
+            // operator is the one who gets there — a timer started at launch is
+            // what gives them time to. Off unless the variable is set.
+            #[cfg(debug_assertions)]
+            dev_harness::schedule_monitor_perturb(app.handle());
             // Read once, here, so the answer cannot change under a running
             // Placement — a setting that flipped between `sync_warm_sessions`
             // starting the sessions and `freeze` consulting them would leak

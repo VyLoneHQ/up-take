@@ -406,14 +406,6 @@ pub(crate) fn is_frozen() -> bool {
     !stills().is_empty()
 }
 
-/// What a freeze cost, for the caller to log.
-///
-/// The stage figures are **maxima across monitors, not sums**, and they may come
-/// from different monitors. Every monitor is captured on its own thread, so what
-/// the user waits for is the last one to land; a sum would report a cost nobody
-/// experiences. They exist to answer one question — which stage dominates — and
-/// are reported rather than asserted: the measured split is what decides whether
-/// this feature's latency has anywhere left to go.
 /// Why a [`freeze`] produced nothing. Both are correct outcomes, not errors —
 /// they are distinguished because a log that conflates them cannot be read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -433,6 +425,49 @@ impl std::fmt::Display for Skipped {
     }
 }
 
+/// What one monitor's freeze cost, and how big the thing it produced was.
+///
+/// **The byte length is why this type exists**, and it is not a diagnostic
+/// nicety. `quality-bars.md` §1's *frozen view painted* row is content-dependent
+/// — PNG encode and PNG decode both scale with image complexity — so a timing
+/// without the content it was taken against is a number whose precondition
+/// nobody stated. That is `UT-F-47`, where 1.9f's headline 72–78 ms turned out
+/// to be the simple-screen best case quoted as *the* measurement, and the
+/// 209–215 ms case had never been observed.
+///
+/// The encoded PNG's length is the property that correlates directly with
+/// encode cost, the freeze path already computes it, and it was thrown away.
+/// Emitting it beside every timing makes a mislabelled run **detectable rather
+/// than trusted**: PLAIN and DENSE differ by orders of magnitude, so a run
+/// against an unlisted screen lands between them and is visibly neither.
+pub(crate) struct MonitorCost {
+    /// The rect actually captured, as the capture crate reports it — never what
+    /// was asked for, for the reason [`capture_still`] gives.
+    pub rect: Rect,
+    /// This monitor's capture.
+    pub capture_ms: u128,
+    /// This monitor's PNG encode.
+    pub encode_ms: u128,
+    /// The encoded PNG's length in bytes. See the type's own note: this is the
+    /// run describing its own conditions, not a statistic.
+    pub png_bytes: usize,
+    /// Whether a **warm** session served this monitor rather than a fresh
+    /// capture.
+    pub served_warm: bool,
+}
+
+/// What a freeze cost, for the caller to log.
+///
+/// The stage figures are **maxima across monitors, not sums**, and they may come
+/// from different monitors. Every monitor is captured on its own thread, so what
+/// the user waits for is the last one to land; a sum would report a cost nobody
+/// experiences. They exist to answer one question — which stage dominates — and
+/// are reported rather than asserted: the measured split is what decides whether
+/// this feature's latency has anywhere left to go.
+///
+/// [`FreezeReport::per_monitor`] carries the unaggregated figures, because a
+/// maximum cannot describe the screen it was taken against and §1's row needs
+/// exactly that. See [`MonitorCost`].
 pub(crate) struct FreezeReport {
     /// How many monitors were actually captured — see [`freeze`].
     pub count: usize,
@@ -452,6 +487,12 @@ pub(crate) struct FreezeReport {
     pub slowest_capture_ms: u128,
     /// The slowest single monitor's PNG encode.
     pub slowest_encode_ms: u128,
+    /// Every captured monitor's own figures, in the order they were captured —
+    /// which is the order of the monitor list, and therefore of the still URLs.
+    ///
+    /// Monitors that could not be captured or encoded are **absent**, not zeroed,
+    /// so this is `count` entries long and never `monitors.len()`.
+    pub per_monitor: Vec<MonitorCost>,
 }
 
 /// Captures `monitors` and holds the stills, replacing any already held.
@@ -520,7 +561,7 @@ pub(crate) fn freeze(monitors: &[Rect]) -> Result<FreezeReport, Skipped> {
     // Scoped rather than detached: the stills must all be in hand before the
     // state is emitted, and a scope makes "every thread has finished" a property
     // of the type rather than something the caller has to remember to join.
-    let captured: Vec<(Still, u128, u128, bool)> = std::thread::scope(|scope| {
+    let captured: Vec<(Still, MonitorCost)> = std::thread::scope(|scope| {
         let handles: Vec<_> = monitors
             .iter()
             .map(|monitor| scope.spawn(move || capture_still(*monitor)))
@@ -534,10 +575,10 @@ pub(crate) fn freeze(monitors: &[Rect]) -> Result<FreezeReport, Skipped> {
             .filter_map(|handle| handle.join().unwrap_or(None))
             .collect()
     });
-    let slowest_capture_ms = captured.iter().map(|(_, capture, _, _)| *capture).max();
-    let slowest_encode_ms = captured.iter().map(|(_, _, encode, _)| *encode).max();
-    let warm_served = captured.iter().filter(|(_, _, _, warm)| *warm).count();
-    let captured: Vec<Still> = captured.into_iter().map(|(still, _, _, _)| still).collect();
+    let slowest_capture_ms = captured.iter().map(|(_, cost)| cost.capture_ms).max();
+    let slowest_encode_ms = captured.iter().map(|(_, cost)| cost.encode_ms).max();
+    let warm_served = captured.iter().filter(|(_, cost)| cost.served_warm).count();
+    let (captured, per_monitor): (Vec<Still>, Vec<MonitorCost>) = captured.into_iter().unzip();
     let count = captured.len();
     // Published under one lock, because the version and the stills are one fact:
     // a reader that catches the bump without the new stills builds URLs the
@@ -553,6 +594,7 @@ pub(crate) fn freeze(monitors: &[Rect]) -> Result<FreezeReport, Skipped> {
         elapsed_ms: started.elapsed().as_millis(),
         slowest_capture_ms: slowest_capture_ms.unwrap_or_default(),
         slowest_encode_ms: slowest_encode_ms.unwrap_or_default(),
+        per_monitor,
     })
 }
 
@@ -596,7 +638,7 @@ fn publish(captured: Vec<Still>, generation: u64) -> Result<(), Skipped> {
 /// keeping it would mean a monitor whose pixels a drag would use but which shows
 /// live content — the see-one-thing-get-another failure this feature exists to
 /// avoid.
-fn capture_still(monitor: Rect) -> Option<(Still, u128, u128, bool)> {
+fn capture_still(monitor: Rect) -> Option<(Still, MonitorCost)> {
     let capture_started = Instant::now();
     // The warm path first, when it is on and has something to hand over.
     //
@@ -630,18 +672,23 @@ fn capture_still(monitor: Rect) -> Option<(Still, u128, u128, bool)> {
             return None;
         }
     };
+    let cost = MonitorCost {
+        // What the capture crate reports it took, never what was asked for: it
+        // clamps to the virtual desktop, and trusting the request would offset
+        // every crop by the clamp distance.
+        rect: shot.rect,
+        capture_ms,
+        encode_ms: encode_started.elapsed().as_millis(),
+        png_bytes: png.len(),
+        served_warm,
+    };
     Some((
         Still {
-            // What the capture crate reports it took, never what was asked for:
-            // it clamps to the virtual desktop, and trusting the request would
-            // offset every crop by the clamp distance.
             rect: shot.rect,
             bitmap: shot.bitmap,
             png,
         },
-        capture_ms,
-        encode_started.elapsed().as_millis(),
-        served_warm,
+        cost,
     ))
 }
 

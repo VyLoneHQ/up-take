@@ -643,6 +643,29 @@ pub fn toggle_freeze(app: &AppHandle) {
             report.slowest_capture_ms,
             report.slowest_encode_ms
         );
+        // Per-monitor, with the encoded size beside the timings, because
+        // `quality-bars.md` §1's row is content-dependent and a maximum cannot
+        // say what it was taken against. The byte length is the run describing
+        // its own conditions mechanically — never the operator's word for what
+        // was on screen, which is exactly what `UT-F-47` and `UT-F-46` cost.
+        //
+        // Unconditional rather than gated on a dev flag: `I-11` is what a switch
+        // nobody can prove is on looks like, and a rig operator reading a freeze
+        // line is the reader this exists for.
+        for cost in &report.per_monitor {
+            eprintln!(
+                "freeze:   {}x{} at ({}, {}) — capture {} ms, encode {} ms, \
+                 png {} bytes, {}",
+                cost.rect.size.width,
+                cost.rect.size.height,
+                cost.rect.origin.x,
+                cost.rect.origin.y,
+                cost.capture_ms,
+                cost.encode_ms,
+                cost.png_bytes,
+                if cost.served_warm { "warm" } else { "cold" }
+            );
+        }
         if let Err(error) = emit_state(&app, OverlayState::Placement) {
             eprintln!("overlay: could not emit state after freezing: {error}");
         }
@@ -1002,6 +1025,49 @@ fn refresh_monitor_cache(window: &WebviewWindow) -> bool {
     }
     *cached = fresh;
     true
+}
+
+/// Perturbs one cached monitor's **scale factor, leaving its bounds alone**, so
+/// the next [`refresh_monitor_cache`] sees a scale-only reconfiguration.
+///
+/// # Why this exists, and what it is honestly worth
+///
+/// `6e25555` widened [`MONITOR_CACHE`] from bare rectangles to whole
+/// [`Monitor`]s precisely so a **scale change at identical bounds** would drive
+/// the warm-session resync. Nothing verifies that. The owed rig check asked the
+/// operator to change a monitor's DPI *while PLACEMENT is visible*, and
+/// `UT-F-50` records that this **cannot be performed by any operator**:
+/// entering PLACEMENT installs the global mouse hook and takes focus, so no
+/// Windows display UI is reachable while the state under test is active. The
+/// substitute an operator naturally reaches for, powering a monitor off, is not
+/// a display-configuration change at all and returned a confident "everything
+/// looked fine" on a check that never ran.
+///
+/// An unplug does not test it either: an unplug changes the bounds, so it would
+/// have passed under the old bounds-keyed code and exercises nothing the
+/// widening added.
+///
+/// **The fidelity, stated rather than left to be assumed.** The comparison
+/// under test (`*cached == fresh`), the gate's return value, and the resync
+/// behind it are all the real code on the real path. What is *not* exercised is
+/// Windows raising the change and Tauri reporting a new scale factor — this
+/// injects the difference at the cache instead. So a green here means "a
+/// scale-only difference drives the resync", and it does **not** mean "a real
+/// DPI change is observed". The second half has no route on this machine and is
+/// recorded as still owed rather than quietly folded in.
+///
+/// Returns what it changed, for the caller to log, or `None` when the cache is
+/// empty and there is nothing to perturb.
+#[cfg(debug_assertions)]
+pub(crate) fn dev_perturb_cached_scale() -> Option<(Rect, f64, f64)> {
+    let mut cached = lock(&MONITOR_CACHE);
+    let monitor = cached.first_mut()?;
+    let was = monitor.scale_factor;
+    // A value no real display reports, so a log line showing it cannot be
+    // mistaken for a genuine reconfiguration by someone reading back later.
+    let now = 3.5;
+    monitor.scale_factor = now;
+    Some((monitor.bounds, was, now))
 }
 
 /// The cached monitor rectangles, for snapping and containment.
