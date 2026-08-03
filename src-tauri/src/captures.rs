@@ -199,7 +199,7 @@ pub fn serve(
     // the suffix would mean changing both parsers for no gain.
     let (bytes, content_type) = if let Some((index, version)) = parse_frozen_path(path) {
         (
-            crate::freeze::still_png(index, version),
+            crate::freeze::still_bytes(index, version),
             crate::freeze::display_format().1,
         )
     } else {

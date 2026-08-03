@@ -655,14 +655,14 @@ pub fn toggle_freeze(app: &AppHandle) {
         for cost in &report.per_monitor {
             eprintln!(
                 "freeze:   {}x{} at ({}, {}) — capture {} ms, encode {} ms, \
-                 png {} bytes, {}",
+                 {} bytes, {}",
                 cost.rect.size.width,
                 cost.rect.size.height,
                 cost.rect.origin.x,
                 cost.rect.origin.y,
                 cost.capture_ms,
                 cost.encode_ms,
-                cost.png_bytes,
+                cost.encoded_bytes,
                 if cost.served_warm { "warm" } else { "cold" }
             );
         }
