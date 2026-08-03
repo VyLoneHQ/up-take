@@ -786,11 +786,34 @@ mod tests {
     /// `BitmapEncoder`, and that wrapper calls `CreateAsync` with **no encoding
     /// options at all** — there is no compression knob on the path we use.
     ///
-    /// So the question becomes whether a *format* with no compression stage is
-    /// cheap enough, which costs nothing to ask because `ImageFormat::Bmp` is
-    /// already in the enum. Printed rather than asserted: this is a measurement
-    /// that informs a design decision, and a threshold invented here would be a
-    /// bar describing whatever was built.
+    /// So the question becomes a *format* question, which costs nothing to ask
+    /// because `Bmp` and `Jpeg` are already in the enum. Printed rather than
+    /// asserted: this is a measurement that informs a design decision, and a
+    /// threshold invented here would be a bar describing whatever was built.
+    ///
+    /// # What the numbers said, and the objection they remove
+    ///
+    /// PNG is 68-294 ms and strongly content-dependent. BMP is a flat 25 ms and
+    /// is not, but costs 14.7 MB per monitor. **JPEG is the interesting one**:
+    /// 26-37 ms, within a rounding error of BMP's speed, at 58 KB (PLAIN) to
+    /// 3.3 MB (DENSE) — so it removes BMP's ~59 MB-per-freeze objection against
+    /// §1's 80 MB idle-RAM row while keeping almost all of the speed.
+    ///
+    /// **Lossy is defensible here for one specific reason, and only that one.**
+    /// This encode feeds the *display* path alone: [`crate::freeze::crop`] cuts
+    /// the user's actual screenshot from `Still::bitmap`, the lossless RGBA, and
+    /// never from these bytes. So artifacts would reach what the user *looks at*
+    /// while selecting, and never what they get.
+    ///
+    /// **That is not the same as saying JPEG is fine, and the remaining risk is
+    /// the one a table cannot settle.** Screen content is JPEG's worst case, not
+    /// its best: ringing around high-contrast glyph edges and chroma
+    /// subsampling smearing coloured text are exactly what a desktop full of
+    /// small text produces. It is also unknown what quality level the WinRT
+    /// encoder defaults to, because — as above — this wrapper passes it no
+    /// options. **Judge it by eye on the rig against a text-heavy screen before
+    /// adopting it**; that is a question for a person looking at a monitor, and
+    /// nothing here answers it.
     ///
     /// Run with:
     /// `cargo test -p up-take --lib encode_cost -- --ignored --nocapture`
@@ -806,7 +829,11 @@ mod tests {
         );
         for screen in ["plain", "blocks", "dense"] {
             let bitmap = test_screen(screen, size);
-            for (label, format) in [("png", ImageFormat::Png), ("bmp", ImageFormat::Bmp)] {
+            for (label, format) in [
+                ("png", ImageFormat::Png),
+                ("bmp", ImageFormat::Bmp),
+                ("jpeg", ImageFormat::Jpeg),
+            ] {
                 let started = std::time::Instant::now();
                 let encoded = ImageEncoder::new(format, ImageEncoderPixelFormat::Rgba8)
                     .unwrap()
