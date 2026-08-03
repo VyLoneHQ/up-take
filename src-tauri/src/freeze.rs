@@ -62,6 +62,7 @@ use std::time::Instant;
 
 use uptake_core::bitmap::RgbaBitmap;
 use uptake_core::geometry::Rect;
+use windows_capture::encoder::ImageFormat;
 
 /// One monitor's still: where it came from, the pixels a crop is cut out of,
 /// and the PNG the WebView displays.
@@ -273,6 +274,65 @@ pub(crate) fn init_warm_capture() {
 /// Whether the warm capture path is enabled. The only reader of [`WARM_CAPTURE`].
 pub(crate) fn warm_capture_enabled() -> bool {
     WARM_CAPTURE.load(Ordering::SeqCst)
+}
+
+/// Which format the **display** path encodes stills in. 0 = PNG, 1 = JPEG, 2 = BMP.
+///
+/// An integer rather than an enum because it lives in an atomic, read once per
+/// monitor per freeze.
+static DISPLAY_FORMAT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// The display encode format, its MIME type, and the name to print.
+///
+/// # Why this is switchable at all
+///
+/// Task 1.9g: the PNG encode is 63-92 % of a warm freeze, and measured off-rig
+/// at 2560x1440 the three formats are **PNG 68-294 ms** (strongly
+/// content-dependent), **BMP a flat 25 ms** at 14.7 MB a monitor, and **JPEG
+/// 26-37 ms** at 58 KB to 3.3 MB. The decision between them is the founder's
+/// and wants an ADR, so this exists to let the rig produce the end-to-end
+/// numbers and the eye-check that decision needs — not to ship three formats.
+///
+/// **Lossy is only defensible because this is the display path alone.**
+/// [`crop`] cuts the user's actual screenshot from [`Still::bitmap`], the
+/// lossless RGBA, and never from these bytes. Change that and this switch
+/// becomes a way to silently degrade what the user receives.
+pub(crate) fn display_format() -> (ImageFormat, &'static str, &'static str) {
+    match DISPLAY_FORMAT.load(Ordering::SeqCst) {
+        1 => (ImageFormat::Jpeg, "image/jpeg", "jpeg"),
+        2 => (ImageFormat::Bmp, "image/bmp", "bmp"),
+        _ => (ImageFormat::Png, "image/png", "png"),
+    }
+}
+
+/// Reads `UPTAKE_FREEZE_FORMAT` once, at startup, and **states what it chose**.
+///
+/// Same shape and the same reason as [`init_warm_capture`]: a format that
+/// silently fell back to the default would make a rig pass measure PNG while its
+/// operator wrote "JPEG" beside the number, which is `UT-F-46`'s defect exactly.
+/// So an unrecognised value is refused out loud rather than absorbed.
+pub(crate) fn init_display_format() {
+    let Ok(raw) = std::env::var("UPTAKE_FREEZE_FORMAT") else {
+        return;
+    };
+    let chosen = match raw.trim().to_ascii_lowercase().as_str() {
+        "png" => 0,
+        "jpeg" | "jpg" => 1,
+        "bmp" => 2,
+        _ => {
+            eprintln!(
+                "freeze: ignoring UPTAKE_FREEZE_FORMAT={raw:?} — expected png, jpeg or bmp; \
+                 staying on png"
+            );
+            return;
+        }
+    };
+    DISPLAY_FORMAT.store(chosen, Ordering::SeqCst);
+    eprintln!(
+        "freeze: display stills encode as {} (UPTAKE_FREEZE_FORMAT) — the DISPLAY path only; \
+         crops still come from the lossless bitmap",
+        display_format().2
+    );
 }
 
 /// Starts or stops the held sessions to match `is_placement`.
@@ -665,7 +725,7 @@ fn capture_still(monitor: Rect) -> Option<(Still, MonitorCost)> {
     };
     let capture_ms = capture_started.elapsed().as_millis();
     let encode_started = Instant::now();
-    let png = match crate::output::encode_png(&shot.bitmap) {
+    let png = match crate::output::encode_for_display(&shot.bitmap) {
         Ok(png) => png,
         Err(error) => {
             eprintln!("freeze: could not encode {monitor:?}: {error}");

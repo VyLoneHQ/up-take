@@ -183,6 +183,10 @@ pub fn run() -> tauri::Result<()> {
             // four held sessions. Task 1.14 replaces the env read with the
             // stored setting; this call site stays.
             freeze::init_warm_capture();
+            // Same place and the same reason: read once, before anything can
+            // freeze, and state what it chose so a rig log says which format
+            // produced its numbers.
+            freeze::init_display_format();
             // State must be managed and the poll thread parked before the
             // first `overlay::show`, which activates the poll.
             app.manage(click_through::ClickThrough::new());

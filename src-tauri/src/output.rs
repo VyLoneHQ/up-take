@@ -324,10 +324,28 @@ pub(crate) fn capture_into_area(app: &AppHandle, id: AreaId, bounds: Rect) {
 /// `uptake-capture`'s own hardware-verification driver uses
 /// (`examples/grab.rs`) — reused rather than adding a second PNG codec to vet.
 pub(crate) fn encode_png(bitmap: &RgbaBitmap) -> Result<Vec<u8>, String> {
-    ImageEncoder::new(ImageFormat::Png, ImageEncoderPixelFormat::Rgba8)
-        .map_err(|error| format!("could not create the PNG encoder: {error}"))?
+    encode_as(bitmap, ImageFormat::Png, "PNG")
+}
+
+/// Encodes for the **freeze display path**, in whatever format
+/// [`crate::freeze::display_format`] selected.
+///
+/// Separate from [`encode_png`] on purpose. Copy and Save keep PNG
+/// unconditionally, because there the bytes *are* the product and a lossy
+/// export would be a defect; here the bytes are only what the WebView paints
+/// while the user selects, and the crop comes from the lossless bitmap. **One
+/// function serving both would make that distinction a comment instead of a
+/// type.**
+pub(crate) fn encode_for_display(bitmap: &RgbaBitmap) -> Result<Vec<u8>, String> {
+    let (format, _, name) = crate::freeze::display_format();
+    encode_as(bitmap, format, name)
+}
+
+fn encode_as(bitmap: &RgbaBitmap, format: ImageFormat, name: &str) -> Result<Vec<u8>, String> {
+    ImageEncoder::new(format, ImageEncoderPixelFormat::Rgba8)
+        .map_err(|error| format!("could not create the {name} encoder: {error}"))?
         .encode(bitmap.pixels(), bitmap.width(), bitmap.height())
-        .map_err(|error| format!("could not encode PNG: {error}"))
+        .map_err(|error| format!("could not encode {name}: {error}"))
 }
 
 /// Logs the outcome and — separately — a budget overrun against §1's
