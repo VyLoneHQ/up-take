@@ -49,8 +49,17 @@
 //! ## `UPTAKE_DEV_PACING`
 //!
 //! Task 1.17(a)'s gesture instrumentation: the achieved poll rate and the
-//! emit→painted round trip, one pair of lines per completed gesture, plus the
-//! sampled IPC probe that produces the second number.
+//! emit→painted round trip, plus the sampled IPC probe that produces the second
+//! number.
+//!
+//! **A pair of lines per gesture is the intent and not a guarantee**, and the
+//! difference is what `I-11` is about. A drag observed in a single poll
+//! iteration carries `ticks == 0` and prints nothing, and a drag abandoned by
+//! `Esc` or by toggling the overlay away is flushed with a `cut short by
+//! deactivate` label rather than reported normally. Read
+//! [`announce_pacing`]'s line at startup before reading anything into silence:
+//! it is the only thing in this module that distinguishes *the probe is off*
+//! from *the probe is on and saw nothing worth printing*.
 //!
 //! **It is opt-in for two separate reasons, and only one of them is noise.** A
 //! line per gesture is a line per *drag*, so an ordinary dev session that places
@@ -67,6 +76,11 @@
 //! ```text
 //! UPTAKE_DEV_PACING=1 pnpm tauri dev
 //! ```
+//!
+//! **On startup this prints one line either way** — armed or not — so a rig
+//! operator can tell at a glance whether the variable reached the process. That
+//! is the whole of `I-11`'s prescribed fix, and it is a positive signal rather
+//! than a louder probe.
 //!
 //! ## `UPTAKE_DEV_MONITOR_PERTURB`
 //!
@@ -140,6 +154,48 @@ static MAIN_THREAD: OnceLock<ThreadId> = OnceLock::new();
 /// Records the event-loop thread so [`log_summon`] can compare against it.
 pub fn record_main_thread() {
     let _ = MAIN_THREAD.set(thread::current().id());
+}
+
+/// Says at startup whether gesture pacing is armed — **the positive signal
+/// `I-11` asks for**, and the reason it is a separate call rather than a louder
+/// probe.
+///
+/// `UPTAKE_DEV_PACING` produced no output at all across nine drags on the
+/// 2026-07-28 rig pass, and nothing could distinguish *the variable did not
+/// reach the process*, *no gesture was ever counted*, and *the probe is working
+/// and the drags were not drags*. All three look like silence. An instrument
+/// whose only output is the measurement it is asked for cannot report that it is
+/// alive, which is `I-11`'s point and the `F-17`/`F-33`/`UT-F-41` family's
+/// shape: a check that says nothing when something is wrong is indistinguishable
+/// from one that is switched off.
+///
+/// So this prints on **both** paths — armed and not armed. A line only when
+/// enabled would leave the disabled case silent, and the disabled case is
+/// exactly the one a rig operator mistakes for a broken probe.
+pub fn announce_pacing() {
+    if pacing_enabled() {
+        // **What this promises is bounded deliberately, and the first version
+        // was not.** It said "one line per completed drag", which is false: a
+        // drag observed in a single poll iteration carries `ticks == 0`, and
+        // both report sites suppress the line at zero. It then named the wrong
+        // cause for a missing line. An armed signal that overclaims is `I-11`'s
+        // own defect one level up — it converts "no measurement" into "the
+        // measurement is zero" — so it now states the floor a drag has to clear
+        // and lists both reasons for silence instead of one.
+        eprintln!(
+            "dev-harness: gesture pacing ARMED ({PACING_VAR}) — a drag spanning \
+             at least two poll iterations prints `poll: gesture ran …`. Silence \
+             after a drag means EITHER it was shorter than two iterations OR it \
+             was abandoned before the loop saw it end — it does not mean the \
+             probe is off, which is the one thing this line rules out."
+        );
+    } else {
+        eprintln!(
+            "dev-harness: gesture pacing off ({PACING_VAR} unset) — no \
+             `poll: gesture …` lines will be printed, and their absence measures \
+             nothing"
+        );
+    }
 }
 
 /// Reports which thread a summon arrived on, and the overlay's origin before

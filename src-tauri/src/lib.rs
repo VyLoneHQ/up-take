@@ -171,6 +171,12 @@ pub fn run() -> tauri::Result<()> {
             // this is the identity every later summon is compared against.
             #[cfg(debug_assertions)]
             dev_harness::record_main_thread();
+            // Says whether the gesture probe is armed, on both paths — `I-11`.
+            // Beside the other startup announcements rather than inside the poll
+            // thread, so it lands before the operator has done anything and
+            // cannot be mistaken for a response to a gesture.
+            #[cfg(debug_assertions)]
+            dev_harness::announce_pacing();
             // Scheduled from setup rather than from a state transition: the
             // check it drives has to fire *while PLACEMENT is up*, and the
             // operator is the one who gets there — a timer started at launch is
