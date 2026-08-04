@@ -104,14 +104,16 @@
         ).toLowerCase();
 
         if (screen === 'plain') {
-          // The floor. PNG compresses a flat field to almost nothing, so this
-          // is the cost of the pipeline with the content removed: IPC, decode
-          // and paint, near enough alone.
+          // The floor. Any compressed format reduces a flat field to almost
+          // nothing, so this is the cost of the pipeline with the content
+          // removed: IPC, decode and paint, near enough alone. (Not BMP, which
+          // is uncompressed and makes all three screens the same size -- see
+          // the README's format table.)
           context.fillStyle = '#808080';
           context.fillRect(0, 0, width, height);
         } else if (screen === 'dense') {
-          // The ceiling. Noise is incompressible, so the PNG encoder does its
-          // worst case. Harsher than any real desktop, which is the point of a
+          // The ceiling. Noise is incompressible, so the encoder does its
+          // worst case, PNG and JPEG alike. Harsher than any real desktop, which is the point of a
           // hard-fail bound.
           const random = mulberry32(SEED);
           const image = context.createImageData(width, height);
