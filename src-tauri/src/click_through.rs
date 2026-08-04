@@ -328,29 +328,43 @@ fn poll_loop(app: &AppHandle) -> ! {
 
         // A gesture still in hand when the loop exits is REPORTED, not dropped.
         //
-        // **This is `I-11`'s leading suspect, and it is visible by reading
-        // rather than by measuring.** All three `break`s above leave the loop
-        // the moment the overlay is deactivated, and a create gesture ends by
-        // deactivating the overlay — so the `(false, Some(..))` arm that prints
-        // the line can be skipped entirely by the very gesture it exists to
-        // report. Nine drags on the 2026-07-28 rig pass produced nine
-        // completions and zero lines, which is exactly this shape.
+        // **What this covers is the ABANDONMENT path, and NOT the create path.**
+        // The first version of this comment said a create gesture ends by
+        // deactivating the overlay, and that is false: `AreaType::after_create`
+        // returns `StayInPlacement` for all seven types (ADR-0023), the state
+        // machine keeps `Placement` on `AreaCreated`, and `overlay.rs` reaches
+        // `deactivate` from `OverlayState::Hidden` alone. It was false at
+        // `3cbeb1e` too — the exact commit of the rig pass it was offered to
+        // explain — so it could never have been the cause of nine drags
+        // producing zero lines. Caught in independent review, by reading the
+        // call chain rather than by measuring.
         //
-        // **Stated honestly: this is *a* cause, not proven to be *the* cause.**
-        // Proving it needs the rig, and `UT-F-43` is the rule against
-        // instrumenting a tree under hardware verification to find out. What is
-        // certain is that the drop existed and that a probe which silently
-        // discards its own measurement cannot be trusted to report zero.
+        // **On the create path this flush is unreachable**, and the ordering is
+        // why: `WM_LBUTTONUP` clears `DRAGGING` *before* `finish_gesture`, and
+        // `is_dragging` is read at the top of the iteration, so the next
+        // iteration takes the `(false, Some(..))` arm and reports normally.
         //
-        // The gesture is marked as ended early so the reader can tell a flushed
-        // line from an ordinary one — a normally-completed drag and a drag whose
-        // overlay vanished underneath it are different events, and `UT-F-46`'s
-        // rule is that a run reports the conditions it ran under.
+        // **The path it does cover is real.** `OverlayState::Hidden` runs
+        // `placement::exit` (which clears `DRAGGING`) and then `hide`, both on
+        // the event-loop thread while this thread sleeps in `wait_timeout`. This
+        // thread wakes, sees `!active`, and breaks **without re-reading
+        // `is_dragging`** — so a drag abandoned by `Esc` or by toggling the
+        // overlay away loses its gesture entirely. That is a genuine drop and
+        // this is a genuine fix; it is simply not `I-11`'s cause.
+        //
+        // **`I-11` therefore remains undiagnosed**, and the honest next suspect
+        // is the one its row lists first: `pacing_enabled()` returning false
+        // because the variable never reached the process. `announce_pacing` is
+        // what settles that, and it is this change's actual deliverable.
+        //
+        // The line is labelled so a reader can tell a flushed gesture from an
+        // ordinary one — a completed drag and one whose overlay vanished
+        // underneath it are different events (`UT-F-46`).
         #[cfg(debug_assertions)]
         if let Some((ticks, start)) = gesture.take()
             && ticks > 0
         {
-            eprint!("poll: [gesture cut short by deactivate] ");
+            eprintln!("poll: gesture below was cut short by deactivate");
             report_gesture(ticks, start);
         }
 
