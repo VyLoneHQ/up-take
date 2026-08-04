@@ -114,6 +114,39 @@ pub fn record_main_thread() {
     let _ = MAIN_THREAD.set(thread::current().id());
 }
 
+/// Says at startup whether gesture pacing is armed — **the positive signal
+/// `I-11` asks for**, and the reason it is a separate call rather than a louder
+/// probe.
+///
+/// `UPTAKE_DEV_PACING` produced no output at all across nine drags on the
+/// 2026-07-28 rig pass, and nothing could distinguish *the variable did not
+/// reach the process*, *no gesture was ever counted*, and *the probe is working
+/// and the drags were not drags*. All three look like silence. An instrument
+/// whose only output is the measurement it is asked for cannot report that it is
+/// alive, which is `I-11`'s point and the `F-17`/`F-33`/`UT-F-41` family's
+/// shape: a check that says nothing when something is wrong is indistinguishable
+/// from one that is switched off.
+///
+/// So this prints on **both** paths — armed and not armed. A line only when
+/// enabled would leave the disabled case silent, and the disabled case is
+/// exactly the one a rig operator mistakes for a broken probe.
+pub fn announce_pacing() {
+    if pacing_enabled() {
+        eprintln!(
+            "dev-harness: gesture pacing ARMED ({PACING_VAR}) — expect one \
+             `poll: gesture ran …` line per completed drag. No line after a drag \
+             means the gesture did not complete inside the poll loop, not that \
+             the probe is off."
+        );
+    } else {
+        eprintln!(
+            "dev-harness: gesture pacing off ({PACING_VAR} unset) — no \
+             `poll: gesture …` lines will be printed, and their absence measures \
+             nothing"
+        );
+    }
+}
+
 /// Reports which thread a summon arrived on, and the overlay's origin before
 /// the show.
 ///

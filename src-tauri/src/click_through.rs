@@ -326,6 +326,34 @@ fn poll_loop(app: &AppHandle) -> ! {
             }
         }
 
+        // A gesture still in hand when the loop exits is REPORTED, not dropped.
+        //
+        // **This is `I-11`'s leading suspect, and it is visible by reading
+        // rather than by measuring.** All three `break`s above leave the loop
+        // the moment the overlay is deactivated, and a create gesture ends by
+        // deactivating the overlay — so the `(false, Some(..))` arm that prints
+        // the line can be skipped entirely by the very gesture it exists to
+        // report. Nine drags on the 2026-07-28 rig pass produced nine
+        // completions and zero lines, which is exactly this shape.
+        //
+        // **Stated honestly: this is *a* cause, not proven to be *the* cause.**
+        // Proving it needs the rig, and `UT-F-43` is the rule against
+        // instrumenting a tree under hardware verification to find out. What is
+        // certain is that the drop existed and that a probe which silently
+        // discards its own measurement cannot be trusted to report zero.
+        //
+        // The gesture is marked as ended early so the reader can tell a flushed
+        // line from an ordinary one — a normally-completed drag and a drag whose
+        // overlay vanished underneath it are different events, and `UT-F-46`'s
+        // rule is that a run reports the conditions it ran under.
+        #[cfg(debug_assertions)]
+        if let Some((ticks, start)) = gesture.take()
+            && ticks > 0
+        {
+            eprint!("poll: [gesture cut short by deactivate] ");
+            report_gesture(ticks, start);
+        }
+
         // Deactivated: the overlay is hidden. Leave the window click-through —
         // its only state (ADR-0016) — so nothing ever observes it interactive.
         if let Ok(window) = overlay_window(app)
