@@ -67,6 +67,30 @@
 //! ```text
 //! UPTAKE_DEV_PACING=1 pnpm tauri dev
 //! ```
+//!
+//! ## `UPTAKE_DEV_MONITOR_PERTURB`
+//!
+//! **The route to a check no operator can perform.** `6e25555` widened the
+//! monitor cache from bare rectangles to whole monitors so that a scale change
+//! at *identical bounds* would drive the warm-session resync, and nothing
+//! verifies it. The owed rig check asked for a DPI change while PLACEMENT is
+//! visible, and `UT-F-50` records that this is impossible: PLACEMENT installs
+//! the global mouse hook and takes focus, so no Windows display UI is reachable
+//! while the state under test is active. An unplug does not substitute, because
+//! an unplug changes the bounds and would have passed under the old code.
+//!
+//! This injects a scale-only difference at the cache and drives the real
+//! `sync_bounds` path. Enter PLACEMENT, wait, and watch for the warm-session
+//! resync line; its absence is the failure.
+//!
+//! ```text
+//! UPTAKE_DEV_MONITOR_PERTURB=20 pnpm tauri dev
+//! ```
+//!
+//! **What it does not cover, stated because the gap is the interesting part:**
+//! Windows raising the change and Tauri reporting a new scale factor are not
+//! exercised. A green here means a scale-only difference drives the resync, and
+//! nothing more.
 
 use std::env;
 use std::sync::{LazyLock, OnceLock};
@@ -85,6 +109,10 @@ const ALLOW_MULTIPLE_VAR: &str = "UPTAKE_DEV_ALLOW_MULTIPLE";
 /// Environment variable that, when set, turns on the gesture pacing and
 /// emit→painted instrumentation.
 const PACING_VAR: &str = "UPTAKE_DEV_PACING";
+
+/// Environment variable holding the monitor-cache perturbation delay, in
+/// seconds. See [`schedule_monitor_perturb`].
+const MONITOR_PERTURB_VAR: &str = "UPTAKE_DEV_MONITOR_PERTURB";
 
 /// Whether gesture instrumentation is on this run.
 ///
@@ -174,6 +202,72 @@ fn reshow_delay() -> Option<Duration> {
         Ok(seconds) if seconds > 0 => Some(Duration::from_secs(seconds)),
         _ => {
             eprintln!("dev-harness: ignoring {RESHOW_VAR}={raw:?} — expected a positive integer");
+            None
+        }
+    }
+}
+
+/// Schedules a synthetic **scale-only** monitor-cache change if
+/// [`MONITOR_PERTURB_VAR`] is set.
+///
+/// Enter PLACEMENT and wait. That the overlay owns the input is irrelevant
+/// here, which is the whole point: `UT-F-50` records that the owed DPI check
+/// cannot be performed by hand *because* PLACEMENT takes the mouse and the
+/// keyboard, so no Windows display UI is reachable while the state under test
+/// is active. This needs no UI at all.
+///
+/// Read `overlay::dev_perturb_cached_scale` for what a green result is worth:
+/// the gate and the resync behind it are the real code on the real path, and
+/// Windows raising the change is **not** exercised.
+///
+/// **What to watch for.** A `freeze: warm sessions held for…` line, printed by
+/// `sync_warm_sessions` on the `refresh_monitor_cache` → resync path. Its
+/// *absence* is the failure — and it is exactly the absence that revealed the
+/// powering-a-monitor-off substitute had never run at all.
+pub fn schedule_monitor_perturb(app: &AppHandle) {
+    let Some(delay) = perturb_delay() else {
+        return;
+    };
+    let app = app.clone();
+    thread::spawn(move || {
+        eprintln!(
+            "dev-harness: perturbing one monitor's cached scale in {} s — be in \
+             PLACEMENT, and watch for a warm-session resync line",
+            delay.as_secs()
+        );
+        thread::sleep(delay);
+        let Some((bounds, was, now)) = crate::overlay::dev_perturb_cached_scale() else {
+            // Said out loud rather than returning quietly. An empty cache means
+            // the perturbation never happened, and a silent no-op would leave
+            // the operator reading the missing resync line as a failure of the
+            // code under test — which is `UT-F-50`'s own defect, one layer up.
+            eprintln!(
+                "dev-harness: the monitor cache is empty, so nothing was perturbed \
+                 and this check did NOT run"
+            );
+            return;
+        };
+        eprintln!(
+            "dev-harness: cached scale for {}x{} at ({}, {}) set {was} -> {now}, bounds \
+             untouched — driving sync_bounds",
+            bounds.size.width, bounds.size.height, bounds.origin.x, bounds.origin.y
+        );
+        if let Err(error) = crate::overlay::sync_bounds(&app) {
+            eprintln!("dev-harness: sync_bounds failed after the perturbation: {error}");
+        }
+    });
+}
+
+/// The configured perturbation delay, or `None` when the harness is off. Same
+/// parse-strictly-or-say-so rule as [`reshow_delay`], for the same reason.
+fn perturb_delay() -> Option<Duration> {
+    let raw = env::var(MONITOR_PERTURB_VAR).ok()?;
+    match raw.trim().parse::<u64>() {
+        Ok(seconds) if seconds > 0 => Some(Duration::from_secs(seconds)),
+        _ => {
+            eprintln!(
+                "dev-harness: ignoring {MONITOR_PERTURB_VAR}={raw:?} — expected a positive integer"
+            );
             None
         }
     }

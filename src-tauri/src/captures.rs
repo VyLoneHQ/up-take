@@ -192,22 +192,37 @@ pub fn serve(
     };
     let path = request.uri().path();
     // Frozen stills first — see `parse_frozen_path` for why the order matters.
-    let bytes = if let Some((index, version)) = parse_frozen_path(path) {
-        crate::freeze::still_png(index, version)
+    //
+    // The URL keeps its `.png` suffix whatever the still is encoded as: it is an
+    // opaque, versioned identifier the WebView never treats as a filename, and
+    // the header below is what actually decides how the bytes are read. Changing
+    // the suffix would mean changing both parsers for no gain.
+    //
+    // The still carries its own content type, taken when it was encoded — never
+    // re-derived from the current setting here. `freeze::Still::content_type`
+    // has the reason; the short version is that 1.14 makes the setting
+    // changeable while a freeze is on screen, and bytes outlive the setting that
+    // produced them.
+    let found = if let Some((index, version)) = parse_frozen_path(path) {
+        crate::freeze::still_bytes(index, version)
     } else {
         let Some((id, version)) = parse_path(path) else {
             return not_found();
         };
         let state = ctx.app_handle().state::<Mutex<CaptureStore>>();
         let guard = state.lock().unwrap_or_else(PoisonError::into_inner);
-        guard.get(id, version).map(<[u8]>::to_vec)
+        // An area's pin is always PNG: those bytes are the product, and only the
+        // freeze *display* path is switchable.
+        guard
+            .get(id, version)
+            .map(|bytes| (bytes.to_vec(), "image/png"))
     };
-    let Some(bytes) = bytes else {
+    let Some((bytes, content_type)) = found else {
         return not_found();
     };
     Response::builder()
         .status(StatusCode::OK)
-        .header("Content-Type", "image/png")
+        .header("Content-Type", content_type)
         // The URL is versioned, so the bytes behind it never change and the
         // WebView may keep them as long as it likes. This is what makes a pin
         // cost one fetch rather than one per repaint — and what makes a
