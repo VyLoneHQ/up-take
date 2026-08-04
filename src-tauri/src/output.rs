@@ -324,10 +324,28 @@ pub(crate) fn capture_into_area(app: &AppHandle, id: AreaId, bounds: Rect) {
 /// `uptake-capture`'s own hardware-verification driver uses
 /// (`examples/grab.rs`) — reused rather than adding a second PNG codec to vet.
 pub(crate) fn encode_png(bitmap: &RgbaBitmap) -> Result<Vec<u8>, String> {
-    ImageEncoder::new(ImageFormat::Png, ImageEncoderPixelFormat::Rgba8)
-        .map_err(|error| format!("could not create the PNG encoder: {error}"))?
+    encode_as(bitmap, ImageFormat::Png, "PNG")
+}
+
+/// Encodes for the **freeze display path**, in whatever format
+/// [`crate::freeze::display_format`] selected.
+///
+/// Separate from [`encode_png`] on purpose. Copy and Save keep PNG
+/// unconditionally, because there the bytes *are* the product and a lossy
+/// export would be a defect; here the bytes are only what the WebView paints
+/// while the user selects, and the crop comes from the lossless bitmap. **One
+/// function serving both would make that distinction a comment instead of a
+/// type.**
+pub(crate) fn encode_for_display(bitmap: &RgbaBitmap) -> Result<Vec<u8>, String> {
+    let (format, _, name) = crate::freeze::display_format();
+    encode_as(bitmap, format, name)
+}
+
+fn encode_as(bitmap: &RgbaBitmap, format: ImageFormat, name: &str) -> Result<Vec<u8>, String> {
+    ImageEncoder::new(format, ImageEncoderPixelFormat::Rgba8)
+        .map_err(|error| format!("could not create the {name} encoder: {error}"))?
         .encode(bitmap.pixels(), bitmap.width(), bitmap.height())
-        .map_err(|error| format!("could not encode PNG: {error}"))
+        .map_err(|error| format!("could not encode {name}: {error}"))
 }
 
 /// Logs the outcome and — separately — a budget overrun against §1's
@@ -668,6 +686,250 @@ mod tests {
             u32::from_le_bytes(dib[20..24].try_into().unwrap()),
             3 * 2 * 4
         );
+    }
+
+    /// The three defined test screens, as pixels rather than as a web page.
+    ///
+    /// `examples/testscreen/index.html` is what the rig displays; this is the
+    /// same three contents built directly, so the claim underneath the whole
+    /// bracket can be checked without a desktop. The PRNG is mulberry32, the
+    /// same one the page uses, for no reason except that two figures taken by
+    /// different routes should not differ for an uninteresting reason.
+    fn test_screen(kind: &str, size: uptake_core::geometry::Size) -> RgbaBitmap {
+        let count = (size.width as usize) * (size.height as usize);
+        let mut pixels = vec![0_u8; count * 4];
+        let mut state: u32 = 0x05ee_d199;
+        let mut next = || {
+            state = state.wrapping_add(0x6d2b_79f5);
+            let mut t = state;
+            t = (t ^ (t >> 15)).wrapping_mul(t | 1);
+            t ^= t.wrapping_add((t ^ (t >> 7)).wrapping_mul(t | 61));
+            (t ^ (t >> 14)) as u8
+        };
+        // The control is 8x8 blocks of one random colour each, which is
+        // full-entropy noise at 1/64 the resolution and therefore lands about
+        // mid-decade between the two.
+        //
+        // **It was smooth vertical bands first, and that was wrong.** Measured
+        // at 640x400: plain 1987 bytes, bands 2011, dense 896245. The bands
+        // satisfied "between the two" by 24 bytes, which is 1.2 % of PLAIN and
+        // nothing a reader of a rig log could tell apart. PNG filters rows
+        // before it deflates them, so hard-edged vertical bands are nearly as
+        // compressible as a flat field. A control that lands on top of one of
+        // the endpoints does not falsify anything.
+        const BLOCK: usize = 8;
+        let width = size.width as usize;
+        let blocks_across = width.div_ceil(BLOCK);
+        let block_colours: Vec<[u8; 3]> = (0..blocks_across
+            * (size.height as usize).div_ceil(BLOCK))
+            .map(|_| [next(), next(), next()])
+            .collect();
+        for (index, pixel) in pixels.chunks_exact_mut(4).enumerate() {
+            let (x, y) = (index % width, index / width);
+            match kind {
+                "plain" => pixel.copy_from_slice(&[0x80, 0x80, 0x80, 255]),
+                "dense" => pixel.copy_from_slice(&[next(), next(), next(), 255]),
+                _ => {
+                    let colour = block_colours[(y / BLOCK) * blocks_across + (x / BLOCK)];
+                    pixel.copy_from_slice(&[colour[0], colour[1], colour[2], 255]);
+                }
+            }
+        }
+        RgbaBitmap::from_pixels(size, pixels).unwrap()
+    }
+
+    /// **The acceptance check `quality-bars.md` §1 footnote 3 demands before any
+    /// 1.9g figure may be quoted**, run against the encoder the freeze path
+    /// actually uses rather than a reproduction of it.
+    ///
+    /// The bracket is only worth having if the two screens separate. If PLAIN
+    /// and DENSE encoded to similar sizes, the screen would not be controlling
+    /// the variable and the pair would be decoration. An order of magnitude is
+    /// the spec's own bar and is not a tuned threshold: the real separation is
+    /// far wider, and the assert is deliberately loose so that a genuine change
+    /// in the encoder trips it rather than ordinary noise.
+    #[test]
+    fn the_defined_test_screens_separate_by_an_order_of_magnitude() {
+        let size = uptake_core::geometry::Size::new(640, 400);
+        let plain = encode_png(&test_screen("plain", size)).unwrap().len();
+        let dense = encode_png(&test_screen("dense", size)).unwrap().len();
+        assert!(
+            dense > plain * 10,
+            "PLAIN and DENSE do not separate: plain {plain} bytes, dense {dense} bytes. \
+             The bracket is decoration unless these differ by orders of magnitude."
+        );
+    }
+
+    /// **The falsifier for the self-description** (`D-29(e)`): a check that
+    /// cannot come out the other way is worth nothing.
+    ///
+    /// The byte length is what makes a mislabelled run detectable, and that
+    /// claim is only true if an *unlisted* screen is visibly neither. So the
+    /// control is asserted to land strictly between the two, which is what a
+    /// reader of the rig log is being asked to rely on.
+    #[test]
+    fn an_unlisted_screen_lands_visibly_between_the_two() {
+        let size = uptake_core::geometry::Size::new(640, 400);
+        let plain = encode_png(&test_screen("plain", size)).unwrap().len();
+        let dense = encode_png(&test_screen("dense", size)).unwrap().len();
+        let blocks = encode_png(&test_screen("blocks", size)).unwrap().len();
+        // An order of magnitude clear of **both** ends, not merely on the
+        // correct side of them. The first version of this asserted only
+        // `blocks > plain && blocks < dense`, which a 24-byte margin satisfied
+        // while the control sat 1.2 % from PLAIN — a green that could not have
+        // gone red for the reason the check exists.
+        assert!(
+            blocks > plain * 10 && dense > blocks * 10,
+            "the control does not land visibly between the listed screens: \
+             plain {plain}, blocks {blocks}, dense {dense}. If an unlisted screen \
+             cannot be told from a listed one, the reported byte length is \
+             unfalsifiable and buys nothing."
+        );
+    }
+
+    /// **The same falsifier, against the format the freeze path actually
+    /// ships** — and the reason it is a second test rather than an edit to the
+    /// two above.
+    ///
+    /// Both checks above call [`encode_png`] explicitly. That was right when
+    /// they were written and stopped being right in the same branch: since
+    /// [ADR-0027] the display path encodes **JPEG**, so the byte lengths printed
+    /// beside every rig timing are JPEG lengths, and the property those tests
+    /// prove was a property of a format the rig no longer measures. A falsifier
+    /// aimed at the wrong format is `UT-F-52`'s defect one level up — the check
+    /// is real, it just does not guard the number anyone reads.
+    ///
+    /// # The bar is deliberately weaker here, and the arithmetic is why
+    ///
+    /// Measured at 2560×1440 through this path's own encoder:
+    ///
+    /// | screen | PNG | JPEG |
+    /// | --- | --- | --- |
+    /// | PLAIN | 17,895 | 58,225 |
+    /// | BLOCKS | 316,483 | 699,076 |
+    /// | DENSE | 12,608,315 | 3,304,252 |
+    ///
+    /// PNG spans a factor of **704**, JPEG a factor of **57**. An order of
+    /// magnitude clear of *both* ends needs the span to exceed 10 × 10 = 100, so
+    /// under JPEG **no control can satisfy the bar above** — it is not that this
+    /// one is badly chosen. The measured control sits 12.0× above PLAIN and
+    /// 4.7× below DENSE, and the best any control could do is √57 ≈ 7.5× each
+    /// way.
+    ///
+    /// So this asserts **3× clear of both ends**: a floor reasoned from the span
+    /// rather than fitted to the measurement (which clears it by 4× and 1.6×),
+    /// and still far more than the 1.2 % margin that made `UT-F-52` worth
+    /// recording. What it preserves is the only claim `quality-bars.md` §1
+    /// footnote 3 actually makes — that an unlisted screen is *visibly* neither.
+    ///
+    /// ⚠️ **Whether §1 should keep asking for "orders of magnitude" once the
+    /// path is JPEG is a spec question, not a test question**, and it is not
+    /// settled here. The footnote still says PNG.
+    ///
+    /// [ADR-0027]: the private planning repo's
+    /// `DECISIONS/ADR-0027-jpeg-for-the-freeze-display-path.md`
+    #[test]
+    fn the_bracket_still_separates_in_the_format_that_ships() {
+        let size = uptake_core::geometry::Size::new(640, 400);
+        let encode = |kind| encode_for_display(&test_screen(kind, size)).unwrap().len();
+        let (plain, blocks, dense) = (encode("plain"), encode("blocks"), encode("dense"));
+        let format = crate::freeze::display_format().2;
+        // The endpoints are the claim §1 makes in its own words, and it survives
+        // the format change: JPEG still separates PLAIN from DENSE by 57×.
+        assert!(
+            dense > plain * 10,
+            "PLAIN and DENSE do not separate in {format}, the shipped display \
+             format: plain {plain} bytes, dense {dense} bytes. The per-monitor \
+             byte length cannot describe a run whose endpoints it cannot tell \
+             apart."
+        );
+        assert!(
+            blocks > plain * 3 && dense > blocks * 3,
+            "the control does not land visibly between the listed screens in \
+             {format}: plain {plain}, blocks {blocks}, dense {dense}. See this \
+             test's own note before loosening the factor — 3× is already \
+             reasoned from the span rather than fitted to it."
+        );
+    }
+
+    /// **Task 1.9g's cheap falsifier, and it needs no rig.**
+    ///
+    /// The measured freeze is `encode 218 ms of a 224 ms freeze`, and
+    /// `289.6 − 218 = 71.6 ms` is under §1's 100 ms target — so if the encode
+    /// goes near-free the row passes and the stronger rewrite (hand the WebView
+    /// raw frames, deleting the encode *and* the decode from the display path)
+    /// is unnecessary. This measures whether it can.
+    ///
+    /// **The roadmap's proposed first move does not exist.** Both the 1.9g row
+    /// and `STATUS.md`'s next action say to drop *the `image` crate's* PNG
+    /// compression to its fastest setting. This project does not depend on the
+    /// `image` crate: `cargo tree -p up-take --target x86_64-pc-windows-msvc
+    /// --edges normal` is 774 entries with zero matches for it. [`encode_png`]
+    /// goes through `windows-capture`'s `ImageEncoder`, which wraps the WinRT
+    /// `BitmapEncoder`, and that wrapper calls `CreateAsync` with **no encoding
+    /// options at all** — there is no compression knob on the path we use.
+    ///
+    /// So the question becomes a *format* question, which costs nothing to ask
+    /// because `Bmp` and `Jpeg` are already in the enum. Printed rather than
+    /// asserted: this is a measurement that informs a design decision, and a
+    /// threshold invented here would be a bar describing whatever was built.
+    ///
+    /// # What the numbers said, and the objection they remove
+    ///
+    /// PNG is 68-294 ms and strongly content-dependent. BMP is a flat 25 ms and
+    /// is not, but costs 14.7 MB per monitor. **JPEG is the interesting one**:
+    /// 26-37 ms, within a rounding error of BMP's speed, at 58 KB (PLAIN) to
+    /// 3.3 MB (DENSE) — so it removes BMP's ~59 MB-per-freeze objection against
+    /// §1's 80 MB idle-RAM row while keeping almost all of the speed.
+    ///
+    /// **Lossy is defensible here for one specific reason, and only that one.**
+    /// This encode feeds the *display* path alone: [`crate::freeze::crop`] cuts
+    /// the user's actual screenshot from `Still::bitmap`, the lossless RGBA, and
+    /// never from these bytes. So artifacts would reach what the user *looks at*
+    /// while selecting, and never what they get.
+    ///
+    /// **That is not the same as saying JPEG is fine, and the remaining risk is
+    /// the one a table cannot settle.** Screen content is JPEG's worst case, not
+    /// its best: ringing around high-contrast glyph edges and chroma
+    /// subsampling smearing coloured text are exactly what a desktop full of
+    /// small text produces. It is also unknown what quality level the WinRT
+    /// encoder defaults to, because — as above — this wrapper passes it no
+    /// options. **Judge it by eye on the rig against a text-heavy screen before
+    /// adopting it**; that is a question for a person looking at a monitor, and
+    /// nothing here answers it.
+    ///
+    /// Run with:
+    /// `cargo test -p up-take --lib encode_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore = "a measurement, not a check: encodes four full-monitor buffers"]
+    fn encode_cost_by_format_and_content() {
+        // The rig's primary, so the figures are comparable with the freeze
+        // lines rather than being a small-buffer proxy.
+        let size = uptake_core::geometry::Size::new(2560, 1440);
+        println!(
+            "\n{:>7}  {:>7}  {:>12}  {:>10}",
+            "screen", "format", "bytes", "ms"
+        );
+        for screen in ["plain", "blocks", "dense"] {
+            let bitmap = test_screen(screen, size);
+            for (label, format) in [
+                ("png", ImageFormat::Png),
+                ("bmp", ImageFormat::Bmp),
+                ("jpeg", ImageFormat::Jpeg),
+            ] {
+                let started = std::time::Instant::now();
+                let encoded = ImageEncoder::new(format, ImageEncoderPixelFormat::Rgba8)
+                    .unwrap()
+                    .encode(bitmap.pixels(), bitmap.width(), bitmap.height())
+                    .unwrap();
+                println!(
+                    "{screen:>7}  {label:>7}  {:>12}  {:>10}",
+                    encoded.len(),
+                    started.elapsed().as_millis()
+                );
+            }
+        }
+        println!();
     }
 
     #[test]

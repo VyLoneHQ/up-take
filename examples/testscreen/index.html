@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>UP-TAKE test screen</title>
+    <style>
+      /* No font is loaded anywhere on this page. The overlay text below uses
+         whatever the system already has, and it is hidden before any
+         measurement runs, so it cannot influence what the capture sees. */
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #000;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #hint {
+        position: fixed;
+        left: 50%;
+        top: 50%;
+        transform: translate(-50%, -50%);
+        max-width: 32rem;
+        padding: 1.25rem 1.5rem;
+        background: rgba(0, 0, 0, 0.82);
+        color: #fff;
+        font-family: system-ui, sans-serif;
+        font-size: 0.95rem;
+        line-height: 1.5;
+        border-radius: 0.5rem;
+      }
+      #hint code {
+        background: rgba(255, 255, 255, 0.14);
+        padding: 0.05rem 0.3rem;
+        border-radius: 0.2rem;
+      }
+      #hint.gone {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="screen"></canvas>
+    <div id="hint">
+      <strong>UP-TAKE test screen</strong><br />
+      Press <code>F11</code> for full screen, then <code>H</code> to hide this
+      note. The taskbar and the wallpaper must not be visible on any monitor, or
+      the screen is not controlling the variable it exists to control.
+      <br /><br />
+      Screens: <code>?screen=plain</code>, <code>?screen=dense</code>,
+      <code>?screen=blocks</code> (the control).
+    </div>
+
+    <script>
+      // The three screens. PLAIN and DENSE are specified in the private
+      // planning repo's SPECS/quality-bars.md section 1, footnote 3; BLOCKS is
+      // the deliberately unlisted control that falsifies the self-description.
+      //
+      // Why noise rather than a realistic desktop: a "typical screen" cannot be
+      // pinned down without shipping a large image asset into this repository
+      // and hoping every rig renders it identically. Noise needs no asset, is
+      // exactly reproducible from a seed, and bounds the real case from above.
+      // Nothing here predicts what a user's actual desktop costs. It brackets it.
+      const SEED = 0x05eed199;
+
+      // mulberry32. Chosen because it is eight lines, has no dependencies, and
+      // is deterministic across engines, which is the only property that
+      // matters here: two rigs running the same screen must encode to the same
+      // byte length, or the figure cannot be compared between them.
+      function mulberry32(seed) {
+        let a = seed >>> 0;
+        return function () {
+          a = (a + 0x6d2b79f5) >>> 0;
+          let t = a;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+      }
+
+      function paint() {
+        const canvas = document.getElementById('screen');
+        const context = canvas.getContext('2d', { alpha: false });
+
+        // devicePixelRatio, so a mixed-DPI rig gets real per-monitor pixels
+        // rather than one small buffer upscaled by the compositor. On a 125%
+        // monitor this is 1.25, and the backing store is the monitor's native
+        // resolution. Getting this wrong is silent: the page still looks right
+        // and the encode measures the wrong number of pixels.
+        const ratio = window.devicePixelRatio || 1;
+        const width = Math.round(window.innerWidth * ratio);
+        const height = Math.round(window.innerHeight * ratio);
+        canvas.width = width;
+        canvas.height = height;
+
+        const screen = (
+          new URLSearchParams(window.location.search).get('screen') || 'plain'
+        ).toLowerCase();
+
+        if (screen === 'plain') {
+          // The floor. PNG compresses a flat field to almost nothing, so this
+          // is the cost of the pipeline with the content removed: IPC, decode
+          // and paint, near enough alone.
+          context.fillStyle = '#808080';
+          context.fillRect(0, 0, width, height);
+        } else if (screen === 'dense') {
+          // The ceiling. Noise is incompressible, so the PNG encoder does its
+          // worst case. Harsher than any real desktop, which is the point of a
+          // hard-fail bound.
+          const random = mulberry32(SEED);
+          const image = context.createImageData(width, height);
+          const pixels = image.data;
+          for (let i = 0; i < pixels.length; i += 4) {
+            pixels[i] = (random() * 256) | 0;
+            pixels[i + 1] = (random() * 256) | 0;
+            pixels[i + 2] = (random() * 256) | 0;
+            pixels[i + 3] = 255;
+          }
+          context.putImageData(image, 0, 0);
+        } else if (screen === 'blocks') {
+          // The control, and it is not a third data point. Its only job is to
+          // land visibly between PLAIN and DENSE, which is what makes the
+          // reported byte length falsifiable: if an unlisted screen could not
+          // be told from a listed one, the self-description would be worth
+          // nothing (D-29(e)).
+          //
+          // 8x8 blocks of one random colour each, so it is full-entropy noise
+          // at 1/64 the resolution. This was smooth vertical bands first and
+          // that was wrong: measured at 640x400 through the real encoder, the
+          // bands came out at 2011 bytes against PLAIN's 1987, a 1.2 % margin
+          // no reader of a rig log could tell apart. PNG filters rows before it
+          // deflates them, so hard-edged vertical bands are nearly as
+          // compressible as a flat field. Blocks measure 23065 bytes, which is
+          // 11.6x PLAIN and a 39th of DENSE.
+          const random = mulberry32(SEED);
+          const BLOCK = 8;
+          for (let y = 0; y < height; y += BLOCK) {
+            for (let x = 0; x < width; x += BLOCK) {
+              const r = (random() * 256) | 0;
+              const g = (random() * 256) | 0;
+              const b = (random() * 256) | 0;
+              context.fillStyle = 'rgb(' + r + ',' + g + ',' + b + ')';
+              context.fillRect(x, y, BLOCK, BLOCK);
+            }
+          }
+        } else {
+          context.fillStyle = '#800000';
+          context.fillRect(0, 0, width, height);
+          document.getElementById('hint').textContent =
+            'Unknown screen "' + screen + '". Use plain, dense or blocks.';
+          return;
+        }
+
+        document.title = 'UP-TAKE test screen: ' + screen + ' ' + width + 'x' + height;
+      }
+
+      window.addEventListener('keydown', (event) => {
+        if (event.key === 'h' || event.key === 'H') {
+          document.getElementById('hint').classList.toggle('gone');
+        }
+      });
+
+      // Repaint on resize, because entering full screen changes the viewport
+      // and a canvas sized to the windowed viewport would be upscaled to fill
+      // it. That upscale is exactly the mistake devicePixelRatio is here to
+      // prevent, and it would be invisible to the eye.
+      window.addEventListener('resize', paint);
+      paint();
+    </script>
+  </body>
+</html>

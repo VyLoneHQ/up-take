@@ -62,32 +62,65 @@ use std::time::Instant;
 
 use uptake_core::bitmap::RgbaBitmap;
 use uptake_core::geometry::Rect;
+use windows_capture::encoder::ImageFormat;
 
 /// One monitor's still: where it came from, the pixels a crop is cut out of,
-/// and the PNG the WebView displays.
+/// and the encoded image the WebView displays.
 ///
 /// The rectangle is not decoration: a bitmap does not know its own position, and
 /// without it a screen-space crop cannot be computed at all.
 ///
-/// # Why both representations, and why the PNG is made now
+/// # The two fields are not interchangeable, and that is now load-bearing
+///
+/// `bitmap` is **lossless RGBA and is what the user actually receives** —
+/// [`crop`] cuts every Screenshot from it. `encoded` is only what the WebView
+/// paints while the user selects, and since [ADR-0027] it is **JPEG**, which is
+/// lossy.
+///
+/// **That asymmetry is the entire justification for a lossy display format.**
+/// If any export path is ever changed to derive from `encoded`, this decision
+/// silently becomes a defect that degrades what the user gets, and it is
+/// [ADR-0027]'s first *Revisit if*. The field is named `encoded` rather than
+/// `png` for the same reason: it held JPEG bytes under a name that said PNG for
+/// exactly one commit, and a name that lies is how this becomes invisible.
+///
+/// # Why both representations, and why the encode happens now
 ///
 /// The same reason [`crate::captures::CaptureStore`] holds both: a crop needs
-/// raw RGBA and an `<img>` needs PNG, and neither cheaply produces the other.
-/// Encoding happens **at freeze time**, on the thread that already spawned for
-/// the captures, rather than inside the URI-scheme handler — that handler runs
-/// on the WebView2 UI thread, and a full-monitor PNG encode there would stall
-/// the very repaint it is feeding.
+/// raw RGBA and an `<img>` needs an encoded image, and neither cheaply produces
+/// the other. Encoding happens **at freeze time**, on the thread that already
+/// spawned for the captures, rather than inside the URI-scheme handler — that
+/// handler runs on the WebView2 UI thread, and a full-monitor encode there would
+/// stall the very repaint it is feeding.
 ///
 /// The cost is memory, and it is the largest this feature carries: a 1440p
-/// monitor is ~14.7 MB raw plus its PNG, and a 4K one ~33 MB. Four monitors
-/// frozen is therefore well past `quality-bars.md` §1's 80 MB idle-RAM row —
-/// **which is why [`thaw`] runs on every state transition and not only on the
-/// toggle.** Frozen is a transient state by construction; if it ever becomes a
-/// resting one, this is the number that has to be revisited first.
+/// monitor is ~14.7 MB raw plus its encoded copy, and a 4K one ~33 MB. Four
+/// monitors frozen is therefore well past `quality-bars.md` §1's 80 MB idle-RAM
+/// row — **which is why [`thaw`] runs on every state transition and not only on
+/// the toggle.** Frozen is a transient state by construction; if it ever becomes
+/// a resting one, this is the number that has to be revisited first. ADR-0027
+/// helped here rather than hurting: the encoded half fell from 33.9 MB to 8.9 MB
+/// across four monitors on the worst screen this project tests.
+///
+/// [ADR-0027]: the private planning repo's
+/// `DECISIONS/ADR-0027-jpeg-for-the-freeze-display-path.md`
 struct Still {
     rect: Rect,
     bitmap: RgbaBitmap,
-    png: Vec<u8>,
+    encoded: Vec<u8>,
+    /// The MIME type of `encoded`, **recorded when it was encoded** rather than
+    /// re-derived when it is served.
+    ///
+    /// The two are the same today, because [`DISPLAY_FORMAT`] is written once at
+    /// startup and never again. They stop being the same the moment roadmap 1.14
+    /// wires a stored setting to it — which [`display_format`] describes as "a
+    /// call site rather than a redesign", and this field is the part that claim
+    /// was missing: a still encoded before the switch would otherwise be served
+    /// under the new format's `Content-Type`, and a JPEG announced as a PNG
+    /// renders as a broken image. Storing the answer beside the bytes makes the
+    /// header describe what was actually produced, whatever the setting does
+    /// afterwards.
+    content_type: &'static str,
 }
 
 /// The stills currently displayed, one per frozen monitor. Empty means live.
@@ -202,7 +235,7 @@ pub(crate) const fn take_paint_probe() -> Option<u64> {
 /// following frame painted. The decode is the reason this exists: `72–78 ms`
 /// was capture-through-encode, and §1's row is about pixels on screen. A
 /// `requestAnimationFrame` pair alone resolves as soon as the DOM has updated,
-/// while four full-monitor PNGs are still decoding — a comfortable number that
+/// while four full-monitor stills are still decoding — a comfortable number that
 /// excludes the one cost nobody has measured, which is `UT-F-41`'s failure
 /// exactly. So the frontend awaits `img.decode()` on every still first.
 ///
@@ -273,6 +306,95 @@ pub(crate) fn init_warm_capture() {
 /// Whether the warm capture path is enabled. The only reader of [`WARM_CAPTURE`].
 pub(crate) fn warm_capture_enabled() -> bool {
     WARM_CAPTURE.load(Ordering::SeqCst)
+}
+
+/// Which format the **display** path encodes stills in. 0 = PNG, 1 = JPEG, 2 = BMP.
+///
+/// An integer rather than an enum because it lives in an atomic, read once per
+/// monitor per freeze.
+///
+/// **Defaults to JPEG ([ADR-0027], 2026-08-03), decided on measurement.** Warm
+/// path, four-monitor rig, against the defined test screens, as `Ctrl+Space` →
+/// painted: JPEG **42.0-53.5 ms** (PLAIN) / **162.2 ms** (DENSE), against PNG's
+/// **122.1 / 535.4**. So `quality-bars.md` §1's *frozen view painted* row is met
+/// at the floor for the first time and never hard fails, where PNG missed the
+/// target at the floor and was 2.7× over the hard fail at the ceiling.
+///
+/// [ADR-0027]: the private planning repo's
+/// `DECISIONS/ADR-0027-jpeg-for-the-freeze-display-path.md`
+static DISPLAY_FORMAT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
+
+/// The display encode format, its MIME type, and the name to print.
+///
+/// # Why this is switchable at all
+///
+/// It was built to let the rig settle 1.9g's format question, and it stays for
+/// two reasons now that [ADR-0027] has settled it: re-measuring the decision,
+/// and **the founder's requirement that the user keep the option of PNG**
+/// (2026-08-03). That is a *settings* surface, not an environment variable —
+/// **roadmap 1.14 owns it**, and this static is the one place the choice lives
+/// so wiring a stored setting to it is a call site rather than a redesign, the
+/// same shape `init_warm_capture` documents.
+///
+/// **Lossy is only defensible because this is the display path alone.**
+/// [`crop`] cuts the user's actual screenshot from [`Still::bitmap`], the
+/// lossless RGBA, and never from these bytes. Change that and this switch
+/// becomes a way to silently degrade what the user receives — which is
+/// [ADR-0027]'s first *Revisit if*, and the reason `encode_for_display` is a
+/// separate function from `encode_png` rather than a parameter on it.
+pub(crate) fn display_format() -> (ImageFormat, &'static str, &'static str) {
+    match DISPLAY_FORMAT.load(Ordering::SeqCst) {
+        1 => (ImageFormat::Jpeg, "image/jpeg", "jpeg"),
+        2 => (ImageFormat::Bmp, "image/bmp", "bmp"),
+        _ => (ImageFormat::Png, "image/png", "png"),
+    }
+}
+
+/// Reads `UPTAKE_FREEZE_FORMAT` once, at startup, and **states what it chose**.
+///
+/// Same shape and the same reason as [`init_warm_capture`]: a format that
+/// silently fell back to the default would make a rig pass measure PNG while its
+/// operator wrote "JPEG" beside the number, which is `UT-F-46`'s defect exactly.
+/// So an unrecognised value is refused out loud rather than absorbed.
+pub(crate) fn init_display_format() {
+    let Ok(raw) = std::env::var("UPTAKE_FREEZE_FORMAT") else {
+        // The default states itself too. A reader of a rig log must be able to
+        // tell which format produced a number without knowing what the default
+        // was on the day the build was made.
+        eprintln!(
+            "freeze: display stills encode as {} (default, ADR-0027) — the DISPLAY path only; \
+             crops still come from the lossless bitmap",
+            display_format().2
+        );
+        return;
+    };
+    let chosen = match raw.trim().to_ascii_lowercase().as_str() {
+        "png" => 0,
+        "jpeg" | "jpg" => 1,
+        "bmp" => 2,
+        _ => {
+            // The format is READ BACK rather than named, because naming it is
+            // how this line was wrong: it said "staying on png" while the
+            // default had become JPEG, so a mistyped variable would have told a
+            // rig operator PNG and handed them a JPEG number. That is `UT-F-46`
+            // exactly — the defect this function's own doc says it exists to
+            // prevent — and it survived because the sentence was written when
+            // PNG was still the default and was not re-read when 4c7440d
+            // changed it. No branch here may name a format it did not load.
+            eprintln!(
+                "freeze: ignoring UPTAKE_FREEZE_FORMAT={raw:?} — expected png, jpeg or bmp; \
+                 staying on {}",
+                display_format().2
+            );
+            return;
+        }
+    };
+    DISPLAY_FORMAT.store(chosen, Ordering::SeqCst);
+    eprintln!(
+        "freeze: display stills encode as {} (UPTAKE_FREEZE_FORMAT) — the DISPLAY path only; \
+         crops still come from the lossless bitmap",
+        display_format().2
+    );
 }
 
 /// Starts or stops the held sessions to match `is_placement`.
@@ -357,13 +479,17 @@ fn still_url(index: usize, version: u64) -> String {
     }
 }
 
-/// The PNG for one frozen still, if `version` is still the live freeze.
+/// One frozen still's encoded bytes **and the MIME type they were encoded as**,
+/// if `version` is still the live freeze.
+///
+/// The content type comes from the still rather than from [`display_format`]:
+/// see [`Still::content_type`] for why re-deriving it is a trap 1.14 walks into.
 ///
 /// A version mismatch is `None` rather than the current bytes, for the same
 /// reason the pin store refuses one: the only way to ask for a stale version is
 /// to hold a stale URL, and answering it with fresh pixels would hide a caching
 /// bug instead of surfacing it.
-pub(crate) fn still_png(index: usize, version: u64) -> Option<Vec<u8>> {
+pub(crate) fn still_bytes(index: usize, version: u64) -> Option<(Vec<u8>, &'static str)> {
     // Version read *under* the stills lock, not beside it. `VERSION` and
     // `STILLS` are one fact in two variables, and reading them separately lets a
     // freeze land between the two reads — see `stills_for_display`, where the
@@ -372,7 +498,9 @@ pub(crate) fn still_png(index: usize, version: u64) -> Option<Vec<u8>> {
     if version != VERSION.load(Ordering::SeqCst) {
         return None;
     }
-    stills.get(index).map(|still| still.png.clone())
+    stills
+        .get(index)
+        .map(|still| (still.encoded.clone(), still.content_type))
 }
 
 /// Every frozen still as `(rect, url)`, for the frontend to lay out.
@@ -386,7 +514,7 @@ pub(crate) fn still_png(index: usize, version: u64) -> Option<Vec<u8>> {
 /// `VERSION` and `STILLS` are **one fact stored in two variables**, and this
 /// function is where reading them apart does visible damage: load the version,
 /// have a freeze land, then lock the stills, and every URL returned names the
-/// previous freeze while the stills are the new one. [`still_png`] answers a
+/// previous freeze while the stills are the new one. [`still_bytes`] answers a
 /// stale version with `None` — correctly — so the frontend renders a `frozen`
 /// badge over a monitor whose image 404'd, which is a live desktop labelled
 /// frozen. Holding the lock across both makes the pair atomic; [`freeze`]
@@ -406,14 +534,6 @@ pub(crate) fn is_frozen() -> bool {
     !stills().is_empty()
 }
 
-/// What a freeze cost, for the caller to log.
-///
-/// The stage figures are **maxima across monitors, not sums**, and they may come
-/// from different monitors. Every monitor is captured on its own thread, so what
-/// the user waits for is the last one to land; a sum would report a cost nobody
-/// experiences. They exist to answer one question — which stage dominates — and
-/// are reported rather than asserted: the measured split is what decides whether
-/// this feature's latency has anywhere left to go.
 /// Why a [`freeze`] produced nothing. Both are correct outcomes, not errors —
 /// they are distinguished because a log that conflates them cannot be read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -433,6 +553,62 @@ impl std::fmt::Display for Skipped {
     }
 }
 
+/// What one monitor's freeze cost, and how big the thing it produced was.
+///
+/// **The byte length is why this type exists**, and it is not a diagnostic
+/// nicety. `quality-bars.md` §1's *frozen view painted* row is content-dependent
+/// — encode and decode both scale with image complexity, in every format this
+/// path can be set to — so a timing
+/// without the content it was taken against is a number whose precondition
+/// nobody stated. That is `UT-F-47`, where 1.9f's headline 72–78 ms turned out
+/// to be the simple-screen best case quoted as *the* measurement, and the
+/// 209–215 ms case had never been observed.
+///
+/// The encoded length is the property that correlates directly with encode
+/// cost, the freeze path already computes it, and it was thrown away. Emitting
+/// it beside every timing makes a mislabelled run **detectable rather than
+/// trusted**: PLAIN and DENSE differ by orders of magnitude, so a run against an
+/// unlisted screen lands between them and is visibly neither.
+///
+/// ⚠️ **How far apart they are depends on the format, and the margin is much
+/// narrower than it was.** Measured at 2560×1440 through this path's own
+/// encoder: PNG spans 17,895 → 12,608,315 bytes, a factor of **704**, while
+/// JPEG — the default since [ADR-0027] — spans 58,225 → 3,304,252, a factor of
+/// **57**. The bracket still separates in both, but only PNG leaves room for an
+/// unlisted screen to sit an order of magnitude clear of *both* ends: 10 × 10
+/// exceeds 57, so under JPEG no control can. Read the byte length against the
+/// format the run actually used.
+pub(crate) struct MonitorCost {
+    /// The rect actually captured, as the capture crate reports it — never what
+    /// was asked for, for the reason [`capture_still`] gives.
+    pub rect: Rect,
+    /// This monitor's capture.
+    pub capture_ms: u128,
+    /// This monitor's display encode, in whatever format [`display_format`]
+    /// selected — **not** necessarily PNG since [ADR-0027].
+    pub encode_ms: u128,
+    /// The encoded image's length in bytes, in the display format — the
+    /// `freeze: display stills encode as …` line at startup says which. See the
+    /// type's own note: this is the run describing its own conditions, not a
+    /// statistic.
+    pub encoded_bytes: usize,
+    /// Whether a **warm** session served this monitor rather than a fresh
+    /// capture.
+    pub served_warm: bool,
+}
+
+/// What a freeze cost, for the caller to log.
+///
+/// The stage figures are **maxima across monitors, not sums**, and they may come
+/// from different monitors. Every monitor is captured on its own thread, so what
+/// the user waits for is the last one to land; a sum would report a cost nobody
+/// experiences. They exist to answer one question — which stage dominates — and
+/// are reported rather than asserted: the measured split is what decides whether
+/// this feature's latency has anywhere left to go.
+///
+/// [`FreezeReport::per_monitor`] carries the unaggregated figures, because a
+/// maximum cannot describe the screen it was taken against and §1's row needs
+/// exactly that. See [`MonitorCost`].
 pub(crate) struct FreezeReport {
     /// How many monitors were actually captured — see [`freeze`].
     pub count: usize,
@@ -450,8 +626,15 @@ pub(crate) struct FreezeReport {
     pub elapsed_ms: u128,
     /// The slowest single monitor's capture.
     pub slowest_capture_ms: u128,
-    /// The slowest single monitor's PNG encode.
+    /// The slowest single monitor's display encode — see [`MonitorCost`] for
+    /// why the format is not assumed.
     pub slowest_encode_ms: u128,
+    /// Every captured monitor's own figures, in the order they were captured —
+    /// which is the order of the monitor list, and therefore of the still URLs.
+    ///
+    /// Monitors that could not be captured or encoded are **absent**, not zeroed,
+    /// so this is `count` entries long and never `monitors.len()`.
+    pub per_monitor: Vec<MonitorCost>,
 }
 
 /// Captures `monitors` and holds the stills, replacing any already held.
@@ -484,7 +667,7 @@ pub(crate) struct FreezeReport {
 ///
 /// **One thread per monitor, so the freeze costs one capture rather than one
 /// per monitor.** It still blocks its caller for that time — roughly 183–313 ms
-/// on the dev rig plus the PNG encode — so it must not run on the event-loop
+/// on the dev rig plus the display encode — so it must not run on the event-loop
 /// thread or inside the `WH_MOUSE_LL` callback; the caller spawns. That is the
 /// same constraint `precapture` documents at length and the failure class F-33
 /// found the hard way.
@@ -520,7 +703,7 @@ pub(crate) fn freeze(monitors: &[Rect]) -> Result<FreezeReport, Skipped> {
     // Scoped rather than detached: the stills must all be in hand before the
     // state is emitted, and a scope makes "every thread has finished" a property
     // of the type rather than something the caller has to remember to join.
-    let captured: Vec<(Still, u128, u128, bool)> = std::thread::scope(|scope| {
+    let captured: Vec<(Still, MonitorCost)> = std::thread::scope(|scope| {
         let handles: Vec<_> = monitors
             .iter()
             .map(|monitor| scope.spawn(move || capture_still(*monitor)))
@@ -534,10 +717,10 @@ pub(crate) fn freeze(monitors: &[Rect]) -> Result<FreezeReport, Skipped> {
             .filter_map(|handle| handle.join().unwrap_or(None))
             .collect()
     });
-    let slowest_capture_ms = captured.iter().map(|(_, capture, _, _)| *capture).max();
-    let slowest_encode_ms = captured.iter().map(|(_, _, encode, _)| *encode).max();
-    let warm_served = captured.iter().filter(|(_, _, _, warm)| *warm).count();
-    let captured: Vec<Still> = captured.into_iter().map(|(still, _, _, _)| still).collect();
+    let slowest_capture_ms = captured.iter().map(|(_, cost)| cost.capture_ms).max();
+    let slowest_encode_ms = captured.iter().map(|(_, cost)| cost.encode_ms).max();
+    let warm_served = captured.iter().filter(|(_, cost)| cost.served_warm).count();
+    let (captured, per_monitor): (Vec<Still>, Vec<MonitorCost>) = captured.into_iter().unzip();
     let count = captured.len();
     // Published under one lock, because the version and the stills are one fact:
     // a reader that catches the bump without the new stills builds URLs the
@@ -553,6 +736,7 @@ pub(crate) fn freeze(monitors: &[Rect]) -> Result<FreezeReport, Skipped> {
         elapsed_ms: started.elapsed().as_millis(),
         slowest_capture_ms: slowest_capture_ms.unwrap_or_default(),
         slowest_encode_ms: slowest_encode_ms.unwrap_or_default(),
+        per_monitor,
     })
 }
 
@@ -596,7 +780,7 @@ fn publish(captured: Vec<Still>, generation: u64) -> Result<(), Skipped> {
 /// keeping it would mean a monitor whose pixels a drag would use but which shows
 /// live content — the see-one-thing-get-another failure this feature exists to
 /// avoid.
-fn capture_still(monitor: Rect) -> Option<(Still, u128, u128, bool)> {
+fn capture_still(monitor: Rect) -> Option<(Still, MonitorCost)> {
     let capture_started = Instant::now();
     // The warm path first, when it is on and has something to hand over.
     //
@@ -623,25 +807,35 @@ fn capture_still(monitor: Rect) -> Option<(Still, u128, u128, bool)> {
     };
     let capture_ms = capture_started.elapsed().as_millis();
     let encode_started = Instant::now();
-    let png = match crate::output::encode_png(&shot.bitmap) {
-        Ok(png) => png,
+    // Read once, here, and carried on the still — so the bytes and the header
+    // that describes them are decided in the same breath. See
+    // [`Still::content_type`].
+    let content_type = display_format().1;
+    let encoded = match crate::output::encode_for_display(&shot.bitmap) {
+        Ok(encoded) => encoded,
         Err(error) => {
             eprintln!("freeze: could not encode {monitor:?}: {error}");
             return None;
         }
     };
+    let cost = MonitorCost {
+        // What the capture crate reports it took, never what was asked for: it
+        // clamps to the virtual desktop, and trusting the request would offset
+        // every crop by the clamp distance.
+        rect: shot.rect,
+        capture_ms,
+        encode_ms: encode_started.elapsed().as_millis(),
+        encoded_bytes: encoded.len(),
+        served_warm,
+    };
     Some((
         Still {
-            // What the capture crate reports it took, never what was asked for:
-            // it clamps to the virtual desktop, and trusting the request would
-            // offset every crop by the clamp distance.
             rect: shot.rect,
             bitmap: shot.bitmap,
-            png,
+            encoded,
+            content_type,
         },
-        capture_ms,
-        encode_started.elapsed().as_millis(),
-        served_warm,
+        cost,
     ))
 }
 
@@ -724,11 +918,72 @@ mod tests {
                 rect,
                 bitmap,
                 // These tests are about the crop decision and the arithmetic,
-                // neither of which reads the PNG. A real encode here would buy
-                // nothing and make every test depend on the encoder.
-                png: Vec::new(),
+                // neither of which reads the encoded bytes. A real encode here
+                // would buy nothing and make every test depend on the encoder.
+                //
+                // **It is also load-bearing that this stays empty.** `crop` must
+                // cut from `bitmap` and never from `encoded` — the one fact that
+                // makes a lossy display format safe (ADR-0027) — and with no
+                // bytes here, a `crop` rewritten to decode `encoded` cannot
+                // produce pixels and every crop test below goes red. See
+                // `the_crop_path_never_reads_the_encoded_bytes` for the check
+                // that says so by name rather than by side effect.
+                encoded: Vec::new(),
+                content_type: "image/png",
             })
             .collect();
+    }
+
+    /// **The single fact [ADR-0027] rests on, asserted by name.**
+    ///
+    /// A lossy display format is defensible for exactly one reason: [`crop`]
+    /// cuts what the user actually receives from [`Still::bitmap`], the lossless
+    /// RGBA, and never from the encoded bytes the WebView paints. ADR-0027's
+    /// first *Revisit if* is that fact ceasing to hold, at which point the
+    /// decision silently becomes a defect that degrades every screenshot taken
+    /// on a frozen screen.
+    ///
+    /// Until now that invariant was carried by doc comments plus a side effect —
+    /// the test helper leaves `encoded` empty, so a `crop` that decoded it would
+    /// fail the *other* tests for a reason none of them names. A reader chasing
+    /// a red test would have had no way to learn what they had broken. This
+    /// installs bytes that are **not** a decodable image and asserts the crop is
+    /// still exact, so the failure names itself.
+    ///
+    /// What makes it fail: change `crop` to decode `still.encoded` instead of
+    /// cutting `still.bitmap`. It cannot return these pixels from this input.
+    ///
+    /// [ADR-0027]: the private planning repo's
+    /// `DECISIONS/ADR-0027-jpeg-for-the-freeze-display-path.md`
+    #[test]
+    fn the_crop_path_never_reads_the_encoded_bytes() {
+        let _guard = crate::precapture::frame_store_guard();
+        let bitmap = patterned(Size::new(64, 48));
+        let expected = bitmap
+            .crop_screen(
+                uptake_core::geometry::Point::new(0, 0),
+                Rect::new(8, 8, 16, 16),
+            )
+            .expect("the crop lies inside the still");
+        *stills() = vec![Still {
+            rect: Rect::new(0, 0, 64, 48),
+            bitmap,
+            // Not an image in any format. If the crop ever comes from here, it
+            // cannot come out right — which is the point of choosing bytes that
+            // no decoder accepts rather than a real encode of the same pixels.
+            // A real encode would let a decoding `crop` return *nearly* these
+            // pixels, and "nearly" is exactly the degradation this guards.
+            encoded: b"not an image".to_vec(),
+            content_type: "image/jpeg",
+        }];
+        let cropped = crop(Rect::new(8, 8, 16, 16)).expect("a contained crop returns pixels");
+        assert_eq!(
+            cropped, expected,
+            "the crop must be a byte-exact cut of the lossless bitmap. If this \
+             fails, ADR-0027's premise no longer holds and a lossy display \
+             format is no longer safe — read that decision before changing \
+             this test."
+        );
     }
 
     /// The URL a still is served at must parse back to the same still through
@@ -767,7 +1022,7 @@ mod tests {
         let _guard = crate::precapture::frame_store_guard();
         hold(vec![(Rect::new(0, 0, 8, 8), patterned(Size::new(8, 8)))]);
         let live = VERSION.load(Ordering::SeqCst);
-        assert!(still_png(0, live.wrapping_sub(1)).is_none());
+        assert!(still_bytes(0, live.wrapping_sub(1)).is_none());
     }
 
     #[test]
@@ -891,7 +1146,7 @@ mod tests {
         let (index, version) =
             crate::captures::parse_frozen_path(url.rsplit_once('/').expect("the url has a path").1)
                 .expect("a frozen url parses");
-        assert!(still_png(index, version).is_some());
+        assert!(still_bytes(index, version).is_some());
         // A freeze over no monitors: captures nothing, and must still retire it.
         assert!(freeze(&[]).is_ok());
         // Re-install a still at the same index. Without this the assertion below
@@ -905,7 +1160,7 @@ mod tests {
             patterned(Size::new(64, 48)),
         )]);
         assert!(
-            still_png(index, version).is_none(),
+            still_bytes(index, version).is_none(),
             "the previous freeze's url must not resolve after a re-freeze"
         );
     }

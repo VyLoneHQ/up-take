@@ -177,12 +177,22 @@ pub fn run() -> tauri::Result<()> {
             // cannot be mistaken for a response to a gesture.
             #[cfg(debug_assertions)]
             dev_harness::announce_pacing();
+            // Scheduled from setup rather than from a state transition: the
+            // check it drives has to fire *while PLACEMENT is up*, and the
+            // operator is the one who gets there — a timer started at launch is
+            // what gives them time to. Off unless the variable is set.
+            #[cfg(debug_assertions)]
+            dev_harness::schedule_monitor_perturb(app.handle());
             // Read once, here, so the answer cannot change under a running
             // Placement — a setting that flipped between `sync_warm_sessions`
             // starting the sessions and `freeze` consulting them would leak
             // four held sessions. Task 1.14 replaces the env read with the
             // stored setting; this call site stays.
             freeze::init_warm_capture();
+            // Same place and the same reason: read once, before anything can
+            // freeze, and state what it chose so a rig log says which format
+            // produced its numbers.
+            freeze::init_display_format();
             // State must be managed and the poll thread parked before the
             // first `overlay::show`, which activates the poll.
             app.manage(click_through::ClickThrough::new());
