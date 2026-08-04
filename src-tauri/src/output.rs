@@ -822,9 +822,18 @@ mod tests {
     /// recording. What it preserves is the only claim `quality-bars.md` §1
     /// footnote 3 actually makes — that an unlisted screen is *visibly* neither.
     ///
-    /// ⚠️ **Whether §1 should keep asking for "orders of magnitude" once the
-    /// path is JPEG is a spec question, not a test question**, and it is not
-    /// settled here. The footnote still says PNG.
+    /// ✅ **Settled by the founder 2026-08-04, and `quality-bars.md` §1
+    /// footnote 3 now states the acceptance per format rather than once.** The
+    /// endpoint requirement is unchanged at 10× and applies to every format —
+    /// that is the bar, and JPEG passes it at 57×. Only the *control's* margin
+    /// is per format, 10× in PNG and 3× in JPEG, because 10 × 10 exceeds JPEG's
+    /// whole span and therefore cannot be met by any control at all.
+    ///
+    /// **Why that is not a bar rewritten to fit what was built** — the thing
+    /// being measured, can a reader tell PLAIN from DENSE, is untouched at full
+    /// strength; what moved is an auxiliary control's margin, and it moved for
+    /// an arithmetic reason. **If a future format widens the span past 100, this
+    /// goes back to 10× without discussion.**
     ///
     /// [ADR-0027]: the private planning repo's
     /// `DECISIONS/ADR-0027-jpeg-for-the-freeze-display-path.md`
