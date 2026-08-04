@@ -197,11 +197,14 @@ pub fn serve(
     // opaque, versioned identifier the WebView never treats as a filename, and
     // the header below is what actually decides how the bytes are read. Changing
     // the suffix would mean changing both parsers for no gain.
-    let (bytes, content_type) = if let Some((index, version)) = parse_frozen_path(path) {
-        (
-            crate::freeze::still_bytes(index, version),
-            crate::freeze::display_format().1,
-        )
+    //
+    // The still carries its own content type, taken when it was encoded — never
+    // re-derived from the current setting here. `freeze::Still::content_type`
+    // has the reason; the short version is that 1.14 makes the setting
+    // changeable while a freeze is on screen, and bytes outlive the setting that
+    // produced them.
+    let found = if let Some((index, version)) = parse_frozen_path(path) {
+        crate::freeze::still_bytes(index, version)
     } else {
         let Some((id, version)) = parse_path(path) else {
             return not_found();
@@ -210,9 +213,11 @@ pub fn serve(
         let guard = state.lock().unwrap_or_else(PoisonError::into_inner);
         // An area's pin is always PNG: those bytes are the product, and only the
         // freeze *display* path is switchable.
-        (guard.get(id, version).map(<[u8]>::to_vec), "image/png")
+        guard
+            .get(id, version)
+            .map(|bytes| (bytes.to_vec(), "image/png"))
     };
-    let Some(bytes) = bytes else {
+    let Some((bytes, content_type)) = found else {
         return not_found();
     };
     Response::builder()

@@ -36,8 +36,12 @@ export interface StatePayload {
    */
   frozen: boolean;
   /**
-   * Each frozen still: its monitor rect in physical px, plus the URL its PNG is
-   * served at. Empty whenever {@link frozen} is false.
+   * Each frozen still: its monitor rect in physical px, plus the URL its image
+   * is served at. Empty whenever {@link frozen} is false.
+   *
+   * The URL ends `.png` regardless of what the still is actually encoded as —
+   * an opaque versioned identifier, and since ADR-0027 the display format
+   * defaults to JPEG. Nothing here may infer the format from the suffix.
    *
    * Rust derives both from one read, so a payload cannot claim frozen with no
    * stills — which would render as a live screen the app believes is frozen.
@@ -492,8 +496,8 @@ export function reportLatency(invoke: Invoke, probe: number): void {
  *
  * **Why this is not {@link reportLatency}.** A double `requestAnimationFrame`
  * resolves as soon as the DOM has updated, and for freeze the DOM updates the
- * instant the `<img>` elements are inserted — while four full-monitor PNGs are
- * still decoding. Decode is precisely the cost this row exists to capture, and
+ * instant the `<img>` elements are inserted — while four full-monitor stills
+ * are still decoding. Decode is precisely the cost this row exists to capture, and
  * 1.9f's measured `72–78 ms` stops at the encode, so timing the rAF pair alone
  * would report a comfortable number excluding the only unmeasured stage. That
  * is `UT-F-41`: an instrument whose summary says the opposite of the thing it
@@ -502,7 +506,7 @@ export function reportLatency(invoke: Invoke, probe: number): void {
  * So `decode()` is awaited on every image first, and the clock stops after
  * *decoded and painted* rather than after *inserted*.
  *
- * A rejected `decode()` — a still whose PNG 404s — counts as decoded rather
+ * A rejected `decode()` — a still whose image 404s — counts as decoded rather
  * than aborting the measurement. The alternative is silence, and a probe that
  * reports nothing when something is wrong is indistinguishable from one that is
  * switched off (`I-11`). A broken still instead shows as an implausibly fast

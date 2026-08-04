@@ -319,7 +319,10 @@ struct StatePayload {
     /// defects of 1.9b happened.
     frozen: bool,
     /// Each frozen still as `(x, y, width, height, url)` — physical
-    /// virtual-desktop px plus the URL the WebView fetches the PNG from.
+    /// virtual-desktop px plus the URL the WebView fetches the image from. The
+    /// URL ends `.png` whatever the display format is — it is an opaque
+    /// versioned identifier and never a filename, and the served `Content-Type`
+    /// is what decides how the bytes are read.
     ///
     /// Empty whenever [`Self::frozen`] is false, and the two are derived from
     /// the same call rather than assembled separately: a payload claiming
