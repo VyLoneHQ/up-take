@@ -824,16 +824,47 @@ mod tests {
     ///
     /// ✅ **Settled by the founder 2026-08-04, and `quality-bars.md` §1
     /// footnote 3 now states the acceptance per format rather than once.** The
-    /// endpoint requirement is unchanged at 10× and applies to every format —
-    /// that is the bar, and JPEG passes it at 57×. Only the *control's* margin
-    /// is per format, 10× in PNG and 3× in JPEG, because 10 × 10 exceeds JPEG's
-    /// whole span and therefore cannot be met by any control at all.
+    /// endpoint requirement is unchanged at 10× for **the two compressed
+    /// formats** — that is the bar, and JPEG passes it. Only the *control's*
+    /// margin is per format, 10× in PNG and 3× in JPEG, because 10 × 10 exceeds
+    /// JPEG's whole span and therefore cannot be met by any control at all.
+    ///
+    /// ⛔ **NOT "every format", and the correction is the point.** This comment
+    /// said *every format* until independent review measured the third one.
+    /// **BMP is uncompressed**, so PLAIN, BLOCKS and DENSE encode to **exactly
+    /// the same length** — 1,024,054 bytes at 640×400, 14,745,654 at 2560×1440,
+    /// a span of **1.000**. Under BMP the per-monitor byte length carries **zero
+    /// information about the screen**, which is not a weaker bracket but the
+    /// absence of one, and `UPTAKE_FREEZE_FORMAT=bmp` is a supported override
+    /// the shipped binary accepts. A universal quantifier written without
+    /// checking the third case is `F-30`'s shape in one sentence. **Never quote
+    /// a 1.9g figure from a BMP run; the self-description is void there.**
     ///
     /// **Why that is not a bar rewritten to fit what was built** — the thing
     /// being measured, can a reader tell PLAIN from DENSE, is untouched at full
     /// strength; what moved is an auxiliary control's margin, and it moved for
     /// an arithmetic reason. **If a future format widens the span past 100, this
-    /// goes back to 10× without discussion.**
+    /// goes back to 10× without discussion** — and that is now *asserted* below
+    /// rather than promised here, because a conditional nobody re-reads is not a
+    /// mechanism.
+    ///
+    /// # The figures, and which size they were taken at
+    ///
+    /// The table above is **2560×1440**; this test asserts at **640×400**, where
+    /// the span is **49.7×** and the control's margins are **3.6×** and
+    /// **1.6×**. The smaller buffer is the *pessimistic* corner — the span grows
+    /// with resolution (49.7 → 57.1 from 640×400 to 4K) — so the assertion is
+    /// stricter than the cited table implies rather than looser. Said out loud
+    /// because this is the file whose whole subject is numbers whose
+    /// preconditions nobody stated (`UT-F-46`, `UT-F-47`).
+    ///
+    /// ⚠️ **3× is comfortable at the PLAIN end and thin at the DENSE end**, and
+    /// a reader should know which. The measured margin is 4.66×, but the *floor
+    /// this assertion permits* would put a control at ~1.1 MB against DENSE's
+    /// 3.3 MB — same order, same digit count, differing in the leading digit,
+    /// which an operator scanning a four-monitor log does not reliably see as
+    /// different. Raising the floor re-opens the arithmetic this settled, so it
+    /// is recorded rather than changed.
     ///
     /// [ADR-0027]: the private planning repo's
     /// `DECISIONS/ADR-0027-jpeg-for-the-freeze-display-path.md`
@@ -858,6 +889,25 @@ mod tests {
              {format}: plain {plain}, blocks {blocks}, dense {dense}. See this \
              test's own note before loosening the factor — 3× is already \
              reasoned from the span rather than fitted to it."
+        );
+        // **The promise above, enforced instead of remembered.** The 3× control
+        // margin exists only because 10 × 10 = 100 exceeds this format's span;
+        // the moment a format's span clears 100, that reason evaporates and the
+        // margin must go back to 10×. Written as an assertion because a
+        // conditional in a doc comment is precisely the obligation nobody
+        // re-reads when the condition finally falls due.
+        //
+        // Not flaky: the span is 49.7× here and 57.1× at 4K, both far from 100.
+        // Deliberately NOT auto-derived as `sqrt(span)` — at this size that
+        // yields 7.05 against a measured `dense/blocks` of 4.66, so a clever
+        // derivation turns the suite red today for no defect.
+        assert!(
+            dense < plain * 100,
+            "{format}'s span is now {:.0}×, past 100 — so a control CAN sit an \
+             order of magnitude clear of both ends, and the 3× margin above has \
+             lost the arithmetic that justified it. Restore 10× and update \
+             quality-bars.md §1 footnote 3. plain {plain}, dense {dense}.",
+            dense as f64 / plain as f64
         );
     }
 

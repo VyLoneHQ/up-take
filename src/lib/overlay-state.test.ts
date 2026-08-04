@@ -425,7 +425,7 @@ describe('reportFreezeLatency', () => {
   });
 
   /**
-   * A still whose PNG 404s must not strand the measurement. Silence is the one
+   * A still whose image 404s must not strand the measurement. Silence is the one
    * outcome a probe cannot have (`I-11`): it is indistinguishable from the
    * probe being switched off.
    */
