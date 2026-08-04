@@ -787,6 +787,71 @@ mod tests {
         );
     }
 
+    /// **The same falsifier, against the format the freeze path actually
+    /// ships** — and the reason it is a second test rather than an edit to the
+    /// two above.
+    ///
+    /// Both checks above call [`encode_png`] explicitly. That was right when
+    /// they were written and stopped being right in the same branch: since
+    /// [ADR-0027] the display path encodes **JPEG**, so the byte lengths printed
+    /// beside every rig timing are JPEG lengths, and the property those tests
+    /// prove was a property of a format the rig no longer measures. A falsifier
+    /// aimed at the wrong format is `UT-F-52`'s defect one level up — the check
+    /// is real, it just does not guard the number anyone reads.
+    ///
+    /// # The bar is deliberately weaker here, and the arithmetic is why
+    ///
+    /// Measured at 2560×1440 through this path's own encoder:
+    ///
+    /// | screen | PNG | JPEG |
+    /// | --- | --- | --- |
+    /// | PLAIN | 17,895 | 58,225 |
+    /// | BLOCKS | 316,483 | 699,076 |
+    /// | DENSE | 12,608,315 | 3,304,252 |
+    ///
+    /// PNG spans a factor of **704**, JPEG a factor of **57**. An order of
+    /// magnitude clear of *both* ends needs the span to exceed 10 × 10 = 100, so
+    /// under JPEG **no control can satisfy the bar above** — it is not that this
+    /// one is badly chosen. The measured control sits 12.0× above PLAIN and
+    /// 4.7× below DENSE, and the best any control could do is √57 ≈ 7.5× each
+    /// way.
+    ///
+    /// So this asserts **3× clear of both ends**: a floor reasoned from the span
+    /// rather than fitted to the measurement (which clears it by 4× and 1.6×),
+    /// and still far more than the 1.2 % margin that made `UT-F-52` worth
+    /// recording. What it preserves is the only claim `quality-bars.md` §1
+    /// footnote 3 actually makes — that an unlisted screen is *visibly* neither.
+    ///
+    /// ⚠️ **Whether §1 should keep asking for "orders of magnitude" once the
+    /// path is JPEG is a spec question, not a test question**, and it is not
+    /// settled here. The footnote still says PNG.
+    ///
+    /// [ADR-0027]: the private planning repo's
+    /// `DECISIONS/ADR-0027-jpeg-for-the-freeze-display-path.md`
+    #[test]
+    fn the_bracket_still_separates_in_the_format_that_ships() {
+        let size = uptake_core::geometry::Size::new(640, 400);
+        let encode = |kind| encode_for_display(&test_screen(kind, size)).unwrap().len();
+        let (plain, blocks, dense) = (encode("plain"), encode("blocks"), encode("dense"));
+        let format = crate::freeze::display_format().2;
+        // The endpoints are the claim §1 makes in its own words, and it survives
+        // the format change: JPEG still separates PLAIN from DENSE by 57×.
+        assert!(
+            dense > plain * 10,
+            "PLAIN and DENSE do not separate in {format}, the shipped display \
+             format: plain {plain} bytes, dense {dense} bytes. The per-monitor \
+             byte length cannot describe a run whose endpoints it cannot tell \
+             apart."
+        );
+        assert!(
+            blocks > plain * 3 && dense > blocks * 3,
+            "the control does not land visibly between the listed screens in \
+             {format}: plain {plain}, blocks {blocks}, dense {dense}. See this \
+             test's own note before loosening the factor — 3× is already \
+             reasoned from the span rather than fitted to it."
+        );
+    }
+
     /// **Task 1.9g's cheap falsifier, and it needs no rig.**
     ///
     /// The measured freeze is `encode 218 ms of a 224 ms freeze`, and
