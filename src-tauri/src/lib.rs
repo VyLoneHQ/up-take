@@ -193,6 +193,11 @@ pub fn run() -> tauri::Result<()> {
             // freeze, and state what it chose so a rig log says which format
             // produced its numbers.
             freeze::init_display_format();
+            // And the third: which monitors a freeze covers. Read here for the
+            // same reason as the warm gate above — the sessions and the freeze
+            // must agree about the scope, and they are consulted at different
+            // moments.
+            freeze::init_freeze_scope();
             // State must be managed and the poll thread parked before the
             // first `overlay::show`, which activates the poll.
             app.manage(click_through::ClickThrough::new());

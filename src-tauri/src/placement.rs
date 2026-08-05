@@ -1033,6 +1033,26 @@ fn pump_hover(app: &AppHandle, state: &mut PumpState) {
     if state.active_monitor != Some(active_monitor) {
         state.active_monitor = Some(active_monitor);
         overlay::emit_active_monitor(app, active_monitor);
+        // The warm sessions follow the cursor for the same reason the badge does
+        // (ADR-0026's third amendment): the held set is the monitor the freeze
+        // will capture, and the pointer crosses monitor edges without any state
+        // transition to notice it. Without this the narrowing would warm
+        // whichever monitor Placement happened to open on and leave the user's
+        // actual target cold — a change that provably does nothing, which is the
+        // failure the amendment names by that name.
+        //
+        // **Gated on the change, not run per tick**, which is the whole reason
+        // this sits inside the `if`: the poll runs at 60–221 Hz against §1's 8 ms
+        // drag row, and `warm::start` blocks on each pump's handshake. A crossing
+        // is a human-speed event; a tick is not.
+        //
+        // `point` rather than a fresh cursor read, so the sessions and the badge
+        // cannot end up describing different monitors: this is the position the
+        // line above resolved `active_monitor` from.
+        //
+        // `true` rather than a state read because this branch is already inside
+        // the `placing` guard above — reached only in Placement.
+        crate::freeze::sync_warm_sessions(true, Some(point));
     }
 
     let menu_open = lock(&MENU).is_some();

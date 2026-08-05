@@ -135,10 +135,13 @@ pub fn sync_bounds(app: &AppHandle) -> Result<(), String> {
     // circuit those, but a rebuild is not free — it blocks on each pump's
     // handshake — and this path runs on the event-loop thread.
     if refresh_monitor_cache(&window) {
-        crate::freeze::sync_warm_sessions(matches!(
-            *lock(&app.state::<Mutex<OverlayState>>()),
-            OverlayState::Placement
-        ));
+        crate::freeze::sync_warm_sessions(
+            matches!(
+                *lock(&app.state::<Mutex<OverlayState>>()),
+                OverlayState::Placement
+            ),
+            cursor_point(app),
+        );
     }
     Ok(())
 }
@@ -469,7 +472,7 @@ fn apply(app: &AppHandle, state: OverlayState) -> Result<(), String> {
     // Warm capture sessions live and die with Placement, placed here beside the
     // thaw and for the same reason: one funnel, so a state added later cannot
     // forget to stop them. A no-op unless the setting is on (roadmap 1.9f).
-    crate::freeze::sync_warm_sessions(matches!(state, OverlayState::Placement));
+    crate::freeze::sync_warm_sessions(matches!(state, OverlayState::Placement), cursor_point(app));
     match state {
         OverlayState::Hidden => {
             // Emit first so the frontend clears its indicator, then hide.
@@ -611,9 +614,20 @@ pub fn toggle_freeze(app: &AppHandle) {
     // the user waits for. Anything later would time a stage and call it the
     // promise.
     crate::freeze::stamp_paint_probe();
+    // Read on this thread, before the spawn, for the same reason the probe is
+    // stamped here: it is the cursor at the moment the user pressed the key, and
+    // by the time the capture thread runs the pointer may have moved. The scope
+    // must describe what the user was looking at when they asked.
+    let cursor = cursor_point(app);
     let app = app.clone();
     std::thread::spawn(move || {
-        let monitors = monitor_rects();
+        // Narrowed to the cursor's monitor unless the 1.14 setting widens it
+        // (ADR-0026's third amendment, inverting ADR-0014 §4). `monitor_rects`
+        // stays the full list because the log below reports the freeze as a
+        // ratio of the desktop, and "1/1" would hide which of four screens is
+        // frozen — the exact thing the ratio was added to show.
+        let desktop = monitor_rects();
+        let monitors = crate::freeze::monitors_in_scope(&desktop, cursor);
         // Timed because the wait between the key and the still appearing is the
         // whole felt cost of this feature and nothing else reported it. Logged
         // in the same shape `output.rs` uses for the export path, with the
@@ -635,11 +649,22 @@ pub fn toggle_freeze(app: &AppHandle) {
         // Reported as a ratio, not as a success: a freeze that captured three of
         // four monitors is a real state the user is about to select on, and
         // "frozen" alone would hide which screens are still live.
+        //
+        // **Two ratios since the narrowing, and collapsing them into one would
+        // make the line lie.** Against the desktop it says how much of the screen
+        // the user is now looking at frozen; against the scope it says whether
+        // the freeze did what it was asked. A single `1/1` cannot distinguish a
+        // narrowed freeze that worked from a whole-desktop freeze that lost three
+        // monitors, and a single `1/4` cannot distinguish it from a whole-desktop
+        // freeze that lost three either. `UT-F-46`'s rule is that a run reports
+        // the condition it ran under, and the scope is that condition here.
         eprintln!(
-            "freeze: froze {}/{} monitor(s) in {} ms — warm {}/{}, slowest monitor: \
-             capture {} ms, encode {} ms",
+            "freeze: froze {}/{} monitor(s) in scope, {} of {} on the desktop, in {} ms — \
+             warm {}/{}, slowest monitor: capture {} ms, encode {} ms",
             report.count,
             monitors.len(),
+            report.count,
+            desktop.len(),
             report.elapsed_ms,
             report.warm_served,
             report.count,
@@ -1152,6 +1177,22 @@ struct ActiveMonitorPayload {
     /// the cursor is in a dead zone between mismatched monitors, where any
     /// answer would be a guess.
     index: Option<usize>,
+}
+
+/// The cursor's position in physical virtual-desktop pixels, if it can be read.
+///
+/// Read from the window rather than from the placement hook's last reported
+/// point, for the reason [`overlay_dismiss_focused`] gives: the hook only reports
+/// while it is installed and only once the mouse has moved, so a `Ctrl+Space`
+/// pressed on entering Placement would act on a stale point or none at all. The
+/// freeze scope is decided from this, and a stale answer would freeze the monitor
+/// the cursor was on last time.
+///
+/// `None` on any failure, which the scope treats as "every monitor" rather than
+/// "no monitors" — see [`crate::freeze::monitors_in_scope`].
+pub(crate) fn cursor_point(app: &AppHandle) -> Option<Point> {
+    let position = overlay_window(app).ok()?.cursor_position().ok()?;
+    Point::from_physical_f64(position.x, position.y)
 }
 
 /// Which monitor contains `point`, as an index into [`monitor_rects`].
