@@ -22,7 +22,33 @@ the `freeze: display stills encode as …` line printed at startup is what tells
 screen could not be told from a listed one by its reported byte length, the byte length would be
 worth nothing. Run it and confirm it lands visibly between the other two.
 
-Measured through the real encoder at 640x400, **and the three formats do not behave the same**:
+## This page is the only place these numbers are written down
+
+Added 2026-08-05, closing backlog `I-20`. The six full-monitor figures below used to sit **here, in
+`output.rs`'s doc comment, and in the private planning repo's `SPECS/quality-bars.md` section 1
+footnote 3** — three hand-maintained copies of one measurement, with the acceptance rules derived
+from them in each place. Nothing checked any copy against any other. The suite asserts the
+*inequalities* and would go red if a Windows codec change crossed a bar, but it has never guarded a
+single digit in the tables, so a stale table is what a later session would have reasoned from.
+
+The two other files now state the rule and cite this page. **If you re-measure, change it here and
+nowhere else.** These figures come from the WinRT/WIC encoder, whose default quality this wrapper
+cannot set and does not know, so a Windows codec update moves them without touching this repository.
+
+### At 2560x1440, the rig's primary
+
+| screen | PNG | JPEG |
+| --- | --- | --- |
+| PLAIN | 17,895 | 58,225 |
+| BLOCKS (the unlisted control) | 316,483 | 699,076 |
+| DENSE | 12,608,315 | 3,304,252 |
+
+Floor to ceiling: PNG spans a factor of **704**, JPEG **57**. Those two spans are what the acceptance
+rules are reasoned from, and they are derived from the table above rather than measured separately.
+
+### At 640x400, the size the suite asserts at
+
+Measured through the real encoder, **and the three formats do not behave the same**:
 
 | Format | PLAIN | BLOCKS | DENSE | Floor to ceiling | Control's margins |
 | --- | --- | --- | --- | --- | --- |

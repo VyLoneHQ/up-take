@@ -801,13 +801,13 @@ mod tests {
     ///
     /// # The bar is deliberately weaker here, and the arithmetic is why
     ///
-    /// Measured at 2560×1440 through this path's own encoder:
-    ///
-    /// | screen | PNG | JPEG |
-    /// | --- | --- | --- |
-    /// | PLAIN | 17,895 | 58,225 |
-    /// | BLOCKS | 316,483 | 699,076 |
-    /// | DENSE | 12,608,315 | 3,304,252 |
+    /// **The measurement is in `examples/testscreen/README.md` and deliberately
+    /// not repeated here** (backlog `I-20`, 2026-08-05). It sat in three files,
+    /// hand-maintained, with nothing comparing the copies: this suite guards the
+    /// *inequalities* and has never guarded a digit, so a stale table was what a
+    /// later reader would have reasoned from. What that page reports at
+    /// 2560×1440 is the span each format covers floor to ceiling, and the two
+    /// spans are the whole of what the argument below needs.
     ///
     /// PNG spans a factor of **704**, JPEG a factor of **57**. An order of
     /// magnitude clear of *both* ends needs the span to exceed 10 × 10 = 100, so
