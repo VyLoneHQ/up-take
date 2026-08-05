@@ -801,13 +801,13 @@ mod tests {
     ///
     /// # The bar is deliberately weaker here, and the arithmetic is why
     ///
-    /// Measured at 2560×1440 through this path's own encoder:
-    ///
-    /// | screen | PNG | JPEG |
-    /// | --- | --- | --- |
-    /// | PLAIN | 17,895 | 58,225 |
-    /// | BLOCKS | 316,483 | 699,076 |
-    /// | DENSE | 12,608,315 | 3,304,252 |
+    /// **The measurement is in `examples/testscreen/README.md` and deliberately
+    /// not repeated here** (backlog `I-20`, 2026-08-05). It sat in three files,
+    /// hand-maintained, with nothing comparing the copies: this suite guards the
+    /// *inequalities* and has never guarded a digit, so a stale table was what a
+    /// later reader would have reasoned from. What that page reports at
+    /// 2560×1440 is the span each format covers floor to ceiling, and the two
+    /// spans are the whole of what the argument below needs.
     ///
     /// PNG spans a factor of **704**, JPEG a factor of **57**. An order of
     /// magnitude clear of *both* ends needs the span to exceed 10 × 10 = 100, so
@@ -850,7 +850,9 @@ mod tests {
     ///
     /// # The figures, and which size they were taken at
     ///
-    /// The table above is **2560×1440**; this test asserts at **640×400**, where
+    /// The README's table is **2560×1440** (it used to sit directly above this
+    /// paragraph, which is why this said "the table above" until `I-20` moved
+    /// it); this test asserts at **640×400**, where
     /// the span is **49.7×** and the control's margins are **3.6×** and
     /// **1.6×**. The smaller buffer is the *pessimistic* corner — the span grows
     /// with resolution (49.7 → 57.1 from 640×400 to 4K) — so the assertion is
@@ -989,6 +991,63 @@ mod tests {
             }
         }
         println!();
+    }
+
+    /// The six figures in `examples/testscreen/README.md` are still what this
+    /// encoder produces.
+    ///
+    /// # Why this exists, and why it is not `#[ignore]`d
+    ///
+    /// `I-20` was closed by making that README the single home of the table.
+    /// The first attempt at that shipped one hand-maintained copy fewer and an
+    /// imperative sentence asking the next person to keep it current — which an
+    /// independent review immediately falsified by finding a copy in `freeze.rs`
+    /// that the sweep had missed. **A rule an agent has to remember had already
+    /// failed before it was written down.**
+    ///
+    /// The backlog row rules out a `CL-` probe, correctly: `verify-claims.py`
+    /// runs in the workspace repository and cannot reach this one. It does not
+    /// rule out a check *here*, and this is the row's own second option — print
+    /// it from the measurement and cite that — turned into an assertion.
+    ///
+    /// **This is not `F-35`'s check-that-cannot-fail-usefully.** It has a
+    /// specific, named, expected failure: the WinRT/WIC encoder's default
+    /// quality is not something this wrapper sets or knows, so a Windows codec
+    /// update moves these numbers without anyone touching this repository. When
+    /// it does, this goes red and names the file to correct, which is exactly
+    /// the event the README says nothing else would catch.
+    ///
+    /// It runs in the ordinary suite rather than behind `--ignored` because
+    /// three 2560×1440 buffers through two encoders measured **1.46 s** — a
+    /// cost the sibling measurement pays only because it also times BMP, whose
+    /// 14 MB of output buys no information here (all three screens encode
+    /// identically, span 1.000).
+    #[test]
+    fn the_readme_table_is_what_the_encoder_still_produces() {
+        let size = uptake_core::geometry::Size::new(2560, 1440);
+        // Exactly the table in examples/testscreen/README.md, in its order.
+        let expected = [
+            ("plain", 17_895_usize, 58_225_usize),
+            ("blocks", 316_483, 699_076),
+            ("dense", 12_608_315, 3_304_252),
+        ];
+        for (screen, png, jpeg) in expected {
+            let bitmap = test_screen(screen, size);
+            for (label, format, want) in [
+                ("PNG", ImageFormat::Png, png),
+                ("JPEG", ImageFormat::Jpeg, jpeg),
+            ] {
+                let got = ImageEncoder::new(format, ImageEncoderPixelFormat::Rgba8)
+                    .unwrap()
+                    .encode(bitmap.pixels(), bitmap.width(), bitmap.height())
+                    .unwrap()
+                    .len();
+                assert_eq!(
+                    got, want,
+                    "{screen} in {label} encodes to {got} bytes, not the {want}                      recorded in examples/testscreen/README.md. If the encoder                      changed under us, re-measure and correct THAT FILE -- it is                      the only home of this table, and every other mention of                      these numbers is a span or a ratio derived from it."
+                );
+            }
+        }
     }
 
     #[test]
