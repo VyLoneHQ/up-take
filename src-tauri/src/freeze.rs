@@ -571,13 +571,13 @@ impl std::fmt::Display for Skipped {
 /// unlisted screen lands between them and is visibly neither.
 ///
 /// ⚠️ **How far apart they are depends on the format, and the margin is much
-/// narrower than it was.** Measured at 2560×1440 through this path's own
-/// encoder: PNG spans 17,895 → 12,608,315 bytes, a factor of **704**, while
-/// JPEG — the default since [ADR-0027] — spans 58,225 → 3,304,252, a factor of
-/// **57**. The bracket still separates in both, but only PNG leaves room for an
-/// unlisted screen to sit an order of magnitude clear of *both* ends: 10 × 10
-/// exceeds 57, so under JPEG no control can. Read the byte length against the
-/// format the run actually used.
+/// narrower than it was.** PNG spans a factor of **704** floor to ceiling, JPEG
+/// — the default since [ADR-0027] — a factor of **57**; the six byte lengths
+/// those come from are in `examples/testscreen/README.md` and are deliberately
+/// not repeated here (`I-20`). The bracket still separates in both, but only PNG
+/// leaves room for an unlisted screen to sit an order of magnitude clear of
+/// *both* ends: 10 × 10 exceeds 57, so under JPEG no control can. Read the byte
+/// length against the format the run actually used.
 pub(crate) struct MonitorCost {
     /// The rect actually captured, as the capture crate reports it — never what
     /// was asked for, for the reason [`capture_still`] gives.

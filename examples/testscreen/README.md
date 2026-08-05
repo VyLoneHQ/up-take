@@ -25,14 +25,29 @@ worth nothing. Run it and confirm it lands visibly between the other two.
 ## This page is the only place these numbers are written down
 
 Added 2026-08-05, closing backlog `I-20`. The six full-monitor figures below used to sit **here, in
-`output.rs`'s doc comment, and in the private planning repo's `SPECS/quality-bars.md` section 1
-footnote 3** — three hand-maintained copies of one measurement, with the acceptance rules derived
-from them in each place. Nothing checked any copy against any other. The suite asserts the
-*inequalities* and would go red if a Windows codec change crossed a bar, but it has never guarded a
-single digit in the tables, so a stale table is what a later session would have reasoned from.
+`output.rs`'s doc comment, in `freeze.rs`'s, and in the private planning repo's
+`SPECS/quality-bars.md` section 1 footnote 3** — four hand-maintained copies of one measurement,
+with the acceptance rules derived from them in each place, and nothing checking any copy against any
+other.
 
-The two other files now state the rule and cite this page. **If you re-measure, change it here and
-nowhere else.** These figures come from the WinRT/WIC encoder, whose default quality this wrapper
+**Four, not three, and the count is worth stating because the first version of this page said
+three.** It named the copies its author had in mind; `freeze.rs` carried four of the six figures
+plus both spans and was not opened. An independent review found it. That is the failure this page
+exists to prevent, committed in the act of preventing it, which is why the fix below is a test
+rather than a promise.
+
+The suite's older assertions guard the *inequalities* and would go red if a codec change crossed a
+bar, but no assertion has ever guarded a single digit in the tables.
+
+The other three files now state the rule and cite this page. **If you re-measure, change it here
+and nowhere else.** That sentence is the entire enforcement, and it is weak on purpose rather than
+by oversight: the backlog row rules out a `CL-` probe, because `verify-claims.py` runs in the
+workspace repo and cannot reach this one. **What it does not rule out is a check inside this
+repository, and there now is one** -- `the_readme_table_is_what_the_encoder_still_produces` in
+`src-tauri/src/output.rs` re-measures all six and fails naming this file, so a Windows codec update
+that moves them turns CI red here instead of leaving a stale table behind.
+
+These figures come from the WinRT/WIC encoder, whose default quality this wrapper
 cannot set and does not know, so a Windows codec update moves them without touching this repository.
 
 ### At 2560x1440, the rig's primary
@@ -56,8 +71,10 @@ Measured through the real encoder, **and the three formats do not behave the sam
 | PNG | 1,987 | 23,065 | 895,515 | 451x | 11.6x and 39x |
 | **BMP** | 1,024,054 | 1,024,054 | 1,024,054 | **1.000** | none, and that is not a rounding |
 
-**Read the JPEG row, because that is what a default rig run produces.** All three formats are
-asserted in the suite, in `src-tauri/src/output.rs`:
+**Read the JPEG row, because that is what a default rig run produces.** **Two** of the three
+formats are asserted in the suite, in `src-tauri/src/output.rs` -- BMP is asserted nowhere, for the
+reason the BMP paragraph below gives, and this line said "all three" until 2026-08-05, seven lines
+above the paragraph that contradicts it:
 `the_defined_test_screens_separate_by_an_order_of_magnitude` and
 `an_unlisted_screen_lands_visibly_between_the_two` pin PNG at 10x each side, and
 `the_bracket_still_separates_in_the_format_that_ships` pins the *display* format at 10x endpoints
