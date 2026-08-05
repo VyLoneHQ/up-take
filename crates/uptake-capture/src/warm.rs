@@ -1,6 +1,12 @@
-//! Warm capture sessions: WGC sessions held open per monitor, so a capture is
-//! a **readback** rather than a capture (roadmap task 1.9f, [ADR-0026]'s second
-//! amendment).
+//! Warm capture sessions: WGC sessions held open, so a capture is a **readback**
+//! rather than a capture (roadmap task 1.9f, [ADR-0026]'s second amendment).
+//!
+//! **Held for the cursor's monitor since ADR-0026's third amendment**, not for
+//! every monitor — see [`Scope`]. The cost figures below were measured on four
+//! sessions and are therefore an **upper bound** on what one costs; the narrowed
+//! number is owed a rig measurement, and the gate does not come off until it
+//! exists. Every "four sessions" in this file means the measured configuration,
+//! not the shipped one.
 //!
 //! # What this fixes, and what it costs
 //!
@@ -272,16 +278,52 @@ impl WarmStatus {
     }
 }
 
-/// Starts a held session for every monitor, or keeps the ones already running
-/// if they still cover the desktop.
+/// Which monitors the warm path holds sessions for.
+///
+/// **[`Self::AtPoint`] is the default since [ADR-0026]'s third amendment**, and
+/// [`Self::AllMonitors`] is what the 1.14 setting widens back to. The direction
+/// matters and is the amendment's decision 2: the old default was every monitor
+/// with a setting narrowing it, and it is now the cursor's monitor with a
+/// setting widening it.
+///
+/// [ADR-0026]: the private planning repo's
+/// `DECISIONS/ADR-0026-freeze-on-demand-trigger.md`
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    /// Every monitor on the desktop.
+    AllMonitors,
+    /// Only the monitor containing this point — the cursor's, in practice.
+    ///
+    /// **Falls back to every monitor when the point is on no monitor at all.**
+    /// That happens in the dead zones between mismatched monitors, and it is the
+    /// same answer `overlay::monitor_bounds_at` already gives for the same
+    /// question: any single monitor would be a guess, and holding none would
+    /// make `Ctrl+Space` do nothing at the moment the user pressed it. Widening
+    /// costs what the old default cost, which is a cost this feature has already
+    /// measured and shipped.
+    AtPoint(Point),
+}
+
+/// Starts a held session for each monitor in `scope`, or keeps the ones already
+/// running if they still cover exactly that scope.
 ///
 /// Returns how many sessions are held — **not** how many are warm, which is zero
 /// for ~330 ms after a set is actually started. Use [`status`] for that.
 ///
+/// # Why the scope is an argument rather than a setting read in here
+///
+/// [`Scope::AtPoint`] carries the cursor, and the cursor **moves while Placement
+/// is visible**. Nothing in this module can see that: `start` is called from the
+/// overlay's state-transition funnel and its display-change path, and neither
+/// fires when the pointer crosses a monitor edge. So the caller owns the
+/// question of *when* the scope changed, and this function owns only what to do
+/// about it. See `placement`'s active-monitor poll, which is the third caller
+/// the amendment added for exactly that reason.
+///
 /// # Why this checks instead of simply restarting
 ///
-/// The caller is [`crate::warm`]'s one funnel: every overlay state transition
-/// calls it, including **Placement → Placement**, which happens on `Esc`
+/// One of the callers is the overlay's state-transition funnel, which calls
+/// this on every transition including **Placement → Placement** — that happens on `Esc`
 /// mid-drag and on a summon while already in Placement. An unconditional
 /// `stop()` first would drop every texture and respawn every pump on those
 /// transitions — so the user would land back in Placement with the warm path
@@ -295,14 +337,16 @@ impl WarmStatus {
 /// **What that does and does not cover — corrected 2026-07-30 after the PR #28
 /// review, whose first version of this paragraph claimed more than the code
 /// does.** `covers` is evaluated *when `start` is called*, and nothing polls.
-/// The callers are the overlay's state-transition funnel and its display-change
-/// path (`sync_bounds`), so a topology change is picked up when Windows reports
-/// it — **not** continuously, and not by `capture_monitor` noticing at freeze
-/// time. If a display moves and neither path runs, the slots keep entry-time
+/// The callers are the overlay's state-transition funnel, its display-change
+/// path (`sync_bounds`), and — since ADR-0026's third amendment made the held
+/// set follow the cursor — the placement poll's active-monitor change, which is
+/// the only one of the three that is not a change to the *desktop*. A topology
+/// change is still picked up when Windows reports it, **not** continuously, and
+/// not by `capture_monitor` noticing at freeze time. If a display moves and neither path runs, the slots keep entry-time
 /// bounds for the rest of the visit. Saying otherwise was `bug_003`'s defect —
 /// a comment asserting a property the code lacks — committed in the same change
 /// that fixed it.
-pub fn start() -> usize {
+pub fn start(scope: Scope) -> usize {
     let Ok(monitors) = crate::monitors::enumerate() else {
         // We cannot show that what is held still describes the desktop, so we
         // stop rather than keep sessions we cannot vouch for. The cold path is a
@@ -310,6 +354,7 @@ pub fn start() -> usize {
         stop();
         return 0;
     };
+    let monitors = in_scope(monitors, scope);
     {
         let sessions = SESSIONS.lock().unwrap_or_else(PoisonError::into_inner);
         if covers(&sessions, &monitors) {
@@ -338,8 +383,38 @@ pub fn start() -> usize {
     sessions.len()
 }
 
-/// Whether the held sessions describe exactly the monitors enumerated now
+/// The monitors `scope` selects out of `monitors`.
+///
+/// Split out and tested directly because it is the whole of the third
+/// amendment's decision 1 and the only part of it that can be exercised without
+/// a desktop: everything else in `start` needs real monitors and a real
+/// compositor. The dead-zone fallback in particular is a branch no rig pass is
+/// likely to reach on purpose — the dead zones are the gaps between mismatched
+/// monitors — so a test is the only thing that will ever read it.
+fn in_scope(
+    monitors: Vec<crate::plan::MonitorInfo>,
+    scope: Scope,
+) -> Vec<crate::plan::MonitorInfo> {
+    let Scope::AtPoint(point) = scope else {
+        return monitors;
+    };
+    match monitors
+        .iter()
+        .find(|monitor| monitor.bounds.contains(point))
+    {
+        Some(monitor) => vec![*monitor],
+        // The dead zone. See `Scope::AtPoint`: every monitor, not none.
+        None => monitors,
+    }
+}
+
+/// Whether the held sessions describe exactly the monitors **in scope** now
 /// **and** are all still being pumped.
+///
+/// The caller passes the scoped list rather than the raw enumeration, which is
+/// what makes a cursor crossing a monitor edge look like any other change to the
+/// desktop under it: one monitor out, one in, caught by the same search below
+/// with nothing added here.
 ///
 /// Three parts, each catching something the others cannot. The length check
 /// catches a monitor **removed**, which the per-monitor search cannot see. The
@@ -1321,5 +1396,79 @@ mod tests {
             }
         );
         assert!(capture_monitor(Rect::new(0, 0, 100, 100)).is_none());
+    }
+
+    /// The dev rig's shape: a 2560×1440 primary, two 1920×1080 to its right, and
+    /// a portrait 1080×1920 below-left. Real numbers rather than unit squares
+    /// because the dead-zone case only exists between monitors of different
+    /// heights, and a tidy grid cannot produce one.
+    fn rig() -> Vec<crate::plan::MonitorInfo> {
+        vec![
+            crate::plan::MonitorInfo {
+                handle: 1,
+                bounds: Rect::new(0, 0, 2560, 1440),
+            },
+            crate::plan::MonitorInfo {
+                handle: 2,
+                bounds: Rect::new(2560, 0, 1920, 1080),
+            },
+            crate::plan::MonitorInfo {
+                handle: 3,
+                bounds: Rect::new(4480, 0, 1920, 1080),
+            },
+            crate::plan::MonitorInfo {
+                handle: 4,
+                bounds: Rect::new(-1080, 0, 1080, 1920),
+            },
+        ]
+    }
+
+    #[test]
+    fn a_scoped_start_holds_only_the_monitor_under_the_point() {
+        for (point, expected) in [
+            (Point::new(100, 100), 1),
+            (Point::new(3000, 500), 2),
+            (Point::new(5000, 900), 3),
+            (Point::new(-500, 1800), 4),
+        ] {
+            let selected = in_scope(rig(), Scope::AtPoint(point));
+            assert_eq!(
+                selected.len(),
+                1,
+                "a narrowed scope holds one session, not {} — {point:?}",
+                selected.len()
+            );
+            assert_eq!(
+                selected[0].handle, expected,
+                "the wrong monitor was selected for {point:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_point_in_a_dead_zone_widens_to_every_monitor() {
+        // (3000, 1300) is past the short monitors' 1080 bottom edge and to the
+        // right of the primary's 2560 — on no monitor at all. Asserted as the
+        // whole rig rather than "more than one": widening to a *subset* would be
+        // a different decision that nobody took, and `Scope::AtPoint` promises
+        // every monitor.
+        let dead = Point::new(3000, 1300);
+        assert!(
+            !rig().iter().any(|m| m.bounds.contains(dead)),
+            "the fixture stopped having a dead zone, so this test no longer \
+             tests anything — pick a point outside every monitor"
+        );
+        assert_eq!(in_scope(rig(), Scope::AtPoint(dead)).len(), rig().len());
+    }
+
+    #[test]
+    fn an_unscoped_start_holds_every_monitor() {
+        // The control for the two above: without it, `in_scope` returning the
+        // full list unconditionally would pass the dead-zone test and only the
+        // narrowing test would fail, which reads as one broken case rather than
+        // a function that does nothing.
+        let selected = in_scope(rig(), Scope::AllMonitors);
+        assert_eq!(selected.len(), rig().len());
+        assert_eq!(selected, rig());
     }
 }

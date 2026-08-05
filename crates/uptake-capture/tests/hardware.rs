@@ -359,7 +359,7 @@ fn a_warm_readback_and_a_fresh_capture_agree_byte_for_byte() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     ensure_dpi_aware();
 
-    let sessions = uptake_capture::warm::start();
+    let sessions = uptake_capture::warm::start(uptake_capture::warm::Scope::AllMonitors);
     assert!(sessions > 0, "no monitors were enumerated to warm");
 
     // The ~330 ms warm-up measured on the rig, with room. Polled rather than
@@ -459,7 +459,7 @@ fn re_entering_placement_keeps_the_sessions_already_warm() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     ensure_dpi_aware();
 
-    let sessions = uptake_capture::warm::start();
+    let sessions = uptake_capture::warm::start(uptake_capture::warm::Scope::AllMonitors);
     assert!(sessions > 0, "no monitors were enumerated to warm");
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
@@ -476,7 +476,7 @@ fn re_entering_placement_keeps_the_sessions_already_warm() {
     );
 
     // The second entry. No sleep follows it, deliberately.
-    let held = uptake_capture::warm::start();
+    let held = uptake_capture::warm::start(uptake_capture::warm::Scope::AllMonitors);
     let after = uptake_capture::warm::status();
     assert_eq!(
         held, sessions,

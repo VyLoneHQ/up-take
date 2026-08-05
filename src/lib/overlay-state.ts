@@ -332,6 +332,48 @@ export function physRectToCss(
   return physRectsToCss([rect], origin, dpr)[0] ?? null;
 }
 
+/**
+ * A CSS rect reduced to a comparison key.
+ *
+ * The `{#each}` over the monitor frames already keys on exactly this, so the
+ * two cannot disagree about what "the same monitor" means.
+ */
+export function frameKey(frame: CssRect): string {
+  return `${frame.x},${frame.y},${frame.width},${frame.height}`;
+}
+
+/**
+ * The frames that are showing a frozen still, as {@link frameKey}s.
+ *
+ * # Why this exists, and why a boolean was wrong
+ *
+ * Until 2026-08-05 the component asked one question — *are there any stills?* —
+ * and painted the `frozen` badge on **every** monitor frame if the answer was
+ * yes. That was correct for exactly as long as a freeze covered the whole
+ * desktop. [ADR-0026]'s third amendment narrows a freeze to the cursor's
+ * monitor, so on a four-monitor desktop one still would have put the word
+ * *frozen* on three live screens.
+ *
+ * **That is the inverse of the thing the amendment was for.** Its *Honesty at
+ * the boundary* argument is that the un-frozen monitors visibly stay live, so
+ * the user can see what they will get rather than being told something false.
+ * A badge derived from a count told them something false. Found in the
+ * independent review of PR #42, before the narrowing shipped.
+ *
+ * Derived from the **converted** frames rather than from the raw stills, which
+ * preserves a property the conversion's own comment relies on: a still whose
+ * rect will not convert is dropped rather than drawn at a fallback position,
+ * and that monitor must then read as live, because it is.
+ *
+ * [ADR-0026]: the private planning repo's
+ * `DECISIONS/ADR-0026-freeze-on-demand-trigger.md`
+ */
+export function frozenFrameKeys(
+  stillFrames: readonly { frame: CssRect }[],
+): Set<string> {
+  return new Set(stillFrames.map((still) => frameKey(still.frame)));
+}
+
 /** Whether this state dims the screen and shows the focus frames (Placement). */
 export function showsTint(state: OverlayStateName): boolean {
   return state === 'placement';

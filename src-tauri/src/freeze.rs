@@ -61,7 +61,7 @@ use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
 
 use uptake_core::bitmap::RgbaBitmap;
-use uptake_core::geometry::Rect;
+use uptake_core::geometry::{Point, Rect};
 use windows_capture::encoder::ImageFormat;
 
 /// One monitor's still: where it came from, the pixels a crop is cut out of,
@@ -274,6 +274,25 @@ pub(crate) fn record_paint_latency(probe: u64) {
 /// remaining budget is not that. Whoever wants the instant freeze pays for it;
 /// whoever does not, does not.
 ///
+/// # Why this is still `false` after the third amendment said it becomes the
+/// default
+///
+/// ADR-0026's third amendment (2026-08-04) decided the warm path becomes the
+/// default **and held that flip behind a measurement whose numbers were written
+/// down in advance**: the still row at or under **+0.25 pp** and the video row
+/// under **+0.40 pp**, taken with the same instrument and the same two conditions
+/// that produced the figures above. Narrowing to one monitor is expected to be
+/// roughly a quarter of four, and *expected* is the whole problem — that is an
+/// arithmetic model of an unmeasured configuration, which is `F-39` and
+/// `UT-F-53` in one step. DWM's share was never resolvable and the per-monitor
+/// cost is not known to be equal, so one monitor is not one quarter of four in
+/// any guaranteed way.
+///
+/// **So the narrowing ships with the gate still on.** Flipping this line is a
+/// one-word change and it is deliberately not made here: it is the rig's to
+/// authorise, and if the measurement misses, the default is re-decided on the
+/// number rather than on this comment.
+///
 /// # How it is set, and why that is temporary
 ///
 /// Task **1.14** owns the settings UI and does not exist yet, so this reads
@@ -306,6 +325,144 @@ pub(crate) fn init_warm_capture() {
 /// Whether the warm capture path is enabled. The only reader of [`WARM_CAPTURE`].
 pub(crate) fn warm_capture_enabled() -> bool {
     WARM_CAPTURE.load(Ordering::SeqCst)
+}
+
+/// Whether a freeze covers **every** monitor rather than the cursor's.
+///
+/// **Default off, which means the cursor's monitor** — [ADR-0026]'s third
+/// amendment, 2026-08-04, inverting [ADR-0014] §4. The setting used to narrow
+/// and now widens, and that direction is the decision rather than a detail:
+///
+/// * **Disclosure.** A whole-desktop freeze holds full-bleed captures of screens
+///   the user was not looking at. Narrowing the freeze is what discharges that;
+///   narrowing only the sessions does not, because the concern is the stills.
+/// * **Honesty at the boundary.** `I-14` records that a selection straddling two
+///   monitors while frozen returns *live* pixels under a display that says
+///   frozen. With the other monitors visibly live the user can see what they will
+///   get. **This does not fix `I-14`** — it stops it being invisible.
+/// * **Cost.** Fewer monitors is less work, but the cost argument belongs to the
+///   *sessions* and is measured there, not asserted here.
+///
+/// # Task 1.14 owns the real setting
+///
+/// Same shape and same reason as [`WARM_CAPTURE`]: read once at startup from
+/// `UPTAKE_FREEZE_ALL_MONITORS` until the settings UI exists, with every reader
+/// routed through [`freeze_all_monitors_enabled`] so 1.14 replaces one line.
+/// This is the **fourth** setting 1.14 has inherited.
+///
+/// [ADR-0026]: the private planning repo's
+/// `DECISIONS/ADR-0026-freeze-on-demand-trigger.md`
+/// [ADR-0014]: the private planning repo's
+/// `DECISIONS/ADR-0014-capture-and-render-over-live-content.md`
+static FREEZE_ALL_MONITORS: AtomicBool = AtomicBool::new(false);
+
+/// Reads `UPTAKE_FREEZE_ALL_MONITORS` and reports what it decided.
+///
+/// **Prints the value it loaded, never a name written here** — `UT-F-46` is this
+/// project's record of `init_display_format` announcing `staying on png` while
+/// the default had been JPEG for a day, inside the function whose own doc said
+/// it existed to prevent that. The scope is the thing a rig operator is most
+/// likely to misattribute a number to, so it says which one it is on every run
+/// rather than only when something was set.
+pub(crate) fn init_freeze_scope() {
+    let all = std::env::var("UPTAKE_FREEZE_ALL_MONITORS")
+        .is_ok_and(|value| matches!(value.trim(), "1" | "true" | "on"));
+    FREEZE_ALL_MONITORS.store(all, Ordering::SeqCst);
+    eprintln!(
+        "freeze: scope is {} (UPTAKE_FREEZE_ALL_MONITORS)",
+        if freeze_all_monitors_enabled() {
+            "EVERY monitor"
+        } else {
+            "the cursor's monitor"
+        }
+    );
+}
+
+/// Whether a freeze covers every monitor. The only reader of
+/// [`FREEZE_ALL_MONITORS`].
+pub(crate) fn freeze_all_monitors_enabled() -> bool {
+    FREEZE_ALL_MONITORS.load(Ordering::SeqCst)
+}
+
+/// **The** scope decision: which monitors this freeze and its warm sessions
+/// cover.
+///
+/// # Why this is a type and not a rule written twice
+///
+/// The first cut of the third amendment had [`monitors_in_scope`] answer the
+/// question for the freeze and [`sync_warm_sessions`] answer it again, in its
+/// own `if`, against [`uptake_capture::warm::Scope`] — and the doc comment
+/// claimed they were "two call sites reading one answer". **They were two
+/// implementations of one rule, and the comment asserting otherwise is
+/// `bug_003`'s recorded shape.** Caught in PR #42's independent review.
+///
+/// The rule is stated once here. Both callers convert; neither decides.
+///
+/// **This is the decision the amendment says the two halves must share.**
+/// Narrowing the sessions without narrowing the freeze buys the freeze nothing,
+/// because [`freeze`] captures every monitor in parallel and the user waits for
+/// the last one to land: one warm monitor and three cold ones costs what the
+/// three cold ones cost, ~255–353 ms, which is exactly the number `I-13` is
+/// about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Scope {
+    /// Every monitor — the widened setting.
+    AllMonitors,
+    /// The monitor containing this point, widening to every monitor if it is on
+    /// none.
+    AtPoint(Point),
+}
+
+/// Resolves the scope from the setting and the cursor. The only place the rule
+/// lives.
+///
+/// `cursor` is `None` when the cursor could not be read at all, which resolves
+/// to [`Scope::AllMonitors`] exactly as a dead zone does. The alternative is a
+/// `Ctrl+Space` that captures nothing because a cursor read failed, and a freeze
+/// that does nothing is indistinguishable from the hotkey not arriving.
+#[must_use]
+pub(crate) fn scope_for(cursor: Option<Point>) -> Scope {
+    match cursor {
+        Some(point) if !freeze_all_monitors_enabled() => Scope::AtPoint(point),
+        _ => Scope::AllMonitors,
+    }
+}
+
+impl Scope {
+    /// This scope as the capture crate's, for [`uptake_capture::warm::start`].
+    fn for_warm(self) -> uptake_capture::warm::Scope {
+        match self {
+            Self::AllMonitors => uptake_capture::warm::Scope::AllMonitors,
+            Self::AtPoint(point) => uptake_capture::warm::Scope::AtPoint(point),
+        }
+    }
+}
+
+/// The monitors a freeze covers, given the desktop and a resolved [`Scope`].
+///
+/// # The two sides do NOT read one monitor list, and pretending they do would be
+/// the same defect again
+///
+/// This narrows `all`, which the caller takes from [`crate::overlay::MONITOR_CACHE`].
+/// The warm side narrows a **fresh** `crate::monitors::enumerate()` inside
+/// `uptake_capture::warm::start`, because that is where a session's bounds have
+/// to come from. They agree whenever the cache is current, which is what
+/// `sync_bounds` exists to keep true, and they can disagree for the window
+/// between a display change and the cache catching up. What is shared is the
+/// **rule** ([`Scope`]), not the list — and a monitor the two disagree about
+/// falls back to the cold path rather than serving wrong pixels, because
+/// `warm::capture_monitor` matches by centre containment and returns `None` on a
+/// miss.
+#[must_use]
+pub(crate) fn monitors_in_scope(all: &[Rect], scope: Scope) -> Vec<Rect> {
+    let Scope::AtPoint(cursor) = scope else {
+        return all.to_vec();
+    };
+    match all.iter().find(|bounds| bounds.contains(cursor)) {
+        Some(bounds) => vec![*bounds],
+        // The dead zone. See `Scope::AtPoint`: every monitor, not none.
+        None => all.to_vec(),
+    }
 }
 
 /// Which format the **display** path encodes stills in. 0 = PNG, 1 = JPEG, 2 = BMP.
@@ -399,8 +556,9 @@ pub(crate) fn init_display_format() {
 
 /// Starts or stops the held sessions to match `is_placement`.
 ///
-/// Called from the one point every state transition funnels through, beside
-/// [`thaw`] and for the same reason: warm sessions exist only while Placement is
+/// Called from the point every state transition funnels through, beside
+/// [`thaw`] and for the same reason (and, since the third amendment, from two
+/// more places — see `cursor` below): warm sessions exist only while Placement is
 /// visible, so "start on entry" and "never held outside Placement" are one rule,
 /// and writing it once means a state added later cannot forget it. Holding four
 /// full-monitor sessions into Living would be this feature's version of the
@@ -410,18 +568,41 @@ pub(crate) fn init_display_format() {
 /// A no-op when the setting is off, and [`uptake_capture::warm::stop`] is safe
 /// with nothing running, so the disabled path costs a bool read and the enabled
 /// path cannot leak.
-pub(crate) fn sync_warm_sessions(is_placement: bool) {
+///
+/// # `cursor` and the third caller
+///
+/// Since [ADR-0026]'s third amendment the held set is **the cursor's monitor**,
+/// so this function's answer changes when the pointer crosses a monitor edge —
+/// which is not a state transition and which neither of the original two callers
+/// can see. `placement`'s active-monitor poll is the third, and without it the
+/// narrowing would warm whichever monitor the cursor happened to be on when
+/// Placement opened and leave the user's actual target cold. That is the shape
+/// the amendment warns about in as many words: a change that provably does
+/// nothing.
+///
+/// `None` means the cursor could not be read, which widens rather than narrows —
+/// see [`monitors_in_scope`].
+///
+/// [ADR-0026]: the private planning repo's
+/// `DECISIONS/ADR-0026-freeze-on-demand-trigger.md`
+pub(crate) fn sync_warm_sessions(is_placement: bool, cursor: Option<Point>) {
     if !warm_capture_enabled() {
         return;
     }
     if is_placement {
-        let held = uptake_capture::warm::start();
+        // The scope the *freeze* will ask for, because it is literally the same
+        // value: `scope_for` is the only place the rule lives, and this converts
+        // rather than decides. A session held for a monitor the freeze will not
+        // capture is pure cost; a monitor the freeze captures without a session
+        // is the cold path this feature exists to remove.
+        let held = uptake_capture::warm::start(scope_for(cursor).for_warm());
         // Reports what is *warm*, not only what is held, because `start` keeps
-        // sessions that already cover the desktop — so a Placement → Placement
-        // transition prints `4 warm` while a fresh entry prints `0 warm` and
-        // stays that way for ~330 ms. A fixed "not warm yet" would have been
-        // wrong on one of those two paths, and `I-11` is this project's row
-        // about a probe whose output cannot distinguish the states it reports.
+        // sessions that already cover the scope — so a Placement → Placement
+        // transition prints `1 warm` (`4 warm` under the widened setting) while
+        // a fresh entry prints `0 warm` and stays that way for ~330 ms. A fixed
+        // "not warm yet" would have been wrong on one of those two paths, and
+        // `I-11` is this project's row about a probe whose output cannot
+        // distinguish the states it reports.
         //
         // `unservable` is printed beside it because that is the whole reason the
         // field exists. `WarmStatus` documents it as the answer to "does `warm
@@ -1234,5 +1415,99 @@ mod tests {
         )]);
         let cropped = crop(Rect::new(10, 10, 8, 6)).unwrap();
         assert_eq!(&cropped.pixels()[0..3], &[10, 10, 10 ^ 10]);
+    }
+
+    /// The dev rig's shape — see `warm`'s copy of this, and the same reason for
+    /// real numbers: the dead zone only exists between monitors of unequal
+    /// height.
+    fn rig() -> Vec<Rect> {
+        vec![
+            Rect::new(0, 0, 2560, 1440),
+            Rect::new(2560, 0, 1920, 1080),
+            Rect::new(4480, 0, 1920, 1080),
+            Rect::new(-1080, 0, 1080, 1920),
+        ]
+    }
+
+    /// Sets the scope for one test and puts it back afterwards.
+    ///
+    /// `FREEZE_ALL_MONITORS` is process-global and libtest runs tests
+    /// concurrently, which is `F-33` exactly: a test that mutates process-global
+    /// state silently disabled another test, and the disabled test still passed.
+    /// The lock is what makes these serial with each other.
+    fn with_all_monitors<T>(all: bool, body: impl FnOnce() -> T) -> T {
+        static SERIAL: Mutex<()> = Mutex::new(());
+        let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        let restore = FREEZE_ALL_MONITORS.swap(all, Ordering::SeqCst);
+        let out = body();
+        FREEZE_ALL_MONITORS.store(restore, Ordering::SeqCst);
+        out
+    }
+
+    #[test]
+    fn the_default_scope_is_the_cursors_monitor() {
+        with_all_monitors(false, || {
+            assert_eq!(
+                monitors_in_scope(&rig(), scope_for(Some(Point::new(3000, 500)))),
+                vec![Rect::new(2560, 0, 1920, 1080)]
+            );
+        });
+    }
+
+    #[test]
+    fn the_setting_widens_rather_than_narrows() {
+        // The direction is the decision (ADR-0026's third amendment), so it is
+        // asserted rather than left to the reader of the `if`: with the setting
+        // on, the same cursor that selects one monitor above selects all four.
+        with_all_monitors(true, || {
+            assert_eq!(
+                monitors_in_scope(&rig(), scope_for(Some(Point::new(3000, 500)))),
+                rig()
+            );
+        });
+    }
+
+    #[test]
+    fn a_freeze_never_narrows_to_nothing() {
+        // Both ways of having no monitor under the cursor, because they arrive
+        // from different places and a freeze over an empty list publishes no
+        // stills — a `Ctrl+Space` that does nothing, indistinguishable from the
+        // hotkey never arriving.
+        with_all_monitors(false, || {
+            let dead = Point::new(3000, 1300);
+            assert!(
+                !rig().iter().any(|bounds| bounds.contains(dead)),
+                "the fixture stopped having a dead zone, so this no longer tests it"
+            );
+            assert_eq!(monitors_in_scope(&rig(), scope_for(Some(dead))), rig());
+            assert_eq!(monitors_in_scope(&rig(), scope_for(None)), rig());
+        });
+    }
+
+    #[test]
+    fn both_gates_are_off_until_a_rig_says_otherwise() {
+        // ADR-0026's third amendment decided the warm path BECOMES the default
+        // and held that flip behind a measurement whose numbers were written
+        // down in advance: the still row at or under +0.25 pp and the video row
+        // under +0.40 pp, taken with the same instrument and the same two
+        // conditions that produced +0.62 / +0.94 pp.
+        //
+        // Both gates are one-word flips and nothing else asserts them, so
+        // without this test a commit changing `new(false)` to `new(true)` on
+        // either line passes the whole suite green. That is exactly the "rule an
+        // agent has to remember" shape, and the amendment's own reason for
+        // refusing the flip is that restoring a default on an arithmetic model
+        // is `F-39` and `UT-F-53` in one step.
+        //
+        // Deleting this test is the honest way to ship the flip. Editing the
+        // measurement into it is not.
+        assert!(
+            !warm_capture_enabled(),
+            "the warm path is the default before the rig measured the narrowed              cost -- see ADR-0026's third amendment release condition"
+        );
+        assert!(
+            !freeze_all_monitors_enabled(),
+            "a freeze covers every monitor by default, which is ADR-0014 section              4 un-inverted -- the amendment made the setting WIDEN"
+        );
     }
 }
