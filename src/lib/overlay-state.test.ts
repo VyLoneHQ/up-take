@@ -7,6 +7,8 @@ import {
   armedTypeForKey,
   dismissFocusedArea,
   escapeOverlay,
+  frameKey,
+  frozenFrameKeys,
   isFreezeKey,
   isRemoveKey,
   type MenuView,
@@ -447,5 +449,48 @@ describe('reportFreezeLatency', () => {
       probe: 7,
     });
     vi.unstubAllGlobals();
+  });
+});
+
+describe('frozenFrameKeys', () => {
+  // The dev rig, converted at dpr 1 with a zero origin so the CSS rects are the
+  // physical ones and the test reads as the desktop it describes.
+  const rig = [
+    { x: 0, y: 0, width: 2560, height: 1440 },
+    { x: 2560, y: 0, width: 1920, height: 1080 },
+    { x: 4480, y: 0, width: 1920, height: 1080 },
+    { x: -1080, y: 0, width: 1080, height: 1920 },
+  ];
+
+  it('marks only the monitor the still covers', () => {
+    // The defect this replaced: one still on a four-monitor desktop used to
+    // print `frozen` on all four, because the badge asked `stills.length > 0`.
+    const frozen = frozenFrameKeys([{ frame: rig[1] }]);
+    expect(rig.map((frame) => frozen.has(frameKey(frame)))).toEqual([
+      false,
+      true,
+      false,
+      false,
+    ]);
+  });
+
+  it('marks every monitor when the freeze covered the whole desktop', () => {
+    // The positive control, and it is not decoration: without it a
+    // `frozenFrameKeys` that always returned an empty set would pass the test
+    // above. The widened setting (UPTAKE_FREEZE_ALL_MONITORS) produces this.
+    const frozen = frozenFrameKeys(rig.map((frame) => ({ frame })));
+    expect(rig.every((frame) => frozen.has(frameKey(frame)))).toBe(true);
+  });
+
+  it('marks nothing when the screen is live', () => {
+    expect(frozenFrameKeys([]).size).toBe(0);
+  });
+
+  it('agrees with the key the monitor loop renders with', () => {
+    // The two are the same function on purpose. If the component ever keys its
+    // {#each} differently from this, every badge silently stops matching and
+    // the screen reads as live while it is frozen -- the failure in the other
+    // direction, which is the one no user would report as a bug.
+    expect(frameKey(rig[2])).toBe('4480,0,1920,1080');
   });
 });

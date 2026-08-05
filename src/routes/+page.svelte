@@ -16,6 +16,8 @@ import {
   escapeOverlay,
   type FlashPayload,
   type FrozenStill,
+  frameKey,
+  frozenFrameKeys,
   type HoverPayload,
   isFreezeKey,
   isRemoveKey,
@@ -85,11 +87,6 @@ let dpr = $state(1);
 
 const frames: CssRect[] = $derived(monitorFramesCss(monitors, origin, dpr));
 /**
- * Whether the screen is frozen — derived from the stills rather than tracked
- * beside them, so the badge cannot appear over a monitor showing live content.
- */
-const frozen: boolean = $derived(stills.length > 0);
-/**
  * The `Ctrl+Space` → painted probe awaiting its echo, or null.
  *
  * Debug builds only — Rust stamps none in release. Cleared as it is echoed, so
@@ -133,6 +130,17 @@ const stillFrames: { url: string; frame: CssRect }[] = $derived(
     return frame === null ? [] : [{ url: still.url, frame }];
   }),
 );
+/**
+ * Which monitors are showing a still — derived from the stills rather than
+ * tracked beside them, so the badge cannot appear over a monitor showing live
+ * content.
+ *
+ * **A count was wrong here and shipped as far as a review.** See
+ * {@link frozenFrameKeys}: since ADR-0026's third amendment a freeze covers the
+ * cursor's monitor, so `stills.length > 0` would have labelled three live
+ * screens frozen on a four-monitor desktop.
+ */
+const frozenFrames: Set<string> = $derived(frozenFrameKeys(stillFrames));
 // Hover chrome — the close control, the brighter border — shows in every
 // visible state as of task 1.17(a).
 //
@@ -339,15 +347,21 @@ onMount(() => {
         {#if armed && i === activeMonitor}
           <span class="armed-badge">{armed}</span>
         {/if}
-        <!-- FROZEN goes on EVERY monitor, unlike the armed badge above, and the
-             difference is deliberate rather than an inconsistency. The armed
-             type is one fact about the next gesture, so repeating it reads as
-             "every screen is armed" (F-13). Frozen is a fact about *each
-             screen*: they are all showing a still, and a screen whose still is
-             indistinguishable from live content — a static desktop — has no
-             other cue that it is frozen. Omitting it anywhere would leave the
-             user reading a live monitor as frozen, or the reverse. -->
-        {#if frozen}
+        <!-- FROZEN goes on every monitor THAT IS SHOWING A STILL, and the
+             qualifier is the whole of it. The armed badge above is one fact
+             about the next gesture, so repeating it reads as "every screen is
+             armed" (F-13). Frozen is a fact about *each screen*: a screen whose
+             still is indistinguishable from live content — a static desktop —
+             has no other cue that it is frozen, so omitting it on a frozen
+             monitor is as wrong as showing it on a live one.
+
+             **This asked `stills.length > 0` until 2026-08-05**, which was
+             correct for exactly as long as a freeze covered the whole desktop.
+             ADR-0026's third amendment narrows it to the cursor's monitor, and
+             a count would then have printed "frozen" over three live screens —
+             inverting the amendment's own *Honesty at the boundary* argument,
+             which is that the others visibly stay live. -->
+        {#if frozenFrames.has(frameKey(frame))}
           <span class="frozen-badge">frozen</span>
         {/if}
       </div>

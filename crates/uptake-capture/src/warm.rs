@@ -322,8 +322,8 @@ pub enum Scope {
 ///
 /// # Why this checks instead of simply restarting
 ///
-/// The caller is [`crate::warm`]'s one funnel: every overlay state transition
-/// calls it, including **Placement → Placement**, which happens on `Esc`
+/// One of the callers is the overlay's state-transition funnel, which calls
+/// this on every transition including **Placement → Placement** — that happens on `Esc`
 /// mid-drag and on a summon while already in Placement. An unconditional
 /// `stop()` first would drop every texture and respawn every pump on those
 /// transitions — so the user would land back in Placement with the warm path
@@ -337,10 +337,12 @@ pub enum Scope {
 /// **What that does and does not cover — corrected 2026-07-30 after the PR #28
 /// review, whose first version of this paragraph claimed more than the code
 /// does.** `covers` is evaluated *when `start` is called*, and nothing polls.
-/// The callers are the overlay's state-transition funnel and its display-change
-/// path (`sync_bounds`), so a topology change is picked up when Windows reports
-/// it — **not** continuously, and not by `capture_monitor` noticing at freeze
-/// time. If a display moves and neither path runs, the slots keep entry-time
+/// The callers are the overlay's state-transition funnel, its display-change
+/// path (`sync_bounds`), and — since ADR-0026's third amendment made the held
+/// set follow the cursor — the placement poll's active-monitor change, which is
+/// the only one of the three that is not a change to the *desktop*. A topology
+/// change is still picked up when Windows reports it, **not** continuously, and
+/// not by `capture_monitor` noticing at freeze time. If a display moves and neither path runs, the slots keep entry-time
 /// bounds for the rest of the visit. Saying otherwise was `bug_003`'s defect —
 /// a comment asserting a property the code lacks — committed in the same change
 /// that fixed it.

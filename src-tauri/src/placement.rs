@@ -876,8 +876,75 @@ fn pump_hook_health(app: &AppHandle, state: &mut PumpState) {
     }
 }
 
+/// The monitor the warm sessions should be following, as a packed `(x, y)`, or
+/// `None` when no resync is wanted. Written by the poll, read by the worker.
+static WANTED_WARM_POINT: Mutex<Option<Point>> = Mutex::new(None);
+
+/// Whether a resync worker is currently running.
+static RESYNC_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// Moves a warm-session resync off the caller's thread, coalescing crossings.
+///
+/// # Why a worker and not a spawn per crossing
+///
+/// A rebuild blocks for as long as a pump takes to hand back its handshake — up
+/// to a second in the pathological case — and the caller is the poll thread that
+/// owns §1's 8 ms drag row. Spawning per crossing would fix the stall and
+/// replace it with a worse problem: a pointer swept across four monitors would
+/// have four threads calling `warm::start` concurrently, each tearing down what
+/// the last built, against one `SESSIONS` lock.
+///
+/// So at most **one** worker runs, and a crossing that arrives while it is
+/// working only overwrites the target. The worker re-reads the target after each
+/// pass and runs again if it moved, so the last crossing always wins and the
+/// intermediate ones are skipped rather than queued — which is the correct
+/// reading of a sweep: the user is going somewhere, not visiting.
+///
+/// **What this deliberately does not do is make the target warm any sooner.** A
+/// rebuilt session is not warm for ~330 ms (`warm`'s module docs), so a
+/// `Ctrl+Space` pressed immediately after arriving on a monitor still takes the
+/// cold path. That window is the honest cost of narrowing and it is recorded in
+/// ADR-0026's third amendment rather than hidden here.
+/// **Both the flag and the target are written under `WANTED_WARM_POINT`'s
+/// lock**, and that pairing is the whole of what makes a crossing undroppable.
+/// Clearing the flag outside it leaves a window where the worker has seen no
+/// target, has not yet cleared, and a crossing arrives: the setter would find
+/// the flag still set, decline to spawn, and the crossing would be lost with no
+/// worker left to notice. Same shape as `warm::stop`'s reason for holding its
+/// lock across the `WM_QUIT` post.
+fn resync_warm_off_thread(point: Point) {
+    let mut wanted = lock(&WANTED_WARM_POINT);
+    *wanted = Some(point);
+    if RESYNC_RUNNING.swap(true, Ordering::SeqCst) {
+        // A worker is already running and will pick up the point just written.
+        return;
+    }
+    drop(wanted);
+    std::thread::spawn(|| {
+        loop {
+            let next = {
+                let mut wanted = lock(&WANTED_WARM_POINT);
+                match wanted.take() {
+                    Some(point) => point,
+                    None => {
+                        RESYNC_RUNNING.store(false, Ordering::SeqCst);
+                        return;
+                    }
+                }
+            };
+            crate::freeze::sync_warm_sessions(true, Some(next));
+        }
+    });
+}
+
 /// The cursor position as the OS reports it, independent of the hook.
-fn real_cursor(app: &AppHandle) -> Option<Point> {
+///
+/// **The one cursor read in this codebase**, used by the gesture recovery below,
+/// by the poll's seeding on entry, and by `overlay::toggle_freeze` to decide the
+/// freeze scope. A second copy of this function was added to `overlay.rs` for
+/// that last caller and deleted in the same review that found the seeding bug —
+/// two readers of one fact is what puts them on different monitors.
+pub(crate) fn real_cursor(app: &AppHandle) -> Option<Point> {
     let position = overlay::overlay_window(app).ok()?.cursor_position().ok()?;
     Point::from_physical_f64(position.x, position.y)
 }
@@ -1041,18 +1108,25 @@ fn pump_hover(app: &AppHandle, state: &mut PumpState) {
         // actual target cold — a change that provably does nothing, which is the
         // failure the amendment names by that name.
         //
-        // **Gated on the change, not run per tick**, which is the whole reason
-        // this sits inside the `if`: the poll runs at 60–221 Hz against §1's 8 ms
-        // drag row, and `warm::start` blocks on each pump's handshake. A crossing
-        // is a human-speed event; a tick is not.
+        // **Gated on the change AND moved off this thread**, and the second half
+        // is not belt-and-braces. Gating on the change bounds how *often* the
+        // rebuild runs; it does nothing about what one costs. A rebuild posts
+        // `WM_QUIT` to each held pump, spawns a thread, and then **blocks on that
+        // pump's handshake for up to a second** (`warm::spawn_session`). This is
+        // the click-through poll thread, which also publishes the live selection
+        // rectangle every tick against §1's 8 ms drag row — so a crossing
+        // mid-drag would have stalled the rectangle the user is dragging. Found
+        // in PR #42's independent review, before it ran on hardware.
         //
         // `point` rather than a fresh cursor read, so the sessions and the badge
         // cannot end up describing different monitors: this is the position the
-        // line above resolved `active_monitor` from.
+        // line above resolved `active_monitor` from, and since entering
+        // Placement now seeds it from the OS, it is a real position on the first
+        // tick rather than (0, 0).
         //
         // `true` rather than a state read because this branch is already inside
         // the `placing` guard above — reached only in Placement.
-        crate::freeze::sync_warm_sessions(true, Some(point));
+        resync_warm_off_thread(point);
     }
 
     let menu_open = lock(&MENU).is_some();
@@ -1194,6 +1268,28 @@ fn enter_placement_on_main_thread() {
     // there is superseded rather than leaked — but the cache has to agree, or the
     // next return to Living would skip the write that corrects it.
     *lock(&LIVING_CURSOR) = None;
+    // Seed the hook's last-known point from the OS, because until this line it
+    // was `(0, 0)` until the user moved the mouse.
+    //
+    // **Nothing wrote CUR_X/CUR_Y except the hook**, which only fires on
+    // movement, so the first poll tick after entering Placement acted on the
+    // origin of the virtual desktop rather than on the cursor. Two consequences,
+    // and the second is what a review of PR #42 caught: the armed-type badge
+    // opened on whichever monitor contains (0, 0) rather than the cursor's,
+    // which is F-13's rule failing for one tick; and once the warm sessions
+    // began following the cursor, that same tick tore down the correctly-warmed
+    // monitor and rebuilt for the wrong one — so `Ctrl+Space` pressed without
+    // moving the mouse took the cold path with the warm path switched on.
+    //
+    // `real_cursor` is the same read `toggle_freeze` uses to pick the freeze
+    // scope, which is the point: seeding from anywhere else would leave the two
+    // able to disagree at exactly the moment they must not.
+    if let Some(app) = APP.get()
+        && let Some(point) = real_cursor(app)
+    {
+        CUR_X.store(point.x, Ordering::SeqCst);
+        CUR_Y.store(point.y, Ordering::SeqCst);
+    }
 }
 
 /// Enters `Living` mode: hook kept for per-area routing (ADR-0016), cursor
