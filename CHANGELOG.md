@@ -19,6 +19,9 @@ Until then it is written by hand.
   per-region click-through.
 - Multi-monitor support including mixed DPI, portrait displays and negative coordinates.
 - A global summon hotkey, `Win+Shift+U`, with conflict handling.
+- A whole screen grab, `Win+Shift+G`, copying the monitor under the cursor to the clipboard without
+  summoning the overlay. It goes through the same capture call the freeze uses when its fast path is
+  off, so expect the same lateness.
 - System tray icon and menu, and a single-instance guard.
 - Areas: drag to create, then move, resize and dismiss them. Areas live until dismissed or until the
   app exits, and do not survive a restart.

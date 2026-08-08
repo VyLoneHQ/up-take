@@ -1,4 +1,10 @@
-//! Global hotkey registration (roadmap task 1.4).
+//! Global hotkey registration (roadmap tasks 1.4 and 1.9e).
+//!
+//! Two combinations, and they are deliberately different in kind. `Win+Shift+U`
+//! changes **state**: it toggles input focus between UP-TAKE and the real
+//! screen. `Win+Shift+G` changes **nothing** and produces an artifact: it copies
+//! the monitor under the cursor to the clipboard and leaves every state exactly
+//! as it found it (see [`crate::output::grab_monitor`]).
 //!
 //! `Win+Shift+U` toggles input focus between UP-TAKE and the real screen
 //! (ADR-0012) — the first press summons the overlay into Placement. Task 1.5's
@@ -51,6 +57,9 @@ use crate::overlay;
 /// the key is labelled `Win` on the hardware, not `Super` or `Meta`.
 pub const SUMMON_LABEL: &str = "Win+Shift+U";
 
+/// How the instant-grab shortcut is written for the user (roadmap task 1.9e).
+pub const GRAB_LABEL: &str = "Win+Shift+G";
+
 /// The combination that summons the overlay.
 ///
 /// `Modifiers::SUPER` is the Windows key. Hard-coded until task 1.14 makes it
@@ -60,34 +69,86 @@ pub fn summon_shortcut() -> Shortcut {
     Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyU)
 }
 
-/// Registers the summon hotkey, reporting a failure to the user.
+/// The combination that grabs the monitor under the cursor (roadmap task 1.9e,
+/// [ADR-0014] section 4: "a separate hotkey does an instant whole-monitor grab
+/// of the monitor under the cursor").
+///
+/// # Why this combination, which is a guess and is labelled as one
+///
+/// `G` for grab, on the same `Win+Shift` prefix as the summon so the two read as
+/// one application's keys rather than two unrelated ones. Windows itself assigns
+/// `Win+G` (Game Bar) and `Win+Shift+S` (Snip and Sketch) but not `Win+Shift+G`,
+/// checked against Microsoft's published shortcut list rather than recalled.
+///
+/// **What that check cannot cover is other applications**, which is the whole of
+/// scenario M-9 and the reason [`install`] reports a failed registration to the
+/// user instead of logging it. If this combination turns out to be commonly
+/// taken, changing it is one line here plus the README, and task 1.14 makes it
+/// the user's choice rather than ours.
+///
+/// [ADR-0014]: the private planning repo's
+/// `DECISIONS/ADR-0014-capture-and-render-over-live-content.md`
+pub fn grab_shortcut() -> Shortcut {
+    Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyG)
+}
+
+/// Registers both global hotkeys, reporting each failure to the user.
 ///
 /// Never returns an error: a hotkey that could not be registered is
 /// architecture §5 class 1 (user-fixable) — the app keeps running and says what
 /// is wrong — not a reason to refuse to start. Refusing would be worse for the
 /// exact user it affects, since the app they cannot summon is also the app they
 /// then cannot reconfigure.
+///
+/// # The two registrations are independent, deliberately
+///
+/// A failure of one does not skip the other, and each reports under its own
+/// label. The alternative, one report naming "the hotkeys", tells the user to go
+/// looking for a conflict without saying which combination to look for, and the
+/// fix is per combination. It also means a taken `Win+Shift+G` costs the user
+/// the grab and not the summon, which is the difference between a degraded
+/// application and an unreachable one.
 pub fn install(app: &AppHandle) {
-    let shortcut = summon_shortcut();
-    let handler_app = app.clone();
-    let outcome = app
+    let summon_app = app.clone();
+    let summon =
+        app.global_shortcut()
+            .on_shortcut(summon_shortcut(), move |_app, _shortcut, event| {
+                // `Pressed` only. Acting on both would summon the overlay twice per
+                // press, and the `Released` half arrives on a different thread (see
+                // the module docs).
+                if event.state != ShortcutState::Pressed {
+                    return;
+                }
+                #[cfg(debug_assertions)]
+                crate::dev_harness::log_summon("hotkey", overlay::current_origin(&summon_app));
+                // The hotkey toggles input focus between UP-TAKE and the real
+                // screen (ADR-0012), rather than only ever showing.
+                overlay::toggle(&summon_app);
+            });
+    if let Err(error) = summon {
+        report_failure(app, SUMMON_LABEL, &error.to_string());
+    }
+
+    let grab_app = app.clone();
+    let grab = app
         .global_shortcut()
-        .on_shortcut(shortcut, move |_app, _shortcut, event| {
-            // `Pressed` only. Acting on both would summon the overlay twice per
-            // press, and the `Released` half arrives on a different thread (see
-            // the module docs).
+        .on_shortcut(grab_shortcut(), move |_app, _shortcut, event| {
             if event.state != ShortcutState::Pressed {
                 return;
             }
-            #[cfg(debug_assertions)]
-            crate::dev_harness::log_summon("hotkey", overlay::current_origin(&handler_app));
-            // The hotkey toggles input focus between UP-TAKE and the real
-            // screen (ADR-0012), rather than only ever showing.
-            overlay::toggle(&handler_app);
+            // **Does not summon, show, or change state.** Task 1.9e is the path
+            // with no placement gesture at all, so a grab that first brought the
+            // overlay up would be the gesture it exists to avoid, and it would
+            // freeze nothing and select nothing on the way past.
+            //
+            // The cursor is read inside `grab_monitor` on this thread, before it
+            // spawns, for the reason `overlay::toggle_freeze` reads it here too:
+            // it is the cursor at the moment the key was pressed, and by the time
+            // a worker runs the pointer may be on another monitor.
+            crate::output::grab_monitor(&grab_app);
         });
-
-    if let Err(error) = outcome {
-        report_failure(app, &error.to_string());
+    if let Err(error) = grab {
+        report_failure(app, GRAB_LABEL, &error.to_string());
     }
 }
 
@@ -103,20 +164,20 @@ pub fn install(app: &AppHandle) {
 /// during `setup` the event
 /// loop has not started, so a blocking dialog would deadlock the startup it is
 /// reporting on.
-fn report_failure(app: &AppHandle, error: &str) {
+fn report_failure(app: &AppHandle, label: &str, error: &str) {
     let detail = if is_already_registered(error) {
         format!(
-            "Another application is already using {SUMMON_LABEL}.\n\n\
+            "Another application is already using {label}.\n\n\
              Close that application, or change its shortcut, then restart UP-TAKE."
         )
     } else {
         format!(
-            "Windows refused to register {SUMMON_LABEL}.\n\n\
+            "Windows refused to register {label}.\n\n\
              Restarting UP-TAKE usually clears this. If it persists, please report it \
              with the details below.\n\n{error}"
         )
     };
-    eprintln!("hotkey: {SUMMON_LABEL} could not be registered: {error}");
+    eprintln!("hotkey: {label} could not be registered: {error}");
     app.dialog()
         .message(detail)
         .kind(MessageDialogKind::Warning)
@@ -156,6 +217,31 @@ mod tests {
         assert!(shortcut.mods.contains(Modifiers::SHIFT));
         assert!(!shortcut.mods.contains(Modifiers::ALT));
         assert!(!shortcut.mods.contains(Modifiers::CONTROL));
+    }
+
+    #[test]
+    fn the_grab_shortcut_is_win_shift_g() {
+        // Pinned for the same reason the summon is: this string goes in the
+        // README, and roadmap 1.14 is meant to inherit it as the default rather
+        // than invent one.
+        let shortcut = grab_shortcut();
+        assert_eq!(shortcut.key, Code::KeyG);
+        assert!(shortcut.mods.contains(Modifiers::SUPER));
+        assert!(shortcut.mods.contains(Modifiers::SHIFT));
+        assert!(!shortcut.mods.contains(Modifiers::ALT));
+        assert!(!shortcut.mods.contains(Modifiers::CONTROL));
+    }
+
+    #[test]
+    fn the_two_shortcuts_are_not_the_same_combination() {
+        // `install` registers both against one manager. Two identical
+        // combinations would not be a compile error and would not be a visible
+        // defect either: the second registration fails with "already
+        // registered", which `report_failure` presents to the user as *another
+        // application* holding the key. So the failure mode of getting this
+        // wrong is a dialog blaming a program that does not exist.
+        let (summon, grab) = (summon_shortcut(), grab_shortcut());
+        assert!(summon.key != grab.key || summon.mods != grab.mods);
     }
 
     #[test]
