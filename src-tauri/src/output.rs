@@ -84,6 +84,8 @@ fn export_source(
         // Capture and encode both stay at 0 ms, which is the honest reading: this
         // path does neither. It also keeps the §1 budget lines meaningful — a
         // pinned export is not a measurement of the capture pipeline.
+        split.bounds = Some(bounds);
+        split.encoded_bytes = pinned.1.len();
         return Ok(pinned);
     }
     capture(bounds, split)
@@ -276,6 +278,29 @@ struct Split {
     /// Whatever the action does with the bytes: the DIB conversion plus the
     /// clipboard bracket for Copy, the file write for Save.
     publish_ms: u128,
+    /// The rectangle the pixels came from, and the size of what was encoded.
+    ///
+    /// # Both exist because a line without them cost a rig pass
+    ///
+    /// `UT-F-56`, 2026-08-08. Task 1.9e's first hardware run produced five grabs
+    /// at 372, 516, 466, 338 and 340 ms across at least three different screens,
+    /// and **nothing in the log said which was which**, so §1's row for the
+    /// gesture could not be filled in and the pass has to be repeated. The
+    /// freeze's own per-monitor line has printed both fields since 1.9g and is
+    /// readable for exactly that reason.
+    ///
+    /// **The bar these feed is content-dependent**, which is what makes this
+    /// mandatory rather than nice: `quality-bars.md` §1 footnote 3 requires a run
+    /// to state the screen it ran against, and the encoded byte length is how a
+    /// run states it without trusting the operator's memory. `UT-F-47` is the
+    /// finding that rule comes from, and this field is that finding's second
+    /// instance being closed rather than recorded again.
+    ///
+    /// `bounds` is `None` only where nothing was captured, which is a failure
+    /// before the rectangle is known.
+    bounds: Option<Rect>,
+    /// Length of the encoded image, in bytes. Zero when nothing was encoded.
+    encoded_bytes: usize,
     /// Where the pixels came from. Reported on every line, because
     /// `capture 0 ms` is ambiguous on its own — it is what both the fast path
     /// and a pinned export produce — and "which path ran" is the first question
@@ -324,6 +349,12 @@ fn capture(bounds: Rect, split: &mut Split) -> Result<(RgbaBitmap, Vec<u8>), Str
     let encode = Instant::now();
     let png = encode_png(&captured.bitmap)?;
     split.encode_ms = encode.elapsed().as_millis();
+    // What the capture crate reports it took, never what was asked for: it clamps
+    // to the virtual desktop, and the log would otherwise name a rectangle that
+    // was not captured. `freeze::capture_still` records the same distinction for
+    // the same reason.
+    split.bounds = Some(captured.rect);
+    split.encoded_bytes = png.len();
     Ok((captured.bitmap, png))
 }
 
@@ -358,6 +389,8 @@ fn capture_or_crop(bounds: Rect, split: &mut Split) -> Result<(RgbaBitmap, Vec<u
         let encode = Instant::now();
         let png = encode_png(&bitmap)?;
         split.encode_ms = encode.elapsed().as_millis();
+        split.bounds = Some(bounds);
+        split.encoded_bytes = png.len();
         return Ok((bitmap, png));
     }
     match crate::precapture::take(bounds) {
@@ -371,6 +404,8 @@ fn capture_or_crop(bounds: Rect, split: &mut Split) -> Result<(RgbaBitmap, Vec<u
             let encode = Instant::now();
             let png = encode_png(&bitmap)?;
             split.encode_ms = encode.elapsed().as_millis();
+            split.bounds = Some(bounds);
+            split.encoded_bytes = png.len();
             Ok((bitmap, png))
         }
         Err(reason) => {
@@ -472,15 +507,43 @@ fn encode_as(bitmap: &RgbaBitmap, format: ImageFormat, name: &str) -> Result<Vec
 /// after the fact (F-29's lesson): a capture alone measured ~190–230 ms warm,
 /// leaving little room before the 300 ms target and less before the 600 ms
 /// hard fail.
+/// The stage breakdown a reader of a rig log actually parses.
+///
+/// # A pure function because the alternative was unverifiable
+///
+/// This was inlined in [`report`], which writes to stderr and returns nothing,
+/// so the only way to check the line was to run the app and read a console.
+/// That is how `UT-F-56` shipped: the line was missing the two fields the bar it
+/// serves depends on, and no test could have said so. Splitting it out is what
+/// lets the assertions below name the fields, so a later edit that drops one
+/// goes red instead of costing another rig pass.
+///
+/// **The rectangle and the byte length lead**, because they are the run's
+/// description of its own conditions and the timings are meaningless without
+/// them (`quality-bars.md` §1 footnote 3, `UT-F-47`).
+fn stage_line(split: &Split) -> String {
+    let where_from = match split.bounds {
+        Some(rect) => format!(
+            "{}x{} at ({}, {}) — ",
+            rect.size.width, rect.size.height, rect.origin.x, rect.origin.y
+        ),
+        // Reached only when the capture itself failed, so there is no rectangle
+        // to name. Printing a placeholder would be worse than the gap: a reader
+        // scanning for the monitor would find one.
+        None => String::new(),
+    };
+    format!(
+        "{where_from}capture {} ms, encode {} ms, publish {} ms, {} bytes ({})",
+        split.capture_ms, split.encode_ms, split.publish_ms, split.encoded_bytes, split.source
+    )
+}
+
 fn report(action: &str, started: Instant, split: &Split, outcome: Result<(), String>) {
     let elapsed = started.elapsed().as_millis();
     // The split rides along with every budget line, not just the debug one:
     // the whole point (ADR-0022) is that "it was 320 ms" is not actionable and
     // "capture 210, encode 25, publish 80" is.
-    let stages = format!(
-        "capture {} ms, encode {} ms, publish {} ms ({})",
-        split.capture_ms, split.encode_ms, split.publish_ms, split.source
-    );
+    let stages = stage_line(split);
     match outcome {
         Ok(()) => {
             if elapsed > BUDGET_HARD_FAIL_MS {
@@ -1235,6 +1298,39 @@ mod tests {
         assert!(error.contains("3000"), "{error}");
         assert!(error.contains("1300"), "{error}");
         assert!(error.contains('4'), "{error}");
+    }
+
+    #[test]
+    fn a_stage_line_names_the_monitor_and_the_byte_length() {
+        use uptake_core::geometry::Rect;
+        // UT-F-56: five grabs across three screens were indistinguishable in the
+        // log because these two fields were absent. Each is asserted by the value
+        // a reader would look for, so dropping one goes red here rather than on
+        // the founder's next rig evening.
+        let split = Split {
+            capture_ms: 254,
+            encode_ms: 38,
+            publish_ms: 79,
+            bounds: Some(Rect::new(0, 0, 2560, 1440)),
+            encoded_bytes: 86_113,
+            source: Source::Live,
+        };
+        let line = stage_line(&split);
+        assert!(line.contains("2560x1440"), "no monitor size: {line}");
+        assert!(line.contains("at (0, 0)"), "no monitor origin: {line}");
+        assert!(line.contains("86113 bytes"), "no byte length: {line}");
+        assert!(line.contains("capture 254 ms"), "{line}");
+        assert!(line.contains("live capture"), "{line}");
+    }
+
+    #[test]
+    fn a_stage_line_omits_the_rectangle_rather_than_inventing_one() {
+        // The capture failed, so no rectangle is known. A placeholder would be
+        // worse than the gap: a reader scanning the log for the monitor would
+        // find one and believe it.
+        let line = stage_line(&Split::default());
+        assert!(!line.contains(" at ("), "invented a rectangle: {line}");
+        assert!(line.contains("0 bytes"), "{line}");
     }
 
     #[test]
