@@ -1128,10 +1128,30 @@ pub(crate) fn monitor_rects() -> Vec<Rect> {
 /// needs no overlay: the grab would find no monitor under the cursor, decline,
 /// and look exactly like a hotkey that did not arrive.
 ///
-/// The cost is one `available_monitors()` call per grab, which is a
-/// user-initiated action a few times an hour rather than a 60 Hz poll, so
-/// enumerating is cheaper than teaching the cache a third refresh path and
-/// cannot go stale by construction.
+/// # What the call actually costs, corrected 2026-08-08
+///
+/// This said "one `available_monitors()` call", which understated it. In
+/// `tauri-runtime-wry-2.11.4` that method is `window_getter!` →
+/// `send_user_message`, and from a thread that is not the event-loop thread it
+/// **posts a message to the event-loop proxy and blocks on `rx.recv()` with no
+/// timeout** (`lib.rs:197-211`, `:2089`). So a grab's worker makes a blocking
+/// round trip to the event loop, which is precisely what
+/// [`crate::output::overlay_hwnd`]'s doc records itself as avoiding.
+///
+/// **It is not a deadlock and the check is mechanical:** `send_user_message`
+/// short-circuits and handles the message inline when the caller already *is*
+/// the main thread, and this is only ever reached from
+/// [`crate::output::grab_monitor`]'s spawned worker, whose caller has already
+/// returned to the event loop. Read in the dependency's sources rather than
+/// assumed, because the first version of this comment asserted a cost without
+/// checking what the call does (`UT-F-51`'s rule).
+///
+/// It is still the right trade for a user-initiated action a few times an hour
+/// rather than a 60 Hz poll, and it cannot go stale by construction. **The
+/// better answer is `uptake_capture`'s own enumeration**, which is a direct
+/// Win32 call on the calling thread and is the list `capture_region` clamps
+/// against — but it is `pub(crate)` there, so reaching it is a public API
+/// widening on that crate rather than an edit here. Recorded as `I-31`.
 pub(crate) fn fresh_monitor_rects(app: &AppHandle) -> Result<Vec<Rect>, String> {
     let window = overlay_window(app)?;
     Ok(monitors(&window)?
