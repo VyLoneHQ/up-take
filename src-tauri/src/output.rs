@@ -84,7 +84,18 @@ fn export_source(
         // Capture and encode both stay at 0 ms, which is the honest reading: this
         // path does neither. It also keeps the §1 budget lines meaningful — a
         // pinned export is not a measurement of the capture pipeline.
-        split.bounds = Some(bounds);
+        // **`bounds` is deliberately NOT recorded here, and that is the whole
+        // point of the field.** `bounds` is the area's rectangle *now*; `pinned`
+        // is the capture taken when the area was created, and 1.17(a) made areas
+        // movable and resizable afterwards (see this function's own docs above).
+        // So on a moved or resized area the two describe different pixels, and a
+        // line naming one beside the byte length of the other is the
+        // misattribution `UT-F-56` exists to end, reintroduced by its own fix.
+        //
+        // The stored capture's *size* is recoverable from `pinned.0`; its origin
+        // is not stored at all, so there is no rectangle to print. `stage_line`
+        // renders `None` by omitting the field rather than inventing one.
+        split.source = Source::Pinned;
         split.encoded_bytes = pinned.1.len();
         return Ok(pinned);
     }
@@ -137,11 +148,26 @@ pub(crate) fn copy_to_clipboard(app: &AppHandle, area: AreaId, bounds: Rect) {
 ///
 /// # It takes the COLD capture path, always, and that is a decision
 ///
-/// [`crate::freeze`]'s warm sessions are held **only while Placement is
-/// visible**, which is exactly the state this feature does not require, so for
-/// the usage 1.9e is defined by there is no warm session to hand over. The grab
-/// could still use one on the rarer in-Placement press, and does not, for two
-/// reasons:
+/// [`crate::freeze`]'s warm sessions are *intended* to be held **only while
+/// Placement is visible**, which is exactly the state this feature does not
+/// require, so for the usage 1.9e is defined by there is normally no warm
+/// session to hand over.
+///
+/// ⚠️ **That invariant is intended and NOT enforced, found by this branch's own
+/// independent review.** `placement::resync_warm_off_thread` spawns a detached
+/// worker that calls `freeze::sync_warm_sessions(true, …)` with `is_placement`
+/// hard-coded, re-reads no state and can be cancelled by nothing. Leave
+/// Placement between a monitor crossing and that worker's next pass and
+/// `warm::start` runs *after* `apply`'s `warm::stop`, leaving sessions held with
+/// the overlay hidden until the next Placement exit. It predates this change,
+/// it needs `UPTAKE_WARM_CAPTURE`, and ADR-0026's third amendment intends to
+/// make that the default, at which point this becomes reachable by default.
+/// **This function does not depend on the invariant** — it never reads a warm
+/// frame on any path — so the race costs held sessions rather than wrong pixels.
+/// The reasoning below is why it does not read one, and it stands either way.
+///
+/// The grab could still use a warm session on the rarer in-Placement press, and
+/// does not, for two reasons:
 ///
 /// 1. **One behaviour, one number.** A path that is fast in one state and slow
 ///    in another produces rig figures that cannot be read without knowing which
@@ -311,10 +337,21 @@ struct Split {
 /// Which of the routes to a Screenshot's pixels actually ran.
 #[derive(Default, Clone, Copy)]
 enum Source {
-    /// A live `capture_region` with no fast path attempted: the pinned export,
-    /// and every action that is not a create.
+    /// A live `capture_region` with no fast path attempted: every action that is
+    /// not a create.
+    ///
+    /// **This used to say "the pinned export" too, and that was wrong** — a
+    /// pinned export captures nothing, so reporting it as a live capture named
+    /// the one path that does no work as the path that does the most. Harmless
+    /// while no rectangle was printed beside it and actively misleading once one
+    /// was (`UT-F-56`'s fix), which is what surfaced it. See [`Self::Pinned`].
     #[default]
     Live,
+    /// The area's stored capture, taken when it was created and re-encoded by
+    /// nothing. Capture and encode are both 0 ms because this path performs
+    /// neither, and **no rectangle is reported**: the area may have moved or
+    /// been resized since, so its current bounds do not describe these pixels.
+    Pinned,
     /// Cropped out of the frame held since mouse-down (task 1.9c).
     Held,
     /// Cropped out of the frozen still the user was looking at (task 1.9d).
@@ -332,6 +369,7 @@ impl std::fmt::Display for Source {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Live => write!(f, "live capture"),
+            Self::Pinned => write!(f, "pinned capture, not re-taken"),
             Self::Held => write!(f, "held frame"),
             Self::Frozen => write!(f, "frozen still"),
             Self::Fell(reason) => write!(f, "live capture — fell back: {reason}"),
@@ -1297,7 +1335,11 @@ mod tests {
         let error = monitor_at(&rig(), Some(Point::new(3000, 1300))).unwrap_err();
         assert!(error.contains("3000"), "{error}");
         assert!(error.contains("1300"), "{error}");
-        assert!(error.contains('4'), "{error}");
+        // The count, with its noun. `contains('4')` was the first version and it
+        // passed for 4, 14, 40 and a hardcoded literal alike: a check whose
+        // falsifying input is hard to name is one of `A3`'s greens that could
+        // not have been earned.
+        assert!(error.contains("4 monitor(s)"), "{error}");
     }
 
     #[test]
