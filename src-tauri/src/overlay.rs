@@ -1112,6 +1112,34 @@ pub(crate) fn monitor_rects() -> Vec<Rect> {
         .collect()
 }
 
+/// Monitor rectangles enumerated **now**, for callers that can run while the
+/// overlay has never been shown.
+///
+/// # Why this is not `monitor_rects`
+///
+/// [`MONITOR_CACHE`] is filled by [`show`] and [`sync_bounds`], the two paths a
+/// display change reaches. Both of them require the overlay to have come up at
+/// least once, so on a process that has been sitting in the tray since launch
+/// the cache is **empty**, and [`monitor_rects`] answers with an empty list
+/// rather than with an error.
+///
+/// That is correct for the poll, which only ever runs while the overlay is
+/// visible. It is wrong for task 1.9e's grab, whose entire point is that it
+/// needs no overlay: the grab would find no monitor under the cursor, decline,
+/// and look exactly like a hotkey that did not arrive.
+///
+/// The cost is one `available_monitors()` call per grab, which is a
+/// user-initiated action a few times an hour rather than a 60 Hz poll, so
+/// enumerating is cheaper than teaching the cache a third refresh path and
+/// cannot go stale by construction.
+pub(crate) fn fresh_monitor_rects(app: &AppHandle) -> Result<Vec<Rect>, String> {
+    let window = overlay_window(app)?;
+    Ok(monitors(&window)?
+        .iter()
+        .map(|monitor| monitor.bounds)
+        .collect())
+}
+
 /// The bounds of the monitor containing `point`, for positioning per-monitor
 /// chrome. Falls back to the whole virtual desktop when the point is on no
 /// monitor at all — which happens in the dead zones between mismatched monitors,

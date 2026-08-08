@@ -33,7 +33,7 @@ use std::time::Instant;
 use tauri::{AppHandle, Manager};
 use uptake_core::area::AreaId;
 use uptake_core::bitmap::RgbaBitmap;
-use uptake_core::geometry::Rect;
+use uptake_core::geometry::{Point, Rect};
 
 use windows_capture::encoder::{ImageEncoder, ImageEncoderPixelFormat, ImageFormat};
 use windows_sys::Win32::Foundation::{GlobalFree, HWND, SYSTEMTIME};
@@ -116,6 +116,125 @@ pub(crate) fn copy_to_clipboard(app: &AppHandle, area: AreaId, bounds: Rect) {
         crate::overlay::emit_flash(app, area);
     }
     report("copy", started, &split, outcome);
+}
+
+/// Copies the whole monitor under the cursor to the clipboard, with no placement
+/// gesture at all (roadmap task **1.9e**, [ADR-0014] section 4).
+///
+/// # What this deliberately does not do
+///
+/// It does not summon, show, or change the overlay's state. The feature is
+/// defined as the path with no gesture, so bringing the overlay up first would
+/// reintroduce the thing it exists to remove. It follows that the grab works
+/// from the tray, with nothing on screen, which is the normal case rather than
+/// an edge one.
+///
+/// It writes no file. `PRODUCT-VISION` section 8 is clipboard only by default,
+/// and Save is a separate explicit action; a grab that also littered
+/// `Pictures\UP-TAKE\` would be that decision reversed by a new entry point.
+///
+/// # It takes the COLD capture path, always, and that is a decision
+///
+/// [`crate::freeze`]'s warm sessions are held **only while Placement is
+/// visible**, which is exactly the state this feature does not require, so for
+/// the usage 1.9e is defined by there is no warm session to hand over. The grab
+/// could still use one on the rarer in-Placement press, and does not, for two
+/// reasons:
+///
+/// 1. **One behaviour, one number.** A path that is fast in one state and slow
+///    in another produces rig figures that cannot be read without knowing which
+///    state produced them, and `UT-F-47` is this project's record of exactly
+///    that being got wrong.
+/// 2. **A warm frame has no freshness bound here.** [`crate::freeze`] can go
+///    without one because the user selects *on the still they are looking at*;
+///    a grab hands back pixels the user never saw, which is
+///    [`crate::precapture`]'s situation, and that path is bounded at 750 ms by
+///    [ADR-0022] section 3 for this reason. Reaching for the warm frame without
+///    settling that bound would be the same hazard with no rule attached.
+///
+/// **The honest consequence, stated rather than discovered on the rig:** this
+/// inherits `UT-F-45` whole. The pixels are the desktop roughly 350 ms after the
+/// key, because a WGC device, item, pool and session are all built before the
+/// compositor is asked for a frame. For a grab of a page you are reading that is
+/// a delay; for a grab of something disappearing it is the wrong moment. Making
+/// it instant needs a warm session held **outside** Placement, which is a
+/// standing cost in every state and is a decision this function is not entitled
+/// to take.
+///
+/// [ADR-0014]: the private planning repo's
+/// `DECISIONS/ADR-0014-capture-and-render-over-live-content.md`
+/// [ADR-0022]: the private planning repo's
+/// `DECISIONS/ADR-0022-hold-a-frame-and-crop.md`
+pub(crate) fn grab_monitor(app: &AppHandle) {
+    // Read here, on the caller's thread, before the spawn. Same reason
+    // `overlay::toggle_freeze` reads it before spawning: this is the cursor at
+    // the moment the key was pressed, and the worker starts late enough that the
+    // pointer can already have crossed onto another monitor. Reading it inside
+    // the thread would grab whichever screen the mouse drifted to.
+    let cursor = crate::placement::real_cursor(app);
+    let app = app.clone();
+    // Spawned for the reason the module docs give: a capture is 100-300 ms even
+    // warm, and this handler runs on the event-loop thread, which is also the
+    // thread the mouse hook's callback runs on.
+    std::thread::spawn(move || {
+        let started = Instant::now();
+        let mut split = Split::default();
+        let outcome = grab_target(&app, cursor).and_then(|monitor| {
+            let (bitmap, png) = capture(monitor, &mut split)?;
+            let publish = Instant::now();
+            let result = dibv5_bytes(&bitmap)
+                .and_then(|dib| publish_clipboard(overlay_hwnd(&app)?, &dib, &png));
+            split.publish_ms = publish.elapsed().as_millis();
+            result
+        });
+        report("grab", started, &split, outcome);
+    });
+}
+
+/// The monitor a grab should capture: the one containing `cursor`.
+///
+/// # Why a failure here is an error and not a fallback
+///
+/// [`crate::freeze::monitors_in_scope`] answers the same question for a freeze
+/// and falls back to **every** monitor when the cursor is unreadable or lands in
+/// a dead zone, because a freeze can cover several screens and doing nothing
+/// would be indistinguishable from the key not arriving.
+///
+/// A grab cannot borrow that. There is exactly one clipboard, so "every monitor"
+/// has no meaning here, and the natural substitutes (the primary display, the
+/// first enumerated one) would hand back a screenshot of a monitor the user was
+/// not pointing at. **That is this project's see-one-thing-get-another failure**,
+/// which `F-38` and the moved-area export defect above are both instances of,
+/// and it is quiet: the result is a plausible image of the right size.
+///
+/// So the grab declines and says why. The cursor being on no monitor at all is
+/// close to unreachable in practice, since Windows keeps the pointer on a
+/// display, and the remaining case is a cursor read that failed.
+fn grab_target(app: &AppHandle, cursor: Option<Point>) -> Result<Rect, String> {
+    monitor_at(&crate::overlay::fresh_monitor_rects(app)?, cursor)
+}
+
+/// The rule [`grab_target`] applies, with the enumeration taken as an argument.
+///
+/// Split out because [`grab_target`] needs an `AppHandle` and therefore a running
+/// Tauri application, which no unit test can build. Leaving the rule inside it
+/// would have made the only reachable test one that asserts a rectangle contains
+/// its own centre, which is backlog `I-1`'s sweep defect and `UT-F-44`'s
+/// tautology in one: true for any input, red for none.
+fn monitor_at(monitors: &[Rect], cursor: Option<Point>) -> Result<Rect, String> {
+    let cursor = cursor.ok_or_else(|| "the cursor position could not be read".to_string())?;
+    monitors
+        .iter()
+        .find(|bounds| bounds.contains(cursor))
+        .copied()
+        .ok_or_else(|| {
+            format!(
+                "the cursor at ({}, {}) is on none of the {} monitor(s) enumerated",
+                cursor.x,
+                cursor.y,
+                monitors.len()
+            )
+        })
 }
 
 /// Writes an area's image to `Pictures\UP-TAKE\`, creating the directory on first
@@ -1048,6 +1167,74 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The dev rig, in the same order and the same coordinates `freeze`'s tests
+    /// use: a 2560x1440 primary, two 1920x1080 to its right, and a portrait
+    /// 1080x1920 at a negative origin.
+    ///
+    /// Copied rather than shared because the two modules assert different rules
+    /// against it and a shared fixture would couple them; the negative origin is
+    /// the part that earns its keep in both.
+    fn rig() -> Vec<uptake_core::geometry::Rect> {
+        use uptake_core::geometry::Rect;
+        vec![
+            Rect::new(0, 0, 2560, 1440),
+            Rect::new(2560, 0, 1920, 1080),
+            Rect::new(4480, 0, 1920, 1080),
+            Rect::new(-1080, 0, 1080, 1920),
+        ]
+    }
+
+    #[test]
+    fn a_grab_takes_the_monitor_the_cursor_is_on() {
+        use uptake_core::geometry::{Point, Rect};
+        // Every monitor, not just a convenient one: picking the first would pass
+        // against an implementation that always returns `monitors[0]`, which is
+        // the shape `UT-F-44` records as a test that cannot go red.
+        for expected in rig() {
+            let inside = Point::new(
+                expected.origin.x + i32::try_from(expected.size.width).unwrap() / 2,
+                expected.origin.y + i32::try_from(expected.size.height).unwrap() / 2,
+            );
+            assert_eq!(monitor_at(&rig(), Some(inside)), Ok(expected));
+        }
+        // The negative-origin monitor specifically, at a point that is *not* its
+        // centre: a sign error in containment survives a centre-only test on a
+        // symmetric layout.
+        assert_eq!(
+            monitor_at(&rig(), Some(Point::new(-1000, 1800))),
+            Ok(Rect::new(-1080, 0, 1080, 1920))
+        );
+    }
+
+    #[test]
+    fn a_grab_declines_rather_than_guessing() {
+        use uptake_core::geometry::Point;
+        // A cursor that could not be read. The freeze widens to every monitor
+        // here; a grab has one clipboard and no defensible widening, so it must
+        // refuse. Asserted on the *behaviour*, not the message.
+        assert!(monitor_at(&rig(), None).is_err());
+        // The dead zone: below the portrait monitor's neighbours and outside all
+        // four. Returning any monitor here is the see-one-thing-get-another
+        // failure, so the refusal is the feature.
+        assert!(monitor_at(&rig(), Some(Point::new(3000, 1300))).is_err());
+        // And an empty enumeration, which is what `fresh_monitor_rects` would
+        // produce if the monitor list could be read but was somehow empty.
+        assert!(monitor_at(&[], Some(Point::new(0, 0))).is_err());
+    }
+
+    #[test]
+    fn the_decline_message_names_what_was_looked_at() {
+        use uptake_core::geometry::Point;
+        // The only signal a rig operator gets when a grab does nothing, since
+        // there is no on-screen acknowledgement yet. A message that said only
+        // "no monitor" would leave them unable to tell a bad cursor read from a
+        // bad monitor list.
+        let error = monitor_at(&rig(), Some(Point::new(3000, 1300))).unwrap_err();
+        assert!(error.contains("3000"), "{error}");
+        assert!(error.contains("1300"), "{error}");
+        assert!(error.contains('4'), "{error}");
     }
 
     #[test]

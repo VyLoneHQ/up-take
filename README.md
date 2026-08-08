@@ -35,6 +35,17 @@ Around those:
   costs measurable CPU on every monitor it holds.
   <!-- source: ADR-0026 (freeze on demand) and its second amendment; BACKLOG.md I-13 (the lateness,
        measured on the rig against a stopwatch); ROADMAP.md task 1.9f (the warm path, settings gated) -->
+- **Grab a whole screen.** `Win+Shift+G` copies the monitor your cursor is on to the clipboard. No
+  overlay, no selection, nothing to place. It goes through the same capture call the freeze uses when
+  its fast path is off, so expect the same lateness: the pixels are the screen about a third of a
+  second after you pressed the key. Fine for a page you are reading, wrong for something that is
+  disappearing.
+  <!-- source: ADR-0014 section 4 (a separate hotkey does an instant whole-monitor grab of the
+       monitor under the cursor); ROADMAP.md task 1.9e. The lateness figure is UT-F-45, measured on
+       the rig against a stopwatch for the FREEZE's cold path. This feature calls the same
+       uptake_capture::capture_region and has not itself been measured on hardware, so the wording
+       above says "expect" rather than quoting a number for it. Do not tighten that until a rig pass
+       has run this path. -->
 - **Multi-monitor and mixed DPI.** Verified on a four monitor rig with mixed scaling, a portrait
   display and negative coordinates. 4K at 150% and ultrawide are untested, because that hardware is
   not here.
@@ -84,7 +95,8 @@ pnpm install
 pnpm tauri dev
 ```
 
-`Win+Shift+U` summons the overlay once it is running.
+`Win+Shift+U` summons the overlay once it is running. `Win+Shift+G` copies the monitor under your
+cursor to the clipboard without summoning anything.
 
 ## When there is a release
 
