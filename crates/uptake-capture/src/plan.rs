@@ -19,7 +19,7 @@ use crate::error::CaptureError;
 /// One monitor as the planner sees it: its Win32 handle (an `HMONITOR` cast to
 /// `isize`, `0` never valid) and its bounds in physical virtual-desktop pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct MonitorInfo {
+pub struct MonitorInfo {
     /// The `HMONITOR` cast to `isize`, so the value is `Send` and carries no
     /// pointer semantics until the capture thread turns it back into a handle.
     pub handle: isize,

@@ -254,18 +254,51 @@ impl Monitor {
     }
 }
 
+/// **The** answer to "which of these rectangles is this point on": the index of
+/// the first one containing it, or `None` when it is on none of them.
+///
+/// Half-open edges (like [`Rect::contains`]) mean a point on a shared edge
+/// belongs to exactly one of two adjacent rectangles. Should they ever overlap
+/// (Windows does not normally report monitors that do), the first match wins.
+/// `None` is the dead zone: the virtual desktop's bounding rectangle can include
+/// gaps when differently-sized monitors are arranged unevenly.
+///
+/// # Why an index, and why this exists at all
+///
+/// The rule was written four times. `monitor_at` below has carried it since task
+/// 1.6, with a property test and cases for dead zones, empty lists, shared
+/// edges, mixed DPI and negative coordinates; `overlay::monitor_index_at` and
+/// `output::monitor_at` each re-implemented the same `contains` scan against
+/// their own container, and `SPECS/quality-bars.md` §2 puts the 90 % property
+/// goal on **this crate**, so those copies were coverage that looked equivalent
+/// and was not (`I-30` — which counted three of the four).
+///
+/// Taking bounds by iterator and returning an **index** is what lets one
+/// implementation serve all of them without a trait or a generic container: the
+/// callers hold `Monitor`, `MonitorInfo` and `Rect` respectively, and every one
+/// of them can produce bounds and index back into its own slice. `freeze::Scope`
+/// makes the same argument for the same reason — one rule, callers convert,
+/// nobody decides twice.
+///
+/// ⚠️ **`freeze::monitors_in_scope` and `warm::in_scope` are NOT copies of this
+/// and must not be folded into it.** They carry the widen-on-dead-zone rule,
+/// where a `None` here becomes *every* monitor rather than none, because a freeze
+/// that captures nothing is indistinguishable from the hotkey not arriving. This
+/// function correctly has no opinion about that; it reports the dead zone and
+/// lets each caller decide what a dead zone means to it.
+#[must_use]
+pub fn index_at(bounds: impl IntoIterator<Item = Rect>, point: Point) -> Option<usize> {
+    bounds.into_iter().position(|bounds| bounds.contains(point))
+}
+
 /// The monitor containing `point`, or `None` when the point lies on no
 /// monitor — the virtual desktop's bounding rectangle can include dead zones
 /// when differently-sized monitors are arranged unevenly.
 ///
-/// Half-open edges (like [`Rect::contains`]) mean a point on a shared edge
-/// belongs to exactly one of two adjacent monitors. Should monitors ever
-/// overlap (Windows does not normally report that), the first match wins.
+/// A thin wrapper over [`index_at`], which is where the rule and its tests live.
 #[must_use]
 pub fn monitor_at(monitors: &[Monitor], point: Point) -> Option<&Monitor> {
-    monitors
-        .iter()
-        .find(|monitor| monitor.bounds.contains(point))
+    index_at(monitors.iter().map(|monitor| monitor.bounds), point).map(|index| &monitors[index])
 }
 
 /// The bounding rectangle of the whole virtual desktop: the union of all
@@ -505,6 +538,40 @@ mod tests {
         assert!(bounds.contains(dead));
         assert!(monitor_at(&rig, dead).is_none());
         assert!(monitor_at(&[], Point::new(0, 0)).is_none());
+    }
+
+    /// `monitor_at`'s cases above all reach [`index_at`] through it, so they are
+    /// the rule's coverage. These are the two things only the primitive can show.
+    #[test]
+    fn index_at_answers_in_the_callers_own_order() {
+        // The index has to address the list that was passed, or every caller
+        // indexing back into its own slice reads the wrong element — which is
+        // the whole mechanism that lets `Monitor`, `MonitorInfo` and `Rect`
+        // share one implementation (`I-30`).
+        let rects = [
+            Rect::new(4480, 0, 1920, 1080),
+            Rect::new(0, 0, 2560, 1440),
+            Rect::new(-1080, 0, 1080, 1920),
+        ];
+        assert_eq!(index_at(rects, Point::new(1280, 720)), Some(1));
+        assert_eq!(index_at(rects, Point::new(5000, 500)), Some(0));
+        assert_eq!(index_at(rects, Point::new(-1000, 1800)), Some(2));
+        // Not a rearrangement of the same answer: position order and list order
+        // disagree here, so an implementation that sorted would fail all three.
+        assert_eq!(index_at(rects, Point::new(9999, 9999)), None);
+    }
+
+    #[test]
+    fn index_at_gives_an_overlap_to_the_first_rectangle() {
+        // Windows does not normally report overlapping monitors, so this pins a
+        // documented tie-break rather than an observed case. It is here because
+        // "the first match wins" is the sentence three call sites now rely on
+        // instead of each deciding for itself.
+        let overlapping = [Rect::new(0, 0, 100, 100), Rect::new(50, 50, 100, 100)];
+        assert_eq!(index_at(overlapping, Point::new(75, 75)), Some(0));
+        // Control: the region only the second covers still resolves to it, so
+        // the assertion above is a tie-break and not "always zero".
+        assert_eq!(index_at(overlapping, Point::new(120, 120)), Some(1));
     }
 
     #[test]
