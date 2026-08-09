@@ -211,7 +211,7 @@ pub(crate) fn grab_monitor(app: &AppHandle) {
     std::thread::spawn(move || {
         let started = Instant::now();
         let mut split = Split::default();
-        let outcome = grab_target(&app, cursor).and_then(|monitor| {
+        let outcome = grab_target(cursor).and_then(|monitor| {
             let (bitmap, png) = capture(monitor, &mut split)?;
             let publish = Instant::now();
             let result = dibv5_bytes(&bitmap)
@@ -242,23 +242,55 @@ pub(crate) fn grab_monitor(app: &AppHandle) {
 /// So the grab declines and says why. The cursor being on no monitor at all is
 /// close to unreachable in practice, since Windows keeps the pointer on a
 /// display, and the remaining case is a cursor read that failed.
-fn grab_target(app: &AppHandle, cursor: Option<Point>) -> Result<Rect, String> {
-    monitor_at(&crate::overlay::fresh_monitor_rects(app)?, cursor)
+///
+/// # It asks the CAPTURE crate which monitors exist, not the window manager
+///
+/// `I-31`. This used to call `overlay::fresh_monitor_rects`, which reads tao's
+/// list, while [`uptake_capture::capture_region`] clamps the region it is given
+/// against the capture crate's own `EnumDisplayMonitors`. Two enumerations, one
+/// decision: whenever they disagreed the grab would pick a rectangle from one
+/// list and receive pixels clamped to the other, which is a screenshot of
+/// something nobody asked for and is not detectable from the image.
+///
+/// It is also the cheaper call. `WebviewWindow::available_monitors()` resolves
+/// in **`tauri-runtime-wry` 2.11.4** to `window_getter!` → `send_user_message`
+/// (`src/lib.rs:197-211`, `:2089`), which posts to the event-loop proxy and
+/// blocks on `rx.recv()` with no timeout from any thread that is not the
+/// event-loop thread — exactly what this worker is.
+/// [`uptake_capture::enumerate_monitors`] is a direct `EnumDisplayMonitors` on
+/// the calling thread. **Not tao's**, which has no such indirection; that
+/// function's own docs record why the distinction is spelled out.
+///
+/// **No fallback if the enumeration fails, deliberately.** A `CaptureError` here
+/// means `EnumDisplayMonitors` failed, and the reasoning above applies with more
+/// force to a guess made without a monitor list than to one made with a
+/// disagreeing one.
+fn grab_target(cursor: Option<Point>) -> Result<Rect, String> {
+    let monitors = uptake_capture::enumerate_monitors().map_err(|error| error.to_string())?;
+    monitor_at(&monitors, cursor)
 }
 
 /// The rule [`grab_target`] applies, with the enumeration taken as an argument.
 ///
-/// Split out because [`grab_target`] needs an `AppHandle` and therefore a running
-/// Tauri application, which no unit test can build. Leaving the rule inside it
-/// would have made the only reachable test one that asserts a rectangle contains
-/// its own centre, which is backlog `I-1`'s sweep defect and `UT-F-44`'s
-/// tautology in one: true for any input, red for none.
-fn monitor_at(monitors: &[Rect], cursor: Option<Point>) -> Result<Rect, String> {
+/// Split out because the enumeration is a Win32 call, so leaving this inside
+/// [`grab_target`] would have made the only reachable test one that asserts a
+/// rectangle contains its own centre — backlog `I-1`'s sweep defect and
+/// `UT-F-44`'s tautology in one: true for any input, red for none.
+///
+/// **The containment scan is [`uptake_core::geometry::index_at`]'s and no longer
+/// this function's** (`I-30`). What is left here is the *policy*, which is
+/// genuinely the grab's: a cursor that could not be read and a cursor in a dead
+/// zone are both refusals, where a freeze widens to every monitor for the second.
+/// `SPECS/quality-bars.md` §2 puts the property-test goal on `uptake-core`, so a
+/// copy of the rule living in `src-tauri` was coverage that looked equivalent and
+/// was not.
+fn monitor_at(
+    monitors: &[uptake_capture::MonitorInfo],
+    cursor: Option<Point>,
+) -> Result<Rect, String> {
     let cursor = cursor.ok_or_else(|| "the cursor position could not be read".to_string())?;
-    monitors
-        .iter()
-        .find(|bounds| bounds.contains(cursor))
-        .copied()
+    uptake_core::geometry::index_at(monitors.iter().map(|monitor| monitor.bounds), cursor)
+        .map(|index| monitors[index].bounds)
         .ok_or_else(|| {
             format!(
                 "the cursor at ({}, {}) is on none of the {} monitor(s) enumerated",
@@ -1301,14 +1333,23 @@ mod tests {
     /// Copied rather than shared because the two modules assert different rules
     /// against it and a shared fixture would couple them; the negative origin is
     /// the part that earns its keep in both.
-    fn rig() -> Vec<uptake_core::geometry::Rect> {
+    ///
+    /// `MonitorInfo` rather than bare rectangles since `I-31`: the grab takes the
+    /// capture crate's own enumeration now, and the handles are **deliberately
+    /// not in position order**, so a scan that matched or sorted by handle would
+    /// disagree with one that matches by containment.
+    fn rig() -> Vec<uptake_capture::MonitorInfo> {
+        use uptake_capture::MonitorInfo;
         use uptake_core::geometry::Rect;
-        vec![
-            Rect::new(0, 0, 2560, 1440),
-            Rect::new(2560, 0, 1920, 1080),
-            Rect::new(4480, 0, 1920, 1080),
-            Rect::new(-1080, 0, 1080, 1920),
+        [
+            (0x40, Rect::new(0, 0, 2560, 1440)),
+            (0x10, Rect::new(2560, 0, 1920, 1080)),
+            (0x30, Rect::new(4480, 0, 1920, 1080)),
+            (0x20, Rect::new(-1080, 0, 1080, 1920)),
         ]
+        .into_iter()
+        .map(|(handle, bounds)| MonitorInfo::new(handle, bounds))
+        .collect()
     }
 
     #[test]
@@ -1317,7 +1358,8 @@ mod tests {
         // Every monitor, not just a convenient one: picking the first would pass
         // against an implementation that always returns `monitors[0]`, which is
         // the shape `UT-F-44` records as a test that cannot go red.
-        for expected in rig() {
+        for monitor in rig() {
+            let expected = monitor.bounds;
             let inside = Point::new(
                 expected.origin.x + i32::try_from(expected.size.width).unwrap() / 2,
                 expected.origin.y + i32::try_from(expected.size.height).unwrap() / 2,
@@ -1344,8 +1386,8 @@ mod tests {
         // four. Returning any monitor here is the see-one-thing-get-another
         // failure, so the refusal is the feature.
         assert!(monitor_at(&rig(), Some(Point::new(3000, 1300))).is_err());
-        // And an empty enumeration, which is what `fresh_monitor_rects` would
-        // produce if the monitor list could be read but was somehow empty.
+        // And an empty enumeration, which is what `enumerate_monitors` returns
+        // when `EnumDisplayMonitors` succeeds against an empty desktop.
         assert!(monitor_at(&[], Some(Point::new(0, 0))).is_err());
     }
 

@@ -456,11 +456,20 @@ pub(crate) fn install_for_test(rect: Rect, bitmap: RgbaBitmap) {
 /// pre-capture there, and the drag will take the ordinary path. Kept as a free
 /// function over a slice so the choice is pure and testable; the caller reads
 /// the live list from the overlay's cache.
+///
+/// The scan is [`uptake_core::geometry::index_at`]'s. This was a copy of it
+/// until 2026-08-09, and it is the copy that mattered most: `SPECS/quality-bars.md`
+/// §2 puts the property-test goal on `uptake-core` and gives `src-tauri` no
+/// coverage row at all, so a containment rule living here had local tests that
+/// looked equivalent to the core crate's property test and were not. `I-30`
+/// named three copies, the branch closing it found a fourth, and the independent
+/// review of that branch found this one and a sixth — the row's own point about
+/// copies being hard to count, at its third iteration.
 pub(crate) fn monitor_holding(
     monitors: &[Rect],
     point: uptake_core::geometry::Point,
 ) -> Option<Rect> {
-    monitors.iter().copied().find(|rect| rect.contains(point))
+    uptake_core::geometry::index_at(monitors.iter().copied(), point).map(|index| monitors[index])
 }
 
 #[cfg(test)]

@@ -67,9 +67,56 @@ pub mod warm;
 mod wgc;
 
 pub use error::CaptureError;
+pub use plan::MonitorInfo;
 
 use uptake_core::bitmap::RgbaBitmap;
 use uptake_core::geometry::Rect;
+
+/// The monitors of the virtual desktop **as this crate sees them**, with their
+/// `HMONITOR` handles and their bounds in physical virtual-desktop pixels.
+///
+/// # Why this is public, when `monitors`'s own docs say the two enumerations are
+/// deliberately separate
+///
+/// They are, and this does not merge them. That module gives the reason: the
+/// Tauri app's enumeration reports through tao and carries scale factors for DPI
+/// decisions, while capture needs the raw handle and nothing else. Both describe
+/// the same hardware through the same OS tables.
+///
+/// What this exposes is that **a caller choosing a region to capture should
+/// choose it from the list the capture will be clamped against**, and until now
+/// it could not. `up-take`'s instant monitor grab picked its monitor from tao's
+/// list and handed the result to [`capture_region`], which clamps against this
+/// one: two enumerations, one decision, and any disagreement between them is a
+/// screenshot of a rectangle nobody asked for. That is `I-31`.
+///
+/// **It is also the cheaper call, which is the half that is easy to miss.**
+/// `WebviewWindow::available_monitors()` resolves in **`tauri-runtime-wry`
+/// 2.11.4** to `window_getter!` → `send_user_message` (`src/lib.rs:197-211`,
+/// `:2089`), which from any thread that is not the event-loop thread posts to
+/// the event-loop proxy and blocks on `rx.recv()` with no timeout. This is a
+/// direct `EnumDisplayMonitors` on the calling thread.
+///
+/// **The crate and the version are named because this claim is about somebody
+/// else's code and moves when they change it.** An earlier draft of this
+/// paragraph attributed it to *tao*, which contains neither `window_getter` nor
+/// `send_user_message` anywhere in its sources — tao's own `available_monitors`
+/// is a direct call with no proxying, and the blocking round trip is Tauri's
+/// wrapper. Caught by the independent review of `I-31`. `UT-F-51`'s rule is that
+/// a claim naming a specific dependency or API is checkable in one command at
+/// the time it is written; this comment cited that rule while breaking it.
+///
+/// **Coordinates are physical pixels only in a per-monitor-DPI-aware process.**
+/// The UP-TAKE app is one because tao opts in; a standalone binary using this
+/// crate must opt in itself (see `examples/grab.rs`) or Windows serves it
+/// DPI-virtualized coordinates and every rectangle here is subtly wrong.
+///
+/// An empty desktop comes back as an empty `Vec` rather than an error, so this
+/// fails only when `EnumDisplayMonitors` itself does.
+#[cfg(windows)]
+pub fn enumerate_monitors() -> Result<Vec<MonitorInfo>, CaptureError> {
+    monitors::enumerate()
+}
 
 /// The pixels of a screen region, together with the rectangle they show.
 ///
