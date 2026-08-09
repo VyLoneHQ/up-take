@@ -905,6 +905,21 @@ static RESYNC_RUNNING: AtomicBool = AtomicBool::new(false);
 /// `Ctrl+Space` pressed immediately after arriving on a monitor still takes the
 /// cold path. That window is the honest cost of narrowing and it is recorded in
 /// ADR-0026's third amendment rather than hidden here.
+/// # It can outlive Placement, and that is handled where the rule lives
+///
+/// The worker is **detached** and a rebuild blocks for up to a second, so the
+/// user can leave Placement while it is working — and this thread has no
+/// `AppHandle` and cannot be cancelled. It therefore calls
+/// [`crate::freeze::resync_warm_sessions`], which reads the overlay state itself
+/// on both sides of the rebuild rather than taking anyone's word for it, and
+/// stops what it built if Placement went in between. `I-29`.
+///
+/// **The cancellation deliberately does not live here.** Making this loop check
+/// a flag would put "warm sessions are never held outside Placement" in a second
+/// place, which is the two-implementations defect `freeze::Scope`'s own docs
+/// record as `bug_003`'s shape. This thread decides *when* to rebuild; `freeze`
+/// decides *whether* one is allowed.
+///
 /// **Both the flag and the target are written under `WANTED_WARM_POINT`'s
 /// lock**, and that pairing is the whole of what makes a crossing undroppable.
 /// Clearing the flag outside it leaves a window where the worker has seen no
@@ -932,7 +947,10 @@ fn resync_warm_off_thread(point: Point) {
                     }
                 }
             };
-            crate::freeze::sync_warm_sessions(true, Some(next));
+            // `resync_warm_sessions` rather than `sync_warm_sessions(true, …)`:
+            // this thread does not know that Placement is still up, it only
+            // knows it was when the crossing was recorded. `I-29`.
+            crate::freeze::resync_warm_sessions(Some(next));
         }
     });
 }
@@ -1124,8 +1142,16 @@ fn pump_hover(app: &AppHandle, state: &mut PumpState) {
         // Placement now seeds it from the OS, it is a real position on the first
         // tick rather than (0, 0).
         //
-        // `true` rather than a state read because this branch is already inside
-        // the `placing` guard above — reached only in Placement.
+        // ⛔ This comment used to end: *"`true` rather than a state read because
+        // this branch is already inside the `placing` guard above — reached only
+        // in Placement."* **True of this line and false of the work it starts.**
+        // The guard holds where the call is made; the rebuild runs on a detached
+        // worker and finishes later, possibly after the user has left. That is
+        // `I-29`, found in the independent review of #44, and the worker now
+        // reads the state instead of being told it — see
+        // `freeze::resync_guarded`. Kept struck rather than deleted, because the
+        // sentence is a worked example of the thing this project keeps getting
+        // wrong: a fact about the caller offered as a fact about the callee.
         resync_warm_off_thread(point);
     }
 

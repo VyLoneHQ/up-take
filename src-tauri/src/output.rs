@@ -153,18 +153,20 @@ pub(crate) fn copy_to_clipboard(app: &AppHandle, area: AreaId, bounds: Rect) {
 /// require, so for the usage 1.9e is defined by there is normally no warm
 /// session to hand over.
 ///
-/// ⚠️ **That invariant is intended and NOT enforced, found by this branch's own
-/// independent review.** `placement::resync_warm_off_thread` spawns a detached
-/// worker that calls `freeze::sync_warm_sessions(true, …)` with `is_placement`
-/// hard-coded, re-reads no state and can be cancelled by nothing. Leave
-/// Placement between a monitor crossing and that worker's next pass and
-/// `warm::start` runs *after* `apply`'s `warm::stop`, leaving sessions held with
-/// the overlay hidden until the next Placement exit. It predates this change,
-/// it needs `UPTAKE_WARM_CAPTURE`, and ADR-0026's third amendment intends to
-/// make that the default, at which point this becomes reachable by default.
-/// **This function does not depend on the invariant** — it never reads a warm
-/// frame on any path — so the race costs held sessions rather than wrong pixels.
-/// The reasoning below is why it does not read one, and it stands either way.
+/// ✅ **That invariant was intended and NOT enforced when this was written, and
+/// it is enforced now** — `I-29`, found by this branch's own independent review
+/// and fixed 2026-08-09, before the warm default flips (founder-sequenced).
+/// `placement::resync_warm_off_thread` spawns a detached worker, and it used to
+/// call `freeze::sync_warm_sessions(true, …)` with `is_placement` hard-coded, so
+/// leaving Placement between a monitor crossing and that worker's next pass ran
+/// `warm::start` *after* `apply`'s `warm::stop` and left sessions held with the
+/// overlay hidden. The worker now reads the state on both sides of the rebuild
+/// and stops what it built if Placement went while it was blocked
+/// (`freeze::resync_guarded`).
+/// **This function did not depend on the invariant either way** — it never reads
+/// a warm frame on any path — so the race cost held sessions rather than wrong
+/// pixels. The reasoning below is why it does not read one, and it stands
+/// unchanged.
 ///
 /// The grab could still use a warm session on the rarer in-Placement press, and
 /// does not, for two reasons:
