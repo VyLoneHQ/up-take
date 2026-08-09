@@ -18,13 +18,43 @@ use crate::error::CaptureError;
 
 /// One monitor as the planner sees it: its Win32 handle (an `HMONITOR` cast to
 /// `isize`, `0` never valid) and its bounds in physical virtual-desktop pixels.
+///
+/// # `#[non_exhaustive]`, and what it does and does not buy
+///
+/// This was `pub(crate)` until `I-31` made it part of the public surface, and
+/// going public gave up something that had been free: the only constructor was
+/// `monitors::push_monitor`, so the `0 is never a valid handle` line above was
+/// enforced by there being nowhere else to build one.
+///
+/// `#[non_exhaustive]` restores **half** of that, and it is worth being exact
+/// about which half. It stops an outside crate assembling one from a struct
+/// literal, so [`new`][Self::new] is the only way in and a field added later is
+/// not a breaking change. It does **not** validate the handle: `new(0, …)`
+/// compiles and is accepted. Nothing public consumes a `MonitorInfo` today —
+/// [`crate::enumerate_monitors`] only returns them — so a bad handle has no path
+/// into this crate, and a validating constructor would be a guard against a
+/// caller that does not exist. Raised by the independent review of `I-31`;
+/// recorded rather than over-solved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct MonitorInfo {
+#[non_exhaustive]
+pub struct MonitorInfo {
     /// The `HMONITOR` cast to `isize`, so the value is `Send` and carries no
     /// pointer semantics until the capture thread turns it back into a handle.
     pub handle: isize,
     /// The monitor's rectangle in physical virtual-desktop pixels.
     pub bounds: Rect,
+}
+
+impl MonitorInfo {
+    /// Creates a monitor description from a handle and its bounds.
+    ///
+    /// The one way to build one from outside this crate, which is what
+    /// `#[non_exhaustive]` above is for. Test fixtures are the expected caller:
+    /// real values come from [`crate::enumerate_monitors`].
+    #[must_use]
+    pub const fn new(handle: isize, bounds: Rect) -> Self {
+        Self { handle, bounds }
+    }
 }
 
 /// One monitor's contribution to a capture: crop `source` (monitor-local, in

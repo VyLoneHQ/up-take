@@ -1,0 +1,15 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+#
+# PROVENANCE, because this file's header implies a failure that did not happen.
+# The seed below was NOT produced by a defect. It was produced on 2026-08-09 by a
+# deliberate mutation drill on `monitor_at` (discarding the index `index_at`
+# returns) while consolidating the containment rule for I-30. It is kept rather
+# than deleted because it is a good discriminating case in its own right: two
+# 1x1 rectangles at different positions with the point on the SECOND, which is
+# exactly what an implementation that always answers the first fails.
+cc 3d7bad58995239ba954194facc33af0c7c7332c9ec312ee6ee40a8ab0eb55f41 # shrinks to rects = [Rect { origin: Point { x: 0, y: 0 }, size: Size { width: 1, height: 1 } }, Rect { origin: Point { x: -12406, y: -19273 }, size: Size { width: 1, height: 1 } }], p = Point { x: -12406, y: -19273 }

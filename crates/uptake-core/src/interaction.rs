@@ -279,9 +279,14 @@ pub fn close_control(bounds: Rect, monitors: &[Rect]) -> Rect {
         (left, bottom),  // bottom-left
     ];
     // The monitor holding the area's own top-right pixel; guaranteed inside the
-    // area for any non-empty one.
+    // area for any non-empty one. `index_at` rather than its own `find`, so this
+    // is not a sixth copy of the containment rule (`I-30`). The quality-bars
+    // argument does not bite inside this crate, but `index_at`'s own doc calls it
+    // *the* answer to "which of these rectangles is this point on", and a
+    // sentence like that has to be true here too or it is decoration.
     let home_pixel = Point::new(clamp_to_i32(right), bounds.origin.y);
-    let home = monitors.iter().find(|m| m.contains(home_pixel)).copied();
+    let home = crate::geometry::index_at(monitors.iter().copied(), home_pixel)
+        .map(|index| monitors[index]);
     for require_home in [true, false] {
         for (x, y) in candidates {
             let candidate = Rect::new(clamp_to_i32(x), clamp_to_i32(y), CLOSE_SPAN, CLOSE_SPAN);

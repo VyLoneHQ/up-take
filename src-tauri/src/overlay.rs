@@ -1183,10 +1183,14 @@ struct ActiveMonitorPayload {
 }
 
 /// Which monitor contains `point`, as an index into [`monitor_rects`].
+///
+/// The scan is [`uptake_core::geometry::index_at`]'s. It was one of five copies
+/// of that rule until 2026-08-09, and one `I-30` does not name — see that
+/// function's own table, which is the single place the count lives. Dead zones
+/// stay `None` here, because the caller is the placement badge and a badge on a
+/// guessed monitor is worse than no badge.
 pub(crate) fn monitor_index_at(point: Point) -> Option<usize> {
-    monitor_rects()
-        .iter()
-        .position(|bounds| bounds.contains(point))
+    uptake_core::geometry::index_at(monitor_rects(), point)
 }
 
 /// Tells the frontend which monitor the per-monitor placement chrome belongs on.

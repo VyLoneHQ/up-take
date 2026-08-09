@@ -463,8 +463,44 @@ fn covers(sessions: &[Arc<Slot>], monitors: &[crate::plan::MonitorInfo]) -> bool
 /// every state transition rather than only the ones it believes are leaving
 /// PLACEMENT — the same "one funnel" reasoning `freeze::thaw` is placed by.
 pub fn stop() {
+    let _ = stop_if(|| true);
+}
+
+/// [`stop`], but only if `should_stop` still agrees **while the session list is
+/// locked**. Reports whether it stopped anything.
+///
+/// # Why the predicate runs under the lock
+///
+/// A caller that decides to stop, and then calls [`stop`], has a gap between the
+/// decision and the action, and anything that starts sessions in that gap is
+/// destroyed by a decision taken before it existed. That is not hypothetical:
+/// `up-take`'s deferred warm resync (`I-29`) undoes a rebuild it should not have
+/// made, and between its decision and its `stop` the user can re-enter Placement
+/// and have a fresh, correct set of sessions built by the state-transition
+/// funnel. Stopping those leaves Placement visible with nothing held and nothing
+/// scheduled to rebuild, so the next freeze silently takes the cold path — the
+/// inverse of the leak the caller was fixing, and invisible because no state is
+/// wrong, only absent.
+///
+/// Evaluating the predicate here closes it, because [`start`] and this function
+/// both mutate `SESSIONS` under the same lock. Whichever gets it first, the
+/// other sees the result: a `start` that lands first makes the predicate false
+/// and its sessions survive; a `stop_if` that lands first empties the list and
+/// the `start` then rebuilds.
+///
+/// **It costs the other side nothing measurable.** The locked region is the
+/// predicate plus a `mem::take`; the `WM_QUIT` posts that make a stop slow
+/// happen after the lock is dropped, exactly as they did when this was `stop`'s
+/// body. `start` is the function that holds `SESSIONS` across a spawn loop, and
+/// a caller of this may wait on that — which is correct, and is why the one
+/// caller today is a detached worker with no latency budget rather than the
+/// event-loop thread.
+pub fn stop_if(should_stop: impl FnOnce() -> bool) -> bool {
     let held: Vec<Arc<Slot>> = {
         let mut sessions = SESSIONS.lock().unwrap_or_else(PoisonError::into_inner);
+        if !should_stop() {
+            return false;
+        }
         std::mem::take(&mut *sessions)
     };
     for slot in held {
@@ -501,6 +537,7 @@ pub fn stop() {
         }
         drop(held_id);
     }
+    true
 }
 
 /// How many sessions are held and how many can answer a capture.
@@ -1377,6 +1414,87 @@ mod tests {
 
         stop();
         assert_eq!(status().sessions, 0);
+    }
+
+    /// [`stop_if`] must consult its predicate and honour a `false`, or it is
+    /// [`stop`] with extra steps and `I-29`'s re-entry race is open again.
+    #[test]
+    fn stop_if_leaves_the_sessions_alone_when_its_condition_says_no() {
+        let _serial = GLOBAL_SESSIONS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        stop();
+        SESSIONS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .extend([slot_at(1, Rect::new(0, 0, 100, 100))]);
+
+        let asked = AtomicBool::new(false);
+        let stopped = stop_if(|| {
+            asked.store(true, Ordering::SeqCst);
+            false
+        });
+
+        assert!(
+            asked.load(Ordering::SeqCst),
+            "the condition was never asked"
+        );
+        assert!(!stopped, "reported a stop it did not perform");
+        assert_eq!(
+            status().sessions,
+            1,
+            "the session was torn down against its condition, which is the re-entry half of \
+             `I-29`: a caller that decided to stop before these sessions existed"
+        );
+
+        stop();
+        assert_eq!(
+            status().sessions,
+            0,
+            "control: a plain stop still empties it"
+        );
+    }
+
+    /// The positive half. Without it the test above passes on a `stop_if` that
+    /// never stops anything at all, which is `OS-F103`'s shape.
+    #[test]
+    fn stop_if_empties_the_sessions_when_its_condition_says_yes() {
+        let _serial = GLOBAL_SESSIONS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        stop();
+        SESSIONS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .extend([slot_at(1, Rect::new(0, 0, 100, 100))]);
+
+        assert!(stop_if(|| true), "reported no stop while holding a session");
+        assert_eq!(status().sessions, 0);
+    }
+
+    /// The predicate runs **while `SESSIONS` is locked**, which is the whole of
+    /// why this function exists rather than a check beside a `stop`. Asserted by
+    /// having the predicate try to take the lock itself: it can only succeed if
+    /// the lock is not already held, and `try_lock` reports that without
+    /// deadlocking the suite.
+    #[test]
+    fn stop_ifs_condition_is_evaluated_under_the_session_lock() {
+        let _serial = GLOBAL_SESSIONS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        stop();
+
+        let held_during = AtomicBool::new(false);
+        let _ = stop_if(|| {
+            held_during.store(SESSIONS.try_lock().is_err(), Ordering::SeqCst);
+            false
+        });
+
+        assert!(
+            held_during.load(Ordering::SeqCst),
+            "the condition ran with `SESSIONS` unlocked, so a concurrent `start` can land \
+             between the decision and the take -- the gap this function exists to remove"
+        );
     }
 
     #[test]
