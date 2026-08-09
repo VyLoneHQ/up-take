@@ -59,8 +59,15 @@ jobs:
       # Python run on a Linux runner that is already required, so it costs no
       # new check to register in branch protection and no queue time on the
       # Windows runners.
+      # `--against origin/main` is what stops the ceiling being raised by hand,
+      # and it needs main to be fetched. The checkout above is shallow, so the
+      # ref is fetched explicitly rather than by setting fetch-depth: 0 on the
+      # whole job, which would clone the full history for one comparison.
+      - name: Fetch main for the ratchet's reference baseline
+        run: git fetch --depth=1 origin main:refs/remotes/origin/main
+
       - name: Em-dash ratchet
-        run: python3 scripts/dash-ratchet.py
+        run: python3 scripts/dash-ratchet.py --against origin/main
 
   # ---------------------------------------------------------------------------
   # Rust: format, lint, test. Windows because uptake-capture and the window

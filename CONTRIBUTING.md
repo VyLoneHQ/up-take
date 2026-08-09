@@ -70,6 +70,40 @@ fix: correct DPI scaling on secondary monitor
 docs: clarify build-from-source steps
 ```
 
+## Writing style, and why CI will fail you over a dash
+
+**No em-dashes (`U+2014`) and no en-dashes (`U+2013`) anywhere in this repository.** Not in prose,
+not in comments, not in doc comments, not in strings a user or an operator sees. Use a comma, a
+colon, a full stop, or parentheses. Ranges take a plain hyphen (`1084-1099`) or the word "to".
+
+`scripts/dash-ratchet.py` runs in CI and fails if the repository-wide count goes up. It is a
+**ratchet**: the count may go down and never up, because the rule arrived against about twelve
+hundred pre-existing characters, and a check that fails the build on the day it lands is a check
+somebody disables. If your change lowers the count, run
+`python scripts/dash-ratchet.py --write-baseline` and commit the result, so the ground stays gained.
+
+**Picking the replacement is the whole job, and there is no single right answer.** It depends on what
+the clause after the dash is doing:
+
+| The clause after it is | Use |
+| --- | --- |
+| a consequence, or a joined clause | a comma |
+| an explanation or a definition | a colon |
+| an independent thought | a full stop, and start a new sentence |
+| an aside | parentheses, or cut it |
+
+Never a hyphen. It reads as a typo, and it is what a find and replace reaches for.
+
+**If the character is data rather than punctuation**, inside a parsed string, a path, an identifier,
+or a fixture a test compares byte for byte, do not change it. Add the file to `EXEMPT` in the script
+with the reason it is data. An entry with a blank reason is refused, and so is one naming a path that
+does not exist.
+
+Why the rule exists: the people who read this repository are mostly engineers deciding whether the
+work is serious, and the comments here carry most of the reasoning. The rest of the house style is
+ordinary technical writing. Be specific, prefer a real number to an adjective, and say what you
+actually ran.
+
 ## One thing worth knowing about this codebase
 
 Automated checks here have a track record of passing over real defects, and most of the interesting
