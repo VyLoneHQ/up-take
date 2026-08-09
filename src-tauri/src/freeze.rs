@@ -613,7 +613,7 @@ pub(crate) fn sync_warm_sessions(is_placement: bool, cursor: Option<Point>) {
         // capture is pure cost; a monitor the freeze captures without a session
         // is the cold path this feature exists to remove.
         let held = uptake_capture::warm::start(scope_for(cursor).for_warm());
-        report_held(held);
+        report_held(held, None);
     } else {
         uptake_capture::warm::stop();
     }
@@ -653,10 +653,13 @@ pub(crate) fn placement_visible() -> bool {
 
 /// What a deferred resync did.
 ///
-/// A return value rather than a bare side effect because [`Resync::Undone`] is
-/// the race actually happening, and a rig operator who cannot tell it from a
-/// resync that simply had nothing to do cannot tell whether this fix is doing
-/// anything at all. `UT-F-56` is this project's row about exactly that.
+/// **The rig operator's signal is the `eprintln!`, not this**, and saying
+/// otherwise was the first version of this comment. What the return value buys is
+/// the tests: [`resync_guarded`]'s three outcomes are asserted by name, which is
+/// how the mutations that delete either guard are caught. Its one production
+/// caller discards it, which `#[must_use]` makes a deliberate act rather than an
+/// oversight.
+#[must_use]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Resync {
     /// Placement had already gone before the rebuild started, so nothing was
@@ -675,10 +678,18 @@ pub(crate) enum Resync {
 /// # Why two reads and not one
 ///
 /// The obvious fix for `I-29` is a single check before the rebuild, and it does
-/// not close the race — it narrows it. `start` blocks on each held pump's
-/// handshake, up to a second, which is precisely the window a user needs to
-/// press `Esc`. A check that runs before that window cannot see a departure
-/// inside it.
+/// not close the race — it narrows it. `start` holds `SESSIONS` across a spawn
+/// loop that blocks on each pump's handshake, and a user can press `Esc` inside
+/// that window. A check that runs before it cannot see a departure inside it.
+///
+/// ⚠️ **The "up to a second" figure this argument is usually quoted with is
+/// ASSERTED, not measured.** It comes from ADR-0026's third amendment,
+/// consequence 2, which states it without a measurement beside it, and
+/// `quality-bars.md` §1 has no row for a rebuild at all. The direction is safe —
+/// a shorter block only narrows a race this already handles either way — but do
+/// not re-quote the number as though someone timed it. Raised by the independent
+/// review of this change; `UT-F-47` is the project's row on unstated
+/// preconditions like it.
 ///
 /// So the state is read on **both** sides of the rebuild:
 ///
@@ -686,37 +697,59 @@ pub(crate) enum Resync {
 /// * `false` after — what was just built is stopped again, which is the only
 ///   outcome that costs a wasted rebuild and the only one that was previously a
 ///   leak.
-/// * `true` after — the sessions are kept, and this is the case that needs the
-///   argument. Reading `true` means the read happened before any
-///   `sync_warm_sessions(false, …)` stored its flag; that function stores the
-///   flag **before** it calls `stop`, so any departure that has not been seen
-///   here has not yet stopped anything and still will. There is no interleaving
-///   that ends with sessions held and no `stop` coming.
+/// * `true` after — the sessions are kept. Reading `true` means the read
+///   happened before any `sync_warm_sessions(false, …)` stored its flag; that
+///   function stores the flag **before** it calls `stop`, so any departure that
+///   has not been seen here has not yet stopped anything and still will. No
+///   interleaving ends with sessions held and no `stop` coming.
 ///
-/// # Why a seam and not three lines inline
+/// # The second read is still not enough on its own, and the rest is not here
 ///
-/// `start` and `stop` need a live WGC session and a desktop, so an inline
-/// version of this is testable only on the rig — and the rig is where this
-/// project's warm-path checks have historically not run (`I-22`). Taking the two
-/// operations as closures makes all three outcomes assertable off-desktop,
-/// including [`Resync::Undone`], which is the one the fix is for and the one a
-/// hardware pass is least likely to hit on purpose. `I-17`'s rule, applied to
-/// both ends this time: the seam that makes a decision testable is worth nothing
-/// if the thing it decides about stays untestable.
+/// **That reasoning covers one direction and the first version of this function
+/// asserted it as if it covered both.** Deciding to stop and then stopping has a
+/// gap of its own, and a re-entry inside that gap gets its correct, freshly built
+/// sessions destroyed by a decision taken before they existed: Placement visible,
+/// nothing held, nothing scheduled to rebuild, and the next freeze silently on
+/// the cold path — `quality-bars.md` §1 measures that at 525–595 ms against
+/// 269–279 ms warm. It is the same defect facing the other way, and it is worse
+/// to notice, because no state is wrong, only absent.
+///
+/// So the undo is not a bare `stop`. It is [`uptake_capture::warm::stop_if`],
+/// which re-evaluates the condition **while holding the lock that mutates the
+/// session list**, so it and [`uptake_capture::warm::start`] cannot interleave:
+/// a `start` that lands first makes the condition false and its sessions
+/// survive; a `stop_if` that lands first empties the list and the `start`
+/// rebuilds. Found by the independent review of this change, which is what an
+/// independent review is for.
+///
+/// # Why a seam, and why the flag read is NOT a parameter
+///
+/// `start` and `stop_if` need a live WGC session and a desktop, so an inline
+/// version is testable only on the rig — and the rig is where this project's
+/// warm-path checks have historically not run (`I-22`). Taking them as closures
+/// makes all three outcomes assertable off-desktop, including [`Resync::Undone`],
+/// which is the one the fix is for and the one a hardware pass is least likely to
+/// hit on purpose.
+///
+/// **The visibility read was a fourth parameter and is not any more.** The review
+/// disconnected the whole fix by passing `|| true` at the single call site, with
+/// all 233 tests still green: `I-17`'s exact shape, in a change whose own comment
+/// claimed to have applied `I-17`'s rule to both ends. Reading
+/// [`placement_visible`] here, and **constructing the `stop_if` condition here**,
+/// puts both inside the region the tests drive, so a test moves the real flag and
+/// watches this function respond rather than watching a fake stand in for it.
 fn resync_guarded(
-    visible: impl Fn() -> bool,
     start: impl FnOnce() -> usize,
-    stop: impl FnOnce(),
+    stop_unless_placement: impl FnOnce(fn() -> bool) -> bool,
 ) -> Resync {
-    if !visible() {
+    if !placement_visible() {
         return Resync::Skipped;
     }
     let held = start();
-    if visible() {
-        Resync::Held(held)
-    } else {
-        stop();
+    if stop_unless_placement(|| !placement_visible()) {
         Resync::Undone
+    } else {
+        Resync::Held(held)
     }
 }
 
@@ -731,22 +764,28 @@ pub(crate) fn resync_warm_sessions(cursor: Option<Point>) -> Resync {
     if !warm_capture_enabled() {
         return Resync::Skipped;
     }
-    let scope = scope_for(cursor).for_warm();
+    let scope = scope_for(cursor);
     let outcome = resync_guarded(
-        placement_visible,
-        || uptake_capture::warm::start(scope),
-        uptake_capture::warm::stop,
+        || uptake_capture::warm::start(scope.for_warm()),
+        uptake_capture::warm::stop_if,
     );
     match outcome {
-        Resync::Held(held) => report_held(held),
-        // Printed unconditionally rather than behind a "verbose" idea, because
-        // this line is the evidence that `I-29`'s window is real and is being
-        // closed. A rig pass that never prints it has not exercised the fix.
+        // The scope is printed beside the count, and it is not decoration.
+        // Placement can exit and re-enter while this worker is inside `start`,
+        // and the rebuild it then reports as `Held` was built for the PREVIOUS
+        // visit's cursor. The count alone cannot show that; the point can, because
+        // a reader can compare it with the `placement: drag at (x, y)` lines
+        // around it. `UT-F-56` is this project's row about a per-sample figure
+        // that does not name its own conditions.
+        Resync::Held(held) => report_held(held, Some(scope)),
+        // Printed rather than left to be inferred, because this line is the
+        // evidence that `I-29`'s window is real and is being closed. A rig pass
+        // that never prints it has not exercised the fix.
         Resync::Undone => {
             #[cfg(debug_assertions)]
             eprintln!(
                 "freeze: warm sessions rebuilt for a Placement that had gone — stopped again \
-                 (I-29; the rebuild outlived the crossing that asked for it)"
+                 ({scope:?}; I-29, the rebuild outlived the crossing that asked for it)"
             );
         }
         Resync::Skipped => {}
@@ -771,16 +810,21 @@ pub(crate) fn resync_warm_sessions(cursor: Option<Point>) -> Resync {
 /// 2026-08-02 the count was computed, tested and never printed, so the one reader
 /// it was built for could not see it: `I-11`'s shape again, one field over from
 /// where it was fixed.
-fn report_held(held: usize) {
+fn report_held(held: usize, scope: Option<Scope>) {
     #[cfg(debug_assertions)]
     {
         let status = uptake_capture::warm::status();
+        // The scope is present on the deferred path and absent on the two
+        // transition callers, which know it from the state they just applied.
+        // Formatted as a suffix rather than a second line so a rig log stays one
+        // line per event.
+        let scope = scope.map_or_else(String::new, |scope| format!(" — {scope:?}"));
         eprintln!(
-            "freeze: warm sessions held for {held} monitor(s) — {} warm, {} unservable",
+            "freeze: warm sessions held for {held} monitor(s) — {} warm, {} unservable{scope}",
             status.warm, status.unservable
         );
     }
-    let _ = held;
+    let _ = (held, scope);
 }
 
 /// Releases [`FREEZING`] however [`freeze`] leaves — including by panic, which
@@ -1669,69 +1713,121 @@ mod tests {
         );
     }
 
-    // `I-29` — the deferred resync. `start` and `stop` need a live WGC session,
-    // so these drive `resync_guarded` with closures rather than the real pair;
-    // what is under test is the decision about *when* a rebuild is allowed to
-    // stand, which is the whole content of the fix.
+    // `I-29` — the deferred resync.
+    //
+    // `start` and `stop_if` need a live WGC session, so these drive
+    // `resync_guarded` with fakes for those two. **The visibility flag is the
+    // real one**, deliberately: it was a fourth closure parameter until the
+    // independent review passed `|| true` for it at the single call site and
+    // watched all 233 tests stay green. A fake there tests the fake.
+    //
+    // These therefore mutate a process-global and must be serial with each other.
+
+    /// The lock is what makes the flag tests serial. Same shape as
+    /// [`with_all_monitors`], and separate from it because the two globals are
+    /// independent and pairing them would serialise tests that need not be.
+    fn with_placement<T>(visible: bool, body: impl FnOnce() -> T) -> T {
+        static SERIAL: Mutex<()> = Mutex::new(());
+        let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        let restore = PLACEMENT_VISIBLE.swap(visible, Ordering::SeqCst);
+        let out = body();
+        PLACEMENT_VISIBLE.store(restore, Ordering::SeqCst);
+        out
+    }
 
     #[test]
     fn a_resync_whose_placement_has_already_gone_builds_nothing() {
-        let started = std::cell::Cell::new(false);
-        let outcome = resync_guarded(
-            || false,
-            || {
-                started.set(true);
-                1
-            },
-            || panic!("stopped something that was never started"),
-        );
-        assert_eq!(outcome, Resync::Skipped);
-        assert!(
-            !started.get(),
-            "the cheap pre-check is gone: a crossing that lost its race still paid for a rebuild"
-        );
+        with_placement(false, || {
+            let started = std::cell::Cell::new(false);
+            let outcome = resync_guarded(
+                || {
+                    started.set(true);
+                    1
+                },
+                |_| panic!("stopped something that was never started"),
+            );
+            assert_eq!(outcome, Resync::Skipped);
+            assert!(
+                !started.get(),
+                "the pre-check is gone: a crossing that lost its race still paid for a rebuild"
+            );
+        });
     }
 
     #[test]
     fn a_resync_inside_placement_keeps_what_it_built() {
-        let outcome = resync_guarded(
-            || true,
-            || 3,
-            || panic!("stopped the sessions it was asked to hold"),
-        );
-        assert_eq!(outcome, Resync::Held(3));
+        // The positive control. Without it every case here asserts a refusal, and
+        // a guard that refused everything would pass the rest of this section --
+        // which is `OS-F103`'s shape and the reason this test is not redundant.
+        with_placement(true, || {
+            let outcome = resync_guarded(
+                || 3,
+                |should_stop| {
+                    assert!(
+                        !should_stop(),
+                        "the undo condition is true while Placement is visible, so a correct \
+                         `stop_if` would tear down the sessions this resync just built"
+                    );
+                    false
+                },
+            );
+            assert_eq!(outcome, Resync::Held(3));
+        });
     }
 
     #[test]
     fn a_departure_during_the_rebuild_stops_what_the_rebuild_started() {
         // THE `I-29` CASE, and the one no pre-check alone can catch: Placement is
-        // up when the worker looks, and gone by the time `start` returns —
-        // `start` blocks on each pump's handshake for up to a second, which is
-        // ample time to press Esc. `visible` therefore answers true then false,
-        // which is the interleaving rather than a contrived one.
-        let reads = std::cell::Cell::new(0);
-        let stopped = std::cell::Cell::new(false);
-        let outcome = resync_guarded(
-            || {
-                let n = reads.get();
-                reads.set(n + 1);
-                n == 0
-            },
-            || 1,
-            || stopped.set(true),
-        );
-        assert_eq!(outcome, Resync::Undone);
-        assert!(
-            stopped.get(),
-            "sessions were left held over a hidden overlay -- `I-29` exactly, which is the \
-             leak this function exists to close"
-        );
-        assert_eq!(
-            reads.get(),
-            2,
-            "the state was read once, not on both sides of the rebuild -- a single read \
-             narrows this race and does not close it"
-        );
+        // up when the worker looks and gone by the time `start` returns. The
+        // departure is simulated by moving the REAL flag inside the fake `stop_if`,
+        // which is where `start`'s blocking window sits in production.
+        with_placement(true, || {
+            let outcome = resync_guarded(
+                || 1,
+                |should_stop| {
+                    PLACEMENT_VISIBLE.store(false, Ordering::SeqCst);
+                    let stop = should_stop();
+                    assert!(
+                        stop,
+                        "the undo condition is false after Placement has gone, so the sessions \
+                         stay held over a hidden overlay -- `I-29` exactly"
+                    );
+                    stop
+                },
+            );
+            assert_eq!(outcome, Resync::Undone);
+        });
+    }
+
+    #[test]
+    fn the_undo_asks_a_question_rather_than_carrying_an_answer() {
+        // The review's finding, pinned: deciding to stop and THEN stopping leaves
+        // a gap in which a re-entry's correct sessions are destroyed by a decision
+        // taken before they existed. `resync_guarded` must therefore hand the
+        // condition down unevaluated, so `warm::stop_if` can run it under the lock
+        // that mutates the session list.
+        //
+        // This asserts the shape rather than the atomicity: the atomicity lives in
+        // `uptake_capture::warm::stop_if` and is tested there. What can be caught
+        // here is a refactor that evaluates the condition early and passes a bool.
+        with_placement(true, || {
+            let outcome = resync_guarded(
+                || 1,
+                |should_stop| {
+                    // Placement is visible at entry, so the condition is false...
+                    assert!(!should_stop());
+                    // ...and must be re-derivable, not a value captured above.
+                    PLACEMENT_VISIBLE.store(false, Ordering::SeqCst);
+                    assert!(
+                        should_stop(),
+                        "the condition was evaluated once and frozen, so `stop_if` cannot \
+                         re-check it under the session lock and the re-entry race stays open"
+                    );
+                    false
+                },
+            );
+            assert_eq!(outcome, Resync::Held(1));
+        });
     }
 
     #[test]
@@ -1747,11 +1843,11 @@ mod tests {
             "the warm gate is on in the test process, so this test would call into WGC -- \
              see `both_gates_are_off_until_a_rig_says_otherwise`"
         );
-        let restore = placement_visible();
-        sync_warm_sessions(true, None);
-        assert!(placement_visible());
-        sync_warm_sessions(false, None);
-        assert!(!placement_visible());
-        PLACEMENT_VISIBLE.store(restore, Ordering::SeqCst);
+        with_placement(false, || {
+            sync_warm_sessions(true, None);
+            assert!(placement_visible());
+            sync_warm_sessions(false, None);
+            assert!(!placement_visible());
+        });
     }
 }

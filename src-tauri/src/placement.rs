@@ -950,7 +950,13 @@ fn resync_warm_off_thread(point: Point) {
             // `resync_warm_sessions` rather than `sync_warm_sessions(true, …)`:
             // this thread does not know that Placement is still up, it only
             // knows it was when the crossing was recorded. `I-29`.
-            crate::freeze::resync_warm_sessions(Some(next));
+            //
+            // The outcome is discarded on purpose and the `let _` says so: this
+            // worker has nothing to do differently for any of the three, and the
+            // operator's signal is the line `resync_warm_sessions` prints. The
+            // return value exists for the tests. `#[must_use]` on `Resync` is
+            // what makes this a decision rather than an oversight.
+            let _ = crate::freeze::resync_warm_sessions(Some(next));
         }
     });
 }
