@@ -49,6 +49,19 @@ jobs:
       - name: Unit tests
         run: pnpm test
 
+      # This repository is public, so its source is public writing: comments,
+      # doc comments and operator-visible strings included. A ratchet rather
+      # than a gate, because the rule landed against 1,187 pre-existing sites,
+      # and a check that fails the build on the day it arrives is a check
+      # somebody disables. The count may go down and never up.
+      #
+      # A step in the web job rather than a job of its own: it is a two-second
+      # Python run on a Linux runner that is already required, so it costs no
+      # new check to register in branch protection and no queue time on the
+      # Windows runners.
+      - name: Em-dash ratchet
+        run: python3 scripts/dash-ratchet.py
+
   # ---------------------------------------------------------------------------
   # Rust: format, lint, test. Windows because uptake-capture and the window
   # layer are Windows-only — checking on Linux would not compile the code that
