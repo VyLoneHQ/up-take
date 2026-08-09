@@ -1184,11 +1184,11 @@ struct ActiveMonitorPayload {
 
 /// Which monitor contains `point`, as an index into [`monitor_rects`].
 ///
-/// The scan is [`uptake_core::geometry::index_at`]'s. It was a fourth copy of
-/// that rule until 2026-08-09 — `I-30` names three and missed this one, which is
-/// its own point about copies being hard to count. Dead zones stay `None` here,
-/// because the caller is the placement badge and a badge on a guessed monitor is
-/// worse than no badge.
+/// The scan is [`uptake_core::geometry::index_at`]'s. It was one of five copies
+/// of that rule until 2026-08-09, and one `I-30` does not name — see that
+/// function's own table, which is the single place the count lives. Dead zones
+/// stay `None` here, because the caller is the placement badge and a badge on a
+/// guessed monitor is worse than no badge.
 pub(crate) fn monitor_index_at(point: Point) -> Option<usize> {
     uptake_core::geometry::index_at(monitor_rects(), point)
 }

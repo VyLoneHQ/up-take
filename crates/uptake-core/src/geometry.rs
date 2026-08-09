@@ -265,20 +265,37 @@ impl Monitor {
 ///
 /// # Why an index, and why this exists at all
 ///
-/// The rule was written four times. `monitor_at` below has carried it since task
-/// 1.6, with a property test and cases for dead zones, empty lists, shared
-/// edges, mixed DPI and negative coordinates; `overlay::monitor_index_at` and
-/// `output::monitor_at` each re-implemented the same `contains` scan against
-/// their own container, and `SPECS/quality-bars.md` §2 puts the 90 % property
-/// goal on **this crate**, so those copies were coverage that looked equivalent
-/// and was not (`I-30` — which counted three of the four).
+/// **The rule was written five times, and the count is the interesting part.**
+/// `monitor_at` below has carried it since task 1.6, with a property test and
+/// cases for dead zones, empty lists, shared edges, mixed DPI and negative
+/// coordinates. The other four each re-implemented the same `contains` scan
+/// against their own container:
+///
+/// | Copy | Found by |
+/// | --- | --- |
+/// | `output::monitor_at` | `I-30`, from the review of up-take #44 |
+/// | `overlay::monitor_index_at` | grepping for the predicate while closing `I-30` |
+/// | `precapture::monitor_holding` | the independent review of the branch that closed `I-30` |
+/// | `interaction::close_control`'s `home` | the same review |
+///
+/// **`I-30` itself named two of the five** — this function and `output::monitor_at`
+/// — since the third thing it lists is the scoped pair below, which the next
+/// paragraph explains is not a copy at all. Each pass found what the last one
+/// missed, which is the argument for one implementation rather than a rule
+/// everyone is asked to remember.
+///
+/// `SPECS/quality-bars.md` §2 is why two of them mattered more than the others:
+/// its property-test mandate and its 90 % coverage figure both sit on **this
+/// crate's** row, and `src-tauri` has no coverage row at all — so a containment
+/// rule living there had local tests that looked equivalent to a property test
+/// and were not.
 ///
 /// Taking bounds by iterator and returning an **index** is what lets one
 /// implementation serve all of them without a trait or a generic container: the
-/// callers hold `Monitor`, `MonitorInfo` and `Rect` respectively, and every one
-/// of them can produce bounds and index back into its own slice. `freeze::Scope`
-/// makes the same argument for the same reason — one rule, callers convert,
-/// nobody decides twice.
+/// callers hold `Monitor`, `MonitorInfo` and `Rect`, and every one of them can
+/// produce bounds and index back into its own slice. `freeze::Scope` makes the
+/// same argument for the same reason — one rule, callers convert, nobody decides
+/// twice.
 ///
 /// ⚠️ **`freeze::monitors_in_scope` and `warm::in_scope` are NOT copies of this
 /// and must not be folded into it.** They carry the widen-on-dead-zone rule,
@@ -556,8 +573,11 @@ mod tests {
         assert_eq!(index_at(rects, Point::new(1280, 720)), Some(1));
         assert_eq!(index_at(rects, Point::new(5000, 500)), Some(0));
         assert_eq!(index_at(rects, Point::new(-1000, 1800)), Some(2));
-        // Not a rearrangement of the same answer: position order and list order
-        // disagree here, so an implementation that sorted would fail all three.
+        // The three above are not a rearrangement of one answer: list order and
+        // position order disagree in this fixture, so an implementation that
+        // sorted before scanning would fail all three.
+        //
+        // And the dead zone, so the test is not satisfiable by "always Some".
         assert_eq!(index_at(rects, Point::new(9999, 9999)), None);
     }
 

@@ -90,11 +90,21 @@ use uptake_core::geometry::Rect;
 /// one: two enumerations, one decision, and any disagreement between them is a
 /// screenshot of a rectangle nobody asked for. That is `I-31`.
 ///
-/// **It is also the cheaper call, which is the half that is easy to miss.** Tao's
-/// `available_monitors()` is a `window_getter!` into `send_user_message`, so from
-/// any thread that is not the event-loop thread it posts to the event-loop proxy
-/// and blocks on `rx.recv()` with no timeout. This is a direct
-/// `EnumDisplayMonitors` on the calling thread.
+/// **It is also the cheaper call, which is the half that is easy to miss.**
+/// `WebviewWindow::available_monitors()` resolves in **`tauri-runtime-wry`
+/// 2.11.4** to `window_getter!` → `send_user_message` (`src/lib.rs:197-211`,
+/// `:2089`), which from any thread that is not the event-loop thread posts to
+/// the event-loop proxy and blocks on `rx.recv()` with no timeout. This is a
+/// direct `EnumDisplayMonitors` on the calling thread.
+///
+/// **The crate and the version are named because this claim is about somebody
+/// else's code and moves when they change it.** An earlier draft of this
+/// paragraph attributed it to *tao*, which contains neither `window_getter` nor
+/// `send_user_message` anywhere in its sources — tao's own `available_monitors`
+/// is a direct call with no proxying, and the blocking round trip is Tauri's
+/// wrapper. Caught by the independent review of `I-31`. `UT-F-51`'s rule is that
+/// a claim naming a specific dependency or API is checkable in one command at
+/// the time it is written; this comment cited that rule while breaking it.
 ///
 /// **Coordinates are physical pixels only in a per-monitor-DPI-aware process.**
 /// The UP-TAKE app is one because tao opts in; a standalone binary using this

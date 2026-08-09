@@ -252,10 +252,14 @@ pub(crate) fn grab_monitor(app: &AppHandle) {
 /// list and receive pixels clamped to the other, which is a screenshot of
 /// something nobody asked for and is not detectable from the image.
 ///
-/// It is also the cheaper call. Tao's `available_monitors()` posts to the
-/// event-loop proxy and blocks on `rx.recv()` with no timeout from any thread
-/// that is not the event-loop thread, which is exactly what this worker is;
-/// `enumerate_monitors` is a direct Win32 call on the calling thread.
+/// It is also the cheaper call. `WebviewWindow::available_monitors()` resolves
+/// in **`tauri-runtime-wry` 2.11.4** to `window_getter!` → `send_user_message`
+/// (`src/lib.rs:197-211`, `:2089`), which posts to the event-loop proxy and
+/// blocks on `rx.recv()` with no timeout from any thread that is not the
+/// event-loop thread — exactly what this worker is.
+/// [`uptake_capture::enumerate_monitors`] is a direct `EnumDisplayMonitors` on
+/// the calling thread. **Not tao's**, which has no such indirection; that
+/// function's own docs record why the distinction is spelled out.
 ///
 /// **No fallback if the enumeration fails, deliberately.** A `CaptureError` here
 /// means `EnumDisplayMonitors` failed, and the reasoning above applies with more
@@ -1344,7 +1348,7 @@ mod tests {
             (0x20, Rect::new(-1080, 0, 1080, 1920)),
         ]
         .into_iter()
-        .map(|(handle, bounds)| MonitorInfo { handle, bounds })
+        .map(|(handle, bounds)| MonitorInfo::new(handle, bounds))
         .collect()
     }
 
