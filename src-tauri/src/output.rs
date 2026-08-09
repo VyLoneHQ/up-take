@@ -33,7 +33,7 @@ use std::time::Instant;
 use tauri::{AppHandle, Manager};
 use uptake_core::area::AreaId;
 use uptake_core::bitmap::RgbaBitmap;
-use uptake_core::geometry::Rect;
+use uptake_core::geometry::{Point, Rect};
 
 use windows_capture::encoder::{ImageEncoder, ImageEncoderPixelFormat, ImageFormat};
 use windows_sys::Win32::Foundation::{GlobalFree, HWND, SYSTEMTIME};
@@ -84,6 +84,19 @@ fn export_source(
         // Capture and encode both stay at 0 ms, which is the honest reading: this
         // path does neither. It also keeps the §1 budget lines meaningful — a
         // pinned export is not a measurement of the capture pipeline.
+        // **`bounds` is deliberately NOT recorded here, and that is the whole
+        // point of the field.** `bounds` is the area's rectangle *now*; `pinned`
+        // is the capture taken when the area was created, and 1.17(a) made areas
+        // movable and resizable afterwards (see this function's own docs above).
+        // So on a moved or resized area the two describe different pixels, and a
+        // line naming one beside the byte length of the other is the
+        // misattribution `UT-F-56` exists to end, reintroduced by its own fix.
+        //
+        // The stored capture's *size* is recoverable from `pinned.0`; its origin
+        // is not stored at all, so there is no rectangle to print. `stage_line`
+        // renders `None` by omitting the field rather than inventing one.
+        split.source = Source::Pinned;
+        split.encoded_bytes = pinned.1.len();
         return Ok(pinned);
     }
     capture(bounds, split)
@@ -116,6 +129,140 @@ pub(crate) fn copy_to_clipboard(app: &AppHandle, area: AreaId, bounds: Rect) {
         crate::overlay::emit_flash(app, area);
     }
     report("copy", started, &split, outcome);
+}
+
+/// Copies the whole monitor under the cursor to the clipboard, with no placement
+/// gesture at all (roadmap task **1.9e**, [ADR-0014] section 4).
+///
+/// # What this deliberately does not do
+///
+/// It does not summon, show, or change the overlay's state. The feature is
+/// defined as the path with no gesture, so bringing the overlay up first would
+/// reintroduce the thing it exists to remove. It follows that the grab works
+/// from the tray, with nothing on screen, which is the normal case rather than
+/// an edge one.
+///
+/// It writes no file. `PRODUCT-VISION` section 8 is clipboard only by default,
+/// and Save is a separate explicit action; a grab that also littered
+/// `Pictures\UP-TAKE\` would be that decision reversed by a new entry point.
+///
+/// # It takes the COLD capture path, always, and that is a decision
+///
+/// [`crate::freeze`]'s warm sessions are *intended* to be held **only while
+/// Placement is visible**, which is exactly the state this feature does not
+/// require, so for the usage 1.9e is defined by there is normally no warm
+/// session to hand over.
+///
+/// ⚠️ **That invariant is intended and NOT enforced, found by this branch's own
+/// independent review.** `placement::resync_warm_off_thread` spawns a detached
+/// worker that calls `freeze::sync_warm_sessions(true, …)` with `is_placement`
+/// hard-coded, re-reads no state and can be cancelled by nothing. Leave
+/// Placement between a monitor crossing and that worker's next pass and
+/// `warm::start` runs *after* `apply`'s `warm::stop`, leaving sessions held with
+/// the overlay hidden until the next Placement exit. It predates this change,
+/// it needs `UPTAKE_WARM_CAPTURE`, and ADR-0026's third amendment intends to
+/// make that the default, at which point this becomes reachable by default.
+/// **This function does not depend on the invariant** — it never reads a warm
+/// frame on any path — so the race costs held sessions rather than wrong pixels.
+/// The reasoning below is why it does not read one, and it stands either way.
+///
+/// The grab could still use a warm session on the rarer in-Placement press, and
+/// does not, for two reasons:
+///
+/// 1. **One behaviour, one number.** A path that is fast in one state and slow
+///    in another produces rig figures that cannot be read without knowing which
+///    state produced them, and `UT-F-47` is this project's record of exactly
+///    that being got wrong.
+/// 2. **A warm frame has no freshness bound here.** [`crate::freeze`] can go
+///    without one because the user selects *on the still they are looking at*;
+///    a grab hands back pixels the user never saw, which is
+///    [`crate::precapture`]'s situation, and that path is bounded at 750 ms by
+///    [ADR-0022] section 3 for this reason. Reaching for the warm frame without
+///    settling that bound would be the same hazard with no rule attached.
+///
+/// **The honest consequence, stated rather than discovered on the rig:** this
+/// inherits `UT-F-45` whole. The pixels are the desktop roughly 350 ms after the
+/// key, because a WGC device, item, pool and session are all built before the
+/// compositor is asked for a frame. For a grab of a page you are reading that is
+/// a delay; for a grab of something disappearing it is the wrong moment. Making
+/// it instant needs a warm session held **outside** Placement, which is a
+/// standing cost in every state and is a decision this function is not entitled
+/// to take.
+///
+/// [ADR-0014]: the private planning repo's
+/// `DECISIONS/ADR-0014-capture-and-render-over-live-content.md`
+/// [ADR-0022]: the private planning repo's
+/// `DECISIONS/ADR-0022-hold-a-frame-and-crop.md`
+pub(crate) fn grab_monitor(app: &AppHandle) {
+    // Read here, on the caller's thread, before the spawn. Same reason
+    // `overlay::toggle_freeze` reads it before spawning: this is the cursor at
+    // the moment the key was pressed, and the worker starts late enough that the
+    // pointer can already have crossed onto another monitor. Reading it inside
+    // the thread would grab whichever screen the mouse drifted to.
+    let cursor = crate::placement::real_cursor(app);
+    let app = app.clone();
+    // Spawned for the reason the module docs give: a capture is 100-300 ms even
+    // warm, and this handler runs on the event-loop thread, which is also the
+    // thread the mouse hook's callback runs on.
+    std::thread::spawn(move || {
+        let started = Instant::now();
+        let mut split = Split::default();
+        let outcome = grab_target(&app, cursor).and_then(|monitor| {
+            let (bitmap, png) = capture(monitor, &mut split)?;
+            let publish = Instant::now();
+            let result = dibv5_bytes(&bitmap)
+                .and_then(|dib| publish_clipboard(overlay_hwnd(&app)?, &dib, &png));
+            split.publish_ms = publish.elapsed().as_millis();
+            result
+        });
+        report("grab", started, &split, outcome);
+    });
+}
+
+/// The monitor a grab should capture: the one containing `cursor`.
+///
+/// # Why a failure here is an error and not a fallback
+///
+/// [`crate::freeze::monitors_in_scope`] answers the same question for a freeze
+/// and falls back to **every** monitor when the cursor is unreadable or lands in
+/// a dead zone, because a freeze can cover several screens and doing nothing
+/// would be indistinguishable from the key not arriving.
+///
+/// A grab cannot borrow that. There is exactly one clipboard, so "every monitor"
+/// has no meaning here, and the natural substitutes (the primary display, the
+/// first enumerated one) would hand back a screenshot of a monitor the user was
+/// not pointing at. **That is this project's see-one-thing-get-another failure**,
+/// which `F-38` and the moved-area export defect above are both instances of,
+/// and it is quiet: the result is a plausible image of the right size.
+///
+/// So the grab declines and says why. The cursor being on no monitor at all is
+/// close to unreachable in practice, since Windows keeps the pointer on a
+/// display, and the remaining case is a cursor read that failed.
+fn grab_target(app: &AppHandle, cursor: Option<Point>) -> Result<Rect, String> {
+    monitor_at(&crate::overlay::fresh_monitor_rects(app)?, cursor)
+}
+
+/// The rule [`grab_target`] applies, with the enumeration taken as an argument.
+///
+/// Split out because [`grab_target`] needs an `AppHandle` and therefore a running
+/// Tauri application, which no unit test can build. Leaving the rule inside it
+/// would have made the only reachable test one that asserts a rectangle contains
+/// its own centre, which is backlog `I-1`'s sweep defect and `UT-F-44`'s
+/// tautology in one: true for any input, red for none.
+fn monitor_at(monitors: &[Rect], cursor: Option<Point>) -> Result<Rect, String> {
+    let cursor = cursor.ok_or_else(|| "the cursor position could not be read".to_string())?;
+    monitors
+        .iter()
+        .find(|bounds| bounds.contains(cursor))
+        .copied()
+        .ok_or_else(|| {
+            format!(
+                "the cursor at ({}, {}) is on none of the {} monitor(s) enumerated",
+                cursor.x,
+                cursor.y,
+                monitors.len()
+            )
+        })
 }
 
 /// Writes an area's image to `Pictures\UP-TAKE\`, creating the directory on first
@@ -157,6 +304,29 @@ struct Split {
     /// Whatever the action does with the bytes: the DIB conversion plus the
     /// clipboard bracket for Copy, the file write for Save.
     publish_ms: u128,
+    /// The rectangle the pixels came from, and the size of what was encoded.
+    ///
+    /// # Both exist because a line without them cost a rig pass
+    ///
+    /// `UT-F-56`, 2026-08-08. Task 1.9e's first hardware run produced five grabs
+    /// at 372, 516, 466, 338 and 340 ms across at least three different screens,
+    /// and **nothing in the log said which was which**, so §1's row for the
+    /// gesture could not be filled in and the pass has to be repeated. The
+    /// freeze's own per-monitor line has printed both fields since 1.9g and is
+    /// readable for exactly that reason.
+    ///
+    /// **The bar these feed is content-dependent**, which is what makes this
+    /// mandatory rather than nice: `quality-bars.md` §1 footnote 3 requires a run
+    /// to state the screen it ran against, and the encoded byte length is how a
+    /// run states it without trusting the operator's memory. `UT-F-47` is the
+    /// finding that rule comes from, and this field is that finding's second
+    /// instance being closed rather than recorded again.
+    ///
+    /// `bounds` is `None` only where nothing was captured, which is a failure
+    /// before the rectangle is known.
+    bounds: Option<Rect>,
+    /// Length of the encoded image, in bytes. Zero when nothing was encoded.
+    encoded_bytes: usize,
     /// Where the pixels came from. Reported on every line, because
     /// `capture 0 ms` is ambiguous on its own — it is what both the fast path
     /// and a pinned export produce — and "which path ran" is the first question
@@ -167,10 +337,21 @@ struct Split {
 /// Which of the routes to a Screenshot's pixels actually ran.
 #[derive(Default, Clone, Copy)]
 enum Source {
-    /// A live `capture_region` with no fast path attempted: the pinned export,
-    /// and every action that is not a create.
+    /// A live `capture_region` with no fast path attempted: every action that is
+    /// not a create.
+    ///
+    /// **This used to say "the pinned export" too, and that was wrong** — a
+    /// pinned export captures nothing, so reporting it as a live capture named
+    /// the one path that does no work as the path that does the most. Harmless
+    /// while no rectangle was printed beside it and actively misleading once one
+    /// was (`UT-F-56`'s fix), which is what surfaced it. See [`Self::Pinned`].
     #[default]
     Live,
+    /// The area's stored capture, taken when it was created and re-encoded by
+    /// nothing. Capture and encode are both 0 ms because this path performs
+    /// neither, and **no rectangle is reported**: the area may have moved or
+    /// been resized since, so its current bounds do not describe these pixels.
+    Pinned,
     /// Cropped out of the frame held since mouse-down (task 1.9c).
     Held,
     /// Cropped out of the frozen still the user was looking at (task 1.9d).
@@ -188,6 +369,7 @@ impl std::fmt::Display for Source {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Live => write!(f, "live capture"),
+            Self::Pinned => write!(f, "pinned capture, not re-taken"),
             Self::Held => write!(f, "held frame"),
             Self::Frozen => write!(f, "frozen still"),
             Self::Fell(reason) => write!(f, "live capture — fell back: {reason}"),
@@ -205,6 +387,12 @@ fn capture(bounds: Rect, split: &mut Split) -> Result<(RgbaBitmap, Vec<u8>), Str
     let encode = Instant::now();
     let png = encode_png(&captured.bitmap)?;
     split.encode_ms = encode.elapsed().as_millis();
+    // What the capture crate reports it took, never what was asked for: it clamps
+    // to the virtual desktop, and the log would otherwise name a rectangle that
+    // was not captured. `freeze::capture_still` records the same distinction for
+    // the same reason.
+    split.bounds = Some(captured.rect);
+    split.encoded_bytes = png.len();
     Ok((captured.bitmap, png))
 }
 
@@ -239,6 +427,8 @@ fn capture_or_crop(bounds: Rect, split: &mut Split) -> Result<(RgbaBitmap, Vec<u
         let encode = Instant::now();
         let png = encode_png(&bitmap)?;
         split.encode_ms = encode.elapsed().as_millis();
+        split.bounds = Some(bounds);
+        split.encoded_bytes = png.len();
         return Ok((bitmap, png));
     }
     match crate::precapture::take(bounds) {
@@ -252,6 +442,8 @@ fn capture_or_crop(bounds: Rect, split: &mut Split) -> Result<(RgbaBitmap, Vec<u
             let encode = Instant::now();
             let png = encode_png(&bitmap)?;
             split.encode_ms = encode.elapsed().as_millis();
+            split.bounds = Some(bounds);
+            split.encoded_bytes = png.len();
             Ok((bitmap, png))
         }
         Err(reason) => {
@@ -353,15 +545,43 @@ fn encode_as(bitmap: &RgbaBitmap, format: ImageFormat, name: &str) -> Result<Vec
 /// after the fact (F-29's lesson): a capture alone measured ~190–230 ms warm,
 /// leaving little room before the 300 ms target and less before the 600 ms
 /// hard fail.
+/// The stage breakdown a reader of a rig log actually parses.
+///
+/// # A pure function because the alternative was unverifiable
+///
+/// This was inlined in [`report`], which writes to stderr and returns nothing,
+/// so the only way to check the line was to run the app and read a console.
+/// That is how `UT-F-56` shipped: the line was missing the two fields the bar it
+/// serves depends on, and no test could have said so. Splitting it out is what
+/// lets the assertions below name the fields, so a later edit that drops one
+/// goes red instead of costing another rig pass.
+///
+/// **The rectangle and the byte length lead**, because they are the run's
+/// description of its own conditions and the timings are meaningless without
+/// them (`quality-bars.md` §1 footnote 3, `UT-F-47`).
+fn stage_line(split: &Split) -> String {
+    let where_from = match split.bounds {
+        Some(rect) => format!(
+            "{}x{} at ({}, {}) — ",
+            rect.size.width, rect.size.height, rect.origin.x, rect.origin.y
+        ),
+        // Reached only when the capture itself failed, so there is no rectangle
+        // to name. Printing a placeholder would be worse than the gap: a reader
+        // scanning for the monitor would find one.
+        None => String::new(),
+    };
+    format!(
+        "{where_from}capture {} ms, encode {} ms, publish {} ms, {} bytes ({})",
+        split.capture_ms, split.encode_ms, split.publish_ms, split.encoded_bytes, split.source
+    )
+}
+
 fn report(action: &str, started: Instant, split: &Split, outcome: Result<(), String>) {
     let elapsed = started.elapsed().as_millis();
     // The split rides along with every budget line, not just the debug one:
     // the whole point (ADR-0022) is that "it was 320 ms" is not actionable and
     // "capture 210, encode 25, publish 80" is.
-    let stages = format!(
-        "capture {} ms, encode {} ms, publish {} ms ({})",
-        split.capture_ms, split.encode_ms, split.publish_ms, split.source
-    );
+    let stages = stage_line(split);
     match outcome {
         Ok(()) => {
             if elapsed > BUDGET_HARD_FAIL_MS {
@@ -1048,6 +1268,111 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The dev rig, in the same order and the same coordinates `freeze`'s tests
+    /// use: a 2560x1440 primary, two 1920x1080 to its right, and a portrait
+    /// 1080x1920 at a negative origin.
+    ///
+    /// Copied rather than shared because the two modules assert different rules
+    /// against it and a shared fixture would couple them; the negative origin is
+    /// the part that earns its keep in both.
+    fn rig() -> Vec<uptake_core::geometry::Rect> {
+        use uptake_core::geometry::Rect;
+        vec![
+            Rect::new(0, 0, 2560, 1440),
+            Rect::new(2560, 0, 1920, 1080),
+            Rect::new(4480, 0, 1920, 1080),
+            Rect::new(-1080, 0, 1080, 1920),
+        ]
+    }
+
+    #[test]
+    fn a_grab_takes_the_monitor_the_cursor_is_on() {
+        use uptake_core::geometry::{Point, Rect};
+        // Every monitor, not just a convenient one: picking the first would pass
+        // against an implementation that always returns `monitors[0]`, which is
+        // the shape `UT-F-44` records as a test that cannot go red.
+        for expected in rig() {
+            let inside = Point::new(
+                expected.origin.x + i32::try_from(expected.size.width).unwrap() / 2,
+                expected.origin.y + i32::try_from(expected.size.height).unwrap() / 2,
+            );
+            assert_eq!(monitor_at(&rig(), Some(inside)), Ok(expected));
+        }
+        // The negative-origin monitor specifically, at a point that is *not* its
+        // centre: a sign error in containment survives a centre-only test on a
+        // symmetric layout.
+        assert_eq!(
+            monitor_at(&rig(), Some(Point::new(-1000, 1800))),
+            Ok(Rect::new(-1080, 0, 1080, 1920))
+        );
+    }
+
+    #[test]
+    fn a_grab_declines_rather_than_guessing() {
+        use uptake_core::geometry::Point;
+        // A cursor that could not be read. The freeze widens to every monitor
+        // here; a grab has one clipboard and no defensible widening, so it must
+        // refuse. Asserted on the *behaviour*, not the message.
+        assert!(monitor_at(&rig(), None).is_err());
+        // The dead zone: below the portrait monitor's neighbours and outside all
+        // four. Returning any monitor here is the see-one-thing-get-another
+        // failure, so the refusal is the feature.
+        assert!(monitor_at(&rig(), Some(Point::new(3000, 1300))).is_err());
+        // And an empty enumeration, which is what `fresh_monitor_rects` would
+        // produce if the monitor list could be read but was somehow empty.
+        assert!(monitor_at(&[], Some(Point::new(0, 0))).is_err());
+    }
+
+    #[test]
+    fn the_decline_message_names_what_was_looked_at() {
+        use uptake_core::geometry::Point;
+        // The only signal a rig operator gets when a grab does nothing, since
+        // there is no on-screen acknowledgement yet. A message that said only
+        // "no monitor" would leave them unable to tell a bad cursor read from a
+        // bad monitor list.
+        let error = monitor_at(&rig(), Some(Point::new(3000, 1300))).unwrap_err();
+        assert!(error.contains("3000"), "{error}");
+        assert!(error.contains("1300"), "{error}");
+        // The count, with its noun. `contains('4')` was the first version and it
+        // passed for 4, 14, 40 and a hardcoded literal alike: a check whose
+        // falsifying input is hard to name is one of `A3`'s greens that could
+        // not have been earned.
+        assert!(error.contains("4 monitor(s)"), "{error}");
+    }
+
+    #[test]
+    fn a_stage_line_names_the_monitor_and_the_byte_length() {
+        use uptake_core::geometry::Rect;
+        // UT-F-56: five grabs across three screens were indistinguishable in the
+        // log because these two fields were absent. Each is asserted by the value
+        // a reader would look for, so dropping one goes red here rather than on
+        // the founder's next rig evening.
+        let split = Split {
+            capture_ms: 254,
+            encode_ms: 38,
+            publish_ms: 79,
+            bounds: Some(Rect::new(0, 0, 2560, 1440)),
+            encoded_bytes: 86_113,
+            source: Source::Live,
+        };
+        let line = stage_line(&split);
+        assert!(line.contains("2560x1440"), "no monitor size: {line}");
+        assert!(line.contains("at (0, 0)"), "no monitor origin: {line}");
+        assert!(line.contains("86113 bytes"), "no byte length: {line}");
+        assert!(line.contains("capture 254 ms"), "{line}");
+        assert!(line.contains("live capture"), "{line}");
+    }
+
+    #[test]
+    fn a_stage_line_omits_the_rectangle_rather_than_inventing_one() {
+        // The capture failed, so no rectangle is known. A placeholder would be
+        // worse than the gap: a reader scanning the log for the monitor would
+        // find one and believe it.
+        let line = stage_line(&Split::default());
+        assert!(!line.contains(" at ("), "invented a rectangle: {line}");
+        assert!(line.contains("0 bytes"), "{line}");
     }
 
     #[test]

@@ -35,7 +35,17 @@
 //! ```
 //!
 //! Options: `--seconds N` (cost window, default 8), `--shots N` (simulated
-//! keypresses, default 5), `--cold` (the control — see below).
+//! keypresses, default 5), `--cold` (the control — see below), `--monitors N`
+//! (hold the first N enumerated instead of every one, default all).
+//!
+//! **`--monitors 1` is what ADR-0026's third amendment needs.** That amendment
+//! flips the warm path to the default only if the *narrowed* configuration lands
+//! at or under **+0.25 pp** still and **under +0.40 pp** video, measured with
+//! this instrument and against the same two conditions that produced the
+//! whole-desktop +0.62 / +0.94 pp. Until 2026-08-08 this program could only hold
+//! every monitor, so that condition could not be run at all and dividing four by
+//! four is the arithmetic model the amendment explicitly refuses (`F-39`,
+//! `UT-F-53`). Run the same four-run matrix below with `--monitors 1`.
 //!
 //! **Run it four times.** The conditions are the measurement, and no single run
 //! answers anything:
@@ -513,28 +523,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut seconds = 8u64;
     let mut shots = 5usize;
     let mut cold = false;
+    let mut limit: Option<usize> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--cold" => cold = true,
             "--seconds" => seconds = args.next().unwrap_or_default().parse()?,
             "--shots" => shots = args.next().unwrap_or_default().parse()?,
+            "--monitors" => limit = Some(args.next().unwrap_or_default().parse()?),
             other => return Err(format!("unknown argument {other}").into()),
         }
     }
     let window = Duration::from_secs(seconds);
 
     let cores = std::thread::available_parallelism().map_or(1.0, |n| n.get() as f64);
-    let monitors = Monitor::enumerate()?;
+    let mut monitors = Monitor::enumerate()?;
     if monitors.is_empty() {
         return Err("no monitors enumerated".into());
     }
+    // `--monitors N` holds the first N enumerated rather than all of them.
+    //
+    // Added 2026-08-08 because ADR-0026's third amendment holds the warm-path
+    // default flip behind a measurement of the NARROWED configuration, taken
+    // "with the same instrument and the same two conditions" as the +0.62 /
+    // +0.94 pp figures — and this program had no way to hold fewer than every
+    // monitor, so that release condition was unexecutable from the day it was
+    // written. `UT-F-50` is this project's record of an owed rig check that
+    // reads like work nobody got round to and could not have been performed.
+    //
+    // **The first N, not the cursor's, and the difference is stated rather than
+    // hidden.** The app narrows to the monitor under the pointer, which moves; a
+    // fixed subset is what makes two runs comparable, which is this program's
+    // whole job. So a run here is not a simulation of the app's behaviour, it is
+    // a measurement of what holding N sessions costs.
+    //
+    // The startup line names the exact monitors held. A subset that did not say
+    // which subset would be `UT-F-46` and `UT-F-56` in one: a number nobody can
+    // attribute to a configuration.
+    if let Some(count) = limit {
+        if count == 0 || count > monitors.len() {
+            return Err(format!(
+                "--monitors {count} is out of range: {} monitor(s) enumerated",
+                monitors.len()
+            )
+            .into());
+        }
+        monitors.truncate(count);
+    }
 
     println!(
-        "warm_session — {} mode, {} monitor(s), {seconds}s cost window, {shots} shot(s), \
+        "warm_session — {} mode, {} monitor(s){}, {seconds}s cost window, {shots} shot(s), \
          {cores:.0} logical cores",
         if cold { "COLD (control)" } else { "WARM" },
         monitors.len(),
+        match limit {
+            Some(count) => format!(" (--monitors {count}, the first {count} enumerated)"),
+            None => " (every monitor)".to_string(),
+        },
     );
     println!(
         "  Both CPU figures are percent of ONE core, matching quality-bars.md §1 — so \
