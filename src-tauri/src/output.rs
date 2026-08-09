@@ -148,23 +148,27 @@ pub(crate) fn copy_to_clipboard(app: &AppHandle, area: AreaId, bounds: Rect) {
 ///
 /// # It takes the COLD capture path, always, and that is a decision
 ///
-/// [`crate::freeze`]'s warm sessions are *intended* to be held **only while
-/// Placement is visible**, which is exactly the state this feature does not
-/// require, so for the usage 1.9e is defined by there is normally no warm
-/// session to hand over.
+/// [`crate::freeze`]'s warm sessions are held **only while Placement is
+/// visible**, which is exactly the state this feature does not require, so for
+/// the usage 1.9e is defined by there is normally no warm session to hand over.
+/// (This said *intended* to be held, which was accurate for one day and is not
+/// now — see below. A skim that stops at this paragraph should not come away
+/// with the superseded reading.)
 ///
-/// ⚠️ **That invariant is intended and NOT enforced, found by this branch's own
-/// independent review.** `placement::resync_warm_off_thread` spawns a detached
-/// worker that calls `freeze::sync_warm_sessions(true, …)` with `is_placement`
-/// hard-coded, re-reads no state and can be cancelled by nothing. Leave
-/// Placement between a monitor crossing and that worker's next pass and
-/// `warm::start` runs *after* `apply`'s `warm::stop`, leaving sessions held with
-/// the overlay hidden until the next Placement exit. It predates this change,
-/// it needs `UPTAKE_WARM_CAPTURE`, and ADR-0026's third amendment intends to
-/// make that the default, at which point this becomes reachable by default.
-/// **This function does not depend on the invariant** — it never reads a warm
-/// frame on any path — so the race costs held sessions rather than wrong pixels.
-/// The reasoning below is why it does not read one, and it stands either way.
+/// ✅ **That invariant was intended and NOT enforced when this was written, and
+/// it is enforced now** — `I-29`, found by this branch's own independent review
+/// and fixed 2026-08-09, before the warm default flips (founder-sequenced).
+/// `placement::resync_warm_off_thread` spawns a detached worker, and it used to
+/// call `freeze::sync_warm_sessions(true, …)` with `is_placement` hard-coded, so
+/// leaving Placement between a monitor crossing and that worker's next pass ran
+/// `warm::start` *after* `apply`'s `warm::stop` and left sessions held with the
+/// overlay hidden. The worker now reads the state on both sides of the rebuild
+/// and stops what it built if Placement went while it was blocked
+/// (`freeze::resync_guarded`).
+/// **This function did not depend on the invariant either way** — it never reads
+/// a warm frame on any path — so the race cost held sessions rather than wrong
+/// pixels. The reasoning below is why it does not read one, and it stands
+/// unchanged.
 ///
 /// The grab could still use a warm session on the rarer in-Placement press, and
 /// does not, for two reasons:
@@ -937,6 +941,26 @@ mod tests {
         // before it deflates them, so hard-edged vertical bands are nearly as
         // compressible as a flat field. A control that lands on top of one of
         // the endpoints does not falsify anything.
+        //
+        // ⚠️ **Those three figures are the BANDS ERA and 896245 is not what this
+        // generator produces today** — `examples/testscreen/README.md` records
+        // 895,515 for the same screen, the two disagreed from the commit that
+        // introduced both (`494b26a`), and the row for it is `I-24`. **The cause
+        // is the line below rather than a typo, and it was measured rather than
+        // reasoned about:** `block_colours` is built unconditionally, before the
+        // `match kind`, so on the dense path it consumes 12,000 draws of this
+        // shared `next` before the pixel loop starts and the dense stream begins
+        // somewhere else. Building it only for the blocks branch reproduces
+        // **896245 exactly**, which is what dates the figure rather than merely
+        // explaining it. The README is current; this paragraph is history and is
+        // labelled as history instead of being edited to match, because the
+        // numbers are the evidence for the argument they sit inside.
+        //
+        // Leave the unconditional build alone: `block_colours` before the loop is
+        // what keeps this function one pass, and the two published figures
+        // (`plain 1,987`, `blocks 23,065`) are both current under it. The one
+        // thing that would be wrong is a fourth copy of the table here, which is
+        // what `I-20` closed.
         const BLOCK: usize = 8;
         let width = size.width as usize;
         let blocks_across = width.div_ceil(BLOCK);
