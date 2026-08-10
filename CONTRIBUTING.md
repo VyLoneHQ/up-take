@@ -79,8 +79,18 @@ colon, a full stop, or parentheses. Ranges take a plain hyphen (`1084-1099`) or 
 `scripts/dash-ratchet.py` runs in CI and fails if the repository-wide count goes up. It is a
 **ratchet**: the count may go down and never up, because the rule arrived against about twelve
 hundred pre-existing characters, and a check that fails the build on the day it lands is a check
-somebody disables. If your change lowers the count, run
-`python scripts/dash-ratchet.py --write-baseline` and commit the result, so the ground stays gained.
+somebody disables. **If your change lowers the count it will also fail**, telling you to run
+`python scripts/dash-ratchet.py --write-baseline` and commit the result. That is not pedantry: an
+unbanked improvement is headroom, and the next change can spend it while the check reports no
+regression.
+
+**What the ratchet does NOT do, because the first version of this section claimed it did.** It does
+not refuse a new dash on its own. It compares one repository-wide total against one ceiling, so a
+change that adds a dash to a new comment and removes one somewhere else passes green. What it
+guarantees is that the repository never gets worse in total and that every tranche of cleanup is
+permanent. Refusing a newly added dash needs a diff-aware check, which is a different program,
+because it has to tell an added line from a moved one. **So the rule above binds you and the script
+is not what enforces it.**
 
 **Picking the replacement is the whole job, and there is no single right answer.** It depends on what
 the clause after the dash is doing:
@@ -92,12 +102,16 @@ the clause after the dash is doing:
 | an independent thought | a full stop, and start a new sentence |
 | an aside | parentheses, or cut it |
 
-Never a hyphen. It reads as a typo, and it is what a find and replace reaches for.
+Never a hyphen **as the replacement for a dash**. It reads as a typo, and it is what a find and
+replace reaches for. A hyphen in a *range* is a different thing and is the correct form: `1084-1099`,
+as the rule at the top of this section says. The two sentences used to sit eighteen lines apart with
+nothing reconciling them, which an independent review read as a contradiction.
 
 **If the character is data rather than punctuation**, inside a parsed string, a path, an identifier,
 or a fixture a test compares byte for byte, do not change it. Add the file to `EXEMPT` in the script
-with the reason it is data. An entry with a blank reason is refused, and so is one naming a path that
-does not exist.
+with the reason it is data. An entry with a blank reason is refused, and so is one naming a path git
+does not track. Untracked is the test, not "does not exist": a file sitting in your working tree that
+you have not added is refused too, and the message says so.
 
 **An exemption does not lower the count.** Exempt files are still counted, so the total cannot be cut
 by declaring a file out of scope. What an exemption sets is the **floor**: the number the count can

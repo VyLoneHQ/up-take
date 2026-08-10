@@ -154,6 +154,59 @@ class RatchetCase(unittest.TestCase):
         code, out, _ = run_main(self.repo, "--against", "reference")
         self.assertEqual(code, 0, out)
 
+    # -- a tranche is not permanent unless the bound comes down with it -------
+
+    def test_a_sweep_that_does_not_bank_is_refused(self):
+        """Below the ceiling is a failure: unbanked ground can be spent again."""
+        self.write_prose(5)
+        self.write_baseline(5)
+        self.commit("five")
+        git(self.repo, "branch", "reference")
+        self.write_prose(1)  # swept, baseline deliberately left at 5
+
+        code, _, err = run_main(self.repo, "--against", "reference")
+        self.assertEqual(code, 1, "an unbanked sweep must be refused")
+        self.assertIn("REFUSED", err)
+        self.assertIn("--write-baseline", err)
+
+    def test_banked_ground_cannot_be_spent_again(self):
+        """The point of banking: once the bound comes down, it binds.
+
+        The reviewer's probe was that an UNBANKED sweep leaves headroom a later
+        change spends in a brand-new file while the check says "No regression".
+        With the sweep refused until it banks, that state is not reachable, so
+        what this pins is the other side: after banking, handing the characters
+        back in a new file is a regression and fails.
+        """
+        self.write_prose(5)
+        self.write_baseline(5)
+        self.commit("five")
+        git(self.repo, "branch", "reference")
+
+        self.write_prose(1)
+        self.write_baseline(1)  # banked, as the refusal now forces
+        self.commit("swept and banked")
+
+        self.write_prose(4, name="new.md")  # total back to 5, ceiling now 1
+        self.commit("spend it again in a new file")
+
+        code, _, err = run_main(self.repo, "--against", "reference")
+        self.assertEqual(code, 1, "the banked ground was handed back and passed")
+        self.assertIn("FAILED", err)
+        self.assertIn("new.md", err)
+
+    def test_a_boolean_baseline_is_refused(self):
+        """`bool` is an `int`, so a bare isinstance check accepts `true` as 1."""
+        (self.repo / "scripts" / "dash-baseline.json").write_text(
+            '{"total": true, "files": 1}\n', encoding="utf-8"
+        )
+        self.write_prose(1)
+        self.commit("a boolean ceiling")
+
+        code, _, err = run_main(self.repo, "--against", "main")
+        self.assertEqual(code, 1)
+        self.assertIn("is not a count", err)
+
     # -- fail closed on a broken checkout ------------------------------------
 
     def test_an_unresolvable_reference_is_refused(self):

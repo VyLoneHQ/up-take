@@ -56,10 +56,13 @@ jobs:
       # and a check that fails the build on the day it arrives is a check
       # somebody disables. The count may go down and never up.
       #
-      # A step in the web job rather than a job of its own: it is a two-second
-      # Python run on a Linux runner that is already required, so it costs no
-      # new check to register in branch protection and no queue time on the
-      # Windows runners.
+      # Steps in the web job rather than a job of their own: Python on a Linux
+      # runner that is already required, so they cost no new check to register
+      # in branch protection and no queue time on the Windows runners. Measured
+      # locally: the ratchet is 0.3 s and the self-tests 10 s, the latter
+      # because each of them initialises a git repository in a temp dir. This
+      # comment said "a two-second Python run" and described only the first,
+      # one commit after the second was added beneath it.
       # `--against origin/main` is what stops the ceiling being raised by hand,
       # and it needs main to be fetched. The checkout above is shallow, so the
       # ref is fetched explicitly rather than by setting fetch-depth: 0 on the

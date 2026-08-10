@@ -34,6 +34,15 @@ gets worse in total, and every tranche is permanent.** Binding new writing
 properly needs a diff-aware check, which is a different program, because it has to
 tell an added line from a moved one. Recorded rather than pretended away.
 
+**The second half of that guarantee is enforced rather than requested, and it was
+not in the first version.** Being *below* the ceiling is a REFUSAL, so a sweep
+cannot land without lowering the bound behind it. Two independent reviews found
+the same hole the same day: the ceiling only moved when somebody remembered to run
+`--write-baseline`, and a reviewer's probe swept seventeen characters, left the
+baseline alone, and spent all seventeen again in a brand-new file while this check
+printed *No regression*. A guarantee that rests on a person remembering a step
+fifteen times is not one.
+
 Where the one-way property actually lives, because the first version got this
 wrong
 -------------------------------------------------------------------------------
@@ -88,9 +97,17 @@ had failed passed green with the anti-tamper guard switched off and nothing in
 the log a reader would stop at. Those are now two cases. **A ref that cannot be
 resolved is a refusal**, because that is a broken checkout and the guard is not
 running. **A resolvable ref that carries no baseline is the first run**, which is
-a real state exactly once, and it is allowed with a notice. After this lands on
-`main` the second case stops occurring on its own, with no flag to remove and no
-ratchet left switched off behind one.
+a real state exactly once, and it is allowed with a notice. Once this lands on
+`main` the second case stops occurring, with no flag to remove and no ratchet
+left switched off behind one.
+
+**"Stops occurring" is not "cannot recur", and a review caught the difference.**
+`reference is None` is evaluated on every run, so if `main` ever loses its
+baseline the anti-tamper comparison silently switches off again and any ceiling
+is accepted. What keeps that narrow is the refusal above it: a change that deletes
+the baseline is refused by the `not baseline_file.exists()` branch before it can
+merge, so `main` cannot reach that state through this check. It is a residual
+rather than an open door, and it is written down rather than rounded up.
 """
 
 from __future__ import annotations
@@ -232,7 +249,10 @@ def read_baseline(raw: str, where: str) -> int:
             f"({type(error).__name__}). It is the ceiling this check enforces, "
             f"so an unreadable one fails closed."
         ) from error
-    if not isinstance(value, int) or value < 0:
+    # `bool` is a subclass of `int`, so a bare isinstance check accepts `true`
+    # as a ceiling of 1 and the run then goes red naming the wrong problem.
+    # Found by review.
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise SystemExit(f"REFUSED: the baseline at {where} is not a count: {value!r}")
     return value
 
@@ -425,13 +445,27 @@ def main() -> int:
         return 1
 
     if total < ceiling:
+        # REFUSED rather than a nudge, and this is the correction that makes
+        # "every tranche is permanent" true. Two independent reviews found the
+        # same hole on the same day: the ceiling only moved when somebody
+        # remembered to run --write-baseline, so a swept tranche that was not
+        # banked stayed as headroom, and the next change could spend it in a
+        # brand-new file while the check printed "No regression". Seventeen
+        # characters were handed back that way in a reviewer's probe.
+        #
+        # The obligation was prose in CONTRIBUTING.md and in the workspace
+        # backlog row, which is the "a rule an agent has to remember" class.
+        # Being below the ceiling is now the failure, so the ratchet is always
+        # at its stop and the ground cannot be given back.
         print(
-            f"{total} against a ceiling of {ceiling}. "
-            f"{ceiling - total} fewer than the baseline: run "
-            f"`python scripts/dash-ratchet.py --write-baseline` and commit it, "
-            f"so the ground you gained is held."
+            f"REFUSED: {total} against a ceiling of {ceiling}, which is "
+            f"{ceiling - total} fewer. Good, and it is not banked yet: the "
+            f"ceiling has to come down with it or the next change can spend "
+            f"the difference. Run this and commit the result:\n"
+            f"    python scripts/dash-ratchet.py --write-baseline\n",
+            file=sys.stderr,
         )
-        return 0
+        return 1
 
     print(f"{total} em/en dashes, at the ceiling of {ceiling}. No regression.")
     if exempt_total:
