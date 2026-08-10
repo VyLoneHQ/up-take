@@ -304,7 +304,7 @@ enum Gesture {
     /// A press on a row of the open area menu, resolved the same way.
     MenuItem { index: usize },
     /// A press that has already done its job and must do nothing more on
-    /// release, closing an open menu by clicking away from it, or landing on
+    /// release: closing an open menu by clicking away from it, or landing on
     /// menu padding between rows. It still exists as a gesture so the release is
     /// swallowed and cannot fall through to whatever is underneath.
     Inert,
@@ -344,7 +344,7 @@ enum MenuAction {
     /// Remove the area.
     Dismiss,
     /// Capture the area and publish it to the clipboard alone (task 1.9,
-    /// `Default` areas only, a typed capture area is 1.9b's).
+    /// `Default` areas only: a typed capture area is 1.9b's).
     Copy,
     /// Capture the area and write it to `Pictures\UP-TAKE\` (task 1.9, same
     /// scope as `Copy`). A separate, explicit action. Does not also copy.
@@ -697,7 +697,7 @@ pub fn cancel_drag() {
 }
 
 /// Arms `kind` for the next drag (ADR-0018 §1), replacing anything already
-/// armed, pressing a second direct key changes your mind rather than erroring.
+/// armed. Pressing a second direct key changes your mind rather than erroring.
 pub fn arm(kind: AreaType) {
     *lock(&ARMED) = Some(kind);
 }
@@ -760,7 +760,7 @@ pub struct PumpState {
 /// callback that takes too long is silently *removed* by Windows
 /// (`LowLevelHooksTimeout`), so the hook writes atomics and this reads them. It
 /// also caps the IPC rate at the poll's cadence however fast the mouse reports,
-/// and keeps the store lock off the mouse's critical path, hover classification
+/// and keeps the store lock off the mouse's critical path: hover classification
 /// needs the area set, and a 1000 Hz mouse would take that lock 1000 times a
 /// second for a result that can only be redrawn 60 times.
 ///
@@ -1005,7 +1005,7 @@ fn reinstall_on_main_thread() {
     WANT_TEARDOWN.store(false, Ordering::SeqCst);
     DRAGGING.store(false, Ordering::SeqCst);
     *lock(&GESTURE) = None;
-    // Only the hook is re-created, the mode and the cursor override are
+    // Only the hook is re-created. The mode and the cursor override are
     // whatever they already were. Re-entering the full Placement path here
     // would stomp a hover-refined cursor shape back to the crosshair, and in
     // Living would wrongly assert one.
@@ -1419,7 +1419,7 @@ fn teardown_now() {
     // per-hover path, not from teardown.
     restore_system_cursors();
     // The override is gone, so both caches must forget what they believe the OS
-    // has, otherwise the next entry would skip re-applying a shape that is no
+    // has. Otherwise the next entry would skip re-applying a shape that is no
     // longer set.
     *lock(&APPLIED_CURSOR) = None;
     *lock(&LIVING_CURSOR) = None;
@@ -1482,7 +1482,7 @@ fn set_living_cursor(shape: Option<CursorShape>) {
     if *applied == shape {
         return;
     }
-    // `None` is not "install nothing", it is "install the genuine arrow", which
+    // `None` is not "install nothing". It is "install the genuine arrow", which
     // is the whole reason `CursorShape::Arrow` exists.
     apply_cursor_to(shape.unwrap_or(CursorShape::Arrow), OCR_NORMAL);
     *applied = shape;
@@ -1676,7 +1676,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
 /// A button-down is only ever swallowed while [`ACTIVE`]; its balancing
 /// button-up is swallowed **regardless** of whether placement is still active
 /// by then, as long as [`LEFT_PENDING`]/[`RIGHT_PENDING`] says that down was
-/// ours, otherwise a drag cancelled or abandoned mid-gesture would leak its
+/// ours. Otherwise a drag cancelled or abandoned mid-gesture would leak its
 /// eventual release to whatever window ends up under the cursor (see the
 /// module docs on abandoned gestures). A release completes into an area only
 /// if [`DRAGGING`] is *also* still set: a cancelled or abandoned drag cleared
@@ -1697,7 +1697,7 @@ fn handle_mouse(wparam: WPARAM, lparam: LPARAM) -> bool {
     //
     // This applies in Placement too, not just Living. Placement means "UP-TAKE
     // owns the mouse", but that was always shorthand for "UP-TAKE is the topmost
-    // thing", when it demonstrably is not, swallowing the click is the same
+    // thing". When it demonstrably is not, swallowing the click is the same
     // mistake in either mode.
     if matches!(wparam as u32, WM_LBUTTONDOWN | WM_RBUTTONDOWN) && shadowed_by_another_window(point)
     {
