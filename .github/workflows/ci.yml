@@ -49,6 +49,39 @@ jobs:
       - name: Unit tests
         run: pnpm test
 
+      # This repository is public, so its source is public writing: comments,
+      # doc comments and operator-visible strings included. A ratchet rather
+      # than a gate, because the rule lands against 1,187 pre-existing sites
+      # (this branch's tree at 914e920; main at 676ffde holds 1,189),
+      # and a check that fails the build on the day it arrives is a check
+      # somebody disables. The count may go down and never up.
+      #
+      # Steps in the web job rather than a job of their own: Python on a Linux
+      # runner that is already required, so they cost no new check to register
+      # in branch protection and no queue time on the Windows runners. Measured
+      # locally: the ratchet is 0.3 s and the self-tests 10 s, the latter
+      # because each of them initialises a git repository in a temp dir. This
+      # comment said "a two-second Python run" and described only the first,
+      # one commit after the second was added beneath it.
+      # `--against origin/main` is what stops the ceiling being raised by hand,
+      # and it needs main to be fetched. The checkout above is shallow, so the
+      # ref is fetched explicitly rather than by setting fetch-depth: 0 on the
+      # whole job, which would clone the full history for one comparison.
+      - name: Fetch main for the ratchet's reference baseline
+        run: git fetch --depth=1 origin main:refs/remotes/origin/main
+
+      # Runs before the ratchet on purpose. The ratchet's own green is weak
+      # evidence on the pull request that introduces it: `main` carries no
+      # baseline yet, so the anti-tamper comparison has nothing to compare
+      # against and cannot fire. An independent review made exactly that point.
+      # These tests are the evidence instead, and each one was confirmed to go
+      # red with the guard it covers removed.
+      - name: Ratchet self-tests
+        run: python3 scripts/test_dash_ratchet.py
+
+      - name: Em-dash ratchet
+        run: python3 scripts/dash-ratchet.py --against origin/main
+
   # ---------------------------------------------------------------------------
   # Rust: format, lint, test. Windows because uptake-capture and the window
   # layer are Windows-only — checking on Linux would not compile the code that
