@@ -51,7 +51,8 @@ jobs:
 
       # This repository is public, so its source is public writing: comments,
       # doc comments and operator-visible strings included. A ratchet rather
-      # than a gate, because the rule landed against 1,187 pre-existing sites,
+      # than a gate, because the rule lands against 1,187 pre-existing sites
+      # (this branch's tree at 914e920; main at 676ffde holds 1,189),
       # and a check that fails the build on the day it arrives is a check
       # somebody disables. The count may go down and never up.
       #
@@ -65,6 +66,15 @@ jobs:
       # whole job, which would clone the full history for one comparison.
       - name: Fetch main for the ratchet's reference baseline
         run: git fetch --depth=1 origin main:refs/remotes/origin/main
+
+      # Runs before the ratchet on purpose. The ratchet's own green is weak
+      # evidence on the pull request that introduces it: `main` carries no
+      # baseline yet, so the anti-tamper comparison has nothing to compare
+      # against and cannot fire. An independent review made exactly that point.
+      # These tests are the evidence instead, and each one was confirmed to go
+      # red with the guard it covers removed.
+      - name: Ratchet self-tests
+        run: python3 scripts/test_dash_ratchet.py
 
       - name: Em-dash ratchet
         run: python3 scripts/dash-ratchet.py --against origin/main

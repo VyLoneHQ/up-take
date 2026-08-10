@@ -9,8 +9,12 @@ is the copy an outside reader can actually open.
 Why a ratchet and not a gate
 ----------------------------
 
-On the day the rule landed this repository held 1,187 of these characters across
-46 files. A check that failed the build on day one is a check somebody disables,
+This branch's own tree, at `914e920`, holds 1,187 of these characters across 46
+files. `main` at `676ffde` holds 1,189 across 47: the two are this branch's,
+removed from `.gitattributes`, and the pair is written out because the first
+draft of this rule quoted the branch's number under `main`'s ref and a review
+caught it. **Name the ref you counted at.**
+A check that failed the build on day one is a check somebody disables,
 and a disabled check reports nothing forever. So the baseline is recorded and may
 only go **down**, the backlog is worked off in tranches, and every tranche
 tightens the bound behind it.
@@ -62,6 +66,31 @@ with a reason, and an entry whose reason is blank is REFUSED rather than
 honoured, so the list cannot fill up with silent exemptions. An entry naming a
 path that no longer exists is refused too, because a stale exemption is one
 nobody notices has stopped applying.
+
+**An exemption does not lower the count, and that is a correction.** The first
+version skipped exempt paths before counting, so adding one entry removed its
+file's dashes from the total and the script then congratulated the author on the
+ground it had apparently gained and invited them to bank it with
+`--write-baseline`. A second review found it: one entry for `placement.rs` was
+worth 172. The ceiling is now measured over every text file, exempt ones
+included, so an exemption cannot move the number by one. What it changes is the
+**floor**: the total can never fall below the number of load-bearing characters,
+and the exemption list is the record of where that floor comes from. Exempt
+paths are also left out of the "worst offenders" list a failure prints, because
+naming a file nobody may edit is noise.
+
+Fail closed on an unreachable reference
+---------------------------------------
+
+`--against` needs a ref. The first version treated "no baseline there" and "no
+ref there" as one case and warned rather than refusing, so a CI run whose fetch
+had failed passed green with the anti-tamper guard switched off and nothing in
+the log a reader would stop at. Those are now two cases. **A ref that cannot be
+resolved is a refusal**, because that is a broken checkout and the guard is not
+running. **A resolvable ref that carries no baseline is the first run**, which is
+a real state exactly once, and it is allowed with a notice. After this lands on
+`main` the second case stops occurring on its own, with no flag to remove and no
+ratchet left switched off behind one.
 """
 
 from __future__ import annotations
@@ -166,10 +195,16 @@ def check_exemptions(root: Path, tracked: set[str]) -> list[str]:
 
 
 def count(root: Path, paths: list[str]) -> tuple[dict[str, int], list[str]]:
+    """Per-file counts over every text file, exempt paths included.
+
+    Exempt paths are counted deliberately. Skipping them here is what let an
+    exemption lower the ceiling and be reported as ground gained; see the module
+    docstring. `EXEMPT` decides what a failure lists, not what the total is.
+    """
     counts: dict[str, int] = {}
     unreadable: list[str] = []
     for path in paths:
-        if not is_text(path) or path in EXEMPT:
+        if not is_text(path):
             continue
         try:
             text = (root / path).read_text(encoding="utf-8")
@@ -202,8 +237,25 @@ def read_baseline(raw: str, where: str) -> int:
     return value
 
 
+def ref_exists(root: Path, ref: str) -> bool:
+    """Whether `ref` resolves in this repository."""
+    return (
+        subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+            capture_output=True,
+        ).returncode
+        == 0
+    )
+
+
 def baseline_on(root: Path, ref: str) -> int | None:
-    """The recorded ceiling on `ref`, or None when it is unreachable."""
+    """The recorded ceiling on `ref`, or None when `ref` carries no baseline.
+
+    Callers must ask `ref_exists` first. This returning None means the file is
+    absent on a ref that does exist, which is the first-run case and nothing
+    else; an unresolvable ref is a broken checkout and is refused by the caller.
+    Collapsing the two is what made the anti-tamper guard fail open.
+    """
     result = subprocess.run(
         ["git", "-C", str(root), "show", f"{ref}:{BASELINE_PATH}"],
         capture_output=True,
@@ -258,13 +310,33 @@ def main() -> int:
         return 1
 
     total = sum(counts.values())
+    exempt_total = sum(n for path, n in counts.items() if path in EXEMPT)
+    actionable = {path: n for path, n in counts.items() if path not in EXEMPT}
 
     if args.list:
         for path, n in sorted(counts.items(), key=lambda kv: -kv[1]):
-            print(f"{n:6d}  {path}")
+            mark = "  (exempt)" if path in EXEMPT else ""
+            print(f"{n:6d}  {path}{mark}")
         print(f"\n{total} in {len(counts)} file(s)")
+        if exempt_total:
+            print(f"{exempt_total} of them exempt, which is the floor this can reach")
 
     baseline_file = root / BASELINE_PATH
+
+    # Two different failures, and merging them is what switched the guard off.
+    # A ref that does not resolve is a broken checkout: in CI that is a fetch
+    # that failed, and continuing would run the ratchet with its anti-tamper
+    # comparison silently disabled.
+    if not ref_exists(root, args.against):
+        print(
+            f"REFUSED: {args.against} does not resolve, so the committed ceiling "
+            f"cannot be compared against anything and the guard that stops it "
+            f"being raised by hand is not running. In CI this is a failed fetch. "
+            f"Fix the checkout rather than the number.",
+            file=sys.stderr,
+        )
+        return 1
+
     reference = baseline_on(root, args.against)
 
     if args.write_baseline:
@@ -279,10 +351,25 @@ def main() -> int:
                 )
                 return 1
         baseline_file.write_text(
-            json.dumps({"total": total, "files": len(counts)}, indent=2) + "\n",
+            json.dumps(
+                {
+                    "total": total,
+                    "files": len(counts),
+                    # Recorded so the floor is visible in the diff. An exemption
+                    # cannot change `total`, but it can change what the total is
+                    # allowed to reach, and that belongs in review rather than in
+                    # one line of a Python dict nobody opens.
+                    "exempt_total": exempt_total,
+                    "exempt_paths": sorted(EXEMPT),
+                },
+                indent=2,
+            )
+            + "\n",
             encoding="utf-8",
         )
         print(f"baseline written: {total} in {len(counts)} file(s)")
+        if exempt_total:
+            print(f"  {exempt_total} exempt, across {len(EXEMPT)} path(s): the floor")
         return 0
 
     if not baseline_file.exists():
@@ -298,11 +385,13 @@ def main() -> int:
     # The guard the first version did not have. Without it the ceiling is a
     # hand-editable number in a committed file and the ratchet turns both ways.
     if reference is None:
+        # `args.against` resolved and carries no baseline, so this is the change
+        # that introduces one. True exactly once per repository, and it stops
+        # being true the moment this lands, with no flag left behind to remove.
         print(
-            f"WARNING: {args.against} carries no readable baseline, so this run "
-            f"cannot tell whether the ceiling was raised. In CI that means the "
-            f"ref was not fetched. Not failing on it, because an unreachable ref "
-            f"is also what a first-ever run looks like.",
+            f"NOTICE: {args.against} carries no baseline, so this is the first "
+            f"run and there is nothing to compare the ceiling against. The "
+            f"anti-tamper comparison starts working on the next change.",
             file=sys.stderr,
         )
     elif ceiling > reference:
@@ -322,8 +411,17 @@ def main() -> int:
             f"Use a comma, a colon, a full stop or parentheses.\n",
             file=sys.stderr,
         )
-        for path, n in sorted(counts.items(), key=lambda kv: -kv[1])[:10]:
+        # Exempt paths are left out: they are counted in the total and nobody may
+        # edit them, so listing them as offenders sends a reader to the one place
+        # the answer is "leave it alone".
+        for path, n in sorted(actionable.items(), key=lambda kv: -kv[1])[:10]:
             print(f"  {n:6d}  {path}", file=sys.stderr)
+        if exempt_total:
+            print(
+                f"  ({exempt_total} of the {total} are exempt and are not listed; "
+                f"they are the floor, not work.)",
+                file=sys.stderr,
+            )
         return 1
 
     if total < ceiling:
@@ -336,6 +434,8 @@ def main() -> int:
         return 0
 
     print(f"{total} em/en dashes, at the ceiling of {ceiling}. No regression.")
+    if exempt_total:
+        print(f"{exempt_total} of them are exempt: the floor this can reach.")
     return 0
 
 

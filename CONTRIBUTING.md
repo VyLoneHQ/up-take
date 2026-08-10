@@ -99,6 +99,12 @@ or a fixture a test compares byte for byte, do not change it. Add the file to `E
 with the reason it is data. An entry with a blank reason is refused, and so is one naming a path that
 does not exist.
 
+**An exemption does not lower the count.** Exempt files are still counted, so the total cannot be cut
+by declaring a file out of scope. What an exemption sets is the **floor**: the number the count can
+never fall below, which the script prints beside the total. That is deliberate. The first version
+skipped exempt files before counting, so a single entry could take a hundred and seventy characters
+off the total and the script would then congratulate you and offer to bank it.
+
 Why the rule exists: the people who read this repository are mostly engineers deciding whether the
 work is serious, and the comments here carry most of the reasoning. The rest of the house style is
 ordinary technical writing. Be specific, prefer a real number to an adjective, and say what you
