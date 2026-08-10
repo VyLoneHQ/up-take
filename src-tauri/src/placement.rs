@@ -297,7 +297,7 @@ enum Gesture {
         start: Rect,
     },
     /// A press on an area's close control. Dismisses **on release, and only if
-    /// the cursor is still on the control**, the press-and-release-on-target
+    /// the cursor is still on the control**: the press-and-release-on-target
     /// contract every button on every platform honours, and the only way to
     /// change your mind about a gesture with no undo.
     Close { id: AreaId, control: Rect },
@@ -582,8 +582,8 @@ struct MenuPayload {
     menu: Option<MenuView>,
 }
 
-/// The menu's geometry, physical px, every rectangle already laid out here, so
-/// the frontend positions rows rather than computing them.
+/// The menu's geometry in physical px: every rectangle is already laid out
+/// here, so the frontend positions rows rather than computing them.
 #[derive(Serialize, Clone)]
 struct MenuView {
     rect: (i32, i32, u32, u32),
@@ -2065,8 +2065,8 @@ fn classify_press(point: Point) -> Gesture {
     }
     if let Some(app) = APP.get() {
         // A click anywhere outside an open menu dismisses it, and does not also
-        // act on what it landed on, the standard contract, and the one that
-        // makes a mis-click cheap.
+        // act on what it landed on (the standard contract), which is what makes
+        // a mis-click cheap.
         if close_menu(app) {
             return Gesture::Inert;
         }
@@ -2308,8 +2308,8 @@ fn vk_is_down(vk: i32) -> bool {
 /// area is invisible to the cursor there by definition, and its pixels belong
 /// to whatever app is underneath. That also means flipping an area to
 /// pass-through from its own Living menu makes the menu unreachable until
-/// Placement, deliberate, and the reason the toggle sits next to the Layer
-/// rows that share the same recovery path.
+/// Placement. That is deliberate, and it is the reason the toggle sits next to
+/// the Layer rows that share the same recovery path.
 fn open_menu(app: &AppHandle, point: Point) {
     let target = match mode() {
         Mode::Placement => overlay::area_at(app, point),
@@ -2330,8 +2330,8 @@ fn open_menu(app: &AppHandle, point: Point) {
         Input::PassThrough => Input::Interactive,
     };
     let mut spec: Vec<(MenuAction, &'static str)> = Vec::with_capacity(7);
-    // Copy/Save lead the menu, the primary actions, ahead of the layout
-    // settings below them, and are scoped to **`Screenshot` areas only**.
+    // Copy/Save lead the menu (the primary actions, ahead of the layout
+    // settings below them) and are scoped to **`Screenshot` areas only**.
     //
     // Task 1.9 scoped them to `Default` instead, as a placeholder: `Screenshot`
     // did not exist yet and its own menu was named as 1.9b's job. That got
