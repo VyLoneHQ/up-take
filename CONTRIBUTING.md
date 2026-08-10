@@ -70,7 +70,7 @@ fix: correct DPI scaling on secondary monitor
 docs: clarify build-from-source steps
 ```
 
-## Writing style, and why CI will fail you over a dash
+## Writing style, and what CI does and does not catch
 
 **No em-dashes (`U+2014`) and no en-dashes (`U+2013`) anywhere in this repository.** Not in prose,
 not in comments, not in doc comments, not in strings a user or an operator sees. Use a comma, a

@@ -9,9 +9,17 @@ yet. So the check went green having never run the branch it was defending, and
 
 These tests are that evidence. Each one builds a throwaway git repository, puts
 the script in the state under test, and asserts the exit code and the message.
-Every guard here has been confirmed to fail when the guard it tests is removed;
-a test that cannot go red is the defect this repository keeps finding
+Every guard **these tests cover** has been confirmed to fail when that guard is
+removed; a test that cannot go red is the defect this repository keeps finding
 (`UT-F-40`, `UT-F-44`, `UT-F-52`).
+
+**That sentence used to read "every guard here", which is a claim about the
+script and not about this file.** A review took it at its word, mutated
+`not baseline_file.exists()` out of the script, and watched all seventeen tests
+stay green: the guard was real, load-bearing to the module docstring's own
+residual argument, and untested. It has a test now (`test_a_missing_baseline_is_refused`),
+and the sentence is scoped to what it can actually promise. **A coverage claim is
+a claim, and the honest form names the set it covers.**
 
 Run: `python3 scripts/test_dash_ratchet.py`
 """
@@ -194,6 +202,33 @@ class RatchetCase(unittest.TestCase):
         self.assertEqual(code, 1, "the banked ground was handed back and passed")
         self.assertIn("FAILED", err)
         self.assertIn("new.md", err)
+
+    def test_a_missing_baseline_is_refused(self):
+        """The guard the module's residual argument rests on, and it had no test.
+
+        Without it a change deleting the baseline reaches `main`, after which
+        `reference is None` on every later run, the anti-tamper comparison is
+        silently off, and any ceiling is accepted. Found by a review that
+        mutated the branch out and watched the whole suite stay green.
+        """
+        self.write_prose(1)
+        self.commit("no baseline anywhere")
+
+        code, _, err = run_main(self.repo, "--against", "main")
+        self.assertEqual(code, 1, "a missing baseline must be refused, not assumed")
+        self.assertIn("REFUSED", err)
+        self.assertIn("--write-baseline", err)
+
+    def test_write_baseline_works_without_a_resolvable_reference(self):
+        """Banking must not need the ref, because it never reads it (P-5)."""
+        self.write_prose(3)
+        self.commit("three")
+
+        code, out, err = run_main(
+            self.repo, "--write-baseline", "--against", "origin/does-not-exist"
+        )
+        self.assertEqual(code, 0, err)
+        self.assertIn("baseline written", out)
 
     def test_a_boolean_baseline_is_refused(self):
         """`bool` is an `int`, so a bare isinstance check accepts `true` as 1."""
