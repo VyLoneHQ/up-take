@@ -34,6 +34,17 @@ gets worse in total, and every tranche is permanent.** Binding new writing
 properly needs a diff-aware check, which is a different program, because it has to
 tell an added line from a moved one. Recorded rather than pretended away.
 
+**"The repository" means the file kinds in `TEXT_SUFFIXES` and `TEXT_NAMES`, and
+saying so is a correction.** It is an allow list, so a tracked file with an
+extension nobody has added is invisible: a review demonstrated it by committing
+a `.rst` file holding forty em-dashes and getting an exit 0. The guarantee above
+is real for the 24 kinds listed and silent about the rest, and the asymmetry
+worth noticing is that `EXEMPT` refuses a stale path while this list can lapse by
+**omission**, which nothing detects. Plausible near misses here: `.xml`, `.wxs`,
+`.nsi` and `.nsh` (the MSI and NSIS bundles), `.rst`, `.mdx`, and any
+extensionless file not in `TEXT_NAMES`. Add the suffix when the repository gains
+the format.
+
 **The second half of that guarantee is enforced rather than requested, and it was
 not in the first version.** Being *below* the ceiling is a REFUSAL, so a sweep
 cannot land without lowering the bound behind it. Two independent reviews found
@@ -347,7 +358,14 @@ def main() -> int:
     # A ref that does not resolve is a broken checkout: in CI that is a fetch
     # that failed, and continuing would run the ratchet with its anti-tamper
     # comparison silently disabled.
-    if not ref_exists(root, args.against):
+    #
+    # `--write-baseline` is exempt, and that is a fix rather than a carve-out.
+    # It reads only the committed file and never `reference`, so refusing it on
+    # an unresolvable ref blocked a contributor whose clone calls the remote
+    # something else from banking the sweep this very check had just ordered
+    # them to bank, with a message about fixing their checkout. Friction in the
+    # attended workflow that bought no safety, which is what `P-5` forbids.
+    if not args.write_baseline and not ref_exists(root, args.against):
         print(
             f"REFUSED: {args.against} does not resolve, so the committed ceiling "
             f"cannot be compared against anything and the guard that stops it "
