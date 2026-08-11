@@ -198,6 +198,12 @@ pub fn run() -> tauri::Result<()> {
             // must agree about the scope, and they are consulted at different
             // moments.
             freeze::init_freeze_scope();
+            // NOT under `cfg(debug_assertions)`, unlike the three `dev_harness`
+            // calls above, and that is the whole point of `I-42`: the build this
+            // switch exists for is the release build, whose log otherwise
+            // reports only the actions that missed the bar. It announces on both
+            // paths, and the unarmed line is the one that matters.
+            output::init_report_verbosity();
             // State must be managed and the poll thread parked before the
             // first `overlay::show`, which activates the poll.
             app.manage(click_through::ClickThrough::new());

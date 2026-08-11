@@ -128,6 +128,25 @@ jobs:
       - name: cargo test
         run: cargo test --all-features
 
+      # The same suite in the release configuration, for the reason the clippy
+      # pair above already gives, applied to behaviour rather than to lints.
+      #
+      # Added 2026-08-11 by the independent review of the `I-42` switch, which
+      # found it by mutation rather than by reading. `output::REPORT_EVERY_ACTION`
+      # starts at `cfg!(debug_assertions)`, so in a debug build it is `true`
+      # whatever the code says. Replacing its initializer with a bare
+      # `AtomicBool::new(true)`, a shipped build logging a line on every grab,
+      # which is the one outcome that backlog row forbids by name, left the suite
+      # fully green, and so did inverting the condition that arms the switch. No
+      # assertion in a debug build can separate those, because the value under
+      # test is the same either way.
+      #
+      # The general rule: a guarantee about a release build has to be checked in
+      # one, and any `cfg(debug_assertions)` default is invisible to the step
+      # above by construction.
+      - name: cargo test (release)
+        run: cargo test --release --all-features
+
   # ---------------------------------------------------------------------------
   # Supply chain: licence policy and security advisories.
   #
