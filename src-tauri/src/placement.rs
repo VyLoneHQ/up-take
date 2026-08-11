@@ -11,18 +11,18 @@
 //! (`WH_MOUSE_LL`) instead, installed for as long as the overlay is visible.
 //! What the hook does with a button press depends on the [`Mode`]:
 //!
-//! - **`Placement`**: the hook owns the whole gesture (button-down → move →
-//!   button-up) and swallows both buttons unconditionally: drags create, move
+//! - **`Placement`** gives the hook the whole gesture (button-down → move →
+//!   button-up), and it swallows both buttons unconditionally: drags create, move
 //!   and resize areas, and a **global cursor override** ([`SetSystemCursor`])
 //!   supplies the pointer shape, because a click-through window can set no
 //!   cursor of its own (no `WM_SETCURSOR` ever reaches it).
-//! - **`Living`**: the user's apps own the pointer, and the hook takes only
+//! - **`Living`** leaves the pointer to the user's apps, and the hook takes only
 //!   what the area model assigns to areas: a press on the topmost *interactive*
-//!   area (`AreaStore::hit_test`: pass-through areas are invisible to input,
+//!   area (`AreaStore::hit_test`; pass-through areas are invisible to input,
 //!   V-7) is swallowed and acted on (left raises the area per §3.2a recency,
 //!   right opens its menu); every other press is passed through untouched. No
 //!   cursor override: the pointer belongs to whatever is underneath.
-//! - **`Hidden`**: the hook is torn down (subject to the pending-button
+//! - **`Hidden`** tears the hook down (subject to the pending-button
 //!   deferral below) and everything here is inert.
 //!
 //! The rectangles are drawn by the WebView from coordinates this module
@@ -648,8 +648,8 @@ pub fn clear_cursor_residue() {
     restore_system_cursors();
 }
 
-/// Restores the system cursors and removes the hook unconditionally, the
-/// graceful-shutdown path, called from `RunEvent::Exit`. The process is
+/// Restores the system cursors and removes the hook unconditionally (the
+/// graceful-shutdown path, called from `RunEvent::Exit`). The process is
 /// exiting either way, so an outstanding pending release no longer matters.
 /// Safe to call when placement was never entered: reloading the registry
 /// cursors over the identical ones is a no-op.
@@ -979,8 +979,8 @@ pub(crate) fn real_cursor(app: &AppHandle) -> Option<Point> {
 /// The live gesture itself ([`DRAGGING`]/[`GESTURE`]) is discarded rather than
 /// carried over: a hook that missed events may have missed the cursor moving
 /// too, so the in-progress rectangle can no longer be trusted. The abandoned
-/// gesture is then treated the same way [`cancel_drag`] treats one, its
-/// eventual release is still swallowed (see below), it just commits nothing.
+/// gesture is then treated the same way [`cancel_drag`] treats one. Its
+/// eventual release is still swallowed (see below); it just commits nothing.
 ///
 /// [`LEFT_PENDING`]/[`RIGHT_PENDING`] are **not** blindly cleared, though:
 /// neither "clear" nor "keep" is safe on its own here. Clearing would leak the
@@ -1271,7 +1271,7 @@ fn ensure_hook() {
 /// [`maybe_finish_teardown`]): re-entering cancels the pending uninstall rather
 /// than racing it.
 ///
-/// Closes a menu left open by a **different** mode, the same reasoning
+/// Closes a menu left open by a **different** mode. The same reasoning
 /// [`enter_living_on_main_thread`] applies to a menu opened in Placement,
 /// applied symmetrically: `Living`'s menu is resolved against `hit_test`
 /// (interactive areas only) and anchored to wherever it was right-clicked, so
@@ -1328,8 +1328,8 @@ fn enter_placement_on_main_thread() {
 /// override dropped, gesture state and menu cleared. Runs on the event-loop
 /// thread.
 ///
-/// A live gesture does not survive the transition: the hotkey was pressed
-/// mid-drag, and the drag's meaning was a Placement meaning, but a *pending
+/// A live gesture does not survive the transition (the hotkey was pressed
+/// mid-drag, and the drag's meaning was a Placement meaning), but a *pending
 /// button* does: its down was swallowed, so its eventual up must still be (the
 /// abandoned-gesture contract in the module docs), which the mode change does
 /// not disturb because [`LEFT_PENDING`]/[`RIGHT_PENDING`] are tracked
@@ -1799,14 +1799,14 @@ fn handle_mouse(wparam: WPARAM, lparam: LPARAM) -> bool {
 
 /// Starts the pre-capture, if this press begins a drag that will capture.
 ///
-/// Three conditions, all of them necessary. The gesture must be [`Gesture::Create`]:
-/// a move, a resize, a close or a menu press produces no capture, and
-/// pre-capturing for one would spend a full-monitor capture on every click in
-/// Placement. The armed type must be one that captures on create, read through
-/// the same [`captures_on_create`] predicate the release path uses. And the
-/// cursor must be on a monitor: in a dead zone between mismatched monitors there
-/// is nothing to pre-capture, and picking a neighbour would hold a frame that
-/// every crop then declines.
+/// Three conditions, all of them necessary. The gesture must be
+/// [`Gesture::Create`]. A move, a resize, a close or a menu press produces no
+/// capture, and pre-capturing for one would spend a full-monitor capture on
+/// every click in Placement. The armed type must be one that captures on
+/// create, read through the same [`captures_on_create`] predicate the release
+/// path uses. And the cursor must be on a monitor: in a dead zone between
+/// mismatched monitors there is nothing to pre-capture, and picking a neighbour
+/// would hold a frame that every crop then declines.
 ///
 /// Reads the overlay's cached monitor list rather than enumerating: this runs in
 /// the hook callback, where a `EnumDisplayMonitors` round trip on every press is
@@ -2233,9 +2233,9 @@ fn gesture_rect(gesture: Gesture, pointer: Point) -> Option<(i32, i32, u32, u32)
     let dx = pointer.x.saturating_sub(anchor.x);
     let dy = pointer.y.saturating_sub(anchor.y);
     let monitors = overlay::monitor_rects();
-    // Holding Alt turns edge snapping off for the rest of the drag, the
+    // Holding Alt turns edge snapping off for the rest of the drag (the
     // standard escape hatch for placing something a few pixels off an edge that
-    // the snap would otherwise swallow. It does **not** disable containment:
+    // the snap would otherwise swallow). It does **not** disable containment:
     // that is the guarantee an area can always be reached again, and a modifier
     // key is not a good reason to let one be lost.
     let free = snapping_suppressed();
