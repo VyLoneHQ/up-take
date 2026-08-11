@@ -27,6 +27,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
 
@@ -54,6 +55,35 @@ const LCS_S_RGB: u32 = 0x7352_4742;
 /// §1's selection→clipboard budget: a soft target and a hard fail (ms).
 const BUDGET_TARGET_MS: u128 = 300;
 const BUDGET_HARD_FAIL_MS: u128 = 600;
+
+/// Environment variable that turns [`report`]'s per-action line on in a release
+/// build. See [`init_report_verbosity`].
+const REPORT_VAR: &str = "UPTAKE_DEV_REPORT";
+
+/// Whether every action prints a timing line, or only the ones over budget.
+///
+/// Defaults to the build kind, so a debug build behaves exactly as it did
+/// before this switch existed and [`REPORT_VAR`] can only ever turn the line
+/// **on**. There is no way to make a release build quieter than its default,
+/// which is deliberate: the failure this switch exists for is a log that says
+/// less than its reader thinks, so a route to less is a route to that failure.
+static REPORT_EVERY_ACTION: AtomicBool =
+    AtomicBool::new(report_line_default(cfg!(debug_assertions)));
+
+/// The starting value of [`REPORT_EVERY_ACTION`], as a function of the build
+/// kind rather than as a `cfg!` read inline.
+///
+/// **It is split out to be assertable from either build.** Written inline, the
+/// only test available is `flag == cfg!(debug_assertions)`, which is `true ==
+/// true` in a debug build and passes whatever the code says. CI runs
+/// `cargo test --all-features` and nothing else, so such a test would have been
+/// green in the one place it is read, for a mutation in either direction. That
+/// is `I-22`'s shape and the 2026-08-05 review's finding against this
+/// repository's own suite: a test pointed away from the thing it is named for.
+/// Taken as a parameter, both directions are checkable in the build CI runs.
+const fn report_line_default(debug_build: bool) -> bool {
+    debug_build
+}
 
 /// The pixels an export should use for `area`: its pinned capture if it has one,
 /// otherwise a fresh capture of `bounds`.
@@ -576,12 +606,12 @@ fn encode_as(bitmap: &RgbaBitmap, format: ImageFormat, name: &str) -> Result<Vec
         .map_err(|error| format!("could not encode {name}: {error}"))
 }
 
-/// Logs the outcome and — separately — a budget overrun against §1's
-/// selection→clipboard numbers. Instrumented inline rather than asserted
-/// after the fact (F-29's lesson): a capture alone measured ~190–230 ms warm,
-/// leaving little room before the 300 ms target and less before the 600 ms
-/// hard fail.
 /// The stage breakdown a reader of a rig log actually parses.
+///
+/// (Five lines describing [`report`] sat at the head of this comment until
+/// 2026-08-11, left behind when that function's own doc was moved and this one
+/// was written above it. `report` was left undocumented and this function
+/// claimed to log a budget overrun, which it does not. They are separated now.)
 ///
 /// # A pure function because the alternative was unverifiable
 ///
@@ -612,6 +642,122 @@ fn stage_line(split: &Split) -> String {
     )
 }
 
+/// Reads [`REPORT_VAR`] once, at startup, and **states what a reader of this
+/// run's log may conclude from silence**.
+///
+/// # Why a switch rather than deleting the gate
+///
+/// `report`'s per-action line was `cfg(debug_assertions)` and its budget lines
+/// were not, so a release build logged **only the actions that missed the bar**.
+/// The rig pass of 2026-08-11 took four grabs, changed the clipboard four times,
+/// and produced one line: the three that MET the 300 ms target are precisely the
+/// three the log discarded, and the survivor at 488 ms was the worst of them
+/// (`I-42`, `UT-F-60`). §1's grab row is filled from these logs, so the coverage
+/// of the instrument was a function of the bar the instrument exists to set:
+/// move the row to 250 ms and three of that day's four vanish; move it to 600 ms
+/// and all four do.
+///
+/// Deleting the `cfg` gate would fix the sample and ship a line on every grab in
+/// a shipped product, which is noise a user cannot turn off, so `P-5`'s reasoning
+/// applies and the instrument gets removed later by someone who is right to. A
+/// `UPTAKE_DEV_*` switch is the route this repository already uses for exactly
+/// that trade (`UPTAKE_DEV_PACING`, `UPTAKE_DEV_RESHOW`,
+/// `UPTAKE_DEV_MONITOR_PERTURB`), and it is the one the backlog row prescribes.
+///
+/// **It cannot live in `dev_harness` with its three siblings.** That module is
+/// `#[cfg(debug_assertions)]` at its declaration in `lib.rs`, so it does not
+/// exist in the one build whose numbers mean anything. The shape it borrows
+/// instead is `freeze::init_display_format`: read once at setup, in release,
+/// and say what was chosen.
+///
+/// # It prints on both paths, and the OFF line is the load-bearing one
+///
+/// `I-11` is this project's standing example of a dev variable whose silence was
+/// indistinguishable from working, and the backlog row attaches it to this fix as
+/// a warning rather than as a precedent: whatever is added must say that it is on.
+/// So this prints armed **and** unarmed, like [`crate::dev_harness::announce_pacing`].
+///
+/// The difference is which line matters. There, the armed line is the useful one.
+/// Here it is the **unarmed** line, because the default state is the one that
+/// misleads: it names the threshold and says outright that an action which met it
+/// prints nothing. Had that sentence been on the console of the 2026-08-11 pass,
+/// the operator would have read three missing lines as three fast grabs rather
+/// than as three grabs that did not happen.
+pub(crate) fn init_report_verbosity() {
+    // The env read is the only part of this that no test covers, and it is kept
+    // to one line for that reason. `std::env::set_var` is `unsafe` in edition
+    // 2024 because a concurrent `getenv` is UB, and `cargo test` runs its tests
+    // on parallel threads, so a test that set the variable would buy this line's
+    // coverage with a soundness hazard in every other test in the binary. The
+    // decision it feeds is [`apply_report_verbosity`], which is tested.
+    eprintln!(
+        "{}",
+        apply_report_verbosity(std::env::var(REPORT_VAR).ok().as_deref())
+    );
+}
+
+/// Applies the variable and returns the line to print. Separated from the env
+/// read so the switch's behaviour is testable; see [`init_report_verbosity`].
+fn apply_report_verbosity(raw: Option<&str>) -> String {
+    if raw.is_some() {
+        REPORT_EVERY_ACTION.store(true, Ordering::SeqCst);
+    }
+    // Read BACK rather than named. `init_display_format` printed `staying on
+    // png` while the default had moved to JPEG (`UT-F-46`), because the sentence
+    // knew what it had decided instead of asking. No branch below may describe a
+    // state it did not load.
+    verbosity_line(
+        REPORT_EVERY_ACTION.load(Ordering::SeqCst),
+        cfg!(debug_assertions),
+        raw,
+    )
+}
+
+/// The startup line, as a pure function so its wording is testable.
+///
+/// Split out for `stage_line`'s reason, one finding later: `UT-F-56` shipped
+/// because a line that writes to stderr and returns nothing can only be checked
+/// by running the app and reading a console, and the field it was missing was the
+/// one the bar depended on. The claim this line makes is the whole value of
+/// `I-42`'s fix, so it is asserted rather than eyeballed.
+///
+/// The threshold is **interpolated from [`BUDGET_TARGET_MS`]**, never typed. A
+/// sentence naming 300 while the constant said something else would be a
+/// censorship notice that misreports what is censored.
+fn verbosity_line(every_action: bool, debug_build: bool, raw: Option<&str>) -> String {
+    match (every_action, debug_build) {
+        (true, true) => format!(
+            "output: every action prints a timing line (debug build), so {REPORT_VAR} is not \
+             consulted. A RELEASE build without it prints only actions over {BUDGET_TARGET_MS} ms."
+        ),
+        (true, false) => format!(
+            "output: every action prints a timing line, ARMED by {REPORT_VAR}={:?}. Any value \
+             counts as on, including \"0\" and the empty string, the same rule as \
+             UPTAKE_DEV_PACING.",
+            // `<unset>` is unreachable through `init_report_verbosity`, which
+            // only sets the flag when the variable is present. If it is ever
+            // printed, the flag was set by something else and that is worth
+            // seeing rather than papering over with a plausible default.
+            raw.unwrap_or("<unset>")
+        ),
+        (false, _) => format!(
+            "output: only actions OVER {BUDGET_TARGET_MS} ms print a line ({REPORT_VAR} unset). An \
+             action that met the target prints NOTHING, so counting lines counts the misses and \
+             not the actions: set {REPORT_VAR}=1 before a measurement pass."
+        ),
+    }
+}
+
+/// Logs the outcome, a budget overrun against §1's selection to clipboard
+/// numbers, and, when [`REPORT_EVERY_ACTION`] is set, the action itself.
+///
+/// Instrumented inline rather than asserted after the fact (F-29's lesson): a
+/// capture alone measured ~190 to 230 ms warm, leaving little room before the
+/// 300 ms target and less before the 600 ms hard fail.
+///
+/// **Every action here is affected, not only `grab`.** `copy`, `save` and
+/// `capture` reach this function too, so the censored sample `I-42` measured on
+/// grabs was equally censoring the other three.
 fn report(action: &str, started: Instant, split: &Split, outcome: Result<(), String>) {
     let elapsed = started.elapsed().as_millis();
     // The split rides along with every budget line, not just the debug one:
@@ -629,8 +775,13 @@ fn report(action: &str, started: Instant, split: &Split, outcome: Result<(), Str
                     "output: {action} took {elapsed} ms — over the §1 target ({BUDGET_TARGET_MS} ms), within the hard fail — {stages}"
                 );
             }
-            #[cfg(debug_assertions)]
-            eprintln!("output: {action} finished in {elapsed} ms — {stages}");
+            // Was `#[cfg(debug_assertions)]`. The flag defaults to that same
+            // answer, so a debug build is unchanged; a release build gains the
+            // line only when the operator asked for it. See
+            // [`init_report_verbosity`].
+            if REPORT_EVERY_ACTION.load(Ordering::SeqCst) {
+                eprintln!("output: {action} finished in {elapsed} ms — {stages}");
+            }
         }
         Err(error) => eprintln!("output: {action} failed after {elapsed} ms: {error} — {stages}"),
     }
@@ -900,6 +1051,110 @@ fn unique_path(dir: &std::path::Path, stem: &str) -> PathBuf {
 #[allow(clippy::unwrap_used, reason = "a failed unwrap is a failed test")]
 mod tests {
     use super::*;
+
+    /// The unarmed line is `I-42`'s actual deliverable, so it is the one with
+    /// the most assertions on it. Each names a thing the 2026-08-11 rig operator
+    /// would have needed to read three absent lines correctly: which threshold
+    /// selects the sample, that meeting it produces silence, and what to set.
+    #[test]
+    fn the_unarmed_line_states_that_a_met_target_prints_nothing() {
+        let line = verbosity_line(false, false, None);
+        assert!(line.contains(&BUDGET_TARGET_MS.to_string()), "{line}");
+        assert!(line.contains("NOTHING"), "{line}");
+        assert!(line.contains("counts the misses"), "{line}");
+        assert!(line.contains(REPORT_VAR), "{line}");
+    }
+
+    /// The threshold is interpolated rather than typed. A line that named a
+    /// literal 300 would keep saying 300 after the constant moved, which is a
+    /// censorship notice misreporting what it censors.
+    #[test]
+    fn the_unarmed_line_takes_its_threshold_from_the_budget_constant() {
+        assert!(
+            verbosity_line(false, false, None).contains(&format!("OVER {BUDGET_TARGET_MS} ms")),
+            "the threshold is not interpolated from BUDGET_TARGET_MS"
+        );
+    }
+
+    /// `I-11`'s requirement: the armed state says so, and it names the value it
+    /// read, because any value counts as on and `UPTAKE_DEV_REPORT=0` is the
+    /// trap that rule sets.
+    #[test]
+    fn the_armed_line_names_the_variable_and_the_value_it_read() {
+        let line = verbosity_line(true, false, Some("0"));
+        assert!(line.contains("ARMED"), "{line}");
+        assert!(line.contains(&format!("{REPORT_VAR}=\"0\"")), "{line}");
+        assert!(line.contains("Any value counts as on"), "{line}");
+    }
+
+    /// A debug build must not claim the variable did anything, and must say what
+    /// a release build would have done instead: the developer reading this line
+    /// is the one who will later read a rig log they did not produce.
+    #[test]
+    fn the_debug_line_says_the_variable_is_not_consulted() {
+        let line = verbosity_line(true, true, Some("1"));
+        assert!(line.contains("not consulted"), "{line}");
+        assert!(line.contains("RELEASE"), "{line}");
+        assert!(!line.contains("ARMED"), "{line}");
+    }
+
+    /// The three cases are mutually distinguishable at a glance. A rig operator
+    /// scanning one line of console output should not have to parse a sentence
+    /// to tell which of them they are in.
+    #[test]
+    fn the_three_verbosity_lines_are_all_different() {
+        let debug = verbosity_line(true, true, None);
+        let armed = verbosity_line(true, false, Some("1"));
+        let off = verbosity_line(false, false, None);
+        assert_ne!(debug, armed);
+        assert_ne!(armed, off);
+        assert_ne!(debug, off);
+    }
+
+    /// A release build starts quiet and a debug build starts loud. **Both
+    /// directions, in whichever build this runs in.** See
+    /// [`report_line_default`] for why that is worth a parameter, and note that
+    /// the assertion CI would otherwise have gotten is vacuous.
+    #[test]
+    fn a_release_build_starts_quiet_and_a_debug_build_starts_loud() {
+        assert!(
+            !report_line_default(false),
+            "a release build must start quiet"
+        );
+        assert!(
+            report_line_default(true),
+            "a debug build must keep its line"
+        );
+    }
+
+    /// The wiring from the variable to the flag, and the one-directional rule:
+    /// presence raises it, absence never lowers it.
+    ///
+    /// **This test owns [`REPORT_EVERY_ACTION`]**, which is process-wide, so the
+    /// three states have to be walked in order inside a single test rather than
+    /// split across three. Nothing else reads the flag (`report` is called by no
+    /// test), so the mutation is contained here.
+    ///
+    /// It is strongest under `cargo test --release`, where the walk is
+    /// `false → false → true`. In a debug build the flag starts on, so the third
+    /// assertion is the only one carrying weight. Stated rather than left for a
+    /// reader to work out, because a test that is weaker than it looks is the
+    /// thing this whole change is about.
+    #[test]
+    fn the_variable_raises_the_flag_and_its_absence_never_lowers_it() {
+        let default = report_line_default(cfg!(debug_assertions));
+        assert_eq!(REPORT_EVERY_ACTION.load(Ordering::SeqCst), default);
+        apply_report_verbosity(None);
+        assert_eq!(
+            REPORT_EVERY_ACTION.load(Ordering::SeqCst),
+            default,
+            "an absent variable moved the flag"
+        );
+        // "0" rather than "1": any value counts as on, which is the trap the
+        // armed line exists to name, so it is the value worth pinning.
+        apply_report_verbosity(Some("0"));
+        assert!(REPORT_EVERY_ACTION.load(Ordering::SeqCst));
+    }
 
     #[test]
     fn unique_path_returns_the_plain_name_when_nothing_collides() {
