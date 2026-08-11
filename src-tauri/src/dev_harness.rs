@@ -105,6 +105,27 @@
 //! Windows raising the change and Tauri reporting a new scale factor are not
 //! exercised. A green here means a scale-only difference drives the resync, and
 //! nothing more.
+//!
+//! ## `UPTAKE_DEV_REPORT`, and it is NOT in this module
+//!
+//! **The fifth switch lives in [`crate::output`], not here, and this section
+//! exists so a reader of this file finds it.** This module is
+//! `#[cfg(debug_assertions)]` at its declaration in `lib.rs`, so nothing in it
+//! exists in a release build, and `UPTAKE_DEV_REPORT` is a switch whose entire
+//! purpose is a release build. It forces `output::report`'s per-action line on,
+//! which is otherwise compiled out of release while the over-budget lines beside
+//! it are not, so a release log records only the actions that MISSED the bar
+//! (`I-42`, `UT-F-60`).
+//!
+//! ```text
+//! UPTAKE_DEV_REPORT=1 <a release build>
+//! ```
+//!
+//! Added here by an independent review, which found the variable documented only
+//! at its own definition: this header is what `click_through.rs`, `hotkey.rs`
+//! and `lib.rs` point a rig operator at, so a switch absent from it is a switch
+//! nobody finds. Nothing detects an omission from a prose index, which is the
+//! same weakness as any rule an author has to remember.
 
 use std::env;
 use std::sync::{LazyLock, OnceLock};

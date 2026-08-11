@@ -75,12 +75,25 @@ static REPORT_EVERY_ACTION: AtomicBool =
 ///
 /// **It is split out to be assertable from either build.** Written inline, the
 /// only test available is `flag == cfg!(debug_assertions)`, which is `true ==
-/// true` in a debug build and passes whatever the code says. CI runs
-/// `cargo test --all-features` and nothing else, so such a test would have been
-/// green in the one place it is read, for a mutation in either direction. That
-/// is `I-22`'s shape and the 2026-08-05 review's finding against this
-/// repository's own suite: a test pointed away from the thing it is named for.
-/// Taken as a parameter, both directions are checkable in the build CI runs.
+/// true` in a debug build and passes whatever the code says. That is `I-22`'s
+/// shape and the 2026-08-05 review's finding against this repository's own
+/// suite: a test pointed away from the thing it is named for.
+///
+/// ⚠️ **This function is checkable in either build. The STATIC BELOW IS NOT, and
+/// an earlier revision of this comment claimed otherwise.** It said *"both
+/// directions are checkable in the build CI runs"*, which is true of
+/// `report_line_default` and false of [`REPORT_EVERY_ACTION`], the value
+/// [`report`] actually reads. Replacing the initializer with a bare
+/// `AtomicBool::new(true)`, a release build that starts loud and ships a timing
+/// line on every grab, which is the one outcome `I-42`'s constraint column
+/// forbids by name, leaves this function correct and every debug assertion
+/// green. No test in a debug build can distinguish *true because debug* from
+/// *true always*.
+///
+/// **What closes it is the release test job, not a cleverer assertion.** CI runs
+/// `cargo test --release --all-features` for this reason (`.github/workflows/ci.yml`),
+/// added by the review that found this: the guarantee is about a release build,
+/// so the check has to run in one. Found by mutation, not by reading.
 const fn report_line_default(debug_build: bool) -> bool {
     debug_build
 }
@@ -683,6 +696,24 @@ fn stage_line(split: &Split) -> String {
 /// prints nothing. Had that sentence been on the console of the 2026-08-11 pass,
 /// the operator would have read three missing lines as three fast grabs rather
 /// than as three grabs that did not happen.
+///
+/// # Where the announcement itself is invisible, which is `I-11` again
+///
+/// This writes to stderr, and `main.rs`'s `windows_subsystem = "windows"`
+/// attribute means a release build allocates **no console of its own**. An
+/// **inherited** console still receives the output, so a release build launched
+/// from a terminal, which is what a rig pass does, prints everything here.
+/// Measured by an independent review on 2026-08-11 with a purpose-built binary,
+/// from two shells and through a redirect; `main.rs:12` and `hotkey.rs:163` both
+/// state flatly that release stderr is invisible, and on this point they are
+/// wrong. Not corrected here: they are outside this change, and a claim about
+/// another module is worth its own commit.
+///
+/// **Launched from Explorer or the installed shortcut there is no console, and
+/// then this announcement disappears along with everything it announces.** That
+/// restores exactly the ambiguity it exists to remove, and no line can fix it
+/// because the missing thing is the sink. Roadmap 1.15 (structured logging) is
+/// where that stops being true. State it rather than let a rig operator find it.
 pub(crate) fn init_report_verbosity() {
     // The env read is the only part of this that no test covers, and it is kept
     // to one line for that reason. `std::env::set_var` is `unsafe` in edition
@@ -690,10 +721,24 @@ pub(crate) fn init_report_verbosity() {
     // on parallel threads, so a test that set the variable would buy this line's
     // coverage with a soundness hazard in every other test in the binary. The
     // decision it feeds is [`apply_report_verbosity`], which is tested.
-    eprintln!(
-        "{}",
-        apply_report_verbosity(std::env::var(REPORT_VAR).ok().as_deref())
-    );
+    //
+    // `NotUnicode` would be folded into `None` by `.ok()` and then announced as
+    // *unset*, which is a line describing a state it did not load: the rule this
+    // function's own comment below states, broken one level up from where it was
+    // applied. Said out loud instead. The `env::var(..).is_ok()` siblings in
+    // `dev_harness` absorb this case silently; they are not release code.
+    let raw = match std::env::var(REPORT_VAR) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(value)) => {
+            eprintln!(
+                "output: {REPORT_VAR} holds a value that is not valid Unicode ({value:?}); it is \
+                 SET, so it counts as on"
+            );
+            Some(String::new())
+        }
+    };
+    eprintln!("{}", apply_report_verbosity(raw.as_deref()));
 }
 
 /// Applies the variable and returns the line to print. Separated from the env
@@ -703,7 +748,11 @@ fn apply_report_verbosity(raw: Option<&str>) -> String {
         REPORT_EVERY_ACTION.store(true, Ordering::SeqCst);
     }
     // Read BACK rather than named. `init_display_format` printed `staying on
-    // png` while the default had moved to JPEG (`UT-F-46`), because the sentence
+    // png` while the default had moved to JPEG (`UT-F-46`'s SHAPE, not that
+    // finding: `UT-F-46` is the idle condition that could not be produced on a
+    // real desktop. The workspace records the format defect as "`UT-F-46`
+    // exactly", meaning the analogy, and this comment dropped the word that
+    // made it one), because the sentence
     // knew what it had decided instead of asking. No branch below may describe a
     // state it did not load.
     verbosity_line(
@@ -742,8 +791,10 @@ fn verbosity_line(every_action: bool, debug_build: bool, raw: Option<&str>) -> S
         ),
         (false, _) => format!(
             "output: only actions OVER {BUDGET_TARGET_MS} ms print a line ({REPORT_VAR} unset). An \
-             action that met the target prints NOTHING, so counting lines counts the misses and \
-             not the actions: set {REPORT_VAR}=1 before a measurement pass."
+             action UNDER it prints NOTHING, so counting lines counts the misses and not the \
+             actions: set {REPORT_VAR}=1 before a measurement pass. {BUDGET_TARGET_MS} ms is the \
+             SELECTION budget and every action is compared against it, so for a grab this is a \
+             cutoff and not a target it can meet."
         ),
     }
 }
@@ -764,27 +815,64 @@ fn report(action: &str, started: Instant, split: &Split, outcome: Result<(), Str
     // the whole point (ADR-0022) is that "it was 320 ms" is not actionable and
     // "capture 210, encode 25, publish 80" is.
     let stages = stage_line(split);
-    match outcome {
-        Ok(()) => {
-            if elapsed > BUDGET_HARD_FAIL_MS {
-                eprintln!(
-                    "output: {action} took {elapsed} ms — over the §1 hard-fail budget ({BUDGET_HARD_FAIL_MS} ms) — {stages}"
-                );
-            } else if elapsed > BUDGET_TARGET_MS {
-                eprintln!(
-                    "output: {action} took {elapsed} ms — over the §1 target ({BUDGET_TARGET_MS} ms), within the hard fail — {stages}"
-                );
-            }
-            // Was `#[cfg(debug_assertions)]`. The flag defaults to that same
-            // answer, so a debug build is unchanged; a release build gains the
-            // line only when the operator asked for it. See
-            // [`init_report_verbosity`].
-            if REPORT_EVERY_ACTION.load(Ordering::SeqCst) {
-                eprintln!("output: {action} finished in {elapsed} ms — {stages}");
-            }
-        }
-        Err(error) => eprintln!("output: {action} failed after {elapsed} ms: {error} — {stages}"),
+    for line in report_lines(
+        action,
+        elapsed,
+        &stages,
+        outcome,
+        REPORT_EVERY_ACTION.load(Ordering::SeqCst),
+    ) {
+        eprintln!("{line}");
     }
+}
+
+/// Which lines an action produces, as a pure function of its outcome and the
+/// verbosity flag.
+///
+/// # This is the site the whole change is about, and it was the one site with
+/// no test
+///
+/// Split out after an independent review drilled it. Inverting the flag check
+/// inside `report`, so that armed prints nothing and unarmed prints everything,
+/// which is `I-42` exactly and inverted, left the suite green in **both**
+/// profiles: no test calls `report`, and `eprintln!` returns nothing to assert on.
+/// A switch whose only job is to decide whether a line appears had every part
+/// tested except whether the line appears.
+///
+/// So the decision is a value now. `report` prints what this returns and makes
+/// no decisions of its own.
+fn report_lines(
+    action: &str,
+    elapsed: u128,
+    stages: &str,
+    outcome: Result<(), String>,
+    every_action: bool,
+) -> Vec<String> {
+    let Err(error) = outcome else {
+        let mut lines = Vec::new();
+        if elapsed > BUDGET_HARD_FAIL_MS {
+            lines.push(format!(
+                "output: {action} took {elapsed} ms — over the §1 hard-fail budget ({BUDGET_HARD_FAIL_MS} ms) — {stages}"
+            ));
+        } else if elapsed > BUDGET_TARGET_MS {
+            lines.push(format!(
+                "output: {action} took {elapsed} ms — over the §1 target ({BUDGET_TARGET_MS} ms), within the hard fail — {stages}"
+            ));
+        }
+        // Was `#[cfg(debug_assertions)]`. The flag defaults to that same
+        // answer, so a debug build is unchanged; a release build gains the
+        // line only when the operator asked for it. See
+        // [`init_report_verbosity`].
+        if every_action {
+            lines.push(format!(
+                "output: {action} finished in {elapsed} ms — {stages}"
+            ));
+        }
+        return lines;
+    };
+    vec![format!(
+        "output: {action} failed after {elapsed} ms: {error} — {stages}"
+    )]
 }
 
 // ---------------------------------------------------------------------------
@@ -1109,6 +1197,72 @@ mod tests {
         assert_ne!(debug, armed);
         assert_ne!(armed, off);
         assert_ne!(debug, off);
+    }
+
+    /// The censorship itself, at the site that performs it.
+    ///
+    /// **This is the test the first cut of this change did not have**, and an
+    /// independent review found the hole by inverting the flag check inside
+    /// `report`: armed printing nothing and unarmed printing everything, which
+    /// is `I-42` exactly and inverted, left the suite green in **both** profiles.
+    /// Every part of the switch was tested except whether the line appears.
+    #[test]
+    fn an_under_budget_action_is_silent_unless_every_action_is_on() {
+        let quiet = report_lines("grab", 120, "STAGES", Ok(()), false);
+        assert!(
+            quiet.is_empty(),
+            "an under-budget action must produce no line at all: {quiet:?}"
+        );
+        let loud = report_lines("grab", 120, "STAGES", Ok(()), true);
+        assert_eq!(loud.len(), 1, "{loud:?}");
+        assert!(loud[0].contains("finished in 120 ms"), "{loud:?}");
+    }
+
+    /// The three grabs of 2026-08-11 that met the target, and the one that did
+    /// not, as the function now sees them. The whole finding in one assertion:
+    /// unarmed, four actions produce one line, and it is the worst of them.
+    #[test]
+    fn the_2026_08_11_sample_is_one_line_from_four_actions_when_unarmed() {
+        let grabs = [281_u128, 297, 300, 488];
+        let unarmed: Vec<String> = grabs
+            .iter()
+            .flat_map(|ms| report_lines("grab", *ms, "STAGES", Ok(()), false))
+            .collect();
+        assert_eq!(unarmed.len(), 1, "{unarmed:?}");
+        assert!(unarmed[0].contains("488"), "{unarmed:?}");
+        let armed: Vec<String> = grabs
+            .iter()
+            .flat_map(|ms| report_lines("grab", *ms, "STAGES", Ok(()), true))
+            .collect();
+        assert_eq!(armed.len(), 5, "four finished lines plus one budget line");
+    }
+
+    /// 300 ms exactly is UNDER the bar, because the comparison is `>`. Pinned
+    /// because the boundary is where a censored sample is least visible.
+    #[test]
+    fn the_budget_comparison_is_strict_at_both_thresholds() {
+        assert!(report_lines("grab", BUDGET_TARGET_MS, "S", Ok(()), false).is_empty());
+        assert_eq!(
+            report_lines("grab", BUDGET_TARGET_MS + 1, "S", Ok(()), false).len(),
+            1
+        );
+        let hard = report_lines("grab", BUDGET_HARD_FAIL_MS + 1, "S", Ok(()), false);
+        assert!(hard[0].contains("hard-fail"), "{hard:?}");
+    }
+
+    /// A failure was never censored and must not become so. It is the one line
+    /// that already survived a release build, which is why `I-42` could be read
+    /// as "no failures appeared" rather than as "successes are invisible".
+    #[test]
+    fn a_failure_prints_whatever_the_flag_says() {
+        for every_action in [false, true] {
+            let lines = report_lines("grab", 12, "S", Err("no monitor".into()), every_action);
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            assert!(
+                lines[0].contains("failed after 12 ms: no monitor"),
+                "{lines:?}"
+            );
+        }
     }
 
     /// A release build starts quiet and a debug build starts loud. **Both
