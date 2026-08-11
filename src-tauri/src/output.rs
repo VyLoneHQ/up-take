@@ -60,6 +60,14 @@ const BUDGET_HARD_FAIL_MS: u128 = 600;
 /// build. See [`init_report_verbosity`].
 const REPORT_VAR: &str = "UPTAKE_DEV_REPORT";
 
+/// Stands in for a [`REPORT_VAR`] value that is set but is not valid Unicode.
+///
+/// A sentinel rather than `""`, because the armed line quotes the value it read
+/// and `""` would announce a value the variable does not hold. It is set, so it
+/// counts as on like any other value; what a reader needs is that it could not be
+/// shown, not a plausible-looking empty string.
+const NOT_UNICODE: &str = "<set, but not valid Unicode>";
+
 /// Whether every action prints a timing line, or only the ones over budget.
 ///
 /// Defaults to the build kind, so a debug build behaves exactly as it did
@@ -677,7 +685,7 @@ fn stage_line(split: &Split) -> String {
 /// that trade (`UPTAKE_DEV_PACING`, `UPTAKE_DEV_RESHOW`,
 /// `UPTAKE_DEV_MONITOR_PERTURB`), and it is the one the backlog row prescribes.
 ///
-/// **It cannot live in `dev_harness` with its three siblings.** That module is
+/// **It cannot live in `dev_harness` with its four siblings.** That module is
 /// `#[cfg(debug_assertions)]` at its declaration in `lib.rs`, so it does not
 /// exist in the one build whose numbers mean anything. The shape it borrows
 /// instead is `freeze::init_display_format`: read once at setup, in release,
@@ -692,7 +700,7 @@ fn stage_line(split: &Split) -> String {
 ///
 /// The difference is which line matters. There, the armed line is the useful one.
 /// Here it is the **unarmed** line, because the default state is the one that
-/// misleads: it names the threshold and says outright that an action which met it
+/// misleads: it names the threshold and says outright that an action UNDER it
 /// prints nothing. Had that sentence been on the console of the 2026-08-11 pass,
 /// the operator would have read three missing lines as three fast grabs rather
 /// than as three grabs that did not happen.
@@ -703,40 +711,61 @@ fn stage_line(split: &Split) -> String {
 /// attribute means a release build allocates **no console of its own**. An
 /// **inherited** console still receives the output, so a release build launched
 /// from a terminal, which is what a rig pass does, prints everything here.
-/// Measured by an independent review on 2026-08-11 with a purpose-built binary,
-/// from two shells and through a redirect; `main.rs:12` and `hotkey.rs:163` both
-/// state flatly that release stderr is invisible, and on this point they are
-/// wrong. Not corrected here: they are outside this change, and a claim about
-/// another module is worth its own commit.
+/// Measured twice by independent review on 2026-08-11, with a purpose-built
+/// `windows_subsystem = "windows"` binary, from two shells and through three
+/// capture forms. `main.rs:12` says release stderr is invisible *in a release
+/// build*, which is too broad and is wrong on this point; `hotkey.rs:163` says it
+/// of an **installed** build, which is the sink-less case below and is correct.
+/// Neither is corrected here: they are outside this change.
 ///
-/// **Launched from Explorer or the installed shortcut there is no console, and
-/// then this announcement disappears along with everything it announces.** That
-/// restores exactly the ambiguity it exists to remove, and no line can fix it
-/// because the missing thing is the sink. Roadmap 1.15 (structured logging) is
+/// ⚠️ **ONE CAPTURE FORM SILENTLY PRODUCES AN EMPTY FILE, and it is the one a
+/// PowerShell operator reaches for first.** Measured, not reasoned about:
+///
+/// ```text
+/// bash    exe 2>&1 | cat                        line present
+/// bash    exe 2> file                           line present
+/// pwsh    & exe 2>&1 | Write-Host               line present
+/// pwsh    & exe 2> file                         FILE CREATED, 0 BYTES
+/// pwsh    Start-Process -RedirectStandardError  line present
+/// ```
+///
+/// So on Windows PowerShell, capture with `Start-Process -RedirectStandardError`
+/// or a pipe, never with `2> file`. The workspace opened `I-43` for this on the
+/// same day and out of the same review, and it had already **cost a rig step**:
+/// the operator was handed the broken form, ran it, and got an empty log with no
+/// error to explain it. An announcement that lands in a 0-byte file is `I-11`
+/// reproduced inside the fix written to escape `I-11`, which is why this table is
+/// here rather than in a commit message.
+///
+/// **Launched from Explorer or the installed shortcut there is no console at all,
+/// and then this announcement disappears along with everything it announces.**
+/// That restores exactly the ambiguity it exists to remove, and no line can fix
+/// it because the missing thing is the sink. Roadmap 1.15 (structured logging) is
 /// where that stops being true. State it rather than let a rig operator find it.
 pub(crate) fn init_report_verbosity() {
-    // The env read is the only part of this that no test covers, and it is kept
-    // to one line for that reason. `std::env::set_var` is `unsafe` in edition
-    // 2024 because a concurrent `getenv` is UB, and `cargo test` runs its tests
-    // on parallel threads, so a test that set the variable would buy this line's
-    // coverage with a soundness hazard in every other test in the binary. The
-    // decision it feeds is [`apply_report_verbosity`], which is tested.
+    // What no test covers is the ENV READ, and only the read: the three-way match
+    // below maps `VarError` onto the argument, and the decision it feeds is
+    // [`apply_report_verbosity`], which is tested including this function's
+    // `NOT_UNICODE` case. `std::env::set_var` is `unsafe` in edition 2024 because
+    // a concurrent `getenv` is UB, and `cargo test` runs its tests on parallel
+    // threads, so covering the read itself would buy one line with a soundness
+    // hazard in every other test in the binary.
+    //
+    // ⚠️ **This comment said the read was "the only part no test covers" while
+    // the correction beneath it added an untested arm.** Round 2 of the review
+    // found the sentence describing the body it no longer matched.
     //
     // `NotUnicode` would be folded into `None` by `.ok()` and then announced as
     // *unset*, which is a line describing a state it did not load: the rule this
     // function's own comment below states, broken one level up from where it was
-    // applied. Said out loud instead. The `env::var(..).is_ok()` siblings in
-    // `dev_harness` absorb this case silently; they are not release code.
+    // applied. It is named instead. It is deliberately NOT rendered as `""`,
+    // which is what the first cut did and which announces a value the variable
+    // does not hold. The `env::var(..).is_ok()` siblings in `dev_harness` absorb
+    // this case silently; they are not release code.
     let raw = match std::env::var(REPORT_VAR) {
         Ok(value) => Some(value),
         Err(std::env::VarError::NotPresent) => None,
-        Err(std::env::VarError::NotUnicode(value)) => {
-            eprintln!(
-                "output: {REPORT_VAR} holds a value that is not valid Unicode ({value:?}); it is \
-                 SET, so it counts as on"
-            );
-            Some(String::new())
-        }
+        Err(std::env::VarError::NotUnicode(_)) => Some(NOT_UNICODE.to_string()),
     };
     eprintln!("{}", apply_report_verbosity(raw.as_deref()));
 }
@@ -1175,6 +1204,24 @@ mod tests {
         assert!(line.contains("Any value counts as on"), "{line}");
     }
 
+    /// A value that is not valid Unicode arms the switch like any other, and the
+    /// line says it could not be shown rather than showing a plausible `""`.
+    ///
+    /// The first cut of the `NotUnicode` arm passed `String::new()`, so the
+    /// armed line read `UPTAKE_DEV_REPORT=""` for a variable holding no such
+    /// thing. Round 2 of the review found it: the rule twenty lines above is
+    /// that no branch may describe a state it did not load.
+    #[test]
+    fn a_non_unicode_value_arms_the_switch_and_is_not_rendered_as_empty() {
+        let line = verbosity_line(true, false, Some(NOT_UNICODE));
+        assert!(line.contains("ARMED"), "{line}");
+        assert!(line.contains("not valid Unicode"), "{line}");
+        assert!(
+            !line.contains(&format!("{REPORT_VAR}=\"\"")),
+            "a value that could not be read must not be shown as empty: {line}"
+        );
+    }
+
     /// A debug build must not claim the variable did anything, and must say what
     /// a release build would have done instead: the developer reading this line
     /// is the one who will later read a rig log they did not produce.
@@ -1248,6 +1295,16 @@ mod tests {
         );
         let hard = report_lines("grab", BUDGET_HARD_FAIL_MS + 1, "S", Ok(()), false);
         assert!(hard[0].contains("hard-fail"), "{hard:?}");
+        // BUDGET_HARD_FAIL_MS exactly is the OTHER boundary, and pinning only
+        // the target one is why `>` -> `>=` at the hard-fail line survived round
+        // 2's mutation pass with the suite green in both profiles. The test was
+        // named for a coverage it did not have.
+        let at_hard = report_lines("grab", BUDGET_HARD_FAIL_MS, "S", Ok(()), false);
+        assert_eq!(at_hard.len(), 1, "{at_hard:?}");
+        assert!(
+            at_hard[0].contains("over the §1 target") && !at_hard[0].contains("hard-fail"),
+            "exactly the hard-fail budget is still WITHIN it: {at_hard:?}"
+        );
     }
 
     /// A failure was never censored and must not become so. It is the one line

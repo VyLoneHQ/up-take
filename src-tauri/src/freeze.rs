@@ -358,10 +358,13 @@ static FREEZE_ALL_MONITORS: AtomicBool = AtomicBool::new(false);
 
 /// Reads `UPTAKE_FREEZE_ALL_MONITORS` and reports what it decided.
 ///
-/// **Prints the value it loaded, never a name written here** — `UT-F-46` is this
-/// project's record of `init_display_format` announcing `staying on png` while
-/// the default had been JPEG for a day, inside the function whose own doc said
-/// it existed to prevent that. The scope is the thing a rig operator is most
+/// **Prints the value it loaded, never a name written here.** The worked example
+/// is `init_display_format` announcing `staying on png` while the default had
+/// been JPEG for a day, inside the function whose own doc said it existed to
+/// prevent that. The workspace records that as **`UT-F-46`'s shape** rather than
+/// as `UT-F-46`, which is the idle condition that could not be produced on a real
+/// desktop; this comment stated it flatly until 2026-08-11, so a reader resolving
+/// the id landed on the wrong event. The scope is the thing a rig operator is most
 /// likely to misattribute a number to, so it says which one it is on every run
 /// rather than only when something was set.
 pub(crate) fn init_freeze_scope() {

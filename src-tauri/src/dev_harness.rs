@@ -112,10 +112,12 @@
 //! exists so a reader of this file finds it.** This module is
 //! `#[cfg(debug_assertions)]` at its declaration in `lib.rs`, so nothing in it
 //! exists in a release build, and `UPTAKE_DEV_REPORT` is a switch whose entire
-//! purpose is a release build. It forces `output::report`'s per-action line on,
-//! which is otherwise compiled out of release while the over-budget lines beside
-//! it are not, so a release log records only the actions that MISSED the bar
-//! (`I-42`, `UT-F-60`).
+//! purpose is a release build. It forces `output::report`'s per-action line on.
+//! That line **was** compiled out of release while the over-budget lines beside
+//! it were not, so a release log recorded only the actions that MISSED the bar
+//! (`I-42`, `UT-F-60`); it is compiled IN now and gated by a runtime flag, which
+//! is what the switch sets. Tense matters here: a reader told the line is
+//! compiled out goes looking for a `cfg` in `report` and does not find one.
 //!
 //! ```text
 //! UPTAKE_DEV_REPORT=1 <a release build>
