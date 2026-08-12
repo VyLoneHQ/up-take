@@ -3,7 +3,7 @@
 
 # Force LF line endings for specific file types.
 #
-# The languages this project is actually written in — .ts, .svelte, .rs — were
+# The languages this project is actually written in (.ts, .svelte, .rs) were
 # missing here (the list came from the scaffold), so with core.autocrlf=true on
 # a Windows clone they checked out CRLF while `biome ci` and `cargo fmt` both
 # expect LF. Local checks then failed on every file regardless of its content,

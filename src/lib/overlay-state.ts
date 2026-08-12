@@ -85,6 +85,28 @@ export function stillsFromWire(
 export type LayerName = 'front' | 'auto' | 'back';
 
 /**
+ * Every area type on the wire, matching `type_name` in `overlay.rs`.
+ *
+ * All seven are listed because Rust sends all seven, not only the ones a
+ * gesture can create. {@link ArmableType} is the narrower set a key can arm.
+ *
+ * ⚠️ Nothing checks this union against Rust in the direction that matters. An
+ * eighth `AreaType` forces an arm in `type_name`'s exhaustive match and leaves
+ * this file silent, so the new name arrives at runtime outside the union with
+ * no type error and no failing test, and the area draws as a default one.
+ * Recorded as UP-TAKE `I-55`; the seven names are pinned on the Rust side so a
+ * rename at least goes red there.
+ */
+export type AreaKind =
+  | 'default'
+  | 'screenshot'
+  | 'record'
+  | 'ocr'
+  | 'upscale'
+  | 'analysis'
+  | 'filter';
+
+/**
  * One area as Rust sends it. Every rectangle is **physical** and already laid
  * out by Rust, including the close control's: the overlay is click-through, so
  * that control is hit-tested against the Rust-side rectangle rather than as a
@@ -96,6 +118,7 @@ export interface AreaView {
   rect: PhysRect;
   close: PhysRect;
   layer: LayerName;
+  kind: AreaKind;
 }
 
 /** The payload of the `overlay://areas` event: every area, bottom-first. */
@@ -177,6 +200,7 @@ export interface AreaFrame {
   rect: CssRect;
   close: CssRect;
   layer: LayerName;
+  kind: AreaKind;
   hovered: boolean;
   /** This area is the source of a live move or resize: draw it as where the
    * area is coming *from*, not as a second area. */
@@ -222,6 +246,7 @@ export function areaFramesCss(
     rect: rects[index] as CssRect,
     close: closes[index] as CssRect,
     layer: area.layer,
+    kind: area.kind,
     // A dragged area is not also "hovered": the hover chrome invites a gesture
     // that is already under way, and its close control would sit at the source
     // position while the cursor is somewhere else entirely.
@@ -444,8 +469,14 @@ export function isFreezeKey(
   return event.key === ' ' && event.ctrlKey && !event.altKey && !event.metaKey;
 }
 
-/** An area type a direct key can arm for the next drag (ADR-0018 §1). */
-export type ArmableType = 'screenshot';
+/**
+ * An area type a direct key can arm for the next drag (ADR-0018 §1).
+ *
+ * Kept in step with `armable_type` in `overlay.rs` by hand, because the wire
+ * has no shared schema. Rust rejects a name it does not know, so a drift here
+ * fails as a refused arm rather than as an area of the wrong type.
+ */
+export type ArmableType = Extract<AreaKind, 'screenshot' | 'filter'>;
 
 /**
  * Which type this key arms, or `null` if it arms nothing.
@@ -468,6 +499,8 @@ export function armedTypeForKey(
   switch (event.key.toLowerCase()) {
     case 's':
       return 'screenshot';
+    case 'f':
+      return 'filter';
     default:
       return null;
   }

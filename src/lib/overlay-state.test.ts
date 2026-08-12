@@ -139,14 +139,25 @@ describe('areaFramesCss', () => {
       rect: [100, 100, 200, 150],
       close: [282, 100, 18, 18],
       layer: 'auto',
+      kind: 'default',
     },
     {
       id: 9,
       rect: [-1000, -200, 300, 300],
       close: [-718, -200, 18, 18],
       layer: 'front',
+      kind: 'filter',
     },
   ];
+
+  it('carries each area type through to the frame', () => {
+    // The frame is what the template styles on, so a dropped `kind` renders
+    // every Filter area as a plain one and nothing else goes wrong: no error,
+    // no failing geometry test, just the tint silently absent.
+    const frames = areaFramesCss(areas, [-1080, -1080], 2, null);
+
+    expect(frames.map((frame) => frame.kind)).toEqual(['default', 'filter']);
+  });
 
   it('converts the area and its close control against the same origin and scale', () => {
     const [first] = areaFramesCss(areas, [-1080, -1080], 2, null);
@@ -325,6 +336,19 @@ describe('armedTypeForKey', () => {
   it('still arms when Shift is held, since that is how a capital S is typed', () => {
     expect(armedTypeForKey(key({ key: 'S', shiftKey: true }))).toBe(
       'screenshot',
+    );
+  });
+
+  it('arms Filter on F, in either case', () => {
+    expect(armedTypeForKey(key({ key: 'f' }))).toBe('filter');
+    expect(armedTypeForKey(key({ key: 'F' }))).toBe('filter');
+  });
+
+  it('keeps the two armable types distinct', () => {
+    // The switch returned one value for every key it matched until Filter
+    // arrived, so a fallthrough between the arms would have been invisible.
+    expect(armedTypeForKey(key({ key: 'f' }))).not.toBe(
+      armedTypeForKey(key({ key: 's' })),
     );
   });
 
