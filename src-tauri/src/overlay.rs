@@ -735,6 +735,14 @@ struct AreaPayload {
     /// `"front"`, `"auto"` or `"back"` — the area's stacking tier (ADR-0013),
     /// so a pinned area can be marked as such on screen.
     layer: &'static str,
+    /// The area's type on the wire, following [`type_name`]'s convention, so a
+    /// type that carries its own visual treatment can be styled without the
+    /// frontend inferring what the area is.
+    ///
+    /// Added with the Filter type. Before it every area drew identically, so
+    /// this field would have been inert: [`type_name`] existed only to name the
+    /// *armed* type in the placement badge, never a placed one.
+    kind: &'static str,
 }
 
 /// The area set sent to the frontend.
@@ -778,6 +786,7 @@ pub(crate) fn emit_areas(app: &AppHandle) -> Result<(), String> {
             rect: as_tuple(area.bounds),
             close: as_tuple(interaction::close_control(area.bounds, &monitors)),
             layer: layer_name(area.layer),
+            kind: type_name(area.kind),
         })
         .collect();
     app.emit(AREAS_EVENT, AreasPayload { areas })
@@ -1377,6 +1386,10 @@ pub fn overlay_escape(app: AppHandle) {
 fn armable_type(name: &str) -> Option<AreaType> {
     match name {
         "screenshot" => Some(AreaType::Screenshot),
+        // Filter is the second type to earn a gesture (PRODUCT-VISION §3.1,
+        // key `F`). It is passive and pass-through by model default, so the
+        // area draws a tint and the user keeps working underneath it.
+        "filter" => Some(AreaType::Filter),
         _ => None,
     }
 }
@@ -1497,5 +1510,38 @@ mod tests {
         let before = Rect::new(0, 0, 2560, 1440);
         let after = Rect::new(0, 0, 4480, 1440);
         assert!(needs_write(before, after));
+    }
+
+    /// `type_name` and `armable_type` are hand-maintained inverses across a
+    /// wire with no shared schema, and the frontend now styles areas on the
+    /// result. A name that resolves to the wrong type would put one type's
+    /// visual treatment on another, with nothing failing to say so.
+    ///
+    /// Both directions are pinned per pair rather than composed through an
+    /// unwrap: the workspace denies `expect_used`, and a test module opting
+    /// back out for one assertion widens the exemption further than the
+    /// assertion is worth.
+    #[test]
+    fn every_armable_name_round_trips_through_type_name() {
+        for (name, kind) in [
+            ("screenshot", AreaType::Screenshot),
+            ("filter", AreaType::Filter),
+        ] {
+            assert_eq!(armable_type(name), Some(kind), "{name} must arm");
+            assert_eq!(type_name(kind), name, "{name} must round trip");
+        }
+    }
+
+    /// The half that matters. `armable_type` is the gate that stops a frontend
+    /// typo becoming an area of a type the app cannot draw, so what it
+    /// *refuses* is the property, and a widening that quietly accepted the
+    /// other five would be invisible from the accepting side alone.
+    #[test]
+    fn a_modelled_type_with_no_gesture_is_still_refused() {
+        for name in ["default", "record", "ocr", "upscale", "analysis"] {
+            assert_eq!(armable_type(name), None, "{name} has no gesture yet");
+        }
+        assert_eq!(armable_type("Filter"), None, "the wire name is lowercase");
+        assert_eq!(armable_type(""), None);
     }
 }

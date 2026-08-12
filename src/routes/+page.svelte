@@ -375,6 +375,7 @@ onMount(() => {
           class="area"
           class:hovered={area.hovered}
           class:pinned={area.layer !== 'auto'}
+          class:filter={area.kind === 'filter'}
           style="transform: translate3d({area.rect.x}px, {area.rect.y}px, 0); width: {area
             .rect.width}px; height: {area.rect.height}px"
         >
@@ -540,6 +541,37 @@ onMount(() => {
   border-color: rgba(160, 210, 255, 1);
   background: rgba(120, 180, 255, 0.12);
   box-shadow: 0 0 10px rgba(120, 180, 255, 0.5);
+}
+
+/* A Filter area (PRODUCT-VISION §3.1, key `F`): a warm translucent wash that
+   takes the glare off whatever sits underneath it. Passive and pass-through by
+   model default, so the user goes on working under it and nothing here is a
+   click target.
+
+   The border stays, and stays visible, for one reason. A pass-through area the
+   user cannot see is one they cannot grab in PLACEMENT either, and until task
+   1.17(b2) lands its grabbable chrome the border and the close control are the
+   whole of its handle. Amber rather than the accent blue so the two built types
+   are told apart at a glance, which is §2.1's per-type theming in its smallest
+   form.
+
+   The strength is a placeholder and is not a design decision yet. Task 1.14
+   owns making it user-selectable, the same way it owns the freeze display
+   format, because a fixed wash that suits one screen suits few. */
+.area.filter {
+  border-color: rgba(255, 186, 110, 0.85);
+  background: rgba(255, 170, 80, 0.16);
+  box-shadow: 0 0 6px rgba(255, 170, 80, 0.25);
+}
+
+/* Hover feedback has to survive the type, so this rule carries both. Written as
+   a third rule rather than by reordering the two above it: `.area.hovered` and
+   `.area.filter` have equal specificity, so whichever came second would win
+   silently and the loser would become dead CSS that no test covers. */
+.area.filter.hovered {
+  border-color: rgba(255, 205, 145, 1);
+  background: rgba(255, 170, 80, 0.24);
+  box-shadow: 0 0 10px rgba(255, 170, 80, 0.45);
 }
 
 /* A pinned tier (ADR-0013) is a state the user set and must be able to see; an

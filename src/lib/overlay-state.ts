@@ -91,11 +91,27 @@ export type LayerName = 'front' | 'auto' | 'back';
  * DOM element, and computing a second one here is how it would end up drawn
  * somewhere it cannot be clicked.
  */
+/**
+ * Every area type on the wire, matching `type_name` in `overlay.rs`.
+ *
+ * All seven are listed because Rust sends all seven, not only the ones a
+ * gesture can create. {@link ArmableType} is the narrower set a key can arm.
+ */
+export type AreaKind =
+  | 'default'
+  | 'screenshot'
+  | 'record'
+  | 'ocr'
+  | 'upscale'
+  | 'analysis'
+  | 'filter';
+
 export interface AreaView {
   id: number;
   rect: PhysRect;
   close: PhysRect;
   layer: LayerName;
+  kind: AreaKind;
 }
 
 /** The payload of the `overlay://areas` event: every area, bottom-first. */
@@ -177,6 +193,7 @@ export interface AreaFrame {
   rect: CssRect;
   close: CssRect;
   layer: LayerName;
+  kind: AreaKind;
   hovered: boolean;
   /** This area is the source of a live move or resize: draw it as where the
    * area is coming *from*, not as a second area. */
@@ -222,6 +239,7 @@ export function areaFramesCss(
     rect: rects[index] as CssRect,
     close: closes[index] as CssRect,
     layer: area.layer,
+    kind: area.kind,
     // A dragged area is not also "hovered": the hover chrome invites a gesture
     // that is already under way, and its close control would sit at the source
     // position while the cursor is somewhere else entirely.
@@ -444,8 +462,14 @@ export function isFreezeKey(
   return event.key === ' ' && event.ctrlKey && !event.altKey && !event.metaKey;
 }
 
-/** An area type a direct key can arm for the next drag (ADR-0018 §1). */
-export type ArmableType = 'screenshot';
+/**
+ * An area type a direct key can arm for the next drag (ADR-0018 §1).
+ *
+ * Kept in step with `armable_type` in `overlay.rs` by hand, because the wire
+ * has no shared schema. Rust rejects a name it does not know, so a drift here
+ * fails as a refused arm rather than as an area of the wrong type.
+ */
+export type ArmableType = Extract<AreaKind, 'screenshot' | 'filter'>;
 
 /**
  * Which type this key arms, or `null` if it arms nothing.
@@ -468,6 +492,8 @@ export function armedTypeForKey(
   switch (event.key.toLowerCase()) {
     case 's':
       return 'screenshot';
+    case 'f':
+      return 'filter';
     default:
       return null;
   }
