@@ -1544,4 +1544,28 @@ mod tests {
         assert_eq!(armable_type("Filter"), None, "the wire name is lowercase");
         assert_eq!(armable_type(""), None);
     }
+
+    /// All seven wire names, pinned. The frontend's `AreaKind` union is a
+    /// hand-written mirror of this list and **nothing checks it from the other
+    /// side**: an eighth `AreaType` forces an arm in `type_name` and leaves
+    /// TypeScript silent, so the new name reaches the browser outside the union
+    /// with no type error and the area draws as a default one (`I-55`).
+    ///
+    /// This test cannot close that gap. What it does is make a *rename* go red
+    /// here, so the two lists cannot drift apart quietly in the cheaper of the
+    /// two directions.
+    #[test]
+    fn every_area_type_has_its_wire_name_pinned() {
+        for (kind, name) in [
+            (AreaType::Default, "default"),
+            (AreaType::Screenshot, "screenshot"),
+            (AreaType::Record, "record"),
+            (AreaType::Ocr, "ocr"),
+            (AreaType::Upscale, "upscale"),
+            (AreaType::Analysis, "analysis"),
+            (AreaType::Filter, "filter"),
+        ] {
+            assert_eq!(type_name(kind), name);
+        }
+    }
 }

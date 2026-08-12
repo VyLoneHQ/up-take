@@ -85,17 +85,17 @@ export function stillsFromWire(
 export type LayerName = 'front' | 'auto' | 'back';
 
 /**
- * One area as Rust sends it. Every rectangle is **physical** and already laid
- * out by Rust, including the close control's: the overlay is click-through, so
- * that control is hit-tested against the Rust-side rectangle rather than as a
- * DOM element, and computing a second one here is how it would end up drawn
- * somewhere it cannot be clicked.
- */
-/**
  * Every area type on the wire, matching `type_name` in `overlay.rs`.
  *
  * All seven are listed because Rust sends all seven, not only the ones a
  * gesture can create. {@link ArmableType} is the narrower set a key can arm.
+ *
+ * ⚠️ Nothing checks this union against Rust in the direction that matters. An
+ * eighth `AreaType` forces an arm in `type_name`'s exhaustive match and leaves
+ * this file silent, so the new name arrives at runtime outside the union with
+ * no type error and no failing test, and the area draws as a default one.
+ * Recorded as UP-TAKE `I-55`; the seven names are pinned on the Rust side so a
+ * rename at least goes red there.
  */
 export type AreaKind =
   | 'default'
@@ -106,6 +106,13 @@ export type AreaKind =
   | 'analysis'
   | 'filter';
 
+/**
+ * One area as Rust sends it. Every rectangle is **physical** and already laid
+ * out by Rust, including the close control's: the overlay is click-through, so
+ * that control is hit-tested against the Rust-side rectangle rather than as a
+ * DOM element, and computing a second one here is how it would end up drawn
+ * somewhere it cannot be clicked.
+ */
 export interface AreaView {
   id: number;
   rect: PhysRect;

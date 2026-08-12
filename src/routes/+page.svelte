@@ -549,9 +549,13 @@ onMount(() => {
    click target.
 
    The border stays, and stays visible, for one reason. A pass-through area the
-   user cannot see is one they cannot grab in PLACEMENT either, and until task
-   1.17(b2) lands its grabbable chrome the border and the close control are the
-   whole of its handle. Amber rather than the accent blue so the two built types
+   user cannot see is one they cannot aim at, and the border and the close
+   control are the whole of its handle: task 1.17(b) already made chrome
+   grabbable for a pass-through area (`interactive_area_handle_at`), so a Filter
+   area resizes and dismisses in LIVING today. What it cannot do is MOVE, since
+   `Handle::Body` is the move grab and the body is what passes through, and
+   1.17(b2)'s control bar is the row that fixes that. Amber rather than the
+   accent blue so the two built types
    are told apart at a glance, which is §2.1's per-type theming in its smallest
    form.
 
