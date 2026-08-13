@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 307f070361b333dd2dfd62b02248c5b233db091292640543584adf9832494985 # shrinks to store = AreaStore { areas: [Area { id: AreaId(1), kind: Record, bounds: Rect { origin: Point { x: 0, y: 0 }, size: Size { width: 50, height: 97 } }, visual: Live, input: PassThrough, layer: Back }], next_id: 2 }, x = 0, y = 0
+cc d2544d34ee2a4486f8b92c5c278609e5768495b47c1feb2e272d56db08924ced # shrinks to bounds = Rect { origin: Point { x: 0, y: 0 }, size: Size { width: 1, height: 1 } }, notches = 1

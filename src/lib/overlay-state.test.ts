@@ -7,6 +7,7 @@ import {
   armedTypeForKey,
   dismissFocusedArea,
   escapeOverlay,
+  formatZoom,
   frameKey,
   frozenFrameKeys,
   isFreezeKey,
@@ -140,6 +141,7 @@ describe('areaFramesCss', () => {
       close: [282, 100, 18, 18],
       layer: 'auto',
       kind: 'default',
+      zoom: 1,
     },
     {
       id: 9,
@@ -147,6 +149,7 @@ describe('areaFramesCss', () => {
       close: [-718, -200, 18, 18],
       layer: 'front',
       kind: 'filter',
+      zoom: 1,
     },
   ];
 
@@ -516,5 +519,28 @@ describe('frozenFrameKeys', () => {
     // the screen reads as live while it is frozen -- the failure in the other
     // direction, which is the one no user would report as a bug.
     expect(frameKey(rig[2])).toBe('4480,0,1920,1080');
+  });
+});
+
+describe('formatZoom', () => {
+  it('prints a whole factor without decimals', () => {
+    // The commonest values in the range. `2.00×` reads as an instrument
+    // reporting a measurement; `2×` reads as the setting the user chose.
+    expect(formatZoom(2)).toBe('2×');
+    expect(formatZoom(8)).toBe('8×');
+  });
+
+  it('keeps the quarters the step actually produces', () => {
+    expect(formatZoom(1.25)).toBe('1.25×');
+    expect(formatZoom(1.5)).toBe('1.5×');
+    expect(formatZoom(3.75)).toBe('3.75×');
+  });
+
+  it('survives the float the wire delivers', () => {
+    // The factor is computed in Rust as an f32 and arrives as an IEEE double,
+    // so it is not exactly the quarter it represents. A formatter that
+    // stringified the number directly would print `2.4999999403953552×`.
+    expect(formatZoom(2.4999999403953552)).toBe('2.5×');
+    expect(formatZoom(0.9999999)).toBe('1×');
   });
 });

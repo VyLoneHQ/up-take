@@ -129,8 +129,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     IDC_SIZEWE, LoadCursorW, MSLLHOOKSTRUCT, OCR_APPSTARTING, OCR_CROSS, OCR_HAND, OCR_IBEAM,
     OCR_NO, OCR_NORMAL, OCR_SIZEALL, OCR_SIZENESW, OCR_SIZENS, OCR_SIZENWSE, OCR_SIZEWE, OCR_UP,
     OCR_WAIT, SPI_SETCURSORS, SetSystemCursor, SetWindowsHookExW, SystemParametersInfoW,
-    UnhookWindowsHookEx, WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WindowFromPoint,
+    UnhookWindowsHookEx, WH_MOUSE_LL, WHEEL_DELTA, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WindowFromPoint,
 };
 
 use crate::overlay;
@@ -1782,6 +1782,49 @@ fn handle_mouse(wparam: WPARAM, lparam: LPARAM) -> bool {
                 claimed
             }
         },
+        // Zoom (§3.4). The target resolves exactly as the area menu's does, and
+        // for the same reason: in Placement the user is editing the layout, so
+        // a pass-through area is still theirs to scroll; in Living ADR-0016
+        // decision 3 governs, and a scroll over a pass-through body belongs to
+        // the application underneath.
+        WM_MOUSEWHEEL => match mode() {
+            Mode::Hidden => false,
+            mode => {
+                let Some(app) = APP.get() else { return false };
+                let target = if mode == Mode::Placement {
+                    overlay::area_at(app, point)
+                } else {
+                    overlay::interactive_area_at(app, point)
+                };
+                // **Claimed on the type, not on whether the zoom moved.** A
+                // scroll held at the ceiling changes nothing and must still be
+                // swallowed: passing it through would scroll the document under
+                // a magnified area, which is the one thing the user cannot see
+                // happening.
+                let Some(area) = target.filter(|area| area.kind.supports_zoom()) else {
+                    return false;
+                };
+                // **Checked here, after the area resolves, and NOT in the
+                // press guard above.** `WM_MOUSEWHEEL` was added to that guard
+                // at first, which an independent review caught: the z-order
+                // walk is measured at up to 2.77 ms and the guard runs before
+                // any handler, so a precision touchpad emitting ~100 events a
+                // second would have paid it on every scroll anywhere on the
+                // machine while the overlay was visible, including sub-notch
+                // events and scrolls over no area at all. Here it runs only
+                // when a zoomable area is actually under the cursor, which is
+                // the only case where the answer changes anything, and the
+                // guard's own comment stays true.
+                if shadowed_by_another_window(point) {
+                    return false;
+                }
+                let notches = wheel_notches(area.id.get(), info.mouseData);
+                if notches != 0 {
+                    overlay::zoom_area(app, area.id, notches);
+                }
+                true
+            }
+        },
         WM_RBUTTONUP if RIGHT_PENDING.swap(false, Ordering::SeqCst) => {
             // Opened on *release*, not on press: a menu that appears under a
             // still-held button is one the same gesture can dismiss by accident.
@@ -1795,6 +1838,58 @@ fn handle_mouse(wparam: WPARAM, lparam: LPARAM) -> bool {
         }
         _ => false,
     }
+}
+
+/// One notch of a notched wheel, in the signed type the arithmetic needs.
+///
+/// `windows_sys` types `WHEEL_DELTA` as `u32`, and every quantity it is
+/// compared against here is signed, so a cast would be needed at each use. The
+/// assertion below is what keeps this a restatement rather than a second
+/// source: it fails to compile if the two ever disagree.
+const WHEEL_STEP: i32 = 120;
+const _: () = assert!(WHEEL_STEP as u32 == WHEEL_DELTA);
+
+/// Wheel movement that has not yet added up to a whole notch.
+///
+/// **A mouse wheel is not the only thing that sends `WM_MOUSEWHEEL`.** A
+/// notched wheel sends exactly `WHEEL_DELTA` (120) per click, and dividing by
+/// it is all that is needed. A precision touchpad and a free-spinning wheel
+/// send *fractions* (8, 17, 40), and integer division alone would floor every
+/// one of them to zero notches. The area still swallows the event, so without
+/// this the product would eat every touchpad scroll over a Default area and
+/// magnify nothing: a dead area rather than a visible bug.
+static WHEEL_RESIDUE: AtomicI32 = AtomicI32::new(0);
+
+/// Which area [`WHEEL_RESIDUE`] was accumulated over. `0` is no area, because ids are
+/// issued from 1 (`AreaStore::new`), so the sentinel cannot collide with one.
+///
+/// Residue is per-area because it is a partial gesture: carrying half a notch
+/// from one area into the next would make the second area jump on a scroll too
+/// small to move the first.
+static WHEEL_RESIDUE_AREA: AtomicU64 = AtomicU64::new(0);
+
+/// Whole scroll notches, accumulating anything left over for the next event.
+///
+/// `mouse_data`'s high word is the signed wheel delta; the low word is
+/// undefined for `WM_MOUSEWHEEL` and must be discarded rather than sign-
+/// extended along with it.
+fn wheel_notches(area: u64, mouse_data: u32) -> i32 {
+    // The documented layout of `MSLLHOOKSTRUCT.mouseData`: the high word is a
+    // signed multiple of `WHEEL_DELTA`. Narrowing to `i16` first is what makes
+    // the sign right, and it cannot lose information: the shift has already
+    // put the whole delta in the low 16 bits.
+    let delta = i32::from((mouse_data >> 16) as i16);
+    // A different area starts a fresh accumulation rather than inheriting the
+    // last one's part-notch.
+    let previous = WHEEL_RESIDUE_AREA.swap(area, Ordering::SeqCst);
+    let carried = if previous == area {
+        WHEEL_RESIDUE.load(Ordering::SeqCst)
+    } else {
+        0
+    };
+    let total = carried.saturating_add(delta);
+    WHEEL_RESIDUE.store(total % WHEEL_STEP, Ordering::SeqCst);
+    total / WHEEL_STEP
 }
 
 /// Starts the pre-capture, if this press begins a drag that will capture.
@@ -2153,7 +2248,17 @@ fn finish_gesture(release: Point) {
             let Some((x, y, width, height)) = pending else {
                 return;
             };
-            overlay::move_area(app, id, Rect::new(x, y, width, height))
+            let moved = overlay::move_area(app, id, Rect::new(x, y, width, height));
+            if moved {
+                // A magnified area holds a still of the screen *inside its own
+                // bounds*, so moving or resizing it leaves it showing a picture
+                // of where it used to be: sharp, plausible, and of the wrong
+                // place. Re-taken here, at the release, rather than per
+                // mouse-move: the drag itself is far inside `LowLevelHooksTimeout`
+                // and the frames in between are not what the user is looking at.
+                overlay::refresh_magnification(app, id);
+            }
+            moved
         }
         // A press-and-release contract: the release must land on the control it
         // started on. Sliding off cancels, which is how a user takes back a
@@ -2492,7 +2597,78 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ALL_SHAPES, CURSOR_SNAPSHOT_LEN};
+    use std::sync::{Mutex, PoisonError};
+
+    use super::{ALL_SHAPES, CURSOR_SNAPSHOT_LEN, WHEEL_STEP, wheel_notches};
+
+    /// `mouseData` as Windows fills it for a wheel event: the delta in the high
+    /// word, and a low word that is undefined and must be discarded rather than
+    /// sign-extended along with it.
+    ///
+    /// The `0xFFFF` is what makes these tests worth having. Reading `mouseData`
+    /// as a whole signed value instead of taking the high word gives an answer
+    /// that is *almost* right, off by a fraction of a notch, so it survives a
+    /// hand test on a notched wheel and only shows up as drift on a touchpad.
+    /// Serialises the tests that drive [`wheel_notches`], which reads and
+    /// writes two process-global atomics.
+    ///
+    /// `libtest` runs tests concurrently in one process, so without this the
+    /// three below race on `WHEEL_RESIDUE` and each other's part-notches, and
+    /// they race *intermittently*, which is worse than failing: the suite would
+    /// go green on most runs and red on a machine with a different core count.
+    /// Same reasoning, and the same shape, as `precapture::frame_store_guard`.
+    fn wheel_guard() -> std::sync::MutexGuard<'static, ()> {
+        static SERIAL: Mutex<()> = Mutex::new(());
+        SERIAL.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn wheel(delta: i16) -> u32 {
+        #[expect(
+            clippy::cast_sign_loss,
+            reason = "reconstructing the documented bit layout"
+        )]
+        let high = ((delta as u32) << 16) | 0xFFFF;
+        high
+    }
+
+    #[test]
+    fn a_notched_wheel_gives_one_notch_per_click() {
+        let _serial = wheel_guard();
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "WHEEL_STEP is 120, asserted equal to WHEEL_DELTA at compile time"
+        )]
+        let step = WHEEL_STEP as i16;
+        assert_eq!(wheel_notches(1, wheel(step)), 1);
+        assert_eq!(wheel_notches(1, wheel(-step)), -1);
+        assert_eq!(wheel_notches(1, wheel(step * 3)), 3);
+    }
+
+    /// The defect this accumulator exists for. A precision touchpad sends
+    /// fractions of a notch; integer division alone floors every one of them to
+    /// zero, and because the area swallows the event either way the result is
+    /// an area that eats scrolls and never magnifies.
+    #[test]
+    fn fractions_of_a_notch_accumulate_into_one() {
+        let _serial = wheel_guard();
+        let id = 2;
+        assert_eq!(wheel_notches(id, wheel(40)), 0);
+        assert_eq!(wheel_notches(id, wheel(40)), 0);
+        assert_eq!(wheel_notches(id, wheel(40)), 1, "40 * 3 == WHEEL_DELTA");
+        // And the residue is spent, not counted twice.
+        assert_eq!(wheel_notches(id, wheel(40)), 0);
+    }
+
+    /// A part-notch belongs to the area it was scrolled over. Carrying it
+    /// across would make a second area jump on a scroll too small to have moved
+    /// the first.
+    #[test]
+    fn residue_does_not_cross_from_one_area_to_another() {
+        let _serial = wheel_guard();
+        assert_eq!(wheel_notches(3, wheel(80)), 0);
+        assert_eq!(wheel_notches(4, wheel(80)), 0, "starts fresh");
+        assert_eq!(wheel_notches(4, wheel(40)), 1);
+    }
 
     /// [`super::CursorShape::index`] and [`ALL_SHAPES`] are two hand-maintained
     /// halves of one mapping: [`super::snapshot_cursor`] fills the array by

@@ -16,6 +16,7 @@ import {
   escapeOverlay,
   type FlashPayload,
   type FrozenStill,
+  formatZoom,
   frameKey,
   frozenFrameKeys,
   type HoverPayload,
@@ -259,7 +260,14 @@ onMount(() => {
     // Arrives ~200 ms after the area itself: the area appears the instant the
     // drag ends and fills in when its capture lands, rather than leaving a hole
     // where the user just dragged.
-    pins.set(event.payload.id, event.payload.url);
+    //
+    // A null URL is the *other* direction: the area has no pixels any more and
+    // must go back to showing the live screen. That is §3.4's floor: scrolling
+    // all the way out is the way back to normal, and an area that kept its last
+    // still would be showing a photograph of normal instead.
+    const { id, url } = event.payload;
+    if (url === null) pins.delete(id);
+    else pins.set(id, url);
   });
   const unlistenSelection = listen<SelectionPayload>(
     'placement://selection',
@@ -390,6 +398,15 @@ onMount(() => {
               alt=""
               draggable={false}
             />
+          {/if}
+          <!-- The magnification (§3.4). Shown only above natural size, where
+               there is something to report: at 1× the area is the live screen
+               and a "1×" badge would be chrome asserting a fact the user can
+               already see. It is what makes scrolling back discoverable, which
+               matters more here than for the frozen badge, because a magnified still
+               of a static desktop is indistinguishable from the desktop. -->
+          {#if area.zoom > 1}
+            <span class="zoom-badge">{formatZoom(area.zoom)}</span>
           {/if}
           {#if flashes.has(area.id)}
             <!-- Acknowledges a completed Copy or Save. `{#key}` on the nonce
@@ -676,10 +693,18 @@ onMount(() => {
   pointer-events: none;
 }
 
-/* A Screenshot area's captured pixels, filling the area exactly (ADR-0014 §6).
-   `object-fit: fill` rather than `contain`: the capture was taken *at* the
-   area's rectangle, so the two always share an aspect ratio, and `contain`
-   would letterbox on a rounding difference instead of showing it. */
+/* An area's captured pixels, filling the area exactly.
+
+   Two callers now. A Screenshot area's pin (ADR-0014 §6) is captured *at* the
+   area's rectangle. A zoomed Default area's (§3.4) is captured at a smaller
+   rectangle inside it, and `fill` is what performs the magnification: the
+   stretch from source to area *is* the zoom, done by the compositor on the GPU
+   rather than by resampling any pixels on the Rust side.
+
+   `fill` rather than `contain` for both. The two rectangles always share an
+   aspect ratio (the source is each extent divided by the same factor), so
+   `contain` would never letterbox on purpose, only on a rounding difference,
+   which it would hide instead of showing. */
 .pin {
   position: absolute;
   inset: 0;
@@ -687,6 +712,23 @@ onMount(() => {
   height: 100%;
   object-fit: fill;
   border-radius: 3px;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* The magnification (§3.4). Deliberately quieter than `.frozen-badge`: that one
+   reports a state of the whole screen and has to be found, this one sits inside
+   an area the user is looking at directly. Bottom-right, because the close
+   control owns the top-right and the resize bands own the edges. */
+.zoom-badge {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(20, 20, 24, 0.72);
+  color: rgba(255, 255, 255, 0.92);
+  font: 600 12px/1 system-ui, sans-serif;
   pointer-events: none;
   user-select: none;
 }

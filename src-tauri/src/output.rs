@@ -24,6 +24,7 @@
 //! plain field read on tao's side, safe from any thread — so nothing below is
 //! thread-affine.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 use std::ptr;
@@ -599,6 +600,230 @@ pub(crate) fn capture_into_area(app: &AppHandle, id: AreaId, bounds: Rect) {
     });
 }
 
+/// Every area's outstanding magnification work, under one lock.
+///
+/// **Per area, not global, and the first version of this was global.** An
+/// independent review found what that costs: with two `Default` areas on
+/// screen, scrolling A and then B within A's capture window issued a newer
+/// generation, so A's finished capture was dropped as superseded and its
+/// request was no longer in the slot to retry. A's `zoom` field and badge went
+/// on reporting `1.25x` over the unmagnified live screen, permanently, until
+/// the user happened to scroll A again. Several areas at once is the product's
+/// normal state (§3.3), so that is the ordinary case rather than a corner.
+///
+/// One lock rather than a lock per map so that "is this request still the
+/// newest for this area" cannot be answered against a half-updated pair.
+static MAGNIFY: Mutex<Magnify> = Mutex::new(Magnify::new());
+
+/// The bookkeeping [`MAGNIFY`] holds.
+struct Magnify {
+    /// Requests no worker has picked up yet, newest per area.
+    ///
+    /// **A slot per area, not a queue, and that is the whole coalescing
+    /// strategy.** A scroll burst is ten notches in a few hundred milliseconds
+    /// and a capture is 100-300 ms, so a queue would serve nine magnifications
+    /// the user has already scrolled past. Overwriting one area's entry drops
+    /// its intermediate steps and keeps every *other* area's request intact.
+    pending: BTreeMap<AreaId, (Rect, u64)>,
+    /// The newest generation issued for each area, which is what a finished
+    /// capture compares itself against.
+    ///
+    /// **A request leaves `pending` before its capture starts**, so the slot
+    /// alone cannot tell a worker that the zoom moved under it. Without this, a
+    /// worker holding the last request of a burst paints a magnification the
+    /// user has already scrolled past, or re-pins an area
+    /// [`clear_magnification`] has just emptied: an area stuck showing a still
+    /// of the screen with no way back short of scrolling in and out again.
+    current: BTreeMap<AreaId, u64>,
+    /// Issues generations. Monotonic across areas so that a stamp is unique;
+    /// what makes the check per-area is `current`, not this.
+    next_generation: u64,
+    /// Whether a worker thread is running. One at a time, for correctness
+    /// rather than for thrift: `CaptureStore::insert` issues versions in
+    /// completion order, so two concurrent captures of one area publish in
+    /// whichever order they happen to finish, and a slower capture of an
+    /// *older* zoom would overwrite a newer one on screen.
+    working: bool,
+}
+
+impl Magnify {
+    const fn new() -> Self {
+        Self {
+            pending: BTreeMap::new(),
+            current: BTreeMap::new(),
+            next_generation: 0,
+            working: false,
+        }
+    }
+
+    /// Stamps a new request for `id`, superseding whatever that area had.
+    fn issue(&mut self, id: AreaId, source: Rect) -> u64 {
+        self.next_generation = self.next_generation.wrapping_add(1);
+        let generation = self.next_generation;
+        self.current.insert(id, generation);
+        self.pending.insert(id, (source, generation));
+        generation
+    }
+
+    /// Invalidates `id`'s in-flight work and drops anything queued for it,
+    /// **without touching any other area's**.
+    fn cancel(&mut self, id: AreaId) {
+        self.pending.remove(&id);
+        self.next_generation = self.next_generation.wrapping_add(1);
+        self.current.insert(id, self.next_generation);
+    }
+
+    /// True when `generation` is still the newest request for `id`.
+    fn is_current(&self, id: AreaId, generation: u64) -> bool {
+        self.current.get(&id) == Some(&generation)
+    }
+
+    fn take_one(&mut self) -> Option<(AreaId, Rect, u64)> {
+        let (&id, &(source, generation)) = self.pending.iter().next()?;
+        self.pending.remove(&id);
+        Some((id, source, generation))
+    }
+}
+
+fn magnify() -> std::sync::MutexGuard<'static, Magnify> {
+    MAGNIFY.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Captures `source` and pins it as `id`'s contents, magnifying the area (§3.4).
+///
+/// `source` is `Zoom::source_rect`'s output: a rectangle *inside* the area,
+/// which the frontend then stretches to fill it. The magnification is entirely
+/// in the ratio between the two rectangles, so this function does no scaling of
+/// its own. The resampling belongs to the compositor, which does it on the GPU.
+///
+/// # Why this is not [`capture_into_area`]
+///
+/// That function is the Snipaste pin and publishes to the clipboard as well
+/// (PRODUCT-VISION §8). Zooming is not a capture the user asked to keep: it is
+/// how the area *renders*, it happens on every notch of a scroll, and putting
+/// each intermediate magnification on the clipboard would destroy whatever the
+/// user had there. What the two share is [`CaptureStore`] and the pin event,
+/// which is the part worth reusing.
+///
+/// It also resolves its pixels differently. [`capture_into_area`] prefers the
+/// pre-capture ([`crate::precapture`]), which holds a frame from the drag that
+/// created the area, which is right for a capture taken *at* that moment and stale by
+/// any amount for a scroll that happens later. This path takes the frozen still
+/// when the screen is frozen (ADR-0026 decision 6: what you see is what you
+/// get) and captures live otherwise.
+///
+/// # Threading
+///
+/// Returns immediately. The only caller is the mouse hook, and a capture is far
+/// past `LowLevelHooksTimeout`, the F-33 failure class, and the same reason
+/// [`capture_into_area`] spawns.
+pub(crate) fn magnify_into_area(app: &AppHandle, id: AreaId, source: Rect) {
+    {
+        let mut state = magnify();
+        state.issue(id, source);
+        // Lost the race to an already-running worker, which will take the
+        // request above rather than the one it was spawned for.
+        if state.working {
+            return;
+        }
+        state.working = true;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        loop {
+            let taken = magnify().take_one();
+            let Some((id, source, generation)) = taken else {
+                let mut state = magnify();
+                // **Re-checked under the same lock that clears `working`.** A
+                // request arriving between `take_one` and here would otherwise
+                // see `working` still true, return without spawning, and sit
+                // unserved until the user happened to scroll again.
+                if state.pending.is_empty() {
+                    state.working = false;
+                    break;
+                }
+                continue;
+            };
+            magnify_once(&app, id, source, generation);
+        }
+    });
+}
+
+fn magnify_once(app: &AppHandle, id: AreaId, source: Rect, generation: u64) {
+    let started = Instant::now();
+    let mut split = Split::default();
+    let outcome = frozen_or_live(source, &mut split).and_then(|(bitmap, png)| {
+        // **The freshness check and the publish are one critical section, and
+        // an independent review is why.** Checking and then locking
+        // `CaptureStore` separately leaves a window in which
+        // `clear_magnification` can run to completion (bump the generation,
+        // forget the pixels, emit the unpin), after which this worker inserts
+        // and re-pins, producing an area at 1x, with no badge, rendering a
+        // magnified still and no way back short of scrolling in and out.
+        // `clear_magnification` takes the same two locks in the same order.
+        let state = magnify();
+        if !state.is_current(id, generation) {
+            return Ok(());
+        }
+        let version = {
+            let store = app.state::<Mutex<CaptureStore>>();
+            let mut guard = store.lock().unwrap_or_else(PoisonError::into_inner);
+            guard.insert(id, bitmap, png)
+        };
+        drop(state);
+        crate::overlay::emit_pin(app, id, version)
+    });
+    report("magnify", started, &split, outcome);
+}
+
+/// The frozen still if there is one, a live capture otherwise.
+///
+/// [`capture_or_crop`]'s first and last branches with the pre-capture left out
+/// of the middle. See [`magnify_into_area`] for why that branch is wrong here.
+fn frozen_or_live(source: Rect, split: &mut Split) -> Result<(RgbaBitmap, Vec<u8>), String> {
+    if let Some(bitmap) = crate::freeze::crop(source) {
+        split.source = Source::Frozen;
+        let encode = Instant::now();
+        let png = encode_png(&bitmap)?;
+        split.encode_ms = encode.elapsed().as_millis();
+        split.bounds = Some(source);
+        split.encoded_bytes = png.len();
+        return Ok((bitmap, png));
+    }
+    capture(source, split)
+}
+
+/// Drops an area's pinned pixels and tells the frontend they are gone.
+///
+/// The caller is the scroll that returns an area to natural size. There the
+/// area must show the live screen underneath rather than a capture of it:
+/// §3.4's floor is *"a way back to normal"*, and an area left rendering its
+/// last still would be a way back to a photograph of normal.
+pub(crate) fn clear_magnification(app: &AppHandle, id: AreaId) {
+    cancel_magnification(app, id);
+    if let Err(error) = crate::overlay::emit_unpin(app, id) {
+        eprintln!("output: dropped the magnification but could not announce it: {error}");
+    }
+}
+
+/// Stops any magnification work for `id` and drops its pixels, **without**
+/// announcing anything.
+///
+/// Split from [`clear_magnification`] for the caller that has no frontend to
+/// tell: `overlay::dismiss_area`, where the area itself is going away. That
+/// path called `captures::forget` alone, and an independent review found what
+/// it left open. Dismissing an area mid-capture let the worker `insert` for an
+/// id nothing would ever `remove` again, so the bitmap and the PNG stayed
+/// resident for the process lifetime. That is the growing map M-20's soak
+/// exists to catch, reachable by closing an area within ~300 ms of scrolling it.
+pub(crate) fn cancel_magnification(app: &AppHandle, id: AreaId) {
+    // `MAGNIFY` before `CaptureStore`, the order `magnify_once` takes them in.
+    let mut state = magnify();
+    state.cancel(id);
+    crate::captures::forget(app, id);
+    drop(state);
+}
+
 /// Encodes RGBA8 pixels as PNG via the same WIC-backed encoder
 /// `uptake-capture`'s own hardware-verification driver uses
 /// (`examples/grab.rs`) — reused rather than adding a second PNG codec to vet.
@@ -1168,6 +1393,87 @@ fn unique_path(dir: &std::path::Path, stem: &str) -> PathBuf {
 #[allow(clippy::unwrap_used, reason = "a failed unwrap is a failed test")]
 mod tests {
     use super::*;
+
+    /// Two areas, one bookkeeper. **This is the review finding that made
+    /// `Magnify` per-area, driven rather than argued.**
+    ///
+    /// With a single global generation, scrolling A and then B inside A's
+    /// capture window superseded A: its finished capture was dropped and its
+    /// request was no longer queued to retry, so A kept a `1.25x` badge over
+    /// the unmagnified live screen until the user scrolled it again. Several
+    /// areas at once is the normal case (§3.3), not a corner.
+    #[test]
+    fn one_areas_scroll_does_not_supersede_another_areas_capture() {
+        let mut state = Magnify::new();
+        let (a, b) = (area(1), area(2));
+        let for_a = state.issue(a, Rect::new(0, 0, 10, 10));
+        let for_b = state.issue(b, Rect::new(50, 50, 10, 10));
+        assert!(
+            state.is_current(a, for_a),
+            "B's scroll must not invalidate A's in-flight capture"
+        );
+        assert!(state.is_current(b, for_b));
+    }
+
+    /// The coalescing half: within *one* area a newer scroll does supersede the
+    /// older one, which is what stops a burst painting steps the user has
+    /// already scrolled past.
+    #[test]
+    fn a_newer_scroll_supersedes_the_same_areas_older_one() {
+        let mut state = Magnify::new();
+        let a = area(1);
+        let first = state.issue(a, Rect::new(0, 0, 10, 10));
+        let second = state.issue(a, Rect::new(2, 2, 6, 6));
+        assert!(!state.is_current(a, first));
+        assert!(state.is_current(a, second));
+        // And only the newest is queued: the slot is per area, not a queue.
+        assert_eq!(state.pending.len(), 1);
+    }
+
+    /// `cancel` is what `clear_magnification` and `dismiss_area` both reach
+    /// for, and it must reach exactly one area. The second assertion is the one
+    /// that was wrong before the review: bumping a *global* counter meant
+    /// scrolling A back to natural size threw away B's fresh capture.
+    #[test]
+    fn cancelling_one_area_leaves_every_other_areas_work_alone() {
+        let mut state = Magnify::new();
+        let (a, b) = (area(1), area(2));
+        let for_a = state.issue(a, Rect::new(0, 0, 10, 10));
+        let for_b = state.issue(b, Rect::new(50, 50, 10, 10));
+        state.cancel(a);
+        assert!(!state.is_current(a, for_a), "A's own work is invalidated");
+        assert!(state.is_current(b, for_b), "B's is not");
+        assert!(!state.pending.contains_key(&a));
+        assert!(state.pending.contains_key(&b), "B stays queued");
+    }
+
+    /// A worker takes requests until there are none, and a taken request is not
+    /// handed out twice. Otherwise the loop in `magnify_into_area` would
+    /// re-capture the same rectangle forever.
+    #[test]
+    fn taking_a_request_removes_it() {
+        let mut state = Magnify::new();
+        let a = area(1);
+        let generation = state.issue(a, Rect::new(3, 4, 10, 10));
+        let taken = state.take_one().unwrap();
+        assert_eq!(taken, (a, Rect::new(3, 4, 10, 10), generation));
+        assert!(state.take_one().is_none());
+        // Still current: taking it out of the queue is not cancelling it. The
+        // worker checks `is_current` again after its capture.
+        assert!(state.is_current(a, generation));
+    }
+
+    /// Ids come from `AreaStore` and there is deliberately no constructor, so
+    /// the tests above build a real store rather than fabricating one.
+    fn area(nth: usize) -> AreaId {
+        let mut store = uptake_core::area::AreaStore::new();
+        let mut id = None;
+        for _ in 0..nth {
+            id = store.create(uptake_core::area::AreaType::Default, Rect::new(0, 0, 4, 4));
+        }
+        // `unwrap`, not `expect`: this module allows the former only.
+        id.unwrap()
+    }
 
     /// The unarmed line is `I-42`'s actual deliverable, so it is the one with
     /// the most assertions on it. Each names a thing the 2026-08-11 rig operator

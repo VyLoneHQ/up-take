@@ -743,6 +743,15 @@ struct AreaPayload {
     /// this field would have been inert: [`type_name`] existed only to name the
     /// *armed* type in the placement badge, never a placed one.
     kind: &'static str,
+    /// The area's magnification (§3.4), `1.0` at natural size.
+    ///
+    /// **The frontend does not scale anything with this.** The magnified
+    /// pixels arrive as a pin and fill the area, so the ratio is already in the
+    /// image. It is here so the area can *say* how far it is zoomed, which is
+    /// what makes §3.4's floor discoverable: without a badge, a user who has
+    /// scrolled has no cue that scrolling back is what returns the area to the
+    /// live screen. Same argument as the `frozen` badge.
+    zoom: f32,
 }
 
 /// The area set sent to the frontend.
@@ -787,6 +796,7 @@ pub(crate) fn emit_areas(app: &AppHandle) -> Result<(), String> {
             close: as_tuple(interaction::close_control(area.bounds, &monitors)),
             layer: layer_name(area.layer),
             kind: type_name(area.kind),
+            zoom: area.zoom.factor(),
         })
         .collect();
     app.emit(AREAS_EVENT, AreasPayload { areas })
@@ -845,6 +855,80 @@ pub(crate) fn interactive_area_at(app: &AppHandle, point: Point) -> Option<AreaS
     let store = app.state::<Mutex<AreaStore>>();
     let guard = lock(&store);
     guard.hit_test(point, &monitors).map(AreaSummary::of)
+}
+
+/// Applies `notches` of scroll to an area's magnification (§3.4) and starts
+/// whatever capture that implies.
+///
+/// Returns whether the zoom moved. A scroll that saturates at the floor or the
+/// ceiling returns `false` and is still the area's to swallow. The caller
+/// decides that on [`AreaType::supports_zoom`], before calling here, because
+/// *"was this scroll ours"* and *"did anything change"* are different questions
+/// and only the first one may pass an event through to the user's application.
+///
+/// # The three outcomes
+///
+/// Natural size clears the pin, so the area shows the live screen underneath;
+/// any other zoom requests a capture of the sub-rectangle that fills it. The
+/// third outcome is *nothing changed*, which must not request a capture: a user
+/// holding a scroll at the ceiling would otherwise re-capture at full rate
+/// forever, which is a live area in all but name and precisely the cost §3.2
+/// says a passive area does not pay.
+pub(crate) fn zoom_area(app: &AppHandle, id: AreaId, notches: i32) -> bool {
+    let (zoom, bounds) = {
+        let store = app.state::<Mutex<AreaStore>>();
+        let mut guard = lock(&store);
+        let before = guard.get(id).map(|area| area.zoom);
+        let after = guard.zoom_by(id, notches);
+        // `zoom_by` answers `None` for an unknown id and for a type that does
+        // not zoom; either way there is nothing to capture.
+        let (Some(after), Some(before)) = (after, before) else {
+            return false;
+        };
+        if after == before {
+            return false;
+        }
+        let Some(bounds) = guard.get(id).map(|area| area.bounds) else {
+            return false;
+        };
+        (after, bounds)
+    };
+    if zoom.is_natural() {
+        crate::output::clear_magnification(app, id);
+    } else {
+        crate::output::magnify_into_area(app, id, zoom.source_rect(bounds));
+    }
+    // The badge is on the area payload, so the area set has to go out again for
+    // the new factor to be visible.
+    if let Err(error) = emit_areas(app) {
+        eprintln!("overlay: zoomed but could not emit the areas: {error}");
+    }
+    true
+}
+
+/// Re-takes the magnified capture an area is already showing, because what it
+/// is a magnification *of* has moved.
+///
+/// A zoomed area holds a still of the screen inside its own bounds. Move or
+/// resize it and that still is now a picture of somewhere else, with no cue
+/// that it is stale: the area goes on displaying the old content, pin-sharp,
+/// wherever the user drops it. Called at the end of a move or a resize rather
+/// than during one: a capture per mouse-move event is the F-33 budget many
+/// times over, and the intermediate frames are not what the user is looking at.
+///
+/// A no-op for an area at natural size, which has no capture to refresh.
+pub(crate) fn refresh_magnification(app: &AppHandle, id: AreaId) {
+    let target = {
+        let store = app.state::<Mutex<AreaStore>>();
+        let guard = lock(&store);
+        guard
+            .get(id)
+            .filter(|area| !area.zoom.is_natural())
+            .map(|area| area.zoom.source_rect(area.bounds))
+    };
+    if let Some(source) = target {
+        crate::output::magnify_into_area(app, id, source);
+    }
 }
 
 /// Raises an area to the top of its tier — §3.2a's "the area you last touched
@@ -955,7 +1039,15 @@ pub(crate) fn dismiss_area(app: &AppHandle, id: AreaId) -> bool {
         // The pinned capture goes with the area that displayed it — see
         // `captures`'s Lifetime note; a map that only grows is a leak the
         // 8-hour soak (M-20) would find and nothing else would.
-        crate::captures::forget(app, id);
+        //
+        // **`cancel_magnification` rather than `captures::forget`, and the
+        // difference is a leak an independent review found.** `forget` alone
+        // removes the pixels and leaves any magnify capture still in flight,
+        // which then `insert`s for an id nothing will ever `remove` again, so
+        // the bitmap and the PNG stay resident for the process lifetime, and it
+        // is reachable by closing an area within ~300 ms of scrolling it. That
+        // is precisely the growing map this comment names.
+        crate::output::cancel_magnification(app, id);
         collapse_living_if_empty(app);
     }
     removed
@@ -1261,7 +1353,14 @@ struct PinPayload {
     /// The URL to load it from — a `uptake-area://` address, **not** the bytes.
     /// See `captures`'s module docs for why the pixels do not travel over this
     /// bridge.
-    url: String,
+    ///
+    /// **`None` means the area no longer has pinned pixels**, which is a
+    /// message the frontend previously had no way to receive: it dropped a pin
+    /// only when the area itself disappeared. Zoom needs the other case,
+    /// because §3.4's floor returns a still-showing area to live screen.
+    /// Carried on this event rather than a second one so that a clear and a
+    /// re-pin cannot be delivered out of order.
+    url: Option<String>,
 }
 
 /// Announces that `id`'s capture is pinned and available at its versioned URL.
@@ -1275,10 +1374,23 @@ pub(crate) fn emit_pin(app: &AppHandle, id: AreaId, version: u64) -> Result<(), 
         PIN_EVENT,
         PinPayload {
             id: id.get(),
-            url: crate::captures::pin_url(id, version),
+            url: Some(crate::captures::pin_url(id, version)),
         },
     )
     .map_err(|e| format!("Could not emit the pin: {e}"))
+}
+
+/// Announces that `id` has no pinned capture any more, so the area draws the
+/// screen underneath again (§3.4's floor; see `output::clear_magnification`).
+pub(crate) fn emit_unpin(app: &AppHandle, id: AreaId) -> Result<(), String> {
+    app.emit(
+        PIN_EVENT,
+        PinPayload {
+            id: id.get(),
+            url: None,
+        },
+    )
+    .map_err(|e| format!("Could not emit the unpin: {e}"))
 }
 
 /// Applies a type's ADR-0018 §6 after-create behaviour, on the event loop.

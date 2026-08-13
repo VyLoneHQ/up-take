@@ -53,7 +53,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::geometry::{Point, Rect};
+use crate::geometry::{Point, Rect, Size};
 use crate::interaction;
 
 /// A stable identity for an area, unique within the [`AreaStore`] that issued
@@ -195,6 +195,36 @@ impl AreaType {
             | Self::Filter => AfterCreate::StayInPlacement,
         }
     }
+
+    /// Whether scrolling over an area of this type magnifies it (§3.4).
+    ///
+    /// **Only `Default` today, and the narrowness is the decision.** §3.4 is
+    /// written about the Default area alone (*"scrolling over a Default area
+    /// scales its contents"*), and §3.1 names zoom as the thing that makes
+    /// Default more than an empty rectangle. Every other type already owns what
+    /// its own region means: a Screenshot holds a pinned still, an Upscale is
+    /// magnification by definition, and an OCR area shows a result rather than
+    /// pixels. Giving them all a second, conflicting magnifier is a decision
+    /// nothing has taken, so this answers `false` and leaves it takeable.
+    ///
+    /// Written as an explicit match rather than `matches!` so an eighth
+    /// [`AreaType`] has to answer here, the way [`default_visual`] and
+    /// [`default_input`] already make it answer.
+    ///
+    /// [`default_visual`]: Self::default_visual
+    /// [`default_input`]: Self::default_input
+    #[must_use]
+    pub const fn supports_zoom(self) -> bool {
+        match self {
+            Self::Default => true,
+            Self::Screenshot
+            | Self::Record
+            | Self::Ocr
+            | Self::Upscale
+            | Self::Analysis
+            | Self::Filter => false,
+        }
+    }
 }
 
 /// Whether an area's contents update continuously — the first of the three
@@ -281,6 +311,147 @@ pub enum Layer {
     Front,
 }
 
+/// How far an area's contents are magnified (§3.4).
+///
+/// **Steps, not a factor.** The stored value is a count of scroll notches above
+/// natural size, and the factor is computed from it. Two reasons, and the first
+/// is structural: [`Area`] derives [`Eq`] and [`Hash`], which an `f32` field
+/// would take away from it and from everything that holds one. The second is
+/// that §3.4's floor is *"as far out as its natural size"*, and a floor
+/// expressed as `step == 0` is exact, where `factor <= 1.0` is a float
+/// comparison a sequence of multiplications can land just underneath.
+///
+/// The increment is a quarter, exactly representable in binary, so
+/// [`Zoom::factor`] returns the same value for the same step on every machine
+/// and the tests can assert equality rather than a tolerance.
+///
+/// # Why there is a ceiling at all
+///
+/// §3.4 names only the floor. The ceiling is this module's, and it exists
+/// because [`Zoom::source_rect`] divides by the factor: without one, a
+/// sufficiently zoomed area asks for a source rectangle of zero pixels and the
+/// magnifier stops being able to show anything at all.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
+pub struct Zoom(u8);
+
+impl Zoom {
+    /// Natural size. §3.4's floor, and the value every area starts at.
+    pub const NATURAL: Self = Self(0);
+
+    /// What one scroll notch adds to the factor.
+    pub const STEP: f32 = 0.25;
+
+    /// The largest step, giving [`Zoom::MAX_FACTOR`].
+    const MAX_STEP: u8 = 28;
+
+    /// The factor at [`Zoom::MAX_STEP`].
+    pub const MAX_FACTOR: f32 = 8.0;
+
+    /// The magnification this zoom applies. `1.0` at [`Zoom::NATURAL`].
+    #[must_use]
+    pub fn factor(self) -> f32 {
+        Self::STEP.mul_add(f32::from(self.0), 1.0)
+    }
+
+    /// True at natural size, where the area shows the live screen underneath
+    /// rather than a magnified capture of it.
+    ///
+    /// The caller that matters is the one deciding whether an area needs a
+    /// capture at all: at natural size it must not have one, or live content
+    /// stops being live (ADR-0014) on the type that exists to demonstrate it.
+    #[must_use]
+    pub const fn is_natural(self) -> bool {
+        self.0 == Self::NATURAL.0
+    }
+
+    /// Applies `notches` of scroll, saturating at the floor and the ceiling.
+    ///
+    /// Positive zooms in. Windows reports a forward wheel rotation as a
+    /// positive `WHEEL_DELTA`, and that is the direction every magnifier in
+    /// this class magnifies on. Saturating rather than wrapping is §3.4's
+    /// guarantee: scrolling out is *"always a way back to normal rather than a
+    /// way to get lost"*, which a wrap at either end would break in the worst
+    /// way available.
+    #[must_use]
+    pub fn stepped(self, notches: i32) -> Self {
+        let stepped = i32::from(self.0).saturating_add(notches);
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "clamped to 0..=MAX_STEP on the line above, and MAX_STEP is a u8"
+        )]
+        Self(stepped.clamp(0, i32::from(Self::MAX_STEP)) as u8)
+    }
+
+    /// The screen rectangle whose pixels fill an area of `bounds` at this zoom.
+    ///
+    /// A magnifier shows *less* screen, larger: at 2× the area is a window onto
+    /// half its own width and half its own height, centred on itself, and the
+    /// renderer stretches those pixels to fill it. So this shrinks about the
+    /// centre rather than scaling about the origin, and the result is always
+    /// inside `bounds`.
+    ///
+    /// **Never empty.** Each axis floors at one pixel, so the result can always
+    /// be captured. The ceiling makes that clamp unreachable for any area at or
+    /// above ADR-0015's minimum size; it is kept because `bounds` arrives from
+    /// callers this type does not control, and a zero-width capture request
+    /// fails a long way from its cause.
+    #[must_use]
+    pub fn source_rect(self, bounds: Rect) -> Rect {
+        if self.is_natural() {
+            return bounds;
+        }
+        let factor = self.factor();
+        let shrink = |extent: u32| -> u32 {
+            #[expect(
+                clippy::cast_precision_loss,
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "screen extents are far inside f32's exactly-representable \
+                          integer range, and the quotient is clamped to at least 1"
+            )]
+            let scaled = (extent as f32 / factor) as u32;
+            scaled.max(1)
+        };
+        let size = Size::new(shrink(bounds.size.width), shrink(bounds.size.height));
+        // Integer division truncates, so the two margins can differ by a pixel.
+        // Taking the margin as the halved *difference* keeps the source inside
+        // `bounds` on both axes rather than assuming it is symmetric.
+        let inset = |extent: u32, inner: u32| -> i32 {
+            #[expect(
+                clippy::cast_possible_wrap,
+                reason = "half the difference of two screen extents"
+            )]
+            let inset = (extent.saturating_sub(inner) / 2) as i32;
+            inset
+        };
+        // `saturating_add`, not `+`, and geometry.rs's own policy is the
+        // reason: rectangle edges are computed in `i64` there precisely because
+        // `origin + size` can overflow `i32`. An area with a large positive
+        // origin makes this the same sum, and the consequence is a debug panic
+        // inside the mouse hook or a silently wrapped negative origin in
+        // release. Not reachable from real screen coordinates -- and this
+        // function's own contract is that `bounds` arrives from callers it does
+        // not control, which is the argument the one-pixel floor below already
+        // rests on. Found by an independent review, which also noted that
+        // `any_rect` is bounded to +/-200 and so could never have caught it.
+        Rect::new(
+            bounds
+                .origin
+                .x
+                .saturating_add(inset(bounds.size.width, size.width)),
+            bounds
+                .origin
+                .y
+                .saturating_add(inset(bounds.size.height, size.height)),
+            size.width,
+            size.height,
+        )
+    }
+}
+
 /// One area: an identity, a rectangle, and the three orthogonal properties.
 ///
 /// `Serialize`/`Deserialize` are derived deliberately even though nothing
@@ -309,6 +480,13 @@ pub struct Area {
     /// Which stacking tier it is pinned to. [`Layer::Auto`] — plain recency —
     /// unless the user has said otherwise.
     pub layer: Layer,
+    /// How far its contents are magnified (§3.4). [`Zoom::NATURAL`] on every
+    /// area of every type, including the types [`AreaType::supports_zoom`]
+    /// refuses: the field is what the area *is*, and the predicate is what the
+    /// gesture is allowed to change. Keeping them separate means a type that
+    /// gains zoom later gains it by answering the predicate, with no migration
+    /// of the model.
+    pub zoom: Zoom,
 }
 
 impl Area {
@@ -405,6 +583,7 @@ impl AreaStore {
             visual: kind.default_visual(),
             input: kind.default_input(),
             layer: Layer::default(),
+            zoom: Zoom::NATURAL,
         };
         let index = self.top_of_tier(area.layer);
         self.areas.insert(index, area);
@@ -466,6 +645,30 @@ impl AreaStore {
             }
             None => false,
         }
+    }
+
+    /// Applies `notches` of scroll to an area's magnification (§3.4), returning
+    /// the zoom it ended at.
+    ///
+    /// Returns `None` for an unknown id **and for a type whose
+    /// [`AreaType::supports_zoom`] is false**. The two are one return value on
+    /// purpose. A caller that has to distinguish them is a caller deciding
+    /// whether to tell the user off for scrolling, and §3.4's model is that a
+    /// scroll the product has no use for belongs to whatever is underneath.
+    /// Both answers mean *this scroll was not ours*.
+    ///
+    /// Returns `Some` even when the zoom did not move, which is the saturating
+    /// case: scrolling out at natural size is a no-op the area still owns, and
+    /// the caller must not pass that notch through to the application beneath.
+    /// Everything downstream compares the returned zoom with the previous one
+    /// to decide whether a re-capture is needed, so a no-op costs nothing.
+    pub fn zoom_by(&mut self, id: AreaId, notches: i32) -> Option<Zoom> {
+        let area = self.area_mut(id)?;
+        if !area.kind.supports_zoom() {
+            return None;
+        }
+        area.zoom = area.zoom.stepped(notches);
+        Some(area.zoom)
     }
 
     /// Sets whether an area captures mouse events. Returns `false` for an
@@ -1147,6 +1350,97 @@ mod tests {
         assert!(!store.has_live_area());
     }
 
+    /// §3.4's floor, stated as the test that would fail if it moved: an area at
+    /// natural size shows the screen itself, and scrolling further out is a
+    /// no-op rather than a way to get lost.
+    #[test]
+    fn zooming_out_at_natural_size_stays_at_natural_size() {
+        let zoom = Zoom::NATURAL.stepped(-1);
+        assert!(zoom.is_natural());
+        assert!((zoom.factor() - 1.0).abs() < f32::EPSILON);
+        // Not merely "still natural after one notch": the floor has to hold
+        // against the scroll a user actually produces, which is a fast flick.
+        assert!(Zoom::NATURAL.stepped(-400).is_natural());
+        assert!(Zoom::NATURAL.stepped(i32::MIN).is_natural());
+    }
+
+    /// The ceiling and the factor it is documented to produce are two constants
+    /// that must agree. Editing `STEP` or `MAX_STEP` alone turns this red. The
+    /// alternative is a doc comment claiming 8× while the code does something
+    /// else, which no test would catch.
+    #[test]
+    fn the_ceiling_matches_the_factor_it_claims() {
+        let ceiling = Zoom::NATURAL.stepped(i32::from(Zoom::MAX_STEP));
+        assert!((ceiling.factor() - Zoom::MAX_FACTOR).abs() < f32::EPSILON);
+        assert_eq!(ceiling, Zoom::NATURAL.stepped(i32::MAX), "must saturate");
+    }
+
+    /// A magnifier shows less screen, larger. At 2× that is exactly half of
+    /// each extent, centred, and asserted on a rectangle whose halves are even, so
+    /// a failure means the arithmetic is wrong rather than that it rounded.
+    #[test]
+    fn source_rect_halves_and_centres_at_two_times() {
+        let zoom = Zoom::NATURAL.stepped(4);
+        assert!((zoom.factor() - 2.0).abs() < f32::EPSILON);
+        let source = zoom.source_rect(Rect::new(100, 200, 400, 300));
+        assert_eq!(source, Rect::new(200, 275, 200, 150));
+    }
+
+    /// The identity case is a separate arm in `source_rect`, so it gets its own
+    /// test: at natural size the source *is* the area, byte for byte, and
+    /// nothing downstream has to special-case a rectangle that drifted by a
+    /// rounding error.
+    #[test]
+    fn source_rect_at_natural_size_is_the_area_itself() {
+        let bounds = Rect::new(-33, 17, 101, 57);
+        assert_eq!(Zoom::NATURAL.source_rect(bounds), bounds);
+    }
+
+    /// The one-pixel floor, driven at the smallest rectangle the model admits
+    /// rather than argued about. A zero-extent source would be a capture
+    /// request no capture backend can serve.
+    #[test]
+    fn source_rect_never_asks_for_an_empty_capture() {
+        let smallest = Rect::new(0, 0, 1, 1);
+        let source = Zoom::NATURAL
+            .stepped(i32::from(Zoom::MAX_STEP))
+            .source_rect(smallest);
+        assert_eq!(source.size, Size::new(1, 1));
+    }
+
+    /// `supports_zoom` is a per-type answer, and the one that matters is that
+    /// exactly one type says yes today. A future type that says yes has to
+    /// change this line, which is where the decision gets noticed.
+    #[test]
+    fn only_the_default_area_zooms() {
+        let zooming: Vec<AreaType> = ALL_TYPES
+            .iter()
+            .copied()
+            .filter(|kind| kind.supports_zoom())
+            .collect();
+        assert_eq!(zooming, vec![AreaType::Default]);
+    }
+
+    /// The store's two refusals are one return value, and this pins which is
+    /// which: an unknown id and an unzoomable type both answer `None`, while a
+    /// scroll that saturates answers `Some` because the area still owns it.
+    #[test]
+    fn zoom_by_refuses_the_wrong_type_and_claims_a_saturating_scroll() {
+        let (mut store, ids) = store_with(&[AreaType::Default, AreaType::Filter]);
+        assert_eq!(store.zoom_by(ids[1], 1), None, "Filter does not zoom");
+        assert_eq!(
+            store.zoom_by(AreaId(9999), 1),
+            None,
+            "an unknown id does not zoom"
+        );
+        assert_eq!(
+            store.zoom_by(ids[0], -3),
+            Some(Zoom::NATURAL),
+            "a scroll that hits the floor is still this area's scroll"
+        );
+        assert_eq!(store.zoom_by(ids[0], 2), Some(Zoom::NATURAL.stepped(2)));
+    }
+
     // Bounded to keep coordinates in a range where overlaps actually occur;
     // `Rect`'s own property tests already cover the extremes of the geometry.
     prop_compose! {
@@ -1212,6 +1506,44 @@ mod tests {
     }
 
     proptest! {
+        /// The two invariants every caller of `source_rect` relies on, over the
+        /// whole zoom range rather than at the three factors a unit test picks:
+        /// the source is **inside** the area, so the magnifier never shows
+        /// pixels the user did not claim, and it is **never empty**, so the
+        /// capture request can always be served.
+        ///
+        /// Containment is checked on the far edges rather than by `contains`,
+        /// which takes a point: a rectangle sitting one pixel outside on the
+        /// right passes any single-corner check.
+        #[test]
+        fn a_source_rect_is_inside_its_area_and_never_empty(
+            bounds in any_rect(),
+            notches in 0i32..=i32::from(Zoom::MAX_STEP),
+        ) {
+            let source = Zoom::NATURAL.stepped(notches).source_rect(bounds);
+            prop_assert!(source.size.width >= 1 && source.size.height >= 1);
+            prop_assert!(source.origin.x >= bounds.origin.x);
+            prop_assert!(source.origin.y >= bounds.origin.y);
+            prop_assert!(source.right() <= bounds.right());
+            prop_assert!(source.bottom() <= bounds.bottom());
+        }
+
+        /// Magnification is monotonic: scrolling in never shows *more* screen.
+        /// Written as a comparison between adjacent steps because that is the
+        /// operation the user performs, and an off-by-one in `stepped` that
+        /// re-used the previous step would pass a test of the endpoints alone.
+        #[test]
+        fn scrolling_in_never_widens_the_source(
+            bounds in any_rect(),
+            notches in 0i32..i32::from(Zoom::MAX_STEP),
+        ) {
+            let here = Zoom::NATURAL.stepped(notches);
+            let closer = here.stepped(1);
+            let (wide, narrow) = (here.source_rect(bounds), closer.source_rect(bounds));
+            prop_assert!(narrow.size.width <= wide.size.width);
+            prop_assert!(narrow.size.height <= wide.size.height);
+        }
+
         #[test]
         fn ids_are_unique_across_the_store(store in any_store()) {
             let mut seen = std::collections::HashSet::new();
