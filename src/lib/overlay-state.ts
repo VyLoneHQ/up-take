@@ -119,6 +119,15 @@ export interface AreaView {
   close: PhysRect;
   layer: LayerName;
   kind: AreaKind;
+  /**
+   * Magnification (§3.4), `1` at natural size.
+   *
+   * **Nothing here scales by it.** The magnified pixels arrive as a pin sized
+   * to fill the area, so the ratio is already in the image; this is what lets
+   * the area *say* how far it is zoomed, which is what makes scrolling back
+   * discoverable.
+   */
+  zoom: number;
 }
 
 /** The payload of the `overlay://areas` event: every area, bottom-first. */
@@ -158,7 +167,13 @@ export interface ActiveMonitorPayload {
  */
 export interface PinPayload {
   id: number;
-  url: string;
+  /**
+   * `null` means this area's pixels are **gone** and it must draw the live
+   * screen again — the case a scroll back to natural size produces (§3.4's
+   * floor). Before zoom existed a pin was only ever dropped along with its
+   * area, so this event never had to say so.
+   */
+  url: string | null;
 }
 
 /**
@@ -194,6 +209,20 @@ export interface MenuPayload {
   menu: MenuView | null;
 }
 
+/**
+ * A magnification as the badge prints it: `2×`, `1.25×`, `3.5×`.
+ *
+ * **Trailing zeros are dropped rather than padded to a fixed width.** The
+ * factor moves in quarters, so a fixed two decimals prints `2.00×` for the
+ * commonest value in the range and reads as a measurement rather than as a
+ * setting. `toFixed(2)` first, then trim, because the value has crossed a JSON
+ * bridge as an IEEE double and `1.25 * 3` is not exactly `3.75`.
+ */
+export function formatZoom(factor: number): string {
+  const fixed = factor.toFixed(2).replace(/\.?0+$/, '');
+  return `${fixed}×`;
+}
+
 /** An area ready to draw: CSS geometry plus the state that styles it. */
 export interface AreaFrame {
   id: number;
@@ -201,6 +230,8 @@ export interface AreaFrame {
   close: CssRect;
   layer: LayerName;
   kind: AreaKind;
+  /** Magnification (§3.4), `1` at natural size. See {@link AreaView.zoom}. */
+  zoom: number;
   hovered: boolean;
   /** This area is the source of a live move or resize: draw it as where the
    * area is coming *from*, not as a second area. */
@@ -247,6 +278,7 @@ export function areaFramesCss(
     close: closes[index] as CssRect,
     layer: area.layer,
     kind: area.kind,
+    zoom: area.zoom,
     // A dragged area is not also "hovered": the hover chrome invites a gesture
     // that is already under way, and its close control would sit at the source
     // position while the cursor is somewhere else entirely.

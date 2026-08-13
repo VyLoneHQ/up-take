@@ -27,7 +27,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
 
@@ -597,6 +597,166 @@ pub(crate) fn capture_into_area(app: &AppHandle, id: AreaId, bounds: Rect) {
         });
         report("capture", started, &split, outcome);
     });
+}
+
+/// The magnified capture a scroll has asked for but no worker has served yet.
+///
+/// **A slot, not a queue, and that is the whole coalescing strategy.** A scroll
+/// burst is ten notches in a few hundred milliseconds and a capture is 100-300
+/// ms, so a queue would serve nine magnifications the user has already scrolled
+/// past. Overwriting means the worker always picks up the newest request and
+/// the intermediate ones are dropped rather than rendered.
+static PENDING_MAGNIFY: Mutex<Option<(AreaId, Rect, u64)>> = Mutex::new(None);
+
+/// Bumped by every scroll and by every return to natural size, so a capture can
+/// tell whether the zoom it was taken for is still the zoom on screen.
+///
+/// **The slot alone is not enough, because a request leaves it before the
+/// capture starts.** A worker holding the last request of a burst is 100-300 ms
+/// from publishing, and in that window the user can scroll again or scroll all
+/// the way back out. Without this, the first case paints a magnification the
+/// user has already scrolled past and the second re-pins an area that
+/// [`clear_magnification`] has just emptied — an area stuck showing a still of
+/// the screen with no way back short of scrolling in and out again.
+static MAGNIFY_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Whether a magnify worker is running. One at a time, for correctness rather
+/// than for thrift: `CaptureStore::insert` issues versions in completion order,
+/// so two concurrent captures of one area publish in whichever order they
+/// happen to finish, and a slower capture of an *older* zoom would overwrite a
+/// newer one on screen.
+static MAGNIFY_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+/// Captures `source` and pins it as `id`'s contents, magnifying the area (§3.4).
+///
+/// `source` is `Zoom::source_rect`'s output: a rectangle *inside* the area,
+/// which the frontend then stretches to fill it. The magnification is entirely
+/// in the ratio between the two rectangles, so this function does no scaling of
+/// its own — the resampling belongs to the compositor, which does it on the GPU.
+///
+/// # Why this is not [`capture_into_area`]
+///
+/// That function is the Snipaste pin and publishes to the clipboard as well
+/// (PRODUCT-VISION §8). Zooming is not a capture the user asked to keep: it is
+/// how the area *renders*, it happens on every notch of a scroll, and putting
+/// each intermediate magnification on the clipboard would destroy whatever the
+/// user had there. What the two share is [`CaptureStore`] and the pin event,
+/// which is the part worth reusing.
+///
+/// It also resolves its pixels differently. [`capture_into_area`] prefers the
+/// pre-capture ([`crate::precapture`]), which holds a frame from the drag that
+/// created the area — right for a capture taken *at* that moment, and stale by
+/// any amount for a scroll that happens later. This path takes the frozen still
+/// when the screen is frozen (ADR-0026 decision 6: what you see is what you
+/// get) and captures live otherwise.
+///
+/// # Threading
+///
+/// Returns immediately. The only caller is the mouse hook, and a capture is far
+/// past `LowLevelHooksTimeout` — the F-33 failure class, and the same reason
+/// [`capture_into_area`] spawns.
+pub(crate) fn magnify_into_area(app: &AppHandle, id: AreaId, source: Rect) {
+    let generation = MAGNIFY_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+    *lock_pending() = Some((id, source, generation));
+    // Lost the race to an already-running worker, which will take the slot
+    // above rather than the request it was spawned for. Nothing else to do.
+    if MAGNIFY_IN_FLIGHT
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        loop {
+            let taken = lock_pending().take();
+            let Some((id, source, generation)) = taken else {
+                MAGNIFY_IN_FLIGHT.store(false, Ordering::Release);
+                // **The re-check is not belt and braces.** A request landing
+                // between the `take` above and the release on the line above
+                // sees `MAGNIFY_IN_FLIGHT` still true, returns without
+                // spawning, and would then sit in the slot unserved until the
+                // user happened to scroll again — leaving the area showing the
+                // magnification before last.
+                if lock_pending().is_some()
+                    && MAGNIFY_IN_FLIGHT
+                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                {
+                    continue;
+                }
+                break;
+            };
+            magnify_once(&app, id, source, generation);
+        }
+    });
+}
+
+fn lock_pending() -> std::sync::MutexGuard<'static, Option<(AreaId, Rect, u64)>> {
+    PENDING_MAGNIFY
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+fn magnify_once(app: &AppHandle, id: AreaId, source: Rect, generation: u64) {
+    let started = Instant::now();
+    let mut split = Split::default();
+    let outcome = frozen_or_live(source, &mut split).and_then(|(bitmap, png)| {
+        // Checked *after* the capture and before the publish, which is the only
+        // place it can be checked: the capture is the slow part, so it is the
+        // part the user scrolls through. A superseded result is dropped, not
+        // published — the newer request is already in the slot and this worker
+        // loops straight back round to it.
+        if MAGNIFY_GENERATION.load(Ordering::Acquire) != generation {
+            return Ok(());
+        }
+        let version = {
+            let store = app.state::<Mutex<CaptureStore>>();
+            let mut guard = store.lock().unwrap_or_else(PoisonError::into_inner);
+            guard.insert(id, bitmap, png)
+        };
+        crate::overlay::emit_pin(app, id, version)
+    });
+    report("magnify", started, &split, outcome);
+}
+
+/// The frozen still if there is one, a live capture otherwise.
+///
+/// [`capture_or_crop`]'s first and last branches with the pre-capture left out
+/// of the middle — see [`magnify_into_area`] for why that branch is wrong here.
+fn frozen_or_live(source: Rect, split: &mut Split) -> Result<(RgbaBitmap, Vec<u8>), String> {
+    if let Some(bitmap) = crate::freeze::crop(source) {
+        split.source = Source::Frozen;
+        let encode = Instant::now();
+        let png = encode_png(&bitmap)?;
+        split.encode_ms = encode.elapsed().as_millis();
+        split.bounds = Some(source);
+        split.encoded_bytes = png.len();
+        return Ok((bitmap, png));
+    }
+    capture(source, split)
+}
+
+/// Drops an area's pinned pixels and tells the frontend they are gone.
+///
+/// The caller is the scroll that returns an area to natural size. There the
+/// area must show the live screen underneath rather than a capture of it:
+/// §3.4's floor is *"a way back to normal"*, and an area left rendering its
+/// last still would be a way back to a photograph of normal.
+pub(crate) fn clear_magnification(app: &AppHandle, id: AreaId) {
+    // Two steps, and both are needed. Emptying the slot stops a request that
+    // has not started; bumping the generation invalidates one that is already
+    // mid-capture, which the slot cannot reach.
+    let mut pending = lock_pending();
+    if pending.is_some_and(|(pending_id, _, _)| pending_id == id) {
+        *pending = None;
+    }
+    MAGNIFY_GENERATION.fetch_add(1, Ordering::AcqRel);
+    crate::captures::forget(app, id);
+    drop(pending);
+    if let Err(error) = crate::overlay::emit_unpin(app, id) {
+        eprintln!("output: dropped the magnification but could not announce it: {error}");
+    }
 }
 
 /// Encodes RGBA8 pixels as PNG via the same WIC-backed encoder
