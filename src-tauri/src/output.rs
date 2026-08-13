@@ -632,7 +632,7 @@ struct Magnify {
     /// alone cannot tell a worker that the zoom moved under it. Without this, a
     /// worker holding the last request of a burst paints a magnification the
     /// user has already scrolled past, or re-pins an area
-    /// [`clear_magnification`] has just emptied — an area stuck showing a still
+    /// [`clear_magnification`] has just emptied: an area stuck showing a still
     /// of the screen with no way back short of scrolling in and out again.
     current: BTreeMap<AreaId, u64>,
     /// Issues generations. Monotonic across areas so that a stamp is unique;
@@ -694,7 +694,7 @@ fn magnify() -> std::sync::MutexGuard<'static, Magnify> {
 /// `source` is `Zoom::source_rect`'s output: a rectangle *inside* the area,
 /// which the frontend then stretches to fill it. The magnification is entirely
 /// in the ratio between the two rectangles, so this function does no scaling of
-/// its own — the resampling belongs to the compositor, which does it on the GPU.
+/// its own. The resampling belongs to the compositor, which does it on the GPU.
 ///
 /// # Why this is not [`capture_into_area`]
 ///
@@ -707,7 +707,7 @@ fn magnify() -> std::sync::MutexGuard<'static, Magnify> {
 ///
 /// It also resolves its pixels differently. [`capture_into_area`] prefers the
 /// pre-capture ([`crate::precapture`]), which holds a frame from the drag that
-/// created the area — right for a capture taken *at* that moment, and stale by
+/// created the area, which is right for a capture taken *at* that moment and stale by
 /// any amount for a scroll that happens later. This path takes the frozen still
 /// when the screen is frozen (ADR-0026 decision 6: what you see is what you
 /// get) and captures live otherwise.
@@ -715,7 +715,7 @@ fn magnify() -> std::sync::MutexGuard<'static, Magnify> {
 /// # Threading
 ///
 /// Returns immediately. The only caller is the mouse hook, and a capture is far
-/// past `LowLevelHooksTimeout` — the F-33 failure class, and the same reason
+/// past `LowLevelHooksTimeout`, the F-33 failure class, and the same reason
 /// [`capture_into_area`] spawns.
 pub(crate) fn magnify_into_area(app: &AppHandle, id: AreaId, source: Rect) {
     {
@@ -756,8 +756,8 @@ fn magnify_once(app: &AppHandle, id: AreaId, source: Rect, generation: u64) {
         // **The freshness check and the publish are one critical section, and
         // an independent review is why.** Checking and then locking
         // `CaptureStore` separately leaves a window in which
-        // `clear_magnification` can run to completion — bump the generation,
-        // forget the pixels, emit the unpin — after which this worker inserts
+        // `clear_magnification` can run to completion (bump the generation,
+        // forget the pixels, emit the unpin), after which this worker inserts
         // and re-pins, producing an area at 1x, with no badge, rendering a
         // magnified still and no way back short of scrolling in and out.
         // `clear_magnification` takes the same two locks in the same order.
@@ -779,7 +779,7 @@ fn magnify_once(app: &AppHandle, id: AreaId, source: Rect, generation: u64) {
 /// The frozen still if there is one, a live capture otherwise.
 ///
 /// [`capture_or_crop`]'s first and last branches with the pre-capture left out
-/// of the middle — see [`magnify_into_area`] for why that branch is wrong here.
+/// of the middle. See [`magnify_into_area`] for why that branch is wrong here.
 fn frozen_or_live(source: Rect, split: &mut Split) -> Result<(RgbaBitmap, Vec<u8>), String> {
     if let Some(bitmap) = crate::freeze::crop(source) {
         split.source = Source::Frozen;
@@ -812,7 +812,7 @@ pub(crate) fn clear_magnification(app: &AppHandle, id: AreaId) {
 /// Split from [`clear_magnification`] for the caller that has no frontend to
 /// tell: `overlay::dismiss_area`, where the area itself is going away. That
 /// path called `captures::forget` alone, and an independent review found what
-/// it left open — dismissing an area mid-capture let the worker `insert` for an
+/// it left open. Dismissing an area mid-capture let the worker `insert` for an
 /// id nothing would ever `remove` again, so the bitmap and the PNG stayed
 /// resident for the process lifetime. That is the growing map M-20's soak
 /// exists to catch, reachable by closing an area within ~300 ms of scrolling it.
@@ -1448,7 +1448,7 @@ mod tests {
     }
 
     /// A worker takes requests until there are none, and a taken request is not
-    /// handed out twice — otherwise the loop in `magnify_into_area` would
+    /// handed out twice. Otherwise the loop in `magnify_into_area` would
     /// re-capture the same rectangle forever.
     #[test]
     fn taking_a_request_removes_it() {

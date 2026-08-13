@@ -169,7 +169,7 @@ export interface PinPayload {
   id: number;
   /**
    * `null` means this area's pixels are **gone** and it must draw the live
-   * screen again — the case a scroll back to natural size produces (§3.4's
+   * screen again: the case a scroll back to natural size produces (§3.4's
    * floor). Before zoom existed a pin was only ever dropped along with its
    * area, so this event never had to say so.
    */

@@ -1810,7 +1810,7 @@ fn handle_mouse(wparam: WPARAM, lparam: LPARAM) -> bool {
                 // walk is measured at up to 2.77 ms and the guard runs before
                 // any handler, so a precision touchpad emitting ~100 events a
                 // second would have paid it on every scroll anywhere on the
-                // machine while the overlay was visible — including sub-notch
+                // machine while the overlay was visible, including sub-notch
                 // events and scrolls over no area at all. Here it runs only
                 // when a zoomable area is actually under the cursor, which is
                 // the only case where the answer changes anything, and the
@@ -1854,13 +1854,13 @@ const _: () = assert!(WHEEL_STEP as u32 == WHEEL_DELTA);
 /// **A mouse wheel is not the only thing that sends `WM_MOUSEWHEEL`.** A
 /// notched wheel sends exactly `WHEEL_DELTA` (120) per click, and dividing by
 /// it is all that is needed. A precision touchpad and a free-spinning wheel
-/// send *fractions* — 8, 17, 40 — and integer division alone would floor every
+/// send *fractions* (8, 17, 40), and integer division alone would floor every
 /// one of them to zero notches. The area still swallows the event, so without
 /// this the product would eat every touchpad scroll over a Default area and
 /// magnify nothing: a dead area rather than a visible bug.
 static WHEEL_RESIDUE: AtomicI32 = AtomicI32::new(0);
 
-/// Which area [`WHEEL_RESIDUE`] was accumulated over. `0` is no area — ids are
+/// Which area [`WHEEL_RESIDUE`] was accumulated over. `0` is no area, because ids are
 /// issued from 1 (`AreaStore::new`), so the sentinel cannot collide with one.
 ///
 /// Residue is per-area because it is a partial gesture: carrying half a notch
@@ -1876,7 +1876,7 @@ static WHEEL_RESIDUE_AREA: AtomicU64 = AtomicU64::new(0);
 fn wheel_notches(area: u64, mouse_data: u32) -> i32 {
     // The documented layout of `MSLLHOOKSTRUCT.mouseData`: the high word is a
     // signed multiple of `WHEEL_DELTA`. Narrowing to `i16` first is what makes
-    // the sign right, and it cannot lose information — the shift has already
+    // the sign right, and it cannot lose information: the shift has already
     // put the whole delta in the low 16 bits.
     let delta = i32::from((mouse_data >> 16) as i16);
     // A different area starts a fresh accumulation rather than inheriting the
@@ -2252,7 +2252,7 @@ fn finish_gesture(release: Point) {
             if moved {
                 // A magnified area holds a still of the screen *inside its own
                 // bounds*, so moving or resizing it leaves it showing a picture
-                // of where it used to be — sharp, plausible, and of the wrong
+                // of where it used to be: sharp, plausible, and of the wrong
                 // place. Re-taken here, at the release, rather than per
                 // mouse-move: the drag itself is far inside `LowLevelHooksTimeout`
                 // and the frames in between are not what the user is looking at.
@@ -2607,13 +2607,13 @@ mod tests {
     ///
     /// The `0xFFFF` is what makes these tests worth having. Reading `mouseData`
     /// as a whole signed value instead of taking the high word gives an answer
-    /// that is *almost* right — off by a fraction of a notch — so it survives a
+    /// that is *almost* right, off by a fraction of a notch, so it survives a
     /// hand test on a notched wheel and only shows up as drift on a touchpad.
     /// Serialises the tests that drive [`wheel_notches`], which reads and
     /// writes two process-global atomics.
     ///
     /// `libtest` runs tests concurrently in one process, so without this the
-    /// three below race on `WHEEL_RESIDUE` and each other's part-notches — and
+    /// three below race on `WHEEL_RESIDUE` and each other's part-notches, and
     /// they race *intermittently*, which is worse than failing: the suite would
     /// go green on most runs and red on a machine with a different core count.
     /// Same reasoning, and the same shape, as `precapture::frame_store_guard`.

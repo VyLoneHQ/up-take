@@ -262,7 +262,7 @@ onMount(() => {
     // where the user just dragged.
     //
     // A null URL is the *other* direction: the area has no pixels any more and
-    // must go back to showing the live screen. That is §3.4's floor — scrolling
+    // must go back to showing the live screen. That is §3.4's floor: scrolling
     // all the way out is the way back to normal, and an area that kept its last
     // still would be showing a photograph of normal instead.
     const { id, url } = event.payload;
@@ -403,7 +403,7 @@ onMount(() => {
                there is something to report: at 1× the area is the live screen
                and a "1×" badge would be chrome asserting a fact the user can
                already see. It is what makes scrolling back discoverable, which
-               matters more here than for the frozen badge — a magnified still
+               matters more here than for the frozen badge, because a magnified still
                of a static desktop is indistinguishable from the desktop. -->
           {#if area.zoom > 1}
             <span class="zoom-badge">{formatZoom(area.zoom)}</span>
@@ -702,7 +702,7 @@ onMount(() => {
    rather than by resampling any pixels on the Rust side.
 
    `fill` rather than `contain` for both. The two rectangles always share an
-   aspect ratio — the source is each extent divided by the same factor — so
+   aspect ratio (the source is each extent divided by the same factor), so
    `contain` would never letterbox on purpose, only on a rounding difference,
    which it would hide instead of showing. */
 .pin {

@@ -199,8 +199,8 @@ impl AreaType {
     /// Whether scrolling over an area of this type magnifies it (§3.4).
     ///
     /// **Only `Default` today, and the narrowness is the decision.** §3.4 is
-    /// written about the Default area alone — *"scrolling over a Default area
-    /// scales its contents"* — and §3.1 names zoom as the thing that makes
+    /// written about the Default area alone (*"scrolling over a Default area
+    /// scales its contents"*), and §3.1 names zoom as the thing that makes
     /// Default more than an empty rectangle. Every other type already owns what
     /// its own region means: a Screenshot holds a pinned still, an Upscale is
     /// magnification by definition, and an OCR area shows a result rather than
@@ -368,7 +368,7 @@ impl Zoom {
 
     /// Applies `notches` of scroll, saturating at the floor and the ceiling.
     ///
-    /// Positive zooms in — Windows reports a forward wheel rotation as a
+    /// Positive zooms in. Windows reports a forward wheel rotation as a
     /// positive `WHEEL_DELTA`, and that is the direction every magnifier in
     /// this class magnifies on. Saturating rather than wrapping is §3.4's
     /// guarantee: scrolling out is *"always a way back to normal rather than a
@@ -651,7 +651,7 @@ impl AreaStore {
     /// the zoom it ended at.
     ///
     /// Returns `None` for an unknown id **and for a type whose
-    /// [`AreaType::supports_zoom`] is false** — the two are one return value on
+    /// [`AreaType::supports_zoom`] is false**. The two are one return value on
     /// purpose. A caller that has to distinguish them is a caller deciding
     /// whether to tell the user off for scrolling, and §3.4's model is that a
     /// scroll the product has no use for belongs to whatever is underneath.
@@ -1365,7 +1365,7 @@ mod tests {
     }
 
     /// The ceiling and the factor it is documented to produce are two constants
-    /// that must agree. Editing `STEP` or `MAX_STEP` alone turns this red — the
+    /// that must agree. Editing `STEP` or `MAX_STEP` alone turns this red. The
     /// alternative is a doc comment claiming 8× while the code does something
     /// else, which no test would catch.
     #[test]
@@ -1376,7 +1376,7 @@ mod tests {
     }
 
     /// A magnifier shows less screen, larger. At 2× that is exactly half of
-    /// each extent, centred — asserted on a rectangle whose halves are even, so
+    /// each extent, centred, and asserted on a rectangle whose halves are even, so
     /// a failure means the arithmetic is wrong rather than that it rounded.
     #[test]
     fn source_rect_halves_and_centres_at_two_times() {

@@ -745,7 +745,7 @@ struct AreaPayload {
     kind: &'static str,
     /// The area's magnification (§3.4), `1.0` at natural size.
     ///
-    /// **The frontend does not scale anything with this** — the magnified
+    /// **The frontend does not scale anything with this.** The magnified
     /// pixels arrive as a pin and fill the area, so the ratio is already in the
     /// image. It is here so the area can *say* how far it is zoomed, which is
     /// what makes §3.4's floor discoverable: without a badge, a user who has
@@ -861,7 +861,7 @@ pub(crate) fn interactive_area_at(app: &AppHandle, point: Point) -> Option<AreaS
 /// whatever capture that implies.
 ///
 /// Returns whether the zoom moved. A scroll that saturates at the floor or the
-/// ceiling returns `false` and is still the area's to swallow — the caller
+/// ceiling returns `false` and is still the area's to swallow. The caller
 /// decides that on [`AreaType::supports_zoom`], before calling here, because
 /// *"was this scroll ours"* and *"did anything change"* are different questions
 /// and only the first one may pass an event through to the user's application.
@@ -911,7 +911,7 @@ pub(crate) fn zoom_area(app: &AppHandle, id: AreaId, notches: i32) -> bool {
 ///
 /// A zoomed area holds a still of the screen inside its own bounds. Move or
 /// resize it and that still is now a picture of somewhere else, with no cue
-/// that it is stale — the area goes on displaying the old content, pin-sharp,
+/// that it is stale: the area goes on displaying the old content, pin-sharp,
 /// wherever the user drops it. Called at the end of a move or a resize rather
 /// than during one: a capture per mouse-move event is the F-33 budget many
 /// times over, and the intermediate frames are not what the user is looking at.
@@ -1043,7 +1043,7 @@ pub(crate) fn dismiss_area(app: &AppHandle, id: AreaId) -> bool {
         // **`cancel_magnification` rather than `captures::forget`, and the
         // difference is a leak an independent review found.** `forget` alone
         // removes the pixels and leaves any magnify capture still in flight,
-        // which then `insert`s for an id nothing will ever `remove` again — so
+        // which then `insert`s for an id nothing will ever `remove` again, so
         // the bitmap and the PNG stay resident for the process lifetime, and it
         // is reachable by closing an area within ~300 ms of scrolling it. That
         // is precisely the growing map this comment names.
@@ -1381,7 +1381,7 @@ pub(crate) fn emit_pin(app: &AppHandle, id: AreaId, version: u64) -> Result<(), 
 }
 
 /// Announces that `id` has no pinned capture any more, so the area draws the
-/// screen underneath again (§3.4's floor — see `output::clear_magnification`).
+/// screen underneath again (§3.4's floor; see `output::clear_magnification`).
 pub(crate) fn emit_unpin(app: &AppHandle, id: AreaId) -> Result<(), String> {
     app.emit(
         PIN_EVENT,
