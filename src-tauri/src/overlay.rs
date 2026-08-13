@@ -1039,7 +1039,15 @@ pub(crate) fn dismiss_area(app: &AppHandle, id: AreaId) -> bool {
         // The pinned capture goes with the area that displayed it — see
         // `captures`'s Lifetime note; a map that only grows is a leak the
         // 8-hour soak (M-20) would find and nothing else would.
-        crate::captures::forget(app, id);
+        //
+        // **`cancel_magnification` rather than `captures::forget`, and the
+        // difference is a leak an independent review found.** `forget` alone
+        // removes the pixels and leaves any magnify capture still in flight,
+        // which then `insert`s for an id nothing will ever `remove` again — so
+        // the bitmap and the PNG stay resident for the process lifetime, and it
+        // is reachable by closing an area within ~300 ms of scrolling it. That
+        // is precisely the growing map this comment names.
+        crate::output::cancel_magnification(app, id);
         collapse_living_if_empty(app);
     }
     removed

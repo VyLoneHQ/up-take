@@ -427,9 +427,25 @@ impl Zoom {
             let inset = (extent.saturating_sub(inner) / 2) as i32;
             inset
         };
+        // `saturating_add`, not `+`, and geometry.rs's own policy is the
+        // reason: rectangle edges are computed in `i64` there precisely because
+        // `origin + size` can overflow `i32`. An area with a large positive
+        // origin makes this the same sum, and the consequence is a debug panic
+        // inside the mouse hook or a silently wrapped negative origin in
+        // release. Not reachable from real screen coordinates -- and this
+        // function's own contract is that `bounds` arrives from callers it does
+        // not control, which is the argument the one-pixel floor below already
+        // rests on. Found by an independent review, which also noted that
+        // `any_rect` is bounded to +/-200 and so could never have caught it.
         Rect::new(
-            bounds.origin.x + inset(bounds.size.width, size.width),
-            bounds.origin.y + inset(bounds.size.height, size.height),
+            bounds
+                .origin
+                .x
+                .saturating_add(inset(bounds.size.width, size.width)),
+            bounds
+                .origin
+                .y
+                .saturating_add(inset(bounds.size.height, size.height)),
             size.width,
             size.height,
         )
@@ -653,22 +669,6 @@ impl AreaStore {
         }
         area.zoom = area.zoom.stepped(notches);
         Some(area.zoom)
-    }
-
-    /// Returns an area to natural size, reporting whether it had been zoomed.
-    ///
-    /// The caller is anything that invalidates a magnified capture without
-    /// being a scroll — today, a type conversion away from `Default`. Returning
-    /// the *change* rather than the new value is what lets that caller drop the
-    /// pinned pixels only when there were some.
-    pub fn reset_zoom(&mut self, id: AreaId) -> bool {
-        match self.area_mut(id) {
-            Some(area) if !area.zoom.is_natural() => {
-                area.zoom = Zoom::NATURAL;
-                true
-            }
-            _ => false,
-        }
     }
 
     /// Sets whether an area captures mouse events. Returns `false` for an
@@ -1439,18 +1439,6 @@ mod tests {
             "a scroll that hits the floor is still this area's scroll"
         );
         assert_eq!(store.zoom_by(ids[0], 2), Some(Zoom::NATURAL.stepped(2)));
-    }
-
-    /// `reset_zoom` reports the *change*, not the state, because its caller
-    /// drops pinned pixels on the strength of it.
-    #[test]
-    fn reset_zoom_reports_whether_anything_changed() {
-        let (mut store, ids) = store_with(&[AreaType::Default]);
-        assert!(!store.reset_zoom(ids[0]), "already at natural size");
-        store.zoom_by(ids[0], 3).unwrap();
-        assert!(store.reset_zoom(ids[0]), "was zoomed");
-        assert!(store.get(ids[0]).unwrap().zoom.is_natural());
-        assert!(!store.reset_zoom(ids[0]), "idempotent");
     }
 
     // Bounded to keep coordinates in a range where overlaps actually occur;

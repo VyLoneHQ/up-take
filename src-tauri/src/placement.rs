@@ -1699,10 +1699,7 @@ fn handle_mouse(wparam: WPARAM, lparam: LPARAM) -> bool {
     // owns the mouse", but that was always shorthand for "UP-TAKE is the topmost
     // thing". When it demonstrably is not, swallowing the click is the same
     // mistake in either mode.
-    if matches!(
-        wparam as u32,
-        WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MOUSEWHEEL
-    ) && shadowed_by_another_window(point)
+    if matches!(wparam as u32, WM_LBUTTONDOWN | WM_RBUTTONDOWN) && shadowed_by_another_window(point)
     {
         return false;
     }
@@ -1807,6 +1804,20 @@ fn handle_mouse(wparam: WPARAM, lparam: LPARAM) -> bool {
                 let Some(area) = target.filter(|area| area.kind.supports_zoom()) else {
                     return false;
                 };
+                // **Checked here, after the area resolves, and NOT in the
+                // press guard above.** `WM_MOUSEWHEEL` was added to that guard
+                // at first, which an independent review caught: the z-order
+                // walk is measured at up to 2.77 ms and the guard runs before
+                // any handler, so a precision touchpad emitting ~100 events a
+                // second would have paid it on every scroll anywhere on the
+                // machine while the overlay was visible — including sub-notch
+                // events and scrolls over no area at all. Here it runs only
+                // when a zoomable area is actually under the cursor, which is
+                // the only case where the answer changes anything, and the
+                // guard's own comment stays true.
+                if shadowed_by_another_window(point) {
+                    return false;
+                }
                 let notches = wheel_notches(area.id.get(), info.mouseData);
                 if notches != 0 {
                     overlay::zoom_area(app, area.id, notches);
