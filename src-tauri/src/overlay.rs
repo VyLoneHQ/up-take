@@ -354,7 +354,7 @@ const fn state_name(state: OverlayState) -> &'static str {
 
 /// An [`AreaType`] as the frontend names it — the same lowercase wire
 /// convention [`layer_name`] uses for [`Layer`].
-const fn type_name(kind: AreaType) -> &'static str {
+pub(crate) const fn type_name(kind: AreaType) -> &'static str {
     match kind {
         AreaType::Default => "default",
         AreaType::Screenshot => "screenshot",
@@ -943,6 +943,68 @@ pub(crate) fn raise_area(app: &AppHandle, id: AreaId) -> bool {
 pub(crate) fn set_area_input(app: &AppHandle, id: AreaId, input: Input) -> bool {
     let store = app.state::<Mutex<AreaStore>>();
     lock(&store).set_input(id, input)
+}
+
+/// Converts an area to another type from its own menu (roadmap task 1.27),
+/// dropping any pinned pixels the new type cannot mean.
+///
+/// Returns whether the area set changed, which is the caller's cue to re-emit.
+/// Converting an area to the type it already has is a real request that changes
+/// nothing, so it answers `false` rather than redrawing.
+///
+/// # Why the store cannot do the whole job
+///
+/// [`AreaStore::set_kind`] owns the model and answers with a
+/// [`uptake_core::area::Conversion`]; the pixels are here. Two of them, in fact:
+/// the pinned bitmap in [`crate::captures`] and any magnify capture still in
+/// flight, which is why this goes through [`crate::output::clear_magnification`]
+/// rather than forgetting the bitmap alone. `overlay::dismiss_area` learned that
+/// distinction from an independent review, and the failure is the same one here:
+/// a worker landing after the conversion would `insert` pixels for an area that
+/// no longer displays them.
+///
+/// **`clear_magnification` rather than `cancel_magnification`, and the
+/// difference is the whole point of the row.** Dismissal has no frontend left to
+/// tell. A conversion does, and an area that goes on rendering its old pin under
+/// a badge nothing can clear is precisely the stranded state 1.27 exists to
+/// prevent.
+pub(crate) fn convert_area(app: &AppHandle, id: AreaId, kind: AreaType) -> bool {
+    // Scoped so the store lock is released before the capture calls below, which
+    // take `MAGNIFY` and then the capture store.
+    let outcome = {
+        let store = app.state::<Mutex<AreaStore>>();
+        let mut guard = lock(&store);
+        let conversion = guard.set_kind(id, kind);
+        let bounds = guard.get(id).map(|area| area.bounds);
+        conversion.zip(bounds)
+    };
+    let Some((conversion, bounds)) = outcome else {
+        return false;
+    };
+    if conversion.discard_capture {
+        crate::output::clear_magnification(app, id);
+    }
+    // **A conversion INTO a capturing type has to take that capture**, and the
+    // order matters: the discard above bumps the magnify generation and drops any
+    // old pin, so doing these the other way round would throw the new one away.
+    //
+    // ADR-0018 §6 says every type must answer "and then what?", and roadmap 1.27
+    // reserved this exact question: *"a conversion to `Screenshot` has to decide
+    // whether it captures"*. This function shipped answering the other three axes
+    // and silently defaulting that one to *no*, which the independent review of
+    // `#55` caught. A `Screenshot` holding no pinned still renders the live
+    // screen, is indistinguishable from a `Default` area, and hands `Copy` and
+    // `Save image` a live grab taken at click time, which is the pre-1.17(a)
+    // behaviour `output::export_source` exists to have fixed. The menu row says
+    // "Screenshot"; this is what makes the row true.
+    //
+    // [`placement::captures_on_create`] rather than a second match, for the reason
+    // that function's own doc gives: two hand-maintained copies of *does this type
+    // capture?* agree today and drift the moment a type is added.
+    if conversion.changed && placement::captures_on_create(kind) {
+        crate::output::capture_into_area(app, id, bounds);
+    }
+    conversion.changed
 }
 
 /// The topmost area whose *interaction surface* contains `point`, and which
@@ -1657,15 +1719,18 @@ mod tests {
         assert_eq!(armable_type(""), None);
     }
 
-    /// All seven wire names, pinned. The frontend's `AreaKind` union is a
-    /// hand-written mirror of this list and **nothing checks it from the other
-    /// side**: an eighth `AreaType` forces an arm in `type_name` and leaves
-    /// TypeScript silent, so the new name reaches the browser outside the union
-    /// with no type error and the area draws as a default one (`I-55`).
+    /// All seven wire names, pinned, so a *rename* goes red on this side.
     ///
-    /// This test cannot close that gap. What it does is make a *rename* go red
-    /// here, so the two lists cannot drift apart quietly in the cheaper of the
-    /// two directions.
+    /// **The other direction is covered as well, and it is covered elsewhere.**
+    /// This doc said *"nothing checks it from the other side"* and *"this test
+    /// cannot close that gap"*, which was true until `src/lib/area-kinds.test.ts`
+    /// arrived: that test reads this function out of the source and asserts the
+    /// frontend's `AreaKind` union lists exactly these names, so an eighth
+    /// `AreaType` now fails there (`I-55`).
+    ///
+    /// Kept as two checks rather than folded into one, because they fail
+    /// differently and both answers are useful: this one names the wrong string
+    /// at the site that produced it, the other names the list that fell behind.
     #[test]
     fn every_area_type_has_its_wire_name_pinned() {
         for (kind, name) in [
