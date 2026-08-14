@@ -872,6 +872,30 @@ impl AreaStore {
         })
     }
 
+    /// [`AreaStore::hit_test`] plus **which part** was hit: the Living grab rule.
+    ///
+    /// The same question `hit_test` answers, returning the [`Handle`] as well,
+    /// because a press needs to know whether it began a move, a resize or a
+    /// dismissal. Kept beside `hit_test` rather than open-coded at the call site:
+    /// the host had its own copy of *an interactive area answers for any handle, a
+    /// pass-through one only for chrome*, and two copies of what takes input
+    /// drifting apart is how a click gets swallowed by an area that would not have
+    /// handled it.
+    ///
+    /// [`Handle`]: interaction::Handle
+    #[must_use]
+    pub fn grab_test(
+        &self,
+        point: Point,
+        monitors: &[Rect],
+    ) -> Option<(&Area, interaction::Handle)> {
+        self.iter_top_down().find_map(|area| {
+            let handle = interaction::handle_at(area.bounds, point, monitors)?;
+            (area.is_interactive() || !matches!(handle, interaction::Handle::Body))
+                .then_some((area, handle))
+        })
+    }
+
     /// The topmost area containing `point`, **whatever its [`Input`]** — the
     /// area a Placement gesture grabs.
     ///
@@ -887,6 +911,44 @@ impl AreaStore {
     pub fn hit_test_any(&self, point: Point) -> Option<&Area> {
         self.iter_top_down()
             .find(|area| area.bounds.contains(point))
+    }
+
+    /// The topmost area the cursor is **over**, for deciding what to draw.
+    ///
+    /// The third member of this family, and the only one that answers a question
+    /// about the display rather than about input. [`AreaStore::hit_test`] answers
+    /// who receives a click in Living; [`AreaStore::hit_test_any`] answers what a
+    /// Placement gesture grabs; this answers what the user is looking at, which
+    /// governs the hover chrome and nothing else.
+    ///
+    /// # Why it is not one of the other two
+    ///
+    /// Hover chrome was resolved through the Living input rule until 2026-08-14,
+    /// so a pass-through area revealed its close control only when the cursor was
+    /// already on the control. On an area below
+    /// [`interaction::CHROME_INSIDE_SPAN`] that control is the sole route back to
+    /// the menu, and it sits outside the corner, so the way out of a Filter area
+    /// was an invisible 18 px target. **Surfaced by** the first hardware pass over
+    /// roadmap 1.27, which had already shipped: the row is not driving this, it is
+    /// what exposed it. (Said "driving roadmap 1.27" until the independent review
+    /// of `#56` read the row and found it marked shipped at this branch's own
+    /// base.)
+    ///
+    /// It is not `hit_test_any` either, because that tests bounds alone. The
+    /// close control of a small area is mostly **outside** its bounds, so a
+    /// bounds-only rule would drop the hover at the moment the cursor arrived on
+    /// the control and the chrome would vanish as it was reached for.
+    ///
+    /// **Nothing here may be read as permission to take a click.** Drawing a
+    /// control and honouring a press are separate questions and this answers only
+    /// the first; ADR-0016 decision 3 owns the second, and a pass-through body
+    /// still belongs to the application underneath.
+    #[must_use]
+    pub fn hover_test(&self, point: Point, monitors: &[Rect]) -> Option<&Area> {
+        self.iter_top_down().find(|area| {
+            area.bounds.contains(point)
+                || interaction::close_control(area.bounds, monitors).contains(point)
+        })
     }
 
     /// Every rectangle that takes input, topmost first — an interactive area's
@@ -1267,6 +1329,115 @@ mod tests {
         let (mut store, ids) = store_with(&[AreaType::Default; 2]);
         assert!(store.set_layer(ids[0], Layer::Front));
         assert_eq!(store.hit_test_any(Point::new(50, 50)).unwrap().id, ids[0]);
+    }
+
+    #[test]
+    fn a_sub_50px_pass_through_areas_close_control_answers_close() {
+        // Roadmap 1.27 records this as owed: "`handle_at` tests the close control
+        // *before* the bounds check, so a pass-through area below
+        // `CHROME_INSIDE_SPAN` answers `Handle::Close` there and `hit_test`
+        // returns it, which means its 18 px close control already opens the menu.
+        // Read from `interaction.rs`, not measured. Owed: a test for it."
+        //
+        // The branch that made that control visible is the right place to pay it.
+        // Asserted at `Handle::Close` specifically rather than "some handle",
+        // because `Handle::Body` here would mean the area had a grab it does not
+        // have, and `None` would mean it was stranded.
+        let mut store = AreaStore::new();
+        let bounds = rect(400, 400, 20, 20);
+        assert!(
+            interaction::chrome_is_outside(bounds),
+            "this test is vacuous unless the area is below CHROME_INSIDE_SPAN"
+        );
+        let small = store.create(AreaType::Filter, bounds).unwrap();
+        let control = interaction::close_control(bounds, &screens());
+        let on_control = Point::new(control.origin.x + 2, control.origin.y + 2);
+
+        let (area, handle) = store.grab_test(on_control, &screens()).unwrap();
+        assert_eq!(area.id, small);
+        assert_eq!(
+            handle,
+            interaction::Handle::Close,
+            "the sole route back from a small Filter must be the close control"
+        );
+    }
+
+    #[test]
+    fn grab_test_admits_a_pass_through_areas_chrome_and_refuses_its_body() {
+        // `grab_test` is the Living grab rule, extracted from the host so there
+        // is one copy rather than two. The rule is ADR-0024 section 2: the body
+        // passes clicks through, the chrome does not. Both directions, because a
+        // version that admitted everything and a version that admitted nothing
+        // would each satisfy a single-sided test.
+        let mut store = AreaStore::new();
+        let bounds = rect(0, 0, 100, 100);
+        let tint = store.create(AreaType::Filter, bounds).unwrap();
+        let control = interaction::close_control(bounds, &screens());
+
+        let on_control = Point::new(control.origin.x + 2, control.origin.y + 2);
+        let (area, handle) = store.grab_test(on_control, &screens()).unwrap();
+        assert_eq!(area.id, tint);
+        assert_eq!(handle, interaction::Handle::Close);
+
+        assert!(
+            store.grab_test(Point::new(50, 50), &screens()).is_none(),
+            "the body of a pass-through area grabs nothing"
+        );
+    }
+
+    #[test]
+    fn a_pass_through_body_is_hovered_even_though_it_takes_no_click() {
+        // The defect the founder found on the rig during 1.27's first hardware
+        // pass, after that row had shipped: hover was
+        // resolved through the Living input rule, so moving across a Filter area
+        // revealed no close control and the only route back to its menu was an
+        // invisible target. `hit_test` must keep saying no here; `hover_test`
+        // must say yes. Both halves, because a fix that made the body take
+        // clicks would satisfy the second assertion and break ADR-0016.
+        let mut store = AreaStore::new();
+        let tint = store
+            .create(AreaType::Filter, rect(0, 0, 100, 100))
+            .unwrap();
+        let body = Point::new(50, 50);
+        assert!(
+            store.hit_test(body, &screens()).is_none(),
+            "a pass-through body must still pass the click to the app underneath"
+        );
+        assert_eq!(store.hover_test(body, &screens()).unwrap().id, tint);
+    }
+
+    #[test]
+    fn a_small_areas_close_control_keeps_the_hover_it_is_reached_by() {
+        // The reason `hover_test` is not `hit_test_any`. Below
+        // `CHROME_INSIDE_SPAN` the control is placed *outside* the bounds, so a
+        // bounds-only rule drops the hover exactly as the cursor arrives on the
+        // control, and the chrome vanishes as it is reached for.
+        let mut store = AreaStore::new();
+        let bounds = rect(200, 200, 20, 20);
+        let small = store.create(AreaType::Filter, bounds).unwrap();
+        let control = interaction::close_control(bounds, &screens());
+        let on_control = Point::new(control.origin.x + 2, control.origin.y + 2);
+        assert!(
+            !bounds.contains(on_control),
+            "this test is vacuous unless the control sits outside the bounds"
+        );
+        assert!(
+            store.hit_test_any(on_control).is_none(),
+            "the bounds-only rule does not cover the control, which is the point"
+        );
+        assert_eq!(store.hover_test(on_control, &screens()).unwrap().id, small);
+    }
+
+    #[test]
+    fn hover_follows_the_same_tier_order_as_everything_else() {
+        // A third resolver is a third chance to get "topmost" wrong, and a
+        // hover on the wrong area draws chrome on the wrong rectangle.
+        let (mut store, ids) = store_with(&[AreaType::Filter; 2]);
+        assert!(store.set_layer(ids[0], Layer::Front));
+        assert_eq!(
+            store.hover_test(Point::new(50, 50), &screens()).unwrap().id,
+            ids[0]
+        );
     }
 
     #[test]

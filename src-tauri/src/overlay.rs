@@ -1061,17 +1061,56 @@ pub(crate) fn interactive_area_handle_at(
     let monitors = monitor_rects();
     let store = app.state::<Mutex<AreaStore>>();
     let guard = lock(&store);
-    guard.iter_top_down().find_map(|area| {
-        let handle = interaction::handle_at(area.bounds, point, &monitors)?;
-        // An interactive area answers for any handle; a pass-through one only for
-        // chrome. `find_map` stops at the first area that answers, so a
-        // pass-through area's body does not shadow an interactive area beneath it.
-        if area.is_interactive() || !matches!(handle, interaction::Handle::Body) {
-            Some((area.id, area.bounds, handle))
-        } else {
-            None
-        }
-    })
+    guard
+        .grab_test(point, &monitors)
+        .map(|(area, handle)| (area.id, area.bounds, handle))
+}
+
+/// What the pointer is doing in `Living`: what it would grab, and what it is over.
+///
+/// # Why both answers come from one call
+///
+/// They are two different questions ([`AreaStore::grab_test`] and
+/// [`AreaStore::hover_test`]) and the poll asks them on the same tick, so asking
+/// them separately took the store lock twice and read `monitor_rects` twice on
+/// the 221 Hz path this module keeps deliberately short. Worse, two locks are two
+/// snapshots: an area created or dismissed between them could be reported hovered
+/// on a tick that said nothing was grabbed. One lock, one answer, no window.
+pub(crate) struct LivingPointer {
+    /// The area a press would act on, and where. `None` means the click belongs
+    /// to whatever is behind the overlay.
+    pub grabbed: Option<(AreaId, Rect, interaction::Handle)>,
+    /// The area whose chrome should be drawn.
+    pub hovered: Option<AreaId>,
+    /// Whether `hovered` came from containment rather than from `grabbed`.
+    ///
+    /// **The frontend needs this and cannot derive it**, which is the whole
+    /// reason it is on the wire. A hovered id means two things there: draw the
+    /// close control, and light the area up to show what a press would grab. The
+    /// second is a promise a pass-through body does not keep, so a Filter area the
+    /// cursor merely sits inside must get the control without the highlight.
+    /// Sending the id alone lit every large Filter area permanently, caught by the
+    /// independent review of `#56` before it reached anyone.
+    pub chrome_only: bool,
+}
+
+/// Resolves [`LivingPointer`] for `point`.
+pub(crate) fn living_pointer_at(app: &AppHandle, point: Point) -> LivingPointer {
+    let monitors = monitor_rects();
+    let store = app.state::<Mutex<AreaStore>>();
+    let guard = lock(&store);
+    if let Some((area, handle)) = guard.grab_test(point, &monitors) {
+        return LivingPointer {
+            grabbed: Some((area.id, area.bounds, handle)),
+            hovered: Some(area.id),
+            chrome_only: false,
+        };
+    }
+    LivingPointer {
+        grabbed: None,
+        hovered: guard.hover_test(point, &monitors).map(|area| area.id),
+        chrome_only: true,
+    }
 }
 
 /// The close control's rectangle for an area, against the current monitors.

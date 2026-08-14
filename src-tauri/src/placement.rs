@@ -609,8 +609,16 @@ struct MenuItemView {
 
 /// Which area the cursor is over, so its chrome can be revealed on hover.
 #[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 struct HoverPayload {
     id: Option<u64>,
+    /// Reveal the close control, but do **not** light the area up.
+    ///
+    /// Set when the cursor is merely inside a pass-through area rather than on
+    /// something it would grab. The highlight means *this is what a press will
+    /// take*, which that body will not honour, so the two facts cannot share one
+    /// field. See `overlay::LivingPointer::chrome_only`.
+    chrome_only: bool,
 }
 
 /// Enters placement: install the mouse hook and override the cursor, on the
@@ -735,6 +743,11 @@ pub struct PumpState {
     was_dragging: bool,
     /// The area the previous tick reported as hovered.
     hovered_area: Option<u64>,
+    /// Whether the last reported hover was chrome-only. Part of the compared
+    /// state, not a derived extra: the cursor can move from an area's chrome to
+    /// its body without changing the id, and that transition has to reach the
+    /// frontend or the highlight sticks.
+    hovered_chrome_only: bool,
     /// The menu row the previous tick reported as hovered.
     hovered_item: Option<usize>,
     /// The real cursor position the previous tick read, for the hook health
@@ -1072,11 +1085,57 @@ fn pump_gesture(app: &AppHandle, state: &mut PumpState) {
 ///
 /// The menu hover highlight runs in every visible mode: the area menu is
 /// reachable from `Living` too (ADR-0016), and a menu whose rows never light up
-/// reads as a picture rather than a control. The cursor override and the area
-/// hover chrome remain `Placement`-only: in `Living` the overlay does not own
-/// the pointer, so overriding the system cursor there would change the cursor
-/// inside the user's apps, and hover chrome would advertise gestures (move,
-/// resize) that only `Placement` offers.
+/// reads as a picture rather than a control.
+///
+/// # Both halves run in `Living` now, and this paragraph used to deny it
+///
+/// It read *"the cursor override and the area hover chrome remain
+/// `Placement`-only ... hover chrome would advertise gestures (move, resize)
+/// that only `Placement` offers"*. Task 1.17(a) gave `Living` its own move and
+/// resize, which removed the premise, and ADR-0025 scoped the cursor override to
+/// `OCR_NORMAL` alone so it no longer reaches inside the user's apps. The
+/// sentence outlived both by three weeks and was found by the independent review
+/// of `#56`, arguing against the code directly beneath it.
+///
+/// What survives from it is the *reason*, and it is now enforced rather than
+/// promised: chrome must not advertise a gesture the state declines. That is why
+/// a hover resolved by containment alone travels as `chrome_only` and gets the
+/// close control without the highlight.
+/// A hover reported as *nothing under the pointer*.
+const NO_HOVER: (Option<u64>, bool) = (None, false);
+
+/// What the `Living` hover should report this tick: the area id, and whether the
+/// hover is chrome-only.
+///
+/// Extracted from [`pump_hover`] so it can be drilled. It is three decisions and
+/// each one has been wrong at least once:
+///
+/// 1. **An open menu owns the pointer**, so nothing under it is hovered.
+/// 2. **A live gesture FREEZES the hover rather than clearing it.** This returned
+///    `NO_HOVER` for one commit, and the independent review of `#56` caught what
+///    that does: pressing a close control set a `Gesture::Close`, the next poll
+///    tick reported nothing hovered, and the control was **removed from under the
+///    cursor while the button was held on it**. `Gesture::Close`'s own contract is
+///    that "the release must land on the control it started on", so hiding the
+///    control hid the target the gesture requires. Freezing also solves what the
+///    clear was reaching for: the hover cannot wander onto a large Filter the
+///    cursor happens to cross mid-drag, because it does not move at all.
+/// 3. **Otherwise report what was resolved.**
+const fn living_hover(
+    menu_open: bool,
+    gesture_live: bool,
+    resolved: (Option<u64>, bool),
+    previous: (Option<u64>, bool),
+) -> (Option<u64>, bool) {
+    if menu_open {
+        return NO_HOVER;
+    }
+    if gesture_live {
+        return previous;
+    }
+    resolved
+}
+
 fn pump_hover(app: &AppHandle, state: &mut PumpState) {
     if mode() == Mode::Hidden {
         return;
@@ -1096,14 +1155,37 @@ fn pump_hover(app: &AppHandle, state: &mut PumpState) {
         state.active_monitor = None;
         // Living needs hover chrome (task 1.17(a)): areas are grabbable here now,
         // and a handle the user cannot see is a handle they will not reach for.
-        // Resolved through the same call `living_lbutton_down` acts on, so chrome
-        // never appears on an area the press would then ignore, which since
-        // task 1.17(b) includes a pass-through area's chrome but not its body.
-        let grabbed = lock(&MENU)
-            .is_none()
-            .then(|| overlay::interactive_area_handle_at(app, point))
-            .flatten();
-        let hovered_area = grabbed.map(|(id, _, _)| id.get());
+        //
+        // Two questions, and until 2026-08-14 one answer served both: which area
+        // would take a press, and which area the user is looking at. They differ
+        // for exactly one thing on screen, the close control of a pass-through
+        // area, and that is the one the founder could not find on the rig.
+        // `overlay::living_pointer_at` answers both from one store snapshot, and
+        // `LivingPointer::chrome_only` is how the second answer says it is not
+        // also the first.
+        //
+        // A live gesture FREEZES the hover; it does not clear it. See
+        // `living_hover`, which is where that decision lives and is tested.
+        //
+        // Read as two statements rather than one chain so neither lock is held
+        // while the other is taken.
+        let menu_open = lock(&MENU).is_some();
+        let gesture_live = lock(&GESTURE).is_some();
+        let pointer = (!menu_open && !gesture_live).then(|| overlay::living_pointer_at(app, point));
+        let grabbed = pointer.as_ref().and_then(|p| p.grabbed);
+        // Whether the hover is chrome-only travels with it, because the frontend
+        // spends one id on two meanings: draw the control, and light the area to
+        // show what a press would grab. Only the first is true of a pass-through
+        // body, and sending the id alone lit every large Filter area permanently.
+        let resolved = pointer
+            .as_ref()
+            .map_or(NO_HOVER, |p| (p.hovered.map(AreaId::get), p.chrome_only));
+        let hover = living_hover(
+            menu_open,
+            gesture_live,
+            resolved,
+            (state.hovered_area, state.hovered_chrome_only),
+        );
         // The cursor *is* the affordance (ADR-0025). A live gesture holds its
         // shape for the duration, matching Placement: it must not flicker between
         // move and resize as the pointer crosses an edge mid-drag.
@@ -1115,9 +1197,19 @@ fn pump_hover(app: &AppHandle, state: &mut PumpState) {
             Some(gesture) => Some(gesture_cursor(gesture)),
             None => grabbed.map(|(_, _, handle)| CursorShape::for_handle(handle)),
         });
-        if state.hovered_area != hovered_area {
-            state.hovered_area = hovered_area;
-            let _ = app.emit(HOVER_EVENT, HoverPayload { id: hovered_area });
+        // Compared as one tuple rather than field by field: a hover that changes
+        // only in `chrome_only` is a real change (the cursor crossing from an
+        // area's chrome to its body at an unchanged id), and a comparison written
+        // out per field is one a later edit can drop half of silently.
+        if (state.hovered_area, state.hovered_chrome_only) != hover {
+            (state.hovered_area, state.hovered_chrome_only) = hover;
+            let _ = app.emit(
+                HOVER_EVENT,
+                HoverPayload {
+                    id: hover.0,
+                    chrome_only: hover.1,
+                },
+            );
         }
         return;
     }
@@ -1191,9 +1283,20 @@ fn pump_hover(app: &AppHandle, state: &mut PumpState) {
         None => shape,
     };
     set_cursor(shape);
-    if state.hovered_area != hovered_area {
-        state.hovered_area = hovered_area;
-        let _ = app.emit(HOVER_EVENT, HoverPayload { id: hovered_area });
+    // Always `false` here: in Placement every area is grabbable whatever its
+    // Input (`hit_test_any`), so the highlight is never a promise this state
+    // declines to keep. Compared as a tuple for the same reason as the Living
+    // side: leaving Living with a chrome-only hover live must re-emit even when
+    // the id has not moved, or the frontend keeps drawing the control alone.
+    if (state.hovered_area, state.hovered_chrome_only) != (hovered_area, false) {
+        (state.hovered_area, state.hovered_chrome_only) = (hovered_area, false);
+        let _ = app.emit(
+            HOVER_EVENT,
+            HoverPayload {
+                id: hovered_area,
+                chrome_only: false,
+            },
+        );
     }
 }
 
@@ -2604,15 +2707,30 @@ fn menu_rows(area: &overlay::AreaSummary) -> Vec<MenuRow> {
     // timing and its own dismissal, for three rows. Revisit when the offered set
     // is long enough that a flat list is the worse read.
     //
-    // ⚠️ **`Type: Filter` is a one-click route into the hardest state this
-    // product has, and nothing here softens it.** Filter is pass-through by
+    // ⚠️ **REVERSED by the founder on 2026-08-14, on the rig, and the trigger was
+    // not list length.** A flat list holds two independent radio groups, Type and
+    // Layer, so two rows are ticked at once and the menu misreports its own state.
+    // Roadmap 1.28 is the submenu; the three costs named above are still the
+    // costs, and they are that row's to pay.
+    //
+    // ⚠️ **`Type: Filter` is a one-click route into a state that was the hardest
+    // this product had, and the sharpest edge is off it.** Filter is pass-through by
     // model default, so on an area below `CHROME_INSIDE_SPAN` (50 px) the whole
     // input surface becomes the 18 px close control placed *outside* the corner,
-    // which the frontend draws only while the area is hovered. It is reachable,
-    // so the area is not stranded and every conversion is undoable; but the way
-    // back is an invisible target that appears once the cursor is already on it.
+    // which the frontend draws while the cursor is anywhere inside the area. It
+    // is reachable, so the area is not stranded and every conversion is
+    // undoable. ~~But the way back is an invisible target that appears once the
+    // cursor is already on it.~~ **WITHDRAWN 2026-08-14** and struck rather than
+    // deleted, because a reader who remembers the sentence needs to see it go.
+    // It was left standing in the present tense two sentences above its own
+    // correction, which the independent review of `#56` picked up.
     // Roadmap 1.27 named this "the case to design for first" and it shipped
-    // undesigned. The `Click-through` row below carries the same one-way
+    // undesigned. ✅ **Half-answered 2026-08-14**: the control is no longer
+    // invisible, because hover is resolved by containment rather than by the
+    // Living input rule, so crossing the area reveals it (`AreaStore::hover_test`).
+    // **What is still open is the target itself**: 18 px, outside the corner, and
+    // no move grab at all below `CHROME_INSIDE_SPAN`. That is 1.17(b2)'s outside
+    // resize handles and control bar, which is blocked on ADR-0028. The `Click-through` row below carries the same one-way
     // character and says so in `open_menu`'s doc, with the mitigation that it
     // sits among the Layer rows that share its recovery path; these rows sit
     // above them and inherit no such neighbour. Raised by the independent review
@@ -2756,9 +2874,93 @@ mod tests {
     use uptake_core::area::{AreaType, Input, Layer};
 
     use super::{
-        ALL_SHAPES, CURSOR_SNAPSHOT_LEN, MenuAction, WHEEL_STEP, conversion_label, menu_rows,
-        wheel_notches,
+        ALL_SHAPES, CURSOR_SNAPSHOT_LEN, HoverPayload, MenuAction, NO_HOVER, WHEEL_STEP,
+        conversion_label, living_hover, menu_rows, wheel_notches,
     };
+
+    #[test]
+    fn the_hover_payload_reaches_the_frontend_as_camel_case() {
+        // The whole fix hangs on this one attribute and nothing else could see
+        // it. `#[serde(rename_all = "camelCase")]` is the only reason the Rust
+        // field `chrome_only` arrives as `chromeOnly`, which is the key
+        // `+page.svelte` reads. Remove the attribute and every gate in this
+        // repository stays green: the frontend then reads `undefined`,
+        // `areaFramesCss`'s default fires, and the highlight comes back on every
+        // hovered Filter area, which is the exact defect this branch removed.
+        //
+        // `area-kinds.test.ts` is the guard for twice-written wire names and its
+        // own doc says it "cannot see a name that reaches the frontend by any
+        // route other than these four functions". A payload key is such a route,
+        // so the guard is blind here by construction and this test is the cover.
+        // Found by the independent review of `#56`.
+        let Ok(json) = serde_json::to_string(&HoverPayload {
+            id: Some(7),
+            chrome_only: true,
+        }) else {
+            panic!("HoverPayload serializes")
+        };
+
+        assert!(
+            json.contains("\"chromeOnly\""),
+            "the frontend reads `chromeOnly`; got {json}"
+        );
+        assert!(
+            !json.contains("chrome_only"),
+            "the snake_case name must not reach the wire; got {json}"
+        );
+    }
+
+    #[test]
+    fn a_live_gesture_freezes_the_hover_rather_than_clearing_it() {
+        // Pressing a close control starts a `Gesture::Close`, whose contract is
+        // that the release lands on the control it started on. Clearing the hover
+        // here removed that control from under the cursor while the button was
+        // held on it. Found by the independent review of `#56`.
+        let pressed = (Some(7), true);
+
+        assert_eq!(
+            living_hover(false, true, NO_HOVER, pressed),
+            pressed,
+            "a gesture holds whatever was hovered when it began"
+        );
+        // And the thing the clear was reaching for still holds: a hover frozen at
+        // the dragged area cannot wander onto a Filter the cursor crosses.
+        assert_eq!(
+            living_hover(false, true, (Some(9), true), pressed),
+            pressed,
+            "a live gesture ignores what is under the pointer now"
+        );
+    }
+
+    #[test]
+    fn an_open_menu_owns_the_pointer_and_outranks_a_live_gesture() {
+        // The menu is drawn over everything and takes the pointer while it is up,
+        // so nothing beneath it is hovered. Asserted against a live gesture too,
+        // because the two conditions are checked in order and swapping them would
+        // otherwise be invisible.
+        assert_eq!(
+            living_hover(true, false, (Some(7), false), NO_HOVER),
+            NO_HOVER
+        );
+        assert_eq!(
+            living_hover(true, true, (Some(7), false), (Some(9), true)),
+            NO_HOVER
+        );
+    }
+
+    #[test]
+    fn an_idle_pointer_reports_what_was_resolved() {
+        // The ordinary case, pinned so a change to either guard above cannot
+        // quietly swallow it.
+        assert_eq!(
+            living_hover(false, false, (Some(7), true), (Some(9), false)),
+            (Some(7), true)
+        );
+        assert_eq!(
+            living_hover(false, false, NO_HOVER, (Some(9), false)),
+            NO_HOVER
+        );
+    }
 
     /// A summary standing in for an area the menu was opened over.
     ///
