@@ -312,8 +312,7 @@ export function areaFramesCss(
     // from containment alone; the control is not a claim about anything and is
     // shown either way. Without the split a large Filter area sat permanently
     // lit with a permanent close control over the user's content.
-    hovered:
-      area.id === hoveredId && area.id !== draggedId && !hoverChromeOnly,
+    hovered: area.id === hoveredId && area.id !== draggedId && !hoverChromeOnly,
     showClose: area.id === hoveredId && area.id !== draggedId,
     source: area.id === draggedId,
   }));
