@@ -541,6 +541,36 @@ pub struct AreaStore {
     next_id: u64,
 }
 
+/// What a completed [`AreaStore::set_kind`] leaves for its caller to finish.
+///
+/// The store owns the *model*: the type, and the zoom only some types may hold.
+/// It does not own the *pixels*, which live in the host's capture store and in
+/// whatever magnification work is in flight, neither of which is reachable from
+/// this crate. A conversion that invalidates those pixels therefore has to say
+/// so, and the caller has to act on it.
+///
+/// Returned rather than left implicit, because the alternative is every caller
+/// working out for itself whether a conversion stranded a capture. That is the
+/// invariant roadmap task 1.27 exists to enforce: an area converted away from a
+/// magnified [`AreaType::Default`] goes on rendering a pin of somewhere else,
+/// under a badge reporting a magnification [`AreaType::supports_zoom`] no longer
+/// lets the user scroll away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Conversion {
+    /// Whether the area's pinned pixels are now wrong for it, so the caller must
+    /// drop them along with any capture still in flight for the same area.
+    ///
+    /// True when the area was showing something its new type cannot mean: a
+    /// magnified still it can no longer be scrolled out of, or the pinned
+    /// capture that *was* its entire content while it was a
+    /// [`AreaType::Screenshot`].
+    pub discard_capture: bool,
+    /// Whether anything actually changed. False when the area already had this
+    /// type, which is an ordinary request rather than an error: the menu row for
+    /// the current type is drawn ticked and is still clickable.
+    pub changed: bool,
+}
+
 impl AreaStore {
     /// An empty store.
     #[must_use]
@@ -681,6 +711,65 @@ impl AreaStore {
             }
             None => false,
         }
+    }
+
+    /// Converts an area to another [`AreaType`] (roadmap task 1.27). `None` for
+    /// an unknown id; otherwise a [`Conversion`] saying what the caller still
+    /// owes.
+    ///
+    /// # Conversion is not creation, and the axes do not all carry over
+    ///
+    /// ADR-0018's warning is that every type has to answer *"and then what?"*.
+    /// Three answers, and the third is the one that is not obvious:
+    ///
+    /// - **[`AfterCreate`] does not apply at all.** It is a property of the
+    ///   creating gesture, and a conversion is not one. There is no drag in
+    ///   progress and no mode to return from.
+    /// - **[`Zoom`] resets whenever the new type does not support it**, and this
+    ///   is the invariant the row is *for*. [`AreaType::supports_zoom`] is
+    ///   `Default`-only, so a converted area left holding a non-natural zoom
+    ///   could never be scrolled back: [`AreaStore::zoom_by`] refuses on the
+    ///   type before it ever reaches the value.
+    /// - **[`Visual`] and [`Input`] are re-taken from the new type's defaults.**
+    ///   §3.2 calls all three properties orthogonal and says a type supplies a
+    ///   *starting* value rather than a constraint, so carrying the old values
+    ///   over would also be defensible. Taking the defaults is chosen because
+    ///   the menu row says "Filter", and a Filter that still swallows every
+    ///   click is the one thing §3.2's own test says a Filter must not be.
+    ///   Little is lost either way: `Input` has its own menu row a few lines
+    ///   below, so a user who wanted the old value can put it back.
+    ///
+    /// [`Layer`] is deliberately untouched. It is not derived from the type, and
+    /// "always on top" is a placement the user set on this rectangle rather than
+    /// on what the rectangle currently does.
+    pub fn set_kind(&mut self, id: AreaId, kind: AreaType) -> Option<Conversion> {
+        let area = self.area_mut(id)?;
+        if area.kind == kind {
+            return Some(Conversion {
+                discard_capture: false,
+                changed: false,
+            });
+        }
+        // Read before the write, and both halves matter. A magnified area holds
+        // a still it can no longer scroll out of; a Screenshot's pin *was* its
+        // content, and the type replacing it has content of its own.
+        let was_magnified = !area.zoom.is_natural();
+        let was_pinned_capture = area.kind == AreaType::Screenshot;
+        area.kind = kind;
+        area.visual = kind.default_visual();
+        area.input = kind.default_input();
+        if !kind.supports_zoom() {
+            area.zoom = Zoom::NATURAL;
+        }
+        // `was_magnified && supports_zoom` is unreachable today, because only
+        // `Default` zooms and `Default` to `Default` returned above. It is
+        // written as a conjunction anyway, so that widening `supports_zoom` to a
+        // second type cannot silently start throwing away a magnification the
+        // new type would have kept.
+        Some(Conversion {
+            discard_capture: (was_magnified && !kind.supports_zoom()) || was_pinned_capture,
+            changed: true,
+        })
     }
 
     /// Raises an area to the top of **its own tier**. Returns `false` for an
@@ -1191,6 +1280,140 @@ mod tests {
             store.hit_test(Point::new(50, 50), &screens()).unwrap().id,
             below
         );
+    }
+
+    #[test]
+    fn converting_away_from_default_resets_a_magnification_the_new_type_cannot_undo() {
+        // Roadmap 1.27's invariant, and the reason it is the model's job rather
+        // than the menu's. `zoom_by` refuses on the *type*, so a converted area
+        // holding a non-natural zoom is not merely odd, it is unrecoverable:
+        // nothing the user can do puts it back.
+        let mut store = AreaStore::new();
+        let id = store
+            .create(AreaType::Default, rect(0, 0, 100, 100))
+            .unwrap();
+        store.zoom_by(id, 4).unwrap();
+        assert!(!store.get(id).unwrap().zoom.is_natural(), "set up magnified");
+
+        let conversion = store.set_kind(id, AreaType::Filter).unwrap();
+
+        assert!(conversion.changed);
+        assert!(
+            conversion.discard_capture,
+            "the magnified pin is a still of somewhere the area no longer is"
+        );
+        assert!(
+            store.get(id).unwrap().zoom.is_natural(),
+            "a type that cannot zoom cannot be left holding a zoom"
+        );
+        // The check that makes the reset load-bearing rather than cosmetic.
+        assert_eq!(
+            store.zoom_by(id, -4),
+            None,
+            "zoom_by refuses on the type, so the user has no way back"
+        );
+    }
+
+    #[test]
+    fn converting_takes_the_new_types_visual_and_input_defaults() {
+        let mut store = AreaStore::new();
+        let id = store
+            .create(AreaType::Default, rect(0, 0, 100, 100))
+            .unwrap();
+        assert_eq!(store.get(id).unwrap().input, Input::Interactive);
+
+        store.set_kind(id, AreaType::Filter).unwrap();
+
+        // §3.2's own test for the two pass-through types: a tint you cannot work
+        // underneath is useless. A Filter that still swallows clicks is not one.
+        assert_eq!(store.get(id).unwrap().input, Input::PassThrough);
+        assert_eq!(store.get(id).unwrap().visual, Visual::Passive);
+        assert_eq!(store.get(id).unwrap().kind, AreaType::Filter);
+    }
+
+    #[test]
+    fn converting_preserves_the_layer_the_user_pinned() {
+        // Layer is not a type-derived axis. "Always on top" was set on this
+        // rectangle, not on what the rectangle currently does.
+        let mut store = AreaStore::new();
+        let id = store
+            .create(AreaType::Default, rect(0, 0, 100, 100))
+            .unwrap();
+        store.set_layer(id, Layer::Front);
+
+        store.set_kind(id, AreaType::Filter).unwrap();
+
+        assert_eq!(store.get(id).unwrap().layer, Layer::Front);
+    }
+
+    #[test]
+    fn converting_away_from_screenshot_discards_the_pin_that_was_its_content() {
+        let mut store = AreaStore::new();
+        let id = store
+            .create(AreaType::Screenshot, rect(0, 0, 100, 100))
+            .unwrap();
+
+        let conversion = store.set_kind(id, AreaType::Default).unwrap();
+
+        assert!(conversion.discard_capture);
+    }
+
+    #[test]
+    fn converting_to_the_type_it_already_is_changes_nothing_and_discards_nothing() {
+        // The menu draws the current type's row ticked and leaves it clickable,
+        // so this is an ordinary request. Reporting `discard_capture` here would
+        // throw away a live Screenshot's pixels for a click that meant nothing.
+        let mut store = AreaStore::new();
+        let id = store
+            .create(AreaType::Screenshot, rect(0, 0, 100, 100))
+            .unwrap();
+
+        let conversion = store.set_kind(id, AreaType::Screenshot).unwrap();
+
+        assert!(!conversion.changed);
+        assert!(!conversion.discard_capture);
+        assert_eq!(store.get(id).unwrap().kind, AreaType::Screenshot);
+    }
+
+    #[test]
+    fn converting_an_unknown_id_answers_none() {
+        let mut store = AreaStore::new();
+        let id = store
+            .create(AreaType::Default, rect(0, 0, 100, 100))
+            .unwrap();
+        store.remove(id);
+
+        assert_eq!(store.set_kind(id, AreaType::Filter), None);
+    }
+
+    #[test]
+    fn every_conversion_leaves_an_area_whose_zoom_its_type_allows() {
+        // The invariant stated over the whole matrix rather than on one pair, so
+        // an eighth type cannot arrive with a hole in it. Seven by seven, with
+        // each source area magnified as far as its own type permits first.
+        let all = [
+            AreaType::Default,
+            AreaType::Screenshot,
+            AreaType::Record,
+            AreaType::Ocr,
+            AreaType::Upscale,
+            AreaType::Analysis,
+            AreaType::Filter,
+        ];
+        for from in all {
+            for to in all {
+                let mut store = AreaStore::new();
+                let id = store.create(from, rect(0, 0, 100, 100)).unwrap();
+                store.zoom_by(id, 4);
+                store.set_kind(id, to).unwrap();
+                let area = store.get(id).unwrap();
+                assert_eq!(area.kind, to, "{from:?} to {to:?}");
+                assert!(
+                    area.kind.supports_zoom() || area.zoom.is_natural(),
+                    "{from:?} to {to:?} left a zoom the type cannot undo"
+                );
+            }
+        }
     }
 
     #[test]
