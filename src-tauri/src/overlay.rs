@@ -969,17 +969,40 @@ pub(crate) fn set_area_input(app: &AppHandle, id: AreaId, input: Input) -> bool 
 /// a badge nothing can clear is precisely the stranded state 1.27 exists to
 /// prevent.
 pub(crate) fn convert_area(app: &AppHandle, id: AreaId, kind: AreaType) -> bool {
-    // Scoped so the store lock is released before `clear_magnification`, which
-    // takes `MAGNIFY` and then the capture store.
-    let conversion = {
+    // Scoped so the store lock is released before the capture calls below, which
+    // take `MAGNIFY` and then the capture store.
+    let outcome = {
         let store = app.state::<Mutex<AreaStore>>();
-        lock(&store).set_kind(id, kind)
+        let mut guard = lock(&store);
+        let conversion = guard.set_kind(id, kind);
+        let bounds = guard.get(id).map(|area| area.bounds);
+        conversion.zip(bounds)
     };
-    let Some(conversion) = conversion else {
+    let Some((conversion, bounds)) = outcome else {
         return false;
     };
     if conversion.discard_capture {
         crate::output::clear_magnification(app, id);
+    }
+    // **A conversion INTO a capturing type has to take that capture**, and the
+    // order matters: the discard above bumps the magnify generation and drops any
+    // old pin, so doing these the other way round would throw the new one away.
+    //
+    // ADR-0018 §6 says every type must answer "and then what?", and roadmap 1.27
+    // reserved this exact question: *"a conversion to `Screenshot` has to decide
+    // whether it captures"*. This function shipped answering the other three axes
+    // and silently defaulting that one to *no*, which the independent review of
+    // `#55` caught. A `Screenshot` holding no pinned still renders the live
+    // screen, is indistinguishable from a `Default` area, and hands `Copy` and
+    // `Save image` a live grab taken at click time, which is the pre-1.17(a)
+    // behaviour `output::export_source` exists to have fixed. The menu row says
+    // "Screenshot"; this is what makes the row true.
+    //
+    // [`placement::captures_on_create`] rather than a second match, for the reason
+    // that function's own doc gives: two hand-maintained copies of *does this type
+    // capture?* agree today and drift the moment a type is added.
+    if conversion.changed && placement::captures_on_create(kind) {
+        crate::output::capture_into_area(app, id, bounds);
     }
     conversion.changed
 }
@@ -1696,15 +1719,18 @@ mod tests {
         assert_eq!(armable_type(""), None);
     }
 
-    /// All seven wire names, pinned. The frontend's `AreaKind` union is a
-    /// hand-written mirror of this list and **nothing checks it from the other
-    /// side**: an eighth `AreaType` forces an arm in `type_name` and leaves
-    /// TypeScript silent, so the new name reaches the browser outside the union
-    /// with no type error and the area draws as a default one (`I-55`).
+    /// All seven wire names, pinned, so a *rename* goes red on this side.
     ///
-    /// This test cannot close that gap. What it does is make a *rename* go red
-    /// here, so the two lists cannot drift apart quietly in the cheaper of the
-    /// two directions.
+    /// **The other direction is covered as well, and it is covered elsewhere.**
+    /// This doc said *"nothing checks it from the other side"* and *"this test
+    /// cannot close that gap"*, which was true until `src/lib/area-kinds.test.ts`
+    /// arrived: that test reads this function out of the source and asserts the
+    /// frontend's `AreaKind` union lists exactly these names, so an eighth
+    /// `AreaType` now fails there (`I-55`).
+    ///
+    /// Kept as two checks rather than folded into one, because they fail
+    /// differently and both answers are useful: this one names the wrong string
+    /// at the site that produced it, the other names the list that fell behind.
     #[test]
     fn every_area_type_has_its_wire_name_pinned() {
         for (kind, name) in [

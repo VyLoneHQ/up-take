@@ -1778,7 +1778,7 @@ fn handle_mouse(wparam: WPARAM, lparam: LPARAM) -> bool {
             // replace it over another area). Everything else is the user's,
             // untouched.
             //
-            // **`menu_target`, not a second copy of its rule.** This press and
+            // **`pointer_target`, not a second copy of its rule.** This press and
             // the `open_menu` on the matching release have to agree exactly.
             // Where they do not, the hook claims a click that `open_menu` then
             // declines to act on: no menu appears *and* the application
@@ -1788,7 +1788,7 @@ fn handle_mouse(wparam: WPARAM, lparam: LPARAM) -> bool {
                 let claimed = lock(&MENU).is_some()
                     || APP
                         .get()
-                        .is_some_and(|app| menu_target(app, point).is_some());
+                        .is_some_and(|app| pointer_target(app, point).is_some());
                 if claimed {
                     RIGHT_PENDING.store(true, Ordering::SeqCst);
                 }
@@ -1800,15 +1800,17 @@ fn handle_mouse(wparam: WPARAM, lparam: LPARAM) -> bool {
         // a pass-through area is still theirs to scroll; in Living ADR-0016
         // decision 3 governs, and a scroll over a pass-through body belongs to
         // the application underneath.
+        //
+        // **`pointer_target`, because that sentence was true and open-coded.**
+        // This arm carried its own copy of the rule while claiming to agree with
+        // the menu's, which is the drift the function exists to prevent, one call
+        // site over from the two it was extracted for. Found by the independent
+        // review of `#55`.
         WM_MOUSEWHEEL => match mode() {
             Mode::Hidden => false,
-            mode => {
+            _ => {
                 let Some(app) = APP.get() else { return false };
-                let target = if mode == Mode::Placement {
-                    overlay::area_at(app, point)
-                } else {
-                    overlay::interactive_area_at(app, point)
-                };
+                let target = pointer_target(app, point);
                 // **Claimed on the type, not on whether the zoom moved.** A
                 // scroll held at the ceiling changes nothing and must still be
                 // swallowed: passing it through would scroll the document under
@@ -2326,7 +2328,16 @@ fn capture_on_create(app: &AppHandle, kind: AreaType, id: AreaId, bounds: Rect) 
 ///
 /// Exhaustive rather than `matches!` with a `_` arm, so adding an `AreaType`
 /// fails to compile here instead of defaulting to "captures nothing".
-const fn captures_on_create(kind: AreaType) -> bool {
+///
+/// # A third reader, and the name is now half right
+///
+/// `overlay::convert_area` asks this too (roadmap 1.27): converting an area
+/// *into* a capturing type has to take the capture, or the menu row promises the
+/// one thing the resulting area does not do. So "on create" reads as "when an
+/// area comes to hold this type", and creation is only one of the two ways that
+/// happens. Kept rather than renamed for the reason the paragraph above gives:
+/// what matters is that there is one predicate, and every caller reaches it.
+pub(crate) const fn captures_on_create(kind: AreaType) -> bool {
     match kind {
         AreaType::Screenshot => true,
         AreaType::Default
@@ -2347,8 +2358,12 @@ const fn captures_on_create(kind: AreaType) -> bool {
 /// `Default`, `Screenshot` and `Filter` have behaviour on the screen today;
 /// `Record`, `Ocr`, `Upscale` and `Analysis` are modelled and have none, so
 /// offering them would ship four rows that turn a working area into a rectangle
-/// indistinguishable from a bug. Each earns its row with the roadmap task that
-/// gives it behaviour: 1.24 for `Upscale`, 1.26 for `Ocr`.
+/// indistinguishable from a bug. Two of the four have a roadmap task that will
+/// give them behaviour and their row arrives with it: 1.24 for `Upscale`, 1.26
+/// for `Ocr`. **`Record` and `Analysis` have no roadmap row at all**, so they are
+/// not merely unbuilt, they are unplanned. Said "each earns its row with the
+/// roadmap task that gives it behaviour" until the independent review of `#55`
+/// resolved the ids and found the quantifier true of half the set.
 ///
 /// The row's own argument is what this defers to rather than contradicts. 1.27
 /// exists so those types are reachable *without inventing four more gestures*,
@@ -2448,7 +2463,7 @@ fn vk_is_down(vk: i32) -> bool {
 // The per-area menu (ADR-0013): the control that sets an area's Layer tier.
 // ---------------------------------------------------------------------------
 
-/// The area a right-click at `point` acts on, in whichever mode is current.
+/// The area a pointer event at `point` acts on, in whichever mode is current.
 ///
 /// **The resolution is mode-dependent, and the difference is the V-7 input
 /// model itself.** In `Placement` the menu opens for the topmost area of *any*
@@ -2459,13 +2474,21 @@ fn vk_is_down(vk: i32) -> bool {
 /// belongs to whatever app is underneath (ADR-0016 decision 3), and its border
 /// and close control do not.
 ///
-/// # One function, two callers, and that is the whole reason it exists
+/// # One function, three callers, and that is the whole reason it exists
 ///
 /// The `WM_RBUTTONDOWN` arm decides whether to *claim* the press; `open_menu`
-/// decides what the release *acts on*. Roadmap 1.27 recorded the hazard: change
+/// decides what the release *acts on*; the `WM_MOUSEWHEEL` arm decides what a
+/// scroll magnifies. Roadmap 1.27 recorded the hazard for the first two: change
 /// one and not the other, and the hook swallows a click the menu then declines,
 /// so no menu appears and the application underneath loses the right-click it
 /// would have had. Two copies of one rule is how that happens, so there is one.
+///
+/// **It was called `menu_target` and reached two of the three.** The wheel arm
+/// open-coded the identical `Placement`/`Living` match under a comment saying it
+/// *"resolves exactly as the area menu's does"*, which is a statement that the
+/// two must agree, sitting on the copy that had not been migrated. Found by the
+/// independent review of `#55`, and the name widened with the fix: a function
+/// three different events resolve through is not the menu's.
 ///
 /// **What the row expected to have to build here was already built.** It read
 /// `interactive_area_at` as *interactive areas only* and concluded both sites
@@ -2473,7 +2496,7 @@ fn vk_is_down(vk: i32) -> bool {
 /// `AreaStore::hit_test` was redefined by ADR-0024 §2, shipped in task 1.17(b),
 /// and has admitted chrome ever since. Nothing here changed the resolution. It
 /// is named, so that the next change to it cannot reach only one caller.
-fn menu_target(app: &AppHandle, point: Point) -> Option<overlay::AreaSummary> {
+fn pointer_target(app: &AppHandle, point: Point) -> Option<overlay::AreaSummary> {
     match mode() {
         Mode::Placement => overlay::area_at(app, point),
         Mode::Living => overlay::interactive_area_at(app, point),
@@ -2485,13 +2508,13 @@ fn menu_target(app: &AppHandle, point: Point) -> Option<overlay::AreaSummary> {
 /// Does nothing if the point resolves to no area: then a click has nothing to
 /// act on, and any open menu simply closes.
 ///
-/// The target comes from [`menu_target`], which is shared with the press that
+/// The target comes from [`pointer_target`], which is shared with the press that
 /// claims the click. Note the consequence for the input toggle: flipping an area
 /// to pass-through from its own Living menu leaves only its chrome able to
 /// re-open that menu. That is deliberate, and it is the reason the toggle sits
 /// next to the Layer rows that share the same recovery path.
 fn open_menu(app: &AppHandle, point: Point) {
-    let Some(area) = menu_target(app, point) else {
+    let Some(area) = pointer_target(app, point) else {
         close_menu(app);
         return;
     };
@@ -2580,6 +2603,20 @@ fn menu_rows(area: &overlay::AreaSummary) -> Vec<MenuRow> {
     // interaction machinery at all: a submenu means nested bounds, hover-to-open
     // timing and its own dismissal, for three rows. Revisit when the offered set
     // is long enough that a flat list is the worse read.
+    //
+    // ⚠️ **`Type: Filter` is a one-click route into the hardest state this
+    // product has, and nothing here softens it.** Filter is pass-through by
+    // model default, so on an area below `CHROME_INSIDE_SPAN` (50 px) the whole
+    // input surface becomes the 18 px close control placed *outside* the corner,
+    // which the frontend draws only while the area is hovered. It is reachable,
+    // so the area is not stranded and every conversion is undoable; but the way
+    // back is an invisible target that appears once the cursor is already on it.
+    // Roadmap 1.27 named this "the case to design for first" and it shipped
+    // undesigned. The `Click-through` row below carries the same one-way
+    // character and says so in `open_menu`'s doc, with the mitigation that it
+    // sits among the Layer rows that share its recovery path; these rows sit
+    // above them and inherit no such neighbour. Raised by the independent review
+    // of `#55`; a real mitigation is a design call, not a comment.
     for kind in AreaType::ALL {
         if let Some(label) = conversion_label(kind) {
             spec.push((MenuAction::SetType(kind), label));
@@ -2725,7 +2762,7 @@ mod tests {
 
     /// A summary standing in for an area the menu was opened over.
     ///
-    /// `AreaSummary` is what `menu_target` hands `open_menu`, and it carries no
+    /// `AreaSummary` is what `pointer_target` hands `open_menu`, and it carries no
     /// geometry, which is exactly why the row list is testable without a running
     /// app: the rows depend on the type, the tier and the input mode, and on
     /// nothing else.
@@ -2810,6 +2847,26 @@ mod tests {
             seen.sort_unstable();
             seen.dedup();
             assert_eq!(seen.len(), before, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn converting_to_a_type_that_captures_is_exactly_screenshot() {
+        // `overlay::convert_area` needs an `AppHandle`, so the branch that takes
+        // a capture on conversion cannot be driven from here. This pins the
+        // predicate that branch asks, which is the half that can go wrong
+        // silently: `captures_on_create` answering false for `Screenshot` gives a
+        // menu row promising a still it never takes, and answering true for any
+        // other type spends a full capture on an area that will never show it.
+        //
+        // The conversion caller arrived in `#55` after the independent review
+        // found the row shipping without one.
+        for kind in AreaType::ALL {
+            assert_eq!(
+                super::captures_on_create(kind),
+                kind == AreaType::Screenshot,
+                "{kind:?}"
+            );
         }
     }
 
