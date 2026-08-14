@@ -1103,7 +1103,29 @@ fn pump_hover(app: &AppHandle, state: &mut PumpState) {
             .is_none()
             .then(|| overlay::interactive_area_handle_at(app, point))
             .flatten();
-        let hovered_area = grabbed.map(|(id, _, _)| id.get());
+        // Two questions, and until 2026-08-14 one answer served both: which area
+        // would take a press, and which area the user is looking at. They differ
+        // for exactly one thing on screen, the close control of a pass-through
+        // area, and that is the one the founder could not find on the rig.
+        //
+        // `grabbed` still leads, so nothing that reveals chrome today stops doing
+        // so and the affordance keeps matching the press wherever a press has a
+        // target. The fallback only fills the case that is empty now: the cursor
+        // is over a pass-through body, no area answers, and today no control is
+        // drawn at all. See `overlay::hover_area_at`.
+        //
+        // Deliberately NOT extended to the cursor shape below. A grab shape over
+        // a body that passes the click through would promise an interaction the
+        // area then declines, which is ADR-0016 decision 3 read backwards.
+        let hovered_area = grabbed
+            .map(|(id, _, _)| id)
+            .or_else(|| {
+                lock(&MENU)
+                    .is_none()
+                    .then(|| overlay::hover_area_at(app, point))
+                    .flatten()
+            })
+            .map(|id| id.get());
         // The cursor *is* the affordance (ADR-0025). A live gesture holds its
         // shape for the duration, matching Placement: it must not flicker between
         // move and resize as the pointer crosses an edge mid-drag.

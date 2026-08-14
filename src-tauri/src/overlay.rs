@@ -1074,6 +1074,34 @@ pub(crate) fn interactive_area_handle_at(
     })
 }
 
+/// The topmost area whose bounds or close control contain `point`, whatever its
+/// [`Input`].
+///
+/// # This answers "what does the user see", not "what takes the click"
+///
+/// Every other resolver in this module answers the second question, and the
+/// close control's visibility was wired to one of them until 2026-08-14. That is
+/// what made a small pass-through area's control appear only once the cursor was
+/// already on it: hover resolved through [`interactive_area_handle_at`], which
+/// rejects a pass-through area's body, so moving across the area itself revealed
+/// nothing. The control was reachable and invisible, which is worse than either
+/// alone, because the user has no way to learn where it is.
+///
+/// Found on the rig by the founder, driving roadmap 1.27. `menu_rows` had
+/// already predicted it in a comment ("the way back is an invisible target that
+/// appears once the cursor is already on it") and shipped anyway; a predicted
+/// defect left in place is still a defect, which this project has written down
+/// once before.
+///
+/// The rule itself is [`AreaStore::hover_test`] and is stated there rather than
+/// here, beside the two input rules it must not be confused with.
+pub(crate) fn hover_area_at(app: &AppHandle, point: Point) -> Option<AreaId> {
+    let monitors = monitor_rects();
+    let store = app.state::<Mutex<AreaStore>>();
+    let guard = lock(&store);
+    guard.hover_test(point, &monitors).map(|area| area.id)
+}
+
 /// The close control's rectangle for an area, against the current monitors.
 pub(crate) fn close_control_of(bounds: Rect) -> Rect {
     interaction::close_control(bounds, &monitor_rects())
