@@ -112,6 +112,29 @@ pub enum AreaType {
 }
 
 impl AreaType {
+    /// Every variant, in PRODUCT-VISION §3.2's Type-row order.
+    ///
+    /// For callers that have to *offer* the types rather than answer a question
+    /// about one, where a `match` cannot help: the area menu's conversion rows
+    /// (roadmap task 1.27) iterate this and ask a per-type predicate what to do
+    /// with each. Declaration order is the spec's order, and it is also the
+    /// order those rows appear in.
+    ///
+    /// ⚠️ **Hand-maintained, and the array length is the only thing that says
+    /// so.** Adding a variant fails to compile in every exhaustive `match` in
+    /// this file and in the host, so the author is stopped and made to decide;
+    /// nothing but the `7` stops them leaving this list short. Kept because the
+    /// alternative is a derive-macro dependency for one list of seven names.
+    pub const ALL: [Self; 7] = [
+        Self::Default,
+        Self::Screenshot,
+        Self::Record,
+        Self::Ocr,
+        Self::Upscale,
+        Self::Analysis,
+        Self::Filter,
+    ];
+
     /// The [`Visual`] an area of this type starts with.
     ///
     /// Passive unless the type is meaningless without continuous capture.
@@ -1293,7 +1316,10 @@ mod tests {
             .create(AreaType::Default, rect(0, 0, 100, 100))
             .unwrap();
         store.zoom_by(id, 4).unwrap();
-        assert!(!store.get(id).unwrap().zoom.is_natural(), "set up magnified");
+        assert!(
+            !store.get(id).unwrap().zoom.is_natural(),
+            "set up magnified"
+        );
 
         let conversion = store.set_kind(id, AreaType::Filter).unwrap();
 
@@ -1391,17 +1417,8 @@ mod tests {
         // The invariant stated over the whole matrix rather than on one pair, so
         // an eighth type cannot arrive with a hole in it. Seven by seven, with
         // each source area magnified as far as its own type permits first.
-        let all = [
-            AreaType::Default,
-            AreaType::Screenshot,
-            AreaType::Record,
-            AreaType::Ocr,
-            AreaType::Upscale,
-            AreaType::Analysis,
-            AreaType::Filter,
-        ];
-        for from in all {
-            for to in all {
+        for from in AreaType::ALL {
+            for to in AreaType::ALL {
                 let mut store = AreaStore::new();
                 let id = store.create(from, rect(0, 0, 100, 100)).unwrap();
                 store.zoom_by(id, 4);

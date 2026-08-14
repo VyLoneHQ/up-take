@@ -795,14 +795,25 @@ fn frozen_or_live(source: Rect, split: &mut Split) -> Result<(RgbaBitmap, Vec<u8
 
 /// Drops an area's pinned pixels and tells the frontend they are gone.
 ///
-/// The caller is the scroll that returns an area to natural size. There the
-/// area must show the live screen underneath rather than a capture of it:
-/// §3.4's floor is *"a way back to normal"*, and an area left rendering its
-/// last still would be a way back to a photograph of normal.
+/// # Two callers, and the name is narrower than both
+///
+/// The first is the scroll that returns an area to natural size. There the area
+/// must show the live screen underneath rather than a capture of it: §3.4's
+/// floor is *"a way back to normal"*, and an area left rendering its last still
+/// would be a way back to a photograph of normal.
+///
+/// The second is `overlay::convert_area` (roadmap task 1.27), which reaches here
+/// for a magnified area *and* for a `Screenshot` whose pin was its whole
+/// content. Both are the same operation on the same store, so this is the right
+/// function, but **the name now describes one caller out of two** and the
+/// `Screenshot` case involves no magnification at all. Recorded rather than
+/// renamed: the rename touches `cancel_magnification` and five doc comments in a
+/// module 1.27 otherwise does not change, which is a wider diff than a naming
+/// fix earns inside a feature branch.
 pub(crate) fn clear_magnification(app: &AppHandle, id: AreaId) {
     cancel_magnification(app, id);
     if let Err(error) = crate::overlay::emit_unpin(app, id) {
-        eprintln!("output: dropped the magnification but could not announce it: {error}");
+        eprintln!("output: dropped the pinned pixels but could not announce it: {error}");
     }
 }
 

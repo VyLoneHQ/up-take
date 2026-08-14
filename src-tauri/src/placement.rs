@@ -333,7 +333,7 @@ struct MenuEntry {
 }
 
 /// What a menu row does when activated.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MenuAction {
     /// Pin the area to a stacking tier (ADR-0013).
     SetLayer(Layer),
@@ -341,6 +341,12 @@ enum MenuAction {
     /// menu row is a toggle, so the action carries the value the row would
     /// switch *to*.
     SetInput(Input),
+    /// Convert the area to another type (roadmap 1.27). Unlike
+    /// [`MenuAction::SetInput`] these are radio rows rather than a toggle, so
+    /// the action carries the type the row *names*, and the row for the area's
+    /// current type is drawn ticked. Clicking that one is harmless: the store
+    /// reports nothing changed and no capture is discarded.
+    SetType(AreaType),
     /// Remove the area.
     Dismiss,
     /// Capture the area and publish it to the clipboard alone (task 1.9,
@@ -1767,15 +1773,22 @@ fn handle_mouse(wparam: WPARAM, lparam: LPARAM) -> bool {
                 true
             }
             // Living takes only what belongs to an area (ADR-0016): a right
-            // press over the topmost *interactive* area, or any right press
-            // while a menu is open (the release will act on the menu state:
-            // close it, or replace it over another area). Everything else is
-            // the user's, untouched.
+            // press the area menu will act on, or any right press while a menu
+            // is open (the release will act on the menu state: close it, or
+            // replace it over another area). Everything else is the user's,
+            // untouched.
+            //
+            // **`menu_target`, not a second copy of its rule.** This press and
+            // the `open_menu` on the matching release have to agree exactly.
+            // Where they do not, the hook claims a click that `open_menu` then
+            // declines to act on: no menu appears *and* the application
+            // underneath never receives the right-click it gets today, which is
+            // strictly worse than not claiming at all.
             Mode::Living => {
                 let claimed = lock(&MENU).is_some()
                     || APP
                         .get()
-                        .is_some_and(|app| overlay::interactive_area_at(app, point).is_some());
+                        .is_some_and(|app| menu_target(app, point).is_some());
                 if claimed {
                     RIGHT_PENDING.store(true, Ordering::SeqCst);
                 }
@@ -2325,6 +2338,40 @@ const fn captures_on_create(kind: AreaType) -> bool {
     }
 }
 
+/// The menu label for converting an area *to* this type, or `None` when the
+/// menu does not offer it (roadmap task 1.27).
+///
+/// # Why only three of the seven
+///
+/// A conversion has to leave the user with an area that does something.
+/// `Default`, `Screenshot` and `Filter` have behaviour on the screen today;
+/// `Record`, `Ocr`, `Upscale` and `Analysis` are modelled and have none, so
+/// offering them would ship four rows that turn a working area into a rectangle
+/// indistinguishable from a bug. Each earns its row with the roadmap task that
+/// gives it behaviour: 1.24 for `Upscale`, 1.26 for `Ocr`.
+///
+/// The row's own argument is what this defers to rather than contradicts. 1.27
+/// exists so those types are reachable *without inventing four more gestures*,
+/// and that stays true: this is one line on the day the behaviour lands.
+///
+/// # Why a label rather than a predicate
+///
+/// It was a `bool` first, beside a separate list of labels, which is the
+/// hand-maintained pair [`captures_on_create`] above already documents itself as
+/// avoiding. One exhaustive match answers both questions, so a type cannot be
+/// offered without a name or named without being offered.
+///
+/// Exhaustive rather than a `_` arm, so an eighth `AreaType` fails to compile
+/// here instead of defaulting to either answer.
+const fn conversion_label(kind: AreaType) -> Option<&'static str> {
+    match kind {
+        AreaType::Default => Some("Type: Default"),
+        AreaType::Screenshot => Some("Type: Screenshot"),
+        AreaType::Filter => Some("Type: Filter"),
+        AreaType::Record | AreaType::Ocr | AreaType::Upscale | AreaType::Analysis => None,
+    }
+}
+
 /// The rectangle a gesture commits, computed against an explicit release point
 /// rather than the polled cursor: the release coordinate is the authoritative
 /// one, and the poll may not have ticked since the last mouse move.
@@ -2401,40 +2448,107 @@ fn vk_is_down(vk: i32) -> bool {
 // The per-area menu (ADR-0013): the control that sets an area's Layer tier.
 // ---------------------------------------------------------------------------
 
+/// The area a right-click at `point` acts on, in whichever mode is current.
+///
+/// **The resolution is mode-dependent, and the difference is the V-7 input
+/// model itself.** In `Placement` the menu opens for the topmost area of *any*
+/// input mode (`hit_test_any`): a pass-through area must stay editable while
+/// the layout is being edited, or it becomes permanent. In `Living` it resolves
+/// through `hit_test`, which since ADR-0024 §2 means an interactive area's whole
+/// body **or a pass-through area's chrome**: the body of a pass-through area
+/// belongs to whatever app is underneath (ADR-0016 decision 3), and its border
+/// and close control do not.
+///
+/// # One function, two callers, and that is the whole reason it exists
+///
+/// The `WM_RBUTTONDOWN` arm decides whether to *claim* the press; `open_menu`
+/// decides what the release *acts on*. Roadmap 1.27 recorded the hazard: change
+/// one and not the other, and the hook swallows a click the menu then declines,
+/// so no menu appears and the application underneath loses the right-click it
+/// would have had. Two copies of one rule is how that happens, so there is one.
+///
+/// **What the row expected to have to build here was already built.** It read
+/// `interactive_area_at` as *interactive areas only* and concluded both sites
+/// needed widening to admit a pass-through area's chrome. They did not:
+/// `AreaStore::hit_test` was redefined by ADR-0024 §2, shipped in task 1.17(b),
+/// and has admitted chrome ever since. Nothing here changed the resolution. It
+/// is named, so that the next change to it cannot reach only one caller.
+fn menu_target(app: &AppHandle, point: Point) -> Option<overlay::AreaSummary> {
+    match mode() {
+        Mode::Placement => overlay::area_at(app, point),
+        Mode::Living => overlay::interactive_area_at(app, point),
+        Mode::Hidden => None,
+    }
+}
+
 /// Opens the area menu for whatever is under `point`, replacing any open menu.
 /// Does nothing if the point resolves to no area: then a click has nothing to
 /// act on, and any open menu simply closes.
 ///
-/// **The target resolution is mode-dependent, and the difference is the V-7
-/// input model itself.** In `Placement` the menu opens for the topmost area of
-/// *any* input mode (`hit_test_any`): a pass-through area must stay editable
-/// while the layout is being edited, or it becomes permanent. In `Living` it
-/// opens only for the topmost *interactive* area (`hit_test`): a pass-through
-/// area is invisible to the cursor there by definition, and its pixels belong
-/// to whatever app is underneath. That also means flipping an area to
-/// pass-through from its own Living menu makes the menu unreachable until
-/// Placement. That is deliberate, and it is the reason the toggle sits next to
-/// the Layer rows that share the same recovery path.
+/// The target comes from [`menu_target`], which is shared with the press that
+/// claims the click. Note the consequence for the input toggle: flipping an area
+/// to pass-through from its own Living menu leaves only its chrome able to
+/// re-open that menu. That is deliberate, and it is the reason the toggle sits
+/// next to the Layer rows that share the same recovery path.
 fn open_menu(app: &AppHandle, point: Point) {
-    let target = match mode() {
-        Mode::Placement => overlay::area_at(app, point),
-        Mode::Living => overlay::interactive_area_at(app, point),
-        Mode::Hidden => None,
-    };
-    let Some(area) = target else {
+    let Some(area) = menu_target(app, point) else {
         close_menu(app);
         return;
     };
     // Anchored to the monitor under the cursor, never to the virtual desktop:
     // desktop-relative chrome can land in a dead zone no cursor can reach (F-13).
     let monitor = overlay::monitor_bounds_at(app, point);
+    let spec = menu_rows(&area);
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "a menu this short cannot overflow u32"
+    )]
+    let bounds = interaction::menu_bounds(point, spec.len() as u32, monitor);
+    let items = spec
+        .into_iter()
+        .enumerate()
+        .map(|(index, row)| MenuEntry {
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "a menu this short cannot overflow u32"
+            )]
+            rect: interaction::menu_item_bounds(bounds, index as u32),
+            action: row.action,
+            label: row.label,
+            checked: row.checked,
+        })
+        .collect();
+    *lock(&MENU) = Some(AreaMenu {
+        area: area.id,
+        bounds,
+        items,
+        hovered: None,
+    });
+    emit_menu(app);
+}
+
+/// One row of the area menu, before it has been given a rectangle.
+///
+/// [`open_menu`] needs an `AppHandle` to find the area and the monitor, which
+/// puts the whole menu out of reach of a unit test. This is the half that has no
+/// such dependency: which rows appear, in what order, with which ticks. Those
+/// are the parts a change to the menu is most likely to get wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MenuRow {
+    action: MenuAction,
+    label: &'static str,
+    checked: bool,
+}
+
+/// The rows an area's menu shows, top to bottom.
+fn menu_rows(area: &overlay::AreaSummary) -> Vec<MenuRow> {
     // The toggle row switches to the opposite of the area's current input mode;
     // its tick shows the current state (ticked = pass-through).
     let toggled_input = match area.input {
         Input::Interactive => Input::PassThrough,
         Input::PassThrough => Input::Interactive,
     };
-    let mut spec: Vec<(MenuAction, &'static str)> = Vec::with_capacity(7);
+    let mut spec: Vec<(MenuAction, &'static str)> = Vec::with_capacity(10);
     // Copy/Save lead the menu (the primary actions, ahead of the layout
     // settings below them) and are scoped to **`Screenshot` areas only**.
     //
@@ -2455,41 +2569,39 @@ fn open_menu(app: &AppHandle, point: Point) {
         spec.push((MenuAction::Copy, "Copy"));
         spec.push((MenuAction::SaveToFile, "Save image"));
     }
+    // Type conversion (roadmap 1.27). It sits above Layer because it says what
+    // the area *is*, where everything below says how it is placed or how it
+    // takes input: a Default area is a claimed rectangle whose purpose is not
+    // yet decided, and this is where it gets decided.
+    //
+    // **Flat radio rows rather than a `Type` submenu**, which is a deviation
+    // from the founder's sketch of 2026-08-12 and is reversible. The Layer tier
+    // directly below is already three flat ticked rows, so this needs no new
+    // interaction machinery at all: a submenu means nested bounds, hover-to-open
+    // timing and its own dismissal, for three rows. Revisit when the offered set
+    // is long enough that a flat list is the worse read.
+    for kind in AreaType::ALL {
+        if let Some(label) = conversion_label(kind) {
+            spec.push((MenuAction::SetType(kind), label));
+        }
+    }
     spec.push((MenuAction::SetLayer(Layer::Front), "Always on top"));
     spec.push((MenuAction::SetLayer(Layer::Auto), "Auto"));
     spec.push((MenuAction::SetLayer(Layer::Back), "Always behind"));
     spec.push((MenuAction::SetInput(toggled_input), "Click-through"));
     spec.push((MenuAction::Dismiss, "Dismiss"));
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "a menu this short cannot overflow u32"
-    )]
-    let bounds = interaction::menu_bounds(point, spec.len() as u32, monitor);
-    let items = spec
-        .iter()
-        .enumerate()
-        .map(|(index, (action, label))| MenuEntry {
-            #[allow(
-                clippy::cast_possible_truncation,
-                reason = "a menu this short cannot overflow u32"
-            )]
-            rect: interaction::menu_item_bounds(bounds, index as u32),
-            action: *action,
+    spec.into_iter()
+        .map(|(action, label)| MenuRow {
+            action,
             label,
             checked: match action {
-                MenuAction::SetLayer(layer) => *layer == area.layer,
+                MenuAction::SetLayer(layer) => layer == area.layer,
                 MenuAction::SetInput(_) => area.input == Input::PassThrough,
+                MenuAction::SetType(kind) => kind == area.kind,
                 MenuAction::Dismiss | MenuAction::Copy | MenuAction::SaveToFile => false,
             },
         })
-        .collect();
-    *lock(&MENU) = Some(AreaMenu {
-        area: area.id,
-        bounds,
-        items,
-        hovered: None,
-    });
-    emit_menu(app);
+        .collect()
 }
 
 /// Closes any open area menu. Returns whether one was open, which is what lets
@@ -2537,6 +2649,7 @@ fn activate_menu_item(app: &AppHandle, index: usize, release: Point) {
     let changed = match action {
         MenuAction::SetLayer(layer) => overlay::set_area_layer(app, area, layer),
         MenuAction::SetInput(input) => overlay::set_area_input(app, area, input),
+        MenuAction::SetType(kind) => overlay::convert_area(app, area, kind),
         MenuAction::Dismiss => overlay::dismiss_area(app, area),
         // Neither touches the area store (nothing to re-emit), and both are
         // spawned onto their own thread rather than run here: a capture is
@@ -2596,10 +2709,131 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "the workspace lint's documented test opt-out, Cargo.toml's lints note"
+)]
 mod tests {
     use std::sync::{Mutex, PoisonError};
 
-    use super::{ALL_SHAPES, CURSOR_SNAPSHOT_LEN, WHEEL_STEP, wheel_notches};
+    use uptake_core::area::{AreaType, Input, Layer};
+
+    use super::{
+        ALL_SHAPES, CURSOR_SNAPSHOT_LEN, MenuAction, WHEEL_STEP, conversion_label, menu_rows,
+        wheel_notches,
+    };
+
+    /// A summary standing in for an area the menu was opened over.
+    ///
+    /// `AreaSummary` is what `menu_target` hands `open_menu`, and it carries no
+    /// geometry, which is exactly why the row list is testable without a running
+    /// app: the rows depend on the type, the tier and the input mode, and on
+    /// nothing else.
+    fn summary(kind: AreaType, layer: Layer, input: Input) -> crate::overlay::AreaSummary {
+        crate::overlay::AreaSummary {
+            id: uptake_core::area::AreaStore::new()
+                .create(kind, uptake_core::geometry::Rect::new(0, 0, 100, 100))
+                .unwrap(),
+            layer,
+            input,
+            kind,
+        }
+    }
+
+    fn labels(rows: &[super::MenuRow]) -> Vec<&'static str> {
+        rows.iter().map(|row| row.label).collect()
+    }
+
+    #[test]
+    fn a_default_areas_menu_offers_the_three_types_that_do_something() {
+        // Roadmap 1.27. The other four are modelled and have no behaviour, so a
+        // row for them would convert a working area into one indistinguishable
+        // from a bug. Asserted as the whole list rather than as "contains", so
+        // adding a row nobody decided on also fails here.
+        let rows = menu_rows(&summary(AreaType::Default, Layer::Auto, Input::Interactive));
+        assert_eq!(
+            labels(&rows),
+            vec![
+                "Type: Default",
+                "Type: Screenshot",
+                "Type: Filter",
+                "Always on top",
+                "Auto",
+                "Always behind",
+                "Click-through",
+                "Dismiss",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_type_rows_tick_the_type_the_area_already_is_and_no_other() {
+        for kind in AreaType::ALL {
+            let rows = menu_rows(&summary(kind, Layer::Auto, Input::Interactive));
+            let ticked: Vec<&'static str> = rows
+                .iter()
+                .filter(|row| matches!(row.action, MenuAction::SetType(_)) && row.checked)
+                .map(|row| row.label)
+                .collect();
+            match conversion_label(kind) {
+                Some(label) => assert_eq!(ticked, vec![label], "{kind:?}"),
+                // A Record area is not offered as a target, so nothing is
+                // ticked. That is honest: the menu is showing what it can
+                // convert *to*, and none of those is what this area is.
+                None => assert!(ticked.is_empty(), "{kind:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_screenshots_menu_still_leads_with_copy_and_save() {
+        // The type rows went in above Layer and below these two. Pinned because
+        // the export actions are the primary ones for the only type that holds a
+        // capture, and a reordering that buries them is a regression.
+        let rows = menu_rows(&summary(
+            AreaType::Screenshot,
+            Layer::Auto,
+            Input::Interactive,
+        ));
+        assert_eq!(labels(&rows)[..3], ["Copy", "Save image", "Type: Default"]);
+    }
+
+    #[test]
+    fn no_two_menu_rows_share_a_label() {
+        // The rows are identified to the user by their text alone, and the type
+        // rows are the first group whose labels are generated rather than
+        // written out one at a time.
+        for kind in AreaType::ALL {
+            let rows = menu_rows(&summary(kind, Layer::Front, Input::PassThrough));
+            let mut seen = labels(&rows);
+            let before = seen.len();
+            seen.sort_unstable();
+            seen.dedup();
+            assert_eq!(seen.len(), before, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn each_type_row_is_labelled_with_its_own_type() {
+        // The hazard is a copy-paste one: `Filter => Some("Type: Screenshot")`
+        // compiles, reads fine, and converts an area to something other than the
+        // row the user clicked. Checked against `overlay::type_name`, which is
+        // the wire name for the same variant and is a second author.
+        //
+        // This does couple the label text to the wire name. That is a real
+        // constraint on future labels rather than an accident: a row named
+        // something other than its type needs this test edited, which is the
+        // moment to ask whether the user can still tell what they picked.
+        for kind in AreaType::ALL {
+            if let Some(label) = conversion_label(kind) {
+                assert_eq!(
+                    label.to_ascii_lowercase(),
+                    format!("type: {}", crate::overlay::type_name(kind)),
+                    "{kind:?}"
+                );
+            }
+        }
+    }
 
     /// `mouseData` as Windows fills it for a wheel event: the delta in the high
     /// word, and a low word that is undefined and must be discarded rather than

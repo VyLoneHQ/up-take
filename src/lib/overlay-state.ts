@@ -90,12 +90,17 @@ export type LayerName = 'front' | 'auto' | 'back';
  * All seven are listed because Rust sends all seven, not only the ones a
  * gesture can create. {@link ArmableType} is the narrower set a key can arm.
  *
- * ⚠️ Nothing checks this union against Rust in the direction that matters. An
- * eighth `AreaType` forces an arm in `type_name`'s exhaustive match and leaves
- * this file silent, so the new name arrives at runtime outside the union with
- * no type error and no failing test, and the area draws as a default one.
- * Recorded as UP-TAKE `I-55`; the seven names are pinned on the Rust side so a
- * rename at least goes red there.
+ * This union is still hand-written, and it is no longer unchecked. UP-TAKE
+ * `I-55` was that an eighth `AreaType` forces an arm in `type_name`'s exhaustive
+ * match and leaves this file silent, so the new name would arrive at runtime
+ * outside the union with no type error and no failing test, and the area would
+ * draw as a default one. `area-kinds.test.ts` reads `type_name` out of the Rust
+ * source and compares the two sets, so that change now goes red here as well.
+ *
+ * ⚠️ **The check is a text comparison, not a generated file.** It fails loudly
+ * if `type_name` is renamed or its `match` reshaped, rather than passing on an
+ * empty extraction, but it cannot see a name that reaches the frontend by any
+ * route other than that function.
  */
 export type AreaKind =
   | 'default'
@@ -169,9 +174,11 @@ export interface PinPayload {
   id: number;
   /**
    * `null` means this area's pixels are **gone** and it must draw the live
-   * screen again: the case a scroll back to natural size produces (§3.4's
-   * floor). Before zoom existed a pin was only ever dropped along with its
-   * area, so this event never had to say so.
+   * screen again. Two cases produce it: a scroll back to natural size (§3.4's
+   * floor), and a type conversion away from a magnified `Default` or from a
+   * `Screenshot` whose pin was its whole content (roadmap 1.27). Before zoom
+   * existed a pin was only ever dropped along with its area, so this event never
+   * had to say so.
    */
   url: string | null;
 }

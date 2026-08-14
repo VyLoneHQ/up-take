@@ -354,7 +354,7 @@ const fn state_name(state: OverlayState) -> &'static str {
 
 /// An [`AreaType`] as the frontend names it — the same lowercase wire
 /// convention [`layer_name`] uses for [`Layer`].
-const fn type_name(kind: AreaType) -> &'static str {
+pub(crate) const fn type_name(kind: AreaType) -> &'static str {
     match kind {
         AreaType::Default => "default",
         AreaType::Screenshot => "screenshot",
@@ -943,6 +943,45 @@ pub(crate) fn raise_area(app: &AppHandle, id: AreaId) -> bool {
 pub(crate) fn set_area_input(app: &AppHandle, id: AreaId, input: Input) -> bool {
     let store = app.state::<Mutex<AreaStore>>();
     lock(&store).set_input(id, input)
+}
+
+/// Converts an area to another type from its own menu (roadmap task 1.27),
+/// dropping any pinned pixels the new type cannot mean.
+///
+/// Returns whether the area set changed, which is the caller's cue to re-emit.
+/// Converting an area to the type it already has is a real request that changes
+/// nothing, so it answers `false` rather than redrawing.
+///
+/// # Why the store cannot do the whole job
+///
+/// [`AreaStore::set_kind`] owns the model and answers with a
+/// [`uptake_core::area::Conversion`]; the pixels are here. Two of them, in fact:
+/// the pinned bitmap in [`crate::captures`] and any magnify capture still in
+/// flight, which is why this goes through [`crate::output::clear_magnification`]
+/// rather than forgetting the bitmap alone. `overlay::dismiss_area` learned that
+/// distinction from an independent review, and the failure is the same one here:
+/// a worker landing after the conversion would `insert` pixels for an area that
+/// no longer displays them.
+///
+/// **`clear_magnification` rather than `cancel_magnification`, and the
+/// difference is the whole point of the row.** Dismissal has no frontend left to
+/// tell. A conversion does, and an area that goes on rendering its old pin under
+/// a badge nothing can clear is precisely the stranded state 1.27 exists to
+/// prevent.
+pub(crate) fn convert_area(app: &AppHandle, id: AreaId, kind: AreaType) -> bool {
+    // Scoped so the store lock is released before `clear_magnification`, which
+    // takes `MAGNIFY` and then the capture store.
+    let conversion = {
+        let store = app.state::<Mutex<AreaStore>>();
+        lock(&store).set_kind(id, kind)
+    };
+    let Some(conversion) = conversion else {
+        return false;
+    };
+    if conversion.discard_capture {
+        crate::output::clear_magnification(app, id);
+    }
+    conversion.changed
 }
 
 /// The topmost area whose *interaction surface* contains `point`, and which
