@@ -195,6 +195,17 @@ export interface PinPayload {
  */
 export interface HoverPayload {
   id: number | null;
+  /**
+   * Reveal the hovered area's close control without lighting the area up.
+   *
+   * Set when the cursor is merely inside a pass-through area rather than on
+   * something it would grab. The highlight means *this is what a press will
+   * take* (see the `.area.hovered` rule's own comment), which a pass-through
+   * body does not honour, so one id cannot carry both facts. Rust decides it;
+   * this side must not re-derive it, because the rule that produces it is the
+   * Living input rule and that lives in one place on purpose.
+   */
+  chromeOnly: boolean;
 }
 
 /** One row of the per-area menu, positioned by Rust. */
@@ -239,7 +250,12 @@ export interface AreaFrame {
   kind: AreaKind;
   /** Magnification (§3.4), `1` at natural size. See {@link AreaView.zoom}. */
   zoom: number;
+  /** Draw this area as the one a press would grab: brighter, lit border. */
   hovered: boolean;
+  /** Draw this area's close control. A superset of {@link AreaFrame.hovered}:
+   * every highlighted area shows its control, and a pass-through area the cursor
+   * is inside shows the control alone. */
+  showClose: boolean;
   /** This area is the source of a live move or resize: draw it as where the
    * area is coming *from*, not as a second area. */
   source: boolean;
@@ -264,6 +280,7 @@ export function areaFramesCss(
   dpr: number,
   hoveredId: number | null,
   draggedId: number | null = null,
+  hoverChromeOnly = false,
 ): AreaFrame[] {
   const rects = physRectsToCss(
     areas.map((area) => area.rect),
@@ -289,7 +306,15 @@ export function areaFramesCss(
     // A dragged area is not also "hovered": the hover chrome invites a gesture
     // that is already under way, and its close control would sit at the source
     // position while the cursor is somewhere else entirely.
-    hovered: area.id === hoveredId && area.id !== draggedId,
+    //
+    // `hoverChromeOnly` splits what used to be one flag. The highlight is a
+    // claim about what a press will grab, so it is withheld when the hover came
+    // from containment alone; the control is not a claim about anything and is
+    // shown either way. Without the split a large Filter area sat permanently
+    // lit with a permanent close control over the user's content.
+    hovered:
+      area.id === hoveredId && area.id !== draggedId && !hoverChromeOnly,
+    showClose: area.id === hoveredId && area.id !== draggedId,
     source: area.id === draggedId,
   }));
 }

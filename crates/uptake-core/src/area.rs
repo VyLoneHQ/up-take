@@ -872,6 +872,30 @@ impl AreaStore {
         })
     }
 
+    /// [`AreaStore::hit_test`] plus **which part** was hit: the Living grab rule.
+    ///
+    /// The same question `hit_test` answers, returning the [`Handle`] as well,
+    /// because a press needs to know whether it began a move, a resize or a
+    /// dismissal. Kept beside `hit_test` rather than open-coded at the call site:
+    /// the host had its own copy of *an interactive area answers for any handle, a
+    /// pass-through one only for chrome*, and two copies of what takes input
+    /// drifting apart is how a click gets swallowed by an area that would not have
+    /// handled it.
+    ///
+    /// [`Handle`]: interaction::Handle
+    #[must_use]
+    pub fn grab_test(
+        &self,
+        point: Point,
+        monitors: &[Rect],
+    ) -> Option<(&Area, interaction::Handle)> {
+        self.iter_top_down().find_map(|area| {
+            let handle = interaction::handle_at(area.bounds, point, monitors)?;
+            (area.is_interactive() || !matches!(handle, interaction::Handle::Body))
+                .then_some((area, handle))
+        })
+    }
+
     /// The topmost area containing `point`, **whatever its [`Input`]** — the
     /// area a Placement gesture grabs.
     ///
@@ -1302,6 +1326,29 @@ mod tests {
         let (mut store, ids) = store_with(&[AreaType::Default; 2]);
         assert!(store.set_layer(ids[0], Layer::Front));
         assert_eq!(store.hit_test_any(Point::new(50, 50)).unwrap().id, ids[0]);
+    }
+
+    #[test]
+    fn grab_test_admits_a_pass_through_areas_chrome_and_refuses_its_body() {
+        // `grab_test` is the Living grab rule, extracted from the host so there
+        // is one copy rather than two. The rule is ADR-0024 section 2: the body
+        // passes clicks through, the chrome does not. Both directions, because a
+        // version that admitted everything and a version that admitted nothing
+        // would each satisfy a single-sided test.
+        let mut store = AreaStore::new();
+        let bounds = rect(0, 0, 100, 100);
+        let tint = store.create(AreaType::Filter, bounds).unwrap();
+        let control = interaction::close_control(bounds, &screens());
+
+        let on_control = Point::new(control.origin.x + 2, control.origin.y + 2);
+        let (area, handle) = store.grab_test(on_control, &screens()).unwrap();
+        assert_eq!(area.id, tint);
+        assert_eq!(handle, interaction::Handle::Close);
+
+        assert!(
+            store.grab_test(Point::new(50, 50), &screens()).is_none(),
+            "the body of a pass-through area grabs nothing"
+        );
     }
 
     #[test]

@@ -180,6 +180,36 @@ describe('areaFramesCss', () => {
     expect(frames.map((frame) => frame.layer)).toEqual(['auto', 'front']);
   });
 
+  it('gives a chrome-only hover its close control but not the highlight', () => {
+    // Finding 1 of the independent review of #56. One id used to drive both the
+    // control and the `.area.hovered` styling, whose own CSS comment defines it
+    // as "which area a drag will grab". A pass-through body grants no such grab,
+    // so a large Filter area sat permanently lit with a permanent close control
+    // over the user's content. The two facts travel separately now.
+    const frames = areaFramesCss(areas, [0, 0], 1, 9, null, true);
+
+    expect(frames.map((frame) => frame.hovered)).toEqual([false, false]);
+    expect(frames.map((frame) => frame.showClose)).toEqual([false, true]);
+  });
+
+  it('gives a grabbable hover both, which is the unchanged case', () => {
+    // The other side of the same split: where a press does have a target, the
+    // highlight is a true claim and nothing about today's behaviour moves.
+    const frames = areaFramesCss(areas, [0, 0], 1, 9, null, false);
+
+    expect(frames.map((frame) => frame.hovered)).toEqual([false, true]);
+    expect(frames.map((frame) => frame.showClose)).toEqual([false, true]);
+  });
+
+  it('suppresses a dragged area entirely, chrome-only or not', () => {
+    // The dragged area's control would sit at the source position while the
+    // cursor is elsewhere, so neither flag may survive the drag.
+    const frames = areaFramesCss(areas, [0, 0], 1, 9, 9, true);
+
+    expect(frames.map((frame) => frame.hovered)).toEqual([false, false]);
+    expect(frames.map((frame) => frame.showClose)).toEqual([false, false]);
+  });
+
   it('marks the dragged area as the source and not as hovered', () => {
     // A move must never look like two areas. The source is styled as where the
     // area is coming from; the hover chrome is suppressed because its close

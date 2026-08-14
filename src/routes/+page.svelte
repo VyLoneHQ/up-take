@@ -60,6 +60,9 @@ let areas: AreaView[] = $state([]);
 let selection: PhysRect | null = $state(null);
 let draggedArea: number | null = $state(null);
 let hoveredArea: number | null = $state(null);
+// Whether that hover is chrome-only: the close control without the grab
+// highlight. Rust's call, not this side's. See `HoverPayload.chromeOnly`.
+let hoverChromeOnly = $state(false);
 let menu: MenuView | null = $state(null);
 // What the next drag will make, or null for Default (ADR-0018 §3). Rust owns
 // this — arming is placement state living beside the mouse hook — and re-emits
@@ -152,11 +155,15 @@ const frozenFrames: Set<string> = $derived(frozenFrameKeys(stillFrames));
 // real move or resize — so the pointer *is* owned over an interactive area, and
 // a handle the user cannot see is a handle they will not reach for.
 //
-// Rust decides what counts as hovered in each state (interactive areas only in
-// Living), so this no longer gates on the state at all — gating in both places
-// is how the two would drift apart.
+// Rust decides what counts as hovered in each state, so this no longer gates on
+// the state at all: gating in both places is how the two would drift apart.
+//
+// Living hover is NOT interactive areas only, and said so here until 2026-08-14.
+// A pass-through area the cursor is inside is hovered for the purpose of drawing
+// its close control, and not for the purpose of the highlight, which is why the
+// payload carries `chromeOnly` beside the id.
 const areaFrames: AreaFrame[] = $derived(
-  areaFramesCss(areas, origin, dpr, hoveredArea, draggedArea),
+  areaFramesCss(areas, origin, dpr, hoveredArea, draggedArea, hoverChromeOnly),
 );
 // The drag preview renders in every visible state as of task 1.17(a), because
 // Living now has move and resize gestures of its own.
@@ -283,6 +290,7 @@ onMount(() => {
   );
   const unlistenHover = listen<HoverPayload>('overlay://hover', (event) => {
     hoveredArea = event.payload.id;
+    hoverChromeOnly = event.payload.chromeOnly;
   });
   const unlistenMenu = listen<MenuPayload>('overlay://menu', (event) => {
     menu = event.payload.menu;
@@ -441,7 +449,7 @@ onMount(() => {
           {/if}
         </div>
       {/if}
-      {#if area.hovered}
+      {#if area.showClose}
         <div
           class="close"
           style="transform: translate3d({area.close.x}px, {area.close.y}px, 0); width: {area
