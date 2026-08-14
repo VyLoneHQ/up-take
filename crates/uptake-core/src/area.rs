@@ -928,8 +928,11 @@ impl AreaStore {
     /// already on the control. On an area below
     /// [`interaction::CHROME_INSIDE_SPAN`] that control is the sole route back to
     /// the menu, and it sits outside the corner, so the way out of a Filter area
-    /// was an invisible 18 px target. Found on hardware by the founder, driving
-    /// roadmap 1.27.
+    /// was an invisible 18 px target. **Surfaced by** the first hardware pass over
+    /// roadmap 1.27, which had already shipped: the row is not driving this, it is
+    /// what exposed it. (Said "driving roadmap 1.27" until the independent review
+    /// of `#56` read the row and found it marked shipped at this branch's own
+    /// base.)
     ///
     /// It is not `hit_test_any` either, because that tests bounds alone. The
     /// close control of a small area is mostly **outside** its bounds, so a
@@ -1329,6 +1332,37 @@ mod tests {
     }
 
     #[test]
+    fn a_sub_50px_pass_through_areas_close_control_answers_close() {
+        // Roadmap 1.27 records this as owed: "`handle_at` tests the close control
+        // *before* the bounds check, so a pass-through area below
+        // `CHROME_INSIDE_SPAN` answers `Handle::Close` there and `hit_test`
+        // returns it, which means its 18 px close control already opens the menu.
+        // Read from `interaction.rs`, not measured. Owed: a test for it."
+        //
+        // The branch that made that control visible is the right place to pay it.
+        // Asserted at `Handle::Close` specifically rather than "some handle",
+        // because `Handle::Body` here would mean the area had a grab it does not
+        // have, and `None` would mean it was stranded.
+        let mut store = AreaStore::new();
+        let bounds = rect(400, 400, 20, 20);
+        assert!(
+            interaction::chrome_is_outside(bounds),
+            "this test is vacuous unless the area is below CHROME_INSIDE_SPAN"
+        );
+        let small = store.create(AreaType::Filter, bounds).unwrap();
+        let control = interaction::close_control(bounds, &screens());
+        let on_control = Point::new(control.origin.x + 2, control.origin.y + 2);
+
+        let (area, handle) = store.grab_test(on_control, &screens()).unwrap();
+        assert_eq!(area.id, small);
+        assert_eq!(
+            handle,
+            interaction::Handle::Close,
+            "the sole route back from a small Filter must be the close control"
+        );
+    }
+
+    #[test]
     fn grab_test_admits_a_pass_through_areas_chrome_and_refuses_its_body() {
         // `grab_test` is the Living grab rule, extracted from the host so there
         // is one copy rather than two. The rule is ADR-0024 section 2: the body
@@ -1353,7 +1387,8 @@ mod tests {
 
     #[test]
     fn a_pass_through_body_is_hovered_even_though_it_takes_no_click() {
-        // The defect the founder found on the rig, driving 1.27: hover was
+        // The defect the founder found on the rig during 1.27's first hardware
+        // pass, after that row had shipped: hover was
         // resolved through the Living input rule, so moving across a Filter area
         // revealed no close control and the only route back to its menu was an
         // invisible target. `hit_test` must keep saying no here; `hover_test`

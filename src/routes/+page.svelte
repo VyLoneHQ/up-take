@@ -558,10 +558,17 @@ onMount(() => {
    stored to undo: the source is derived from the live gesture, so cancelling or
    interrupting a drag brings the area straight back where it was. */
 
-/* The hovered area in Placement: brighter, so which area a drag will grab is
-   visible before the button goes down. The cursor shape says *what* the drag
-   will do (move, resize, dismiss) — that half is a system cursor set by
-   placement.rs, because a click-through window receives no WM_SETCURSOR. */
+/* The hovered area: brighter, so which area a press will grab is visible before
+   the button goes down. The cursor shape says *what* the press will do (move,
+   resize, dismiss); that half is a system cursor set by placement.rs, because a
+   click-through window receives no WM_SETCURSOR.
+
+   This said "in Placement" until 2026-08-14 and had been false since task
+   1.17(a) gave Living its own move and resize. It is the fourth member of a
+   class three of whose members were corrected one commit earlier, found by the
+   independent review of #56 enumerating the class rather than trusting the
+   count. The rule now: this class is applied whenever an area is hovered AND a
+   press on it would be honoured, which is what `chromeOnly` withholds. */
 .area.hovered {
   border-color: rgba(160, 210, 255, 1);
   background: rgba(120, 180, 255, 0.12);
