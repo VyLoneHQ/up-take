@@ -478,6 +478,7 @@ onMount(() => {
       <div
         class="menu-item"
         class:hovered={item.hovered}
+        class:open={item.open}
         style="left: {item.rect.x}px; top: {item.rect.y}px; width: {item.rect
           .width}px; height: {item.rect.height}px"
       >
@@ -506,6 +507,10 @@ onMount(() => {
         >
           <span class="tick">{item.checked ? '✓' : ''}</span>
           <span class="label">{item.label}</span>
+          <!-- Empty, and present on purpose: `.label` is `flex: 1`, so a list
+               whose rows omit this span lays its labels out over a different
+               width from the list beside it. -->
+          <span class="arrow"></span>
         </div>
       {/each}
     {/if}
@@ -844,6 +849,15 @@ onMount(() => {
 
 .menu-item.hovered {
   background: rgba(120, 180, 255, 0.22);
+}
+
+/* The row whose child list is open, drawn as the list's source. Dimmer than a
+   hover on purpose: the pointer is somewhere else, and this says "the list
+   beside you came from here" rather than "a click lands here". Without it the
+   parent goes dark the moment the pointer crosses another row, and the open
+   list sits there with nothing pointing at it. */
+.menu-item.open {
+  background: rgba(120, 180, 255, 0.12);
 }
 
 .menu-item .tick {

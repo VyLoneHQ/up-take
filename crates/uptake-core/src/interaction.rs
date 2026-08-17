@@ -1553,6 +1553,19 @@ mod tests {
         // Still beside the parent row rather than above or below it.
         assert!(child.origin.y <= parent.origin.y);
         assert!(child.bottom() >= i64::from(parent.origin.y));
+        // **The assertion that separates a slide from a flip**, and the reason
+        // this test exists at all. Everything above is satisfied by a vertical
+        // flip too: the flipped rectangle ends exactly at the parent row's top
+        // edge, so `child.bottom() >= parent.origin.y` holds with equality and
+        // the list is on the monitor either way. An independent review gave
+        // `submenu_bounds` `menu_bounds`' flip and this test stayed green.
+        //
+        // A slide moves the list up by the overflow and no more, so the parent
+        // row still falls inside it. A flip puts the whole list above the row.
+        assert!(
+            child.origin.y <= parent.origin.y && child.bottom() > i64::from(parent.origin.y),
+            "the parent row must still be inside its own list: a flip puts it above"
+        );
     }
 
     #[test]
