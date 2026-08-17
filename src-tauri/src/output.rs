@@ -771,6 +771,36 @@ fn magnify_once(app: &AppHandle, id: AreaId, source: Rect, generation: u64) {
             guard.insert(id, bitmap, png)
         };
         drop(state);
+        // **Asked again, after the lock is released and before the pin is
+        // announced.** `I-61`, found by the independent review of `#55` under
+        // attack A14. The section above is correct about what it covers and
+        // stops one line short of the emit: release it, and
+        // `clear_magnification` can still bump the generation, forget these
+        // pixels and emit the unpin, after which this worker announces a pin for
+        // a version that no longer exists. The frontend then holds a URL for
+        // forgotten pixels, the `<img>` fails, and the area falls back to the
+        // live screen.
+        //
+        // **A re-check rather than a wider critical section, and that is the
+        // constraint rather than the cheaper option.** `emit_pin` crosses the
+        // IPC boundary and this runs on the magnify worker thread, so holding
+        // `MAGNIFY` across it would hold a lock across a call this module does
+        // not control. This costs one uncontended acquisition and no held time.
+        //
+        // ⚠️ **It narrows the window and does not close it.** A cancel landing
+        // between this check and the emit below still announces a stale pin.
+        // Closing it needs the pin event to carry something the frontend can
+        // reject, which is a different change from this one; do not read this
+        // comment as saying the race is gone.
+        //
+        // **Pre-existing on every caller, not new to `#55`.** `zoom_area` and
+        // `refresh_magnification` are the only two entry points and both route
+        // through this function, so this reaches the scroll path the backlog row
+        // singles out as the one a user actually hits, by scrolling and
+        // dismissing inside one capture.
+        if !magnify().is_current(id, generation) {
+            return Ok(());
+        }
         crate::overlay::emit_pin(app, id, version)
     });
     report("magnify", started, &split, outcome);
@@ -1456,6 +1486,35 @@ mod tests {
         assert!(state.is_current(b, for_b), "B's is not");
         assert!(!state.pending.contains_key(&a));
         assert!(state.pending.contains_key(&b), "B stays queued");
+    }
+
+    /// The question `magnify_once` asks a second time, after its critical
+    /// section has ended and before it announces the pin (`I-61`).
+    ///
+    /// **What this covers and what it does not, stated rather than left to be
+    /// assumed.** It pins the property the re-check relies on: a cancel that
+    /// lands *after* a worker's insert was allowed still invalidates that
+    /// worker's generation, so asking again gets a different answer from asking
+    /// once. It does **not** see the ordering inside `magnify_once`, which needs
+    /// an `AppHandle` and a real capture and so has no unit-test seam at all.
+    /// Deleting the re-check leaves this test green.
+    #[test]
+    fn a_cancel_after_the_insert_still_invalidates_the_pin() {
+        let mut state = Magnify::new();
+        let a = area(1);
+        let generation = state.issue(a, Rect::new(0, 0, 10, 10));
+        state.take_one();
+        // The worker's first check, which lets it insert into the CaptureStore.
+        assert!(state.is_current(a, generation));
+        // `clear_magnification` runs in the window after that insert: it bumps
+        // the generation, forgets the pixels and emits the unpin.
+        state.cancel(a);
+        // The worker's second check. Without this answer the pin below it names
+        // a version that has already been forgotten.
+        assert!(
+            !state.is_current(a, generation),
+            "a cancelled generation must not be announced"
+        );
     }
 
     /// A worker takes requests until there are none, and a taken request is not
