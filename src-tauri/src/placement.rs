@@ -3279,10 +3279,13 @@ mod tests {
     use uptake_core::geometry::{Point, Rect};
     use uptake_core::interaction;
 
+    use crate::payload_keys::{assert_keys, assert_payload_coverage};
+
     use super::{
         ALL_SHAPES, CURSOR_SNAPSHOT_LEN, ChildMenuView, HoverPayload, MenuAction, MenuItemView,
-        MenuPayload, MenuView, NO_HOVER, SUBMENU_CLOSE_MS, SUBMENU_OPEN_MS, SubmenuStep,
-        WHEEL_STEP, conversion_label, living_hover, menu_rows, submenu_step, wheel_notches,
+        MenuPayload, MenuView, NO_HOVER, SUBMENU_CLOSE_MS, SUBMENU_OPEN_MS, SelectionPayload,
+        SubmenuStep, WHEEL_STEP, conversion_label, living_hover, menu_rows, submenu_step,
+        wheel_notches,
     };
 
     #[test]
@@ -3638,43 +3641,84 @@ mod tests {
         assert_eq!(super::submenu_argument(&menu, Point::new(10, 10)), None);
     }
 
+    /// Every payload this module emits, and the keys the frontend indexes it
+    /// with (`I-67`).
+    ///
+    /// **Replaces the single-struct test `1.28` added**, which asserted with
+    /// `json.contains("\"child\"")` over a nested payload. That shape is weaker
+    /// than it looks: a key present at the wrong level satisfies it, and it
+    /// cannot notice a key that should NOT be there. Each struct is asserted on
+    /// its own, as an exact set.
+    ///
+    /// **`HoverPayload` is the only renamed type in `src-tauri`**, and the two
+    /// conventions sitting side by side here is the fact worth pinning rather
+    /// than the rename itself. `chromeOnly` is camelCase because of one
+    /// attribute; everything else is snake_case verbatim. Delete the attribute
+    /// and this goes red, which is what `UT-F-72` says nothing did.
     #[test]
-    fn the_menu_payload_reaches_the_frontend_under_the_keys_it_reads() {
-        // `UT-F-72`, one field over. `HoverPayload` needed a `rename_all` and
-        // nothing in this repository could see it being removed. These field
-        // names are single lowercase words so that they need no attribute at
-        // all, and this pins that: a rename here is a rename the frontend reads,
-        // and it fails on this side rather than silently in the WebView.
+    fn every_payload_this_module_emits_keeps_the_keys_the_frontend_reads() {
+        assert_keys(
+            "SelectionPayload",
+            &SelectionPayload {
+                rect: None,
+                source: None,
+                probe: None,
+            },
+            &["rect", "source", "probe"],
+        );
+        let item = MenuItemView {
+            rect: (1, 2, 3, 4),
+            label: "Area type",
+            checked: false,
+            parent: true,
+        };
+        assert_keys(
+            "MenuItemView",
+            &item,
+            &["rect", "label", "checked", "parent"],
+        );
+        let child = ChildMenuView {
+            rect: (5, 6, 7, 8),
+            items: vec![item.clone()],
+            hovered: None,
+        };
+        assert_keys("ChildMenuView", &child, &["rect", "items", "hovered"]);
         let view = MenuView {
             rect: (1, 2, 3, 4),
+            items: vec![item],
             hovered: Some(0),
-            items: vec![MenuItemView {
-                rect: (1, 2, 3, 4),
-                label: "Area type",
-                checked: false,
-                parent: true,
-            }],
-            child: Some(ChildMenuView {
-                rect: (5, 6, 7, 8),
-                hovered: None,
-                items: Vec::new(),
-            }),
+            child: Some(child),
         };
-        let Ok(json) = serde_json::to_string(&MenuPayload { menu: Some(view) }) else {
-            panic!("the menu payload serializes")
-        };
-        for key in [
-            "\"menu\"",
-            "\"rect\"",
-            "\"items\"",
-            "\"hovered\"",
-            "\"child\"",
-            "\"label\"",
-            "\"checked\"",
-            "\"parent\"",
-        ] {
-            assert!(json.contains(key), "{key} is missing from {json}");
-        }
+        assert_keys("MenuView", &view, &["rect", "items", "hovered", "child"]);
+        assert_keys("MenuPayload", &MenuPayload { menu: Some(view) }, &["menu"]);
+        assert_keys(
+            "HoverPayload",
+            &HoverPayload {
+                id: Some(7),
+                chrome_only: true,
+            },
+            &["id", "chromeOnly"],
+        );
+    }
+
+    #[test]
+    fn no_payload_in_this_module_escapes_the_key_table() {
+        // The completeness half. A hand-maintained table cannot tell you what it
+        // is missing, and `A9`'s rule is that the completeness of an author's own
+        // list is the one thing the author cannot check. This reads the file.
+        assert_payload_coverage(
+            "placement.rs",
+            include_str!("placement.rs"),
+            &[
+                "SelectionPayload",
+                "MenuPayload",
+                "MenuView",
+                "ChildMenuView",
+                "MenuItemView",
+                "HoverPayload",
+            ],
+            &[],
+        );
     }
 
     /// The children of the one row that has any.
