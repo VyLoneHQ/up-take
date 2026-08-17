@@ -1470,12 +1470,19 @@ struct PinPayload {
 /// different timing: an area appears the instant the drag ends, and its capture
 /// lands ~200 ms later. Making the area wait for its pixels would put a visible
 /// hole where the user just dragged.
-pub(crate) fn emit_pin(app: &AppHandle, id: AreaId, version: u64) -> Result<(), String> {
+/// **Takes proof that the pixels still exist rather than an id and a version**
+/// (`I-61`). A [`FreshPin`] can only come from `captures::still_holds`, so a
+/// caller cannot announce a URL for pixels that have been forgotten without
+/// first asking whether they have. See that type for why this is an argument
+/// rather than a check the caller is trusted to perform.
+///
+/// [`FreshPin`]: crate::captures::FreshPin
+pub(crate) fn emit_pin(app: &AppHandle, pin: &crate::captures::FreshPin) -> Result<(), String> {
     app.emit(
         PIN_EVENT,
         PinPayload {
-            id: id.get(),
-            url: Some(crate::captures::pin_url(id, version)),
+            id: pin.id().get(),
+            url: Some(crate::captures::pin_url(pin.id(), pin.version())),
         },
     )
     .map_err(|e| format!("Could not emit the pin: {e}"))

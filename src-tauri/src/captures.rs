@@ -116,6 +116,76 @@ impl CaptureStore {
             .filter(|pinned| pinned.version == version)
             .map(|pinned| pinned.png.as_slice())
     }
+
+    /// Whether `id`'s stored capture is still exactly `version`.
+    ///
+    /// **False for both ways a version stops being the one on screen**, which is
+    /// the distinction `I-61` turns on and the one a magnify generation cannot
+    /// draw: the entry was *forgotten* (a dismissal, or a scroll back to natural
+    /// size), or it was *replaced* by a newer capture, since [`insert`] is keyed
+    /// on the id alone.
+    ///
+    /// [`insert`]: CaptureStore::insert
+    fn holds(&self, id: AreaId, version: u64) -> bool {
+        self.pinned
+            .get(&id.get())
+            .is_some_and(|pinned| pinned.version == version)
+    }
+}
+
+/// Proof that the pixels a pin would name are still the ones the store holds.
+///
+/// # Why announcing a pin takes a value and not a checked condition
+///
+/// `I-61` was `overlay::emit_pin` announcing a capture that [`forget`] had
+/// already dropped, leaving the frontend holding a URL that resolves to nothing.
+/// The first fix was a re-check immediately before the emit, and an independent
+/// review made two points about that shape which this replaces.
+///
+/// **It could not be drilled.** Deleting the re-check left the entire suite
+/// green, so nothing could tell a reviewer the guard had gone. `emit_pin` takes
+/// one of these instead of an id and a version, and [`still_holds`] is the only
+/// thing that can make one, so deleting the question stops the program
+/// compiling. That is the only form of this that survives a refactor.
+///
+/// **It reached one of the two call sites.** `emit_pin`'s other caller,
+/// `output::capture_into_area`, consulted nothing at all: the re-check
+/// enumerated the entry points of the *magnify path* rather than the callers of
+/// `emit_pin`, which are not the same set. Making the proof an argument closes
+/// that by construction, and closes it for a call site nobody has written yet.
+///
+/// **It deliberately carries no lifetime and promises nothing about the
+/// future.** The store can be emptied between this being made and the emit that
+/// consumes it. That race is narrower than the one it replaces and it is real;
+/// it is recorded as a backlog row rather than implied away by the type.
+pub(crate) struct FreshPin {
+    id: AreaId,
+    version: u64,
+}
+
+impl FreshPin {
+    pub(crate) const fn id(&self) -> AreaId {
+        self.id
+    }
+
+    pub(crate) const fn version(&self) -> u64 {
+        self.version
+    }
+}
+
+/// Proof that `id` still holds `version`, or `None` when it does not.
+///
+/// **Asks the store rather than the magnify generation, and that is a fix
+/// rather than a tidier spelling.** `Magnify::is_current` goes false for two
+/// events that want opposite answers: a *cancel*, where the pixels are gone and
+/// the pin must be withheld, and a *supersede* by the next scroll notch, where
+/// the pixels are still there and withholding the pin would leave the store
+/// holding a capture the view was never told about. The store knows which
+/// happened. The generation cannot.
+pub(crate) fn still_holds(app: &AppHandle, id: AreaId, version: u64) -> Option<FreshPin> {
+    let store = app.state::<Mutex<CaptureStore>>();
+    let guard = store.lock().unwrap_or_else(PoisonError::into_inner);
+    guard.holds(id, version).then_some(FreshPin { id, version })
 }
 
 /// The URL a pinned capture is served at, for the frontend to request.
@@ -300,6 +370,63 @@ mod tests {
                     .unwrap()
             })
             .collect()
+    }
+
+    /// The three answers `CaptureStore::holds` has to give, which is the guard
+    /// behind every pin announcement since `I-61`.
+    ///
+    /// **This is the seam the first version of the fix did not have.** That one
+    /// asked `Magnify::is_current` inside `magnify_once`, which needs an
+    /// `AppHandle` and a real capture, so deleting the guard left the whole
+    /// suite green and the author had to say so in the test's own doc. The
+    /// question now lives on the store, where it can be asked directly, and the
+    /// answer is carried to `emit_pin` as a value that only `still_holds` can
+    /// make, so deleting the guard no longer compiles.
+    #[test]
+    fn a_pin_is_fresh_only_while_the_store_still_holds_that_exact_version() {
+        let mut store = CaptureStore::default();
+        let areas = ids(2);
+        let version = store.insert(areas[0], pixels(), vec![1, 2, 3]);
+
+        // Present: the ordinary case, and the one a supersede must not break.
+        assert!(store.holds(areas[0], version));
+
+        // Forgotten. This is `I-61` itself: `captures::forget` ran between the
+        // insert and the announcement, so the URL would resolve to nothing.
+        store.remove(areas[0]);
+        assert!(!store.holds(areas[0], version));
+
+        // Replaced by a newer capture. `insert` is keyed on the id alone, so the
+        // older version is no longer the one on screen and its worker must not
+        // announce it over the newer one.
+        let first = store.insert(areas[1], pixels(), vec![4]);
+        let second = store.insert(areas[1], pixels(), vec![5]);
+        assert!(!store.holds(areas[1], first));
+        assert!(store.holds(areas[1], second));
+    }
+
+    #[test]
+    fn freshness_is_per_area_and_not_a_global_version_counter() {
+        // The versions come from one counter shared across areas, so a naive
+        // `holds` that compared only the number would answer for the wrong area.
+        let mut store = CaptureStore::default();
+        let areas = ids(2);
+        let first = store.insert(areas[0], pixels(), vec![1]);
+        let second = store.insert(areas[1], pixels(), vec![2]);
+        assert_ne!(
+            first, second,
+            "the counter is shared, so this is a real risk"
+        );
+        assert!(!store.holds(areas[0], second));
+        assert!(!store.holds(areas[1], first));
+    }
+
+    #[test]
+    fn an_area_with_no_capture_at_all_is_never_fresh() {
+        let mut store = CaptureStore::default();
+        let areas = ids(2);
+        let version = store.insert(areas[0], pixels(), vec![1]);
+        assert!(!store.holds(areas[1], version));
     }
 
     #[test]
