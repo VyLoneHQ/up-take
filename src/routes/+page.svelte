@@ -483,8 +483,32 @@ onMount(() => {
       >
         <span class="tick">{item.checked ? '✓' : ''}</span>
         <span class="label">{item.label}</span>
+        <span class="arrow">{item.parent ? '▸' : ''}</span>
       </div>
     {/each}
+    <!-- The child list is drawn after the parent's rows so it paints over
+         them. It opens flush beside the panel rather than inside it, so today
+         nothing overlaps; the order matches `menu_hit`, which tests the child
+         list first for the same reason. -->
+    {#if menuFrame.child}
+      <div
+        class="menu"
+        style="left: {menuFrame.child.rect.x}px; top: {menuFrame.child.rect
+          .y}px; width: {menuFrame.child.rect.width}px; height: {menuFrame.child
+          .rect.height}px"
+      ></div>
+      {#each menuFrame.child.items as item (item.label)}
+        <div
+          class="menu-item"
+          class:hovered={item.hovered}
+          style="left: {item.rect.x}px; top: {item.rect.y}px; width: {item.rect
+            .width}px; height: {item.rect.height}px"
+        >
+          <span class="tick">{item.checked ? '✓' : ''}</span>
+          <span class="label">{item.label}</span>
+        </div>
+      {/each}
+    {/if}
   {/if}
 </main>
 
@@ -825,5 +849,21 @@ onMount(() => {
 .menu-item .tick {
   width: 12px;
   color: rgba(160, 210, 255, 1);
+}
+
+/* The marker on a row that opens a child list (roadmap 1.28). It sits hard
+   right, where the list itself opens, and `.label` takes the slack so the two
+   cannot collide on a long label. */
+.menu-item .label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.menu-item .arrow {
+  width: 8px;
+  text-align: right;
+  color: rgba(160, 210, 255, 0.8);
 }
 </style>

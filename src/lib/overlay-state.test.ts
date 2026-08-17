@@ -240,10 +240,44 @@ describe('menuFrameCss', () => {
   const menu: MenuView = {
     rect: [400, 300, 176, 122],
     items: [
-      { rect: [400, 305, 176, 28], label: 'Always on top', checked: false },
-      { rect: [400, 333, 176, 28], label: 'Auto', checked: true },
+      {
+        rect: [400, 305, 176, 28],
+        label: 'Area type',
+        checked: false,
+        parent: true,
+      },
+      {
+        rect: [400, 333, 176, 28],
+        label: 'Auto',
+        checked: true,
+        parent: false,
+      },
     ],
     hovered: 1,
+    child: null,
+  };
+
+  /** The same menu with its type list open, as Rust lays it out beside it. */
+  const withChild: MenuView = {
+    ...menu,
+    child: {
+      rect: [576, 300, 176, 94],
+      items: [
+        {
+          rect: [576, 305, 176, 28],
+          label: 'Type: Default',
+          checked: true,
+          parent: false,
+        },
+        {
+          rect: [576, 333, 176, 28],
+          label: 'Type: Screenshot',
+          checked: false,
+          parent: false,
+        },
+      ],
+      hovered: 0,
+    },
   };
 
   it('positions every row from the rect Rust hit-tests', () => {
@@ -260,9 +294,64 @@ describe('menuFrameCss', () => {
     expect(frame?.items.map((item) => item.checked)).toEqual([false, true]);
   });
 
+  it('marks the row that opens a child list and no other', () => {
+    const frame = menuFrameCss(menu, [0, 0], 1);
+
+    expect(frame?.items.map((item) => item.parent)).toEqual([true, false]);
+  });
+
+  it('draws no child list until one is open', () => {
+    expect(menuFrameCss(menu, [0, 0], 1)?.child).toBeNull();
+  });
+
+  it('positions the child list from its own rects, not the parent list', () => {
+    // The child opens flush beside the panel, so its x is the parent's right
+    // edge. Deriving it here instead of reading it would put the rows where
+    // this side thinks they are rather than where Rust hit-tests them, which
+    // is the failure the whole menu is laid out in Rust to avoid.
+    const frame = menuFrameCss(withChild, [0, 0], 1);
+
+    expect(frame?.child?.rect).toEqual({
+      x: 576,
+      y: 300,
+      width: 176,
+      height: 94,
+    });
+    expect(frame?.child?.items[1]?.rect).toEqual({
+      x: 576,
+      y: 333,
+      width: 176,
+      height: 28,
+    });
+    expect(frame?.child?.items.map((item) => item.checked)).toEqual([
+      true,
+      false,
+    ]);
+  });
+
+  it('highlights the child list from its own hovered index', () => {
+    // Two lists, two indices. Reading the parent's `hovered` for both would
+    // light row 1 of the child list here, which is a plausible highlight on the
+    // wrong row: it looks like a working menu and points at the wrong type.
+    const frame = menuFrameCss(withChild, [0, 0], 1);
+
+    expect(frame?.items.map((item) => item.hovered)).toEqual([false, true]);
+    expect(frame?.child?.items.map((item) => item.hovered)).toEqual([
+      true,
+      false,
+    ]);
+  });
+
   it('is null when no menu is open or the scale is unusable', () => {
     expect(menuFrameCss(null, [0, 0], 1)).toBeNull();
     expect(menuFrameCss(menu, [0, 0], Number.NaN)).toBeNull();
+  });
+
+  it('drops the whole menu when the child list cannot be converted', () => {
+    // Rather than drawing the parent alone. Rust has already opened the child
+    // and is hit-testing its rows, so a parent drawn without it leaves a strip
+    // of screen that swallows clicks and shows nothing.
+    expect(menuFrameCss(withChild, [0, 0], Number.NaN)).toBeNull();
   });
 });
 

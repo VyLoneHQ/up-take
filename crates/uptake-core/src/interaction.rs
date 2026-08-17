@@ -917,6 +917,52 @@ pub fn menu_bounds(anchor: Point, items: u32, monitor: Rect) -> Rect {
     Rect::new(clamp_to_i32(x), clamp_to_i32(y), MENU_WIDTH, height)
 }
 
+/// Where the child list of an area-menu row should sit (roadmap 1.28).
+///
+/// It opens **flush against the right edge of `parent_row`**, top-aligned so the
+/// child list's first row lines up with the parent row, and **flips to the left
+/// edge** when opening rightward would overflow the monitor. Flush on both sides
+/// is not cosmetic: a gap between the two lists is a strip where the pointer is
+/// inside neither, and every pointer travelling from the parent row to a child
+/// row has to cross it.
+///
+/// **Vertically it slides rather than flipping.** [`menu_bounds`] flips, because
+/// its anchor is the cursor and a flip keeps the cursor on a corner. This
+/// anchor is a row the pointer has to travel *from*, and a vertical flip would
+/// move the list away from it for no gain.
+///
+/// `monitor` is the monitor under the cursor, never the whole virtual desktop.
+/// That is F-13's rule, the same one [`menu_bounds`] follows, and it is the
+/// reason this lives here beside it rather than being open-coded at the call
+/// site: a child list placed against the desktop opens off-screen on a
+/// right-hand monitor.
+#[must_use]
+pub fn submenu_bounds(parent_row: Rect, items: u32, monitor: Rect) -> Rect {
+    let height = items * MENU_ITEM_HEIGHT + 2 * MENU_PADDING;
+    let (width_i, height_i) = (i64::from(MENU_WIDTH), i64::from(height));
+
+    let x = if parent_row.right() + width_i > monitor.right() {
+        i64::from(parent_row.origin.x) - width_i
+    } else {
+        parent_row.right()
+    };
+    // The parent row sits `MENU_PADDING` below its own list's top edge, so the
+    // child list starts that much higher for its first row to line up with it.
+    let y = i64::from(parent_row.origin.y) - i64::from(MENU_PADDING);
+
+    // A list taller or wider than the monitor cannot be fully placed; clamping
+    // after the flip keeps its top-left on screen, as [`menu_bounds`] does.
+    let x = x.clamp(
+        i64::from(monitor.origin.x),
+        (monitor.right() - width_i).max(i64::from(monitor.origin.x)),
+    );
+    let y = y.clamp(
+        i64::from(monitor.origin.y),
+        (monitor.bottom() - height_i).max(i64::from(monitor.origin.y)),
+    );
+    Rect::new(clamp_to_i32(x), clamp_to_i32(y), MENU_WIDTH, height)
+}
+
 /// The rectangle of the `index`-th row of a menu occupying `menu`.
 #[must_use]
 pub fn menu_item_bounds(menu: Rect, index: u32) -> Rect {
@@ -1463,6 +1509,65 @@ mod tests {
             previous = row;
         }
         assert_eq!(previous.bottom(), menu.bottom() - i64::from(MENU_PADDING));
+    }
+
+    #[test]
+    fn a_child_list_with_room_opens_flush_to_the_right_of_its_parent_row() {
+        let monitor = Rect::new(0, 0, 1920, 1080);
+        let menu = menu_bounds(Point::new(400, 300), 8, monitor);
+        let parent = menu_item_bounds(menu, 2);
+        let child = submenu_bounds(parent, 3, monitor);
+        // Flush, not merely near: any gap is a strip belonging to neither list
+        // that every pointer crossing from parent to child passes through.
+        assert_eq!(i64::from(child.origin.x), parent.right());
+        assert_eq!(child.size.height, 3 * MENU_ITEM_HEIGHT + 2 * MENU_PADDING);
+        // The first child row lines up with the parent row it opened from.
+        assert_eq!(menu_item_bounds(child, 0).origin.y, parent.origin.y);
+    }
+
+    #[test]
+    fn a_child_list_flips_to_the_left_rather_than_spilling_off_the_monitor() {
+        let monitor = Rect::new(0, 0, 1920, 1080);
+        // A menu opened close enough to the right edge that the parent list
+        // fits and a second list beside it does not.
+        let menu = menu_bounds(Point::new(1800, 300), 8, monitor);
+        let parent = menu_item_bounds(menu, 2);
+        let child = submenu_bounds(parent, 3, monitor);
+        assert!(child.right() <= monitor.right());
+        assert!(child.origin.x >= monitor.origin.x);
+        // Flush on the other side, for the same reason as above.
+        assert_eq!(child.right(), i64::from(parent.origin.x));
+    }
+
+    #[test]
+    fn a_child_list_slides_up_rather_than_off_the_bottom() {
+        // Vertically it slides, where `menu_bounds` flips: the anchor here is a
+        // row the pointer travels from, so moving the list away from it is the
+        // wrong answer even when it fits.
+        let monitor = Rect::new(0, 0, 1920, 1080);
+        let menu = menu_bounds(Point::new(400, 1000), 3, monitor);
+        let parent = menu_item_bounds(menu, 2);
+        let child = submenu_bounds(parent, 6, monitor);
+        assert!(child.bottom() <= monitor.bottom());
+        assert!(child.origin.y >= monitor.origin.y);
+        // Still beside the parent row rather than above or below it.
+        assert!(child.origin.y <= parent.origin.y);
+        assert!(child.bottom() >= i64::from(parent.origin.y));
+    }
+
+    #[test]
+    fn a_child_list_stays_on_a_monitor_at_negative_coordinates() {
+        // The portrait monitor left of the primary on the dev rig (F-13). A
+        // child list clamped against the virtual desktop instead of against
+        // this monitor would open on a different screen from its parent.
+        let monitor = Rect::new(-1080, -267, 1080, 1920);
+        let menu = menu_bounds(Point::new(-1000, -200), 8, monitor);
+        let parent = menu_item_bounds(menu, 2);
+        let child = submenu_bounds(parent, 3, monitor);
+        assert!(child.origin.x >= monitor.origin.x);
+        assert!(child.origin.y >= monitor.origin.y);
+        assert!(child.right() <= monitor.right());
+        assert!(child.bottom() <= monitor.bottom());
     }
 
     prop_compose! {

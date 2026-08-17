@@ -301,8 +301,9 @@ enum Gesture {
     /// contract every button on every platform honours, and the only way to
     /// change your mind about a gesture with no undo.
     Close { id: AreaId, control: Rect },
-    /// A press on a row of the open area menu, resolved the same way.
-    MenuItem { index: usize },
+    /// A press on a row of the open area menu, resolved the same way. The hit
+    /// names which of the two lists the row is in (roadmap 1.28).
+    MenuItem { hit: MenuHit },
     /// A press that has already done its job and must do nothing more on
     /// release: closing an open menu by clicking away from it, or landing on
     /// menu padding between rows. It still exists as a gesture so the release is
@@ -320,16 +321,63 @@ struct AreaMenu {
     items: Vec<MenuEntry>,
     /// The row under the cursor, for the hover highlight.
     hovered: Option<usize>,
+    /// The open child list, if a parent row has earned one (roadmap 1.28).
+    open: Option<Submenu>,
+    /// What the pointer currently argues the open state should be, and the
+    /// millisecond since [`EPOCH`] at which it started arguing it.
+    ///
+    /// **The timestamp is what buys the diagonal travel**, which is one of the
+    /// three costs roadmap 1.27 named and 1.28 pays. A pointer moving from the
+    /// parent row to a child row crosses the rows between them, and each of
+    /// those ticks argues *close*. Restarting the clock on every change rather
+    /// than acting on it means those ticks cost time and nothing else: arrive
+    /// inside the child list within [`SUBMENU_CLOSE_MS`] and the argument flips
+    /// back before it was ever acted on. See [`submenu_step`].
+    argument: (Option<usize>, u64),
+}
+
+/// The open child list of one parent row.
+struct Submenu {
+    /// The index in [`AreaMenu::items`] of the row this list belongs to.
+    parent: usize,
+    /// The list's outer rectangle, physical px.
+    bounds: Rect,
+    /// One entry per child row, in draw order.
+    items: Vec<MenuEntry>,
+    /// The child row under the cursor.
+    hovered: Option<usize>,
 }
 
 /// One row of the area menu.
-#[derive(Clone, Copy)]
+///
+/// `Clone` rather than `Copy` since 1.28: a parent row carries the rows it
+/// opens, so that the child list is laid out from the same spec the top level
+/// was built from rather than from a second call to [`menu_rows`] that could
+/// answer differently.
+#[derive(Clone)]
 struct MenuEntry {
     rect: Rect,
     action: MenuAction,
     label: &'static str,
     /// Whether this row shows a tick: the area's current tier.
     checked: bool,
+    /// The rows this row opens as a child list. Empty on a leaf row, and empty
+    /// on every row of a child list: menus here are two deep.
+    children: Vec<MenuRow>,
+}
+
+/// Where a point falls inside an open menu.
+///
+/// The two lists are separate hit targets, which is the first of the three costs
+/// roadmap 1.27 priced. One `usize` cannot carry both, and the failure of
+/// pretending otherwise is silent: an index into the wrong list still resolves
+/// to a row and still performs its action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MenuHit {
+    /// A row of the top-level list.
+    Row(usize),
+    /// A row of the open child list.
+    Child(usize),
 }
 
 /// What a menu row does when activated.
@@ -341,6 +389,11 @@ enum MenuAction {
     /// menu row is a toggle, so the action carries the value the row would
     /// switch *to*.
     SetInput(Input),
+    /// Open this row's child list (roadmap 1.28). The only action that leaves
+    /// the menu up: it is a way *into* the menu rather than something done to
+    /// the area. Which list to open is the row's own position, so the action
+    /// carries nothing.
+    OpenSubmenu,
     /// Convert the area to another type (roadmap 1.27). Unlike
     /// [`MenuAction::SetInput`] these are radio rows rather than a toggle, so
     /// the action carries the type the row *names*, and the row for the area's
@@ -590,11 +643,41 @@ struct MenuPayload {
 
 /// The menu's geometry in physical px: every rectangle is already laid out
 /// here, so the frontend positions rows rather than computing them.
+///
+/// # Every field name here is one word, and that is a decision
+///
+/// `UT-F-72`: `HoverPayload` needs `#[serde(rename_all = "camelCase")]` to reach
+/// the frontend at all, that attribute is the only one in `src-tauri`, removing
+/// it leaves **every gate in this repository green** while the frontend silently
+/// reads `undefined`, and the guard written for twice-written wire names says in
+/// its own doc that it cannot see a payload key. Roadmap 1.28 adds three fields
+/// to this payload, and a `has_children` among them would have joined that
+/// class. A single lowercase word serializes identically under both conventions,
+/// so `child` and `parent` need no attribute and cannot be broken by deleting
+/// one. It is a narrower fix than `I-67`'s and does not replace it: the class is
+/// still open for every payload that *does* need a rename.
 #[derive(Serialize, Clone)]
 struct MenuView {
     rect: (i32, i32, u32, u32),
     items: Vec<MenuItemView>,
     /// The row under the cursor, for the highlight.
+    hovered: Option<usize>,
+    /// The open child list, drawn on top of the rows beneath it (roadmap 1.28).
+    child: Option<ChildMenuView>,
+}
+
+/// The open child list of one parent row.
+///
+/// Not a `MenuView` holding another `MenuView`: menus here are exactly two deep
+/// (`menu_rows` builds one level of children and nothing builds a third), and a
+/// recursive payload would advertise a nesting the hit-testing does not
+/// implement. A reader who sees `Option<Box<MenuView>>` reasonably expects
+/// arbitrary depth to work.
+#[derive(Serialize, Clone)]
+struct ChildMenuView {
+    rect: (i32, i32, u32, u32),
+    items: Vec<MenuItemView>,
+    /// The child row under the cursor.
     hovered: Option<usize>,
 }
 
@@ -605,6 +688,9 @@ struct MenuItemView {
     label: &'static str,
     /// Whether to show a tick: this is the area's current tier.
     checked: bool,
+    /// Whether this row opens a child list, so the frontend draws the marker
+    /// that says so. Never true of a row in a child list.
+    parent: bool,
 }
 
 /// Which area the cursor is over, so its chrome can be revealed on hover.
@@ -748,8 +834,9 @@ pub struct PumpState {
     /// its body without changing the id, and that transition has to reach the
     /// frontend or the highlight sticks.
     hovered_chrome_only: bool,
-    /// The menu row the previous tick reported as hovered.
-    hovered_item: Option<usize>,
+    /// The menu row the previous tick reported as hovered, in whichever of the
+    /// two lists held it.
+    hovered_item: Option<MenuHit>,
     /// The real cursor position the previous tick read, for the hook health
     /// check.
     last_cursor: Option<Point>,
@@ -1136,18 +1223,199 @@ const fn living_hover(
     resolved
 }
 
+/// How long the pointer must argue for a child list before it opens.
+///
+/// Roadmap 1.27 named the hazard at both ends: an instant open flickers as the
+/// cursor crosses the parent row on its way somewhere else, and a slow one reads
+/// as broken. Windows' own default (`MenuShowDelay`) is 400 ms for both edges;
+/// this opens sooner than that and closes at it, because the two are not the
+/// same question. **These two numbers are the rig's to settle** -- they are a
+/// judgement about feel, and nothing in a unit test can have an opinion about
+/// them. What the tests below pin is that the delay is *obeyed*, not its value.
+const SUBMENU_OPEN_MS: u64 = 220;
+
+/// How long the pointer must argue against the open child list before it closes.
+///
+/// Longer than the open delay, and that asymmetry is the diagonal-travel
+/// allowance rather than a hedge: a pointer moving from the parent row to a
+/// child row spends these milliseconds over rows that argue *close*, and it must
+/// be able to arrive before they are acted on. See [`AreaMenu::argument`].
+const SUBMENU_CLOSE_MS: u64 = 400;
+
+/// Milliseconds since [`EPOCH`], the process's one monotonic clock.
+fn elapsed_ms() -> u64 {
+    u64::try_from(EPOCH.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// What the child list should do this tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubmenuStep {
+    /// Open the child list of this top-level row, replacing any other.
+    Open(usize),
+    /// Close the open child list.
+    Close,
+    /// Leave it as it is.
+    Hold,
+}
+
+/// Advances the child list's clock by one tick: what to do now, and the
+/// argument state to carry into the next tick.
+///
+/// Extracted so it can be drilled, the same reason [`living_hover`] is, and
+/// **the restart is inside it rather than at the call site on purpose**. The
+/// diagonal-travel allowance is not the two constants; it is the interaction
+/// between them and the restart, so a version of this function that took an
+/// already-computed `elapsed` would leave the only interesting half in
+/// [`pump_menu`], where no test can step a clock. It was written that way first.
+///
+/// The `argument == open` arm is not an optimisation. Without it a pointer
+/// resting inside an already-open child list would re-`Open` it every tick past
+/// the delay, rebuilding its rectangles and dropping its hovered row each time.
+fn submenu_step(
+    now_ms: u64,
+    argument: Option<usize>,
+    open: Option<usize>,
+    since: (Option<usize>, u64),
+) -> (SubmenuStep, (Option<usize>, u64)) {
+    // A changed argument starts its own clock. Every tick the pointer spends
+    // over the rows between a parent row and its list argues *close* and costs
+    // time and nothing else, which is what lets it arrive.
+    let since = if since.0 == argument {
+        since
+    } else {
+        (argument, now_ms)
+    };
+    if argument == open {
+        return (SubmenuStep::Hold, since);
+    }
+    let elapsed = now_ms.saturating_sub(since.1);
+    let step = match argument {
+        Some(parent) if elapsed >= SUBMENU_OPEN_MS => SubmenuStep::Open(parent),
+        None if elapsed >= SUBMENU_CLOSE_MS => SubmenuStep::Close,
+        _ => SubmenuStep::Hold,
+    };
+    (step, since)
+}
+
+/// Which parent row the pointer at `point` argues should have its list open, or
+/// `None` for none of them.
+///
+/// **Being anywhere inside the open child list argues for that list**, including
+/// its padding, and that is what makes it dismissable without being fragile: a
+/// pointer that has arrived is not asked to stay on a row.
+fn submenu_argument(menu: &AreaMenu, point: Point) -> Option<usize> {
+    if let Some(open) = menu.open.as_ref()
+        && open.bounds.contains(point)
+    {
+        return Some(open.parent);
+    }
+    menu.items
+        .iter()
+        .position(|item| item.rect.contains(point) && !item.children.is_empty())
+}
+
+/// Where `point` falls in an open menu.
+///
+/// **The child list is tested first, because it draws on top.** The two lists
+/// are placed flush and do not overlap today, so the order is currently
+/// unobservable; it is written this way because the drawing order is the thing
+/// that decides it, and a later change to the geometry must not silently make
+/// the rows underneath win.
+fn menu_hit(menu: &AreaMenu, point: Point) -> Option<MenuHit> {
+    if let Some(open) = menu.open.as_ref() {
+        if let Some(index) = open.items.iter().position(|item| item.rect.contains(point)) {
+            return Some(MenuHit::Child(index));
+        }
+        // Inside the child list but on its padding: it belongs to the child
+        // list, and must not resolve to whatever is drawn beneath it.
+        if open.bounds.contains(point) {
+            return None;
+        }
+    }
+    menu.items
+        .iter()
+        .position(|item| item.rect.contains(point))
+        .map(MenuHit::Row)
+}
+
+/// Points the hover highlights at `hit`, returning whether either moved.
+///
+/// **A parent row stays lit for as long as its list is open**, whatever the
+/// pointer is doing, including while it crosses the padding between the two.
+/// The highlight is what says which row the open list belongs to, and a parent
+/// that goes dark the moment the pointer leaves it orphans the list beside it.
+fn apply_menu_hover(menu: &mut AreaMenu, hit: Option<MenuHit>) -> bool {
+    let open_parent = menu.open.as_ref().map(|open| open.parent);
+    let (row, child) = match hit {
+        Some(MenuHit::Child(index)) => (open_parent, Some(index)),
+        Some(MenuHit::Row(index)) => (Some(index), None),
+        None => (open_parent, None),
+    };
+    let mut changed = false;
+    if menu.hovered != row {
+        menu.hovered = row;
+        changed = true;
+    }
+    if let Some(open) = menu.open.as_mut()
+        && open.hovered != child
+    {
+        open.hovered = child;
+        changed = true;
+    }
+    changed
+}
+
+/// Advances the open menu for a pointer at `point`: the hover highlight in
+/// whichever list holds it, and the child list's own open and close timing.
+/// Emits when anything the frontend draws has changed, and returns where the
+/// pointer landed so the caller can pick a cursor shape without asking twice.
+fn pump_menu(app: &AppHandle, point: Point) -> Option<MenuHit> {
+    let (mut changed, hit, step) = {
+        let mut guard = lock(&MENU);
+        let menu = guard.as_mut()?;
+        let hit = menu_hit(menu, point);
+        let mut changed = apply_menu_hover(menu, hit);
+        let argument = submenu_argument(menu, point);
+        let (step, since) = submenu_step(
+            elapsed_ms(),
+            argument,
+            menu.open.as_ref().map(|open| open.parent),
+            menu.argument,
+        );
+        menu.argument = since;
+        if step == SubmenuStep::Close {
+            menu.open = None;
+            changed = true;
+        }
+        (changed, hit, step)
+    };
+    if let SubmenuStep::Open(parent) = step {
+        // The monitor is resolved with `MENU` unlocked. `monitor_bounds_at`
+        // takes the area store's lock, `open_menu` also resolves it before
+        // locking `MENU`, and nothing in this module nests the two the other way
+        // round. Keeping it that way is cheaper than reasoning about whether one
+        // more nesting order is safe.
+        let monitor = overlay::monitor_bounds_at(app, point);
+        changed |= open_submenu(parent, monitor);
+    }
+    if changed {
+        emit_menu(app);
+    }
+    hit
+}
+
 fn pump_hover(app: &AppHandle, state: &mut PumpState) {
     if mode() == Mode::Hidden {
         return;
     }
     let point = Point::new(CUR_X.load(Ordering::SeqCst), CUR_Y.load(Ordering::SeqCst));
 
-    // A menu, while open, owns the pointer above everything under it.
-    let menu_item = menu_item_at(point);
-    if let Some(menu_hover) = menu_hover_changed(menu_item) {
-        state.hovered_item = menu_hover;
-        emit_menu(app);
-    }
+    // A menu, while open, owns the pointer above everything under it. Since
+    // roadmap 1.28 that includes running the child list's open and close clock,
+    // which is why this is a call rather than two lines: the hover highlight and
+    // the timing read the same hit and must not resolve it separately.
+    let menu_item = pump_menu(app, point);
+    state.hovered_item = menu_item;
     let placing = mode() == Mode::Placement;
     if !placing {
         // Forget the reported monitor so the next entry into Placement re-emits
@@ -1309,18 +1577,6 @@ const fn gesture_cursor(gesture: Gesture) -> CursorShape {
         Gesture::Close { .. } | Gesture::MenuItem { .. } => CursorShape::Hand,
         Gesture::Inert => CursorShape::Cross,
     }
-}
-
-/// Updates the open menu's hovered row, returning the new value only when it
-/// changed (so the caller emits once rather than every tick).
-fn menu_hover_changed(item: Option<usize>) -> Option<Option<usize>> {
-    let mut guard = lock(&MENU);
-    let menu = guard.as_mut()?;
-    if menu.hovered == item {
-        return None;
-    }
-    menu.hovered = item;
-    Some(item)
 }
 
 /// The rectangle the current gesture would commit, or `None` when no gesture is
@@ -2054,9 +2310,9 @@ fn start_precapture(gesture: Gesture, point: Point) {
 fn living_lbutton_down(point: Point) -> bool {
     if menu_contains(point) {
         let gesture = match menu_item_at(point) {
-            Some(index) => Gesture::MenuItem { index },
-            // Menu padding: a press that does nothing, rather than one that
-            // falls through to whatever is underneath the menu.
+            Some(hit) => Gesture::MenuItem { hit },
+            // Menu padding, in either list: a press that does nothing, rather
+            // than one that falls through to whatever is underneath the menu.
             None => Gesture::Inert,
         };
         *lock(&GESTURE) = Some(gesture);
@@ -2270,9 +2526,10 @@ fn shadowed_by_another_window(point: Point) -> bool {
 fn classify_press(point: Point) -> Gesture {
     if menu_contains(point) {
         return match menu_item_at(point) {
-            Some(index) => Gesture::MenuItem { index },
-            // Inside the menu but on its padding: a press that does nothing,
-            // rather than one that falls through to the area underneath.
+            Some(hit) => Gesture::MenuItem { hit },
+            // Inside the menu but on its padding, in either list: a press that
+            // does nothing, rather than one that falls through to the area
+            // underneath.
             None => Gesture::Inert,
         };
     }
@@ -2384,7 +2641,7 @@ fn finish_gesture(release: Point) {
         Gesture::Close { id, control } => {
             control.contains(release) && overlay::dismiss_area(app, id)
         }
-        Gesture::MenuItem { index } => return activate_menu_item(app, index, release),
+        Gesture::MenuItem { hit } => return activate_menu_item(app, hit, release),
         Gesture::Inert => return,
     };
     if changed && let Err(error) = overlay::emit_areas(app) {
@@ -2630,8 +2887,26 @@ fn open_menu(app: &AppHandle, point: Point) {
         reason = "a menu this short cannot overflow u32"
     )]
     let bounds = interaction::menu_bounds(point, spec.len() as u32, monitor);
-    let items = spec
-        .into_iter()
+    let items = laid_out(spec, bounds);
+    *lock(&MENU) = Some(AreaMenu {
+        area: area.id,
+        bounds,
+        items,
+        hovered: None,
+        // A fresh menu has no child list open and nothing argued for yet. The
+        // timestamp is `0` rather than `now` on purpose: the first tick after
+        // this resolves the pointer's real argument and restarts the clock from
+        // there, so a menu opened with the cursor already on the parent row does
+        // not inherit an age it never earned.
+        open: None,
+        argument: (None, 0),
+    });
+    emit_menu(app);
+}
+
+/// Gives a row spec its rectangles, top to bottom inside `bounds`.
+fn laid_out(spec: Vec<MenuRow>, bounds: Rect) -> Vec<MenuEntry> {
+    spec.into_iter()
         .enumerate()
         .map(|(index, row)| MenuEntry {
             #[allow(
@@ -2642,15 +2917,47 @@ fn open_menu(app: &AppHandle, point: Point) {
             action: row.action,
             label: row.label,
             checked: row.checked,
+            children: row.children,
         })
-        .collect();
-    *lock(&MENU) = Some(AreaMenu {
-        area: area.id,
+        .collect()
+}
+
+/// Opens the child list of the top-level row at `parent`, replacing any other.
+/// Returns whether anything changed, so the caller emits once.
+///
+/// Does nothing when the row has no children, which is every row but one: the
+/// hover machinery only ever nominates a parent row, and a press only reaches
+/// here through [`MenuAction::OpenSubmenu`], so this is a guard against a future
+/// caller rather than a live case.
+fn open_submenu(parent: usize, monitor: Rect) -> bool {
+    let mut guard = lock(&MENU);
+    let Some(menu) = guard.as_mut() else {
+        return false;
+    };
+    if menu.open.as_ref().is_some_and(|open| open.parent == parent) {
+        return false;
+    }
+    let Some(row) = menu.items.get(parent) else {
+        return false;
+    };
+    if row.children.is_empty() {
+        return false;
+    }
+    // Anchored to the parent ROW rather than to the cursor, and clamped against
+    // the monitor under it (F-13). See `interaction::submenu_bounds`.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "a menu this short cannot overflow u32"
+    )]
+    let bounds = interaction::submenu_bounds(row.rect, row.children.len() as u32, monitor);
+    let items = laid_out(row.children.clone(), bounds);
+    menu.open = Some(Submenu {
+        parent,
         bounds,
         items,
         hovered: None,
     });
-    emit_menu(app);
+    true
 }
 
 /// One row of the area menu, before it has been given a rectangle.
@@ -2659,11 +2966,24 @@ fn open_menu(app: &AppHandle, point: Point) {
 /// puts the whole menu out of reach of a unit test. This is the half that has no
 /// such dependency: which rows appear, in what order, with which ticks. Those
 /// are the parts a change to the menu is most likely to get wrong.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct MenuRow {
     action: MenuAction,
     label: &'static str,
     checked: bool,
+    /// The rows this one opens as a child list (roadmap 1.28), empty on a leaf.
+    /// Nothing builds a third level and [`MenuHit`] could not address one.
+    children: Vec<MenuRow>,
+}
+
+/// A row with no child list, which is every row but one.
+fn leaf(action: MenuAction, label: &'static str, checked: bool) -> MenuRow {
+    MenuRow {
+        action,
+        label,
+        checked,
+        children: Vec::new(),
+    }
 }
 
 /// The rows an area's menu shows, top to bottom.
@@ -2674,7 +2994,7 @@ fn menu_rows(area: &overlay::AreaSummary) -> Vec<MenuRow> {
         Input::Interactive => Input::PassThrough,
         Input::PassThrough => Input::Interactive,
     };
-    let mut spec: Vec<(MenuAction, &'static str)> = Vec::with_capacity(10);
+    let mut rows: Vec<MenuRow> = Vec::with_capacity(8);
     // Copy/Save lead the menu (the primary actions, ahead of the layout
     // settings below them) and are scoped to **`Screenshot` areas only**.
     //
@@ -2692,26 +3012,45 @@ fn menu_rows(area: &overlay::AreaSummary) -> Vec<MenuRow> {
     // movable in the same PR, so the moment arrived immediately, and the rig
     // found it on 2026-07-27. A predicted defect left in place is still a defect.
     if area.kind == AreaType::Screenshot {
-        spec.push((MenuAction::Copy, "Copy"));
-        spec.push((MenuAction::SaveToFile, "Save image"));
+        rows.push(leaf(MenuAction::Copy, "Copy", false));
+        rows.push(leaf(MenuAction::SaveToFile, "Save image", false));
     }
     // Type conversion (roadmap 1.27). It sits above Layer because it says what
     // the area *is*, where everything below says how it is placed or how it
     // takes input: a Default area is a claimed rectangle whose purpose is not
     // yet decided, and this is where it gets decided.
     //
-    // **Flat radio rows rather than a `Type` submenu**, which is a deviation
-    // from the founder's sketch of 2026-08-12 and is reversible. The Layer tier
-    // directly below is already three flat ticked rows, so this needs no new
-    // interaction machinery at all: a submenu means nested bounds, hover-to-open
-    // timing and its own dismissal, for three rows. Revisit when the offered set
-    // is long enough that a flat list is the worse read.
+    // **A child list of its own, which is roadmap 1.28 and the founder's sketch
+    // of 2026-08-12 restored.**
     //
-    // ⚠️ **REVERSED by the founder on 2026-08-14, on the rig, and the trigger was
-    // not list length.** A flat list holds two independent radio groups, Type and
-    // Layer, so two rows are ticked at once and the menu misreports its own state.
-    // Roadmap 1.28 is the submenu; the three costs named above are still the
-    // costs, and they are that row's to pay.
+    // ~~Flat radio rows rather than a `Type` submenu. The Layer tier directly
+    // below is already three flat ticked rows, so this needs no new interaction
+    // machinery at all: a submenu means nested bounds, hover-to-open timing and
+    // its own dismissal, for three rows. Revisit when the offered set is long
+    // enough that a flat list is the worse read.~~ **Struck rather than deleted,
+    // because the argument was sound and lost to evidence rather than to a
+    // better argument, and a reader who remembers it needs to see it go.**
+    //
+    // **The trigger was not list length, which is what that comment predicted
+    // would reverse it.** The set never grew. Check 1 of the `1.27` rig pass,
+    // 2026-08-14, found `Type: Default` and `Auto` ticked at the same time: both
+    // ticks are correct, and a flat list holding two independent radio groups
+    // still reads as one group with two selections, so the menu misreported its
+    // own state to the only person who has ever used it. A divider would have
+    // hinted at the grouping; a child list makes it visible.
+    //
+    // **All three costs it priced were real and are paid here rather than
+    // avoided**: nested bounds are [`MenuHit`], hover-to-open timing is
+    // [`submenu_step`], and dismissal is the same function's `Close` arm with
+    // [`AreaMenu::argument`] buying the diagonal travel.
+    //
+    // ⚠️ **The parent row names no type and carries no tick, which is a choice
+    // the rig can overturn in one line.** `conversion_label(area.kind)` is a
+    // ready-made "Type: Screenshot" for it, so the current type could be read
+    // without opening the list. It is not used because the roadmap row asked for
+    // a parent row, a plain one is unambiguous, and putting a radio group's
+    // value on a row that is not in that group is the ambiguity this change
+    // exists to remove, one level up. Worth trying on hardware before deciding.
     //
     // ⚠️ **`Type: Filter` is a one-click route into a state that was the hardest
     // this product had, and the sharpest edge is off it.** Filter is pass-through by
@@ -2735,28 +3074,41 @@ fn menu_rows(area: &overlay::AreaSummary) -> Vec<MenuRow> {
     // sits among the Layer rows that share its recovery path; these rows sit
     // above them and inherit no such neighbour. Raised by the independent review
     // of `#55`; a real mitigation is a design call, not a comment.
-    for kind in AreaType::ALL {
-        if let Some(label) = conversion_label(kind) {
-            spec.push((MenuAction::SetType(kind), label));
-        }
-    }
-    spec.push((MenuAction::SetLayer(Layer::Front), "Always on top"));
-    spec.push((MenuAction::SetLayer(Layer::Auto), "Auto"));
-    spec.push((MenuAction::SetLayer(Layer::Back), "Always behind"));
-    spec.push((MenuAction::SetInput(toggled_input), "Click-through"));
-    spec.push((MenuAction::Dismiss, "Dismiss"));
-    spec.into_iter()
-        .map(|(action, label)| MenuRow {
-            action,
-            label,
-            checked: match action {
-                MenuAction::SetLayer(layer) => layer == area.layer,
-                MenuAction::SetInput(_) => area.input == Input::PassThrough,
-                MenuAction::SetType(kind) => kind == area.kind,
-                MenuAction::Dismiss | MenuAction::Copy | MenuAction::SaveToFile => false,
-            },
+    let types: Vec<MenuRow> = AreaType::ALL
+        .into_iter()
+        .filter_map(|kind| {
+            conversion_label(kind)
+                .map(|label| leaf(MenuAction::SetType(kind), label, kind == area.kind))
         })
-        .collect()
+        .collect();
+    rows.push(MenuRow {
+        action: MenuAction::OpenSubmenu,
+        label: "Area type",
+        checked: false,
+        children: types,
+    });
+    rows.push(leaf(
+        MenuAction::SetLayer(Layer::Front),
+        "Always on top",
+        area.layer == Layer::Front,
+    ));
+    rows.push(leaf(
+        MenuAction::SetLayer(Layer::Auto),
+        "Auto",
+        area.layer == Layer::Auto,
+    ));
+    rows.push(leaf(
+        MenuAction::SetLayer(Layer::Back),
+        "Always behind",
+        area.layer == Layer::Back,
+    ));
+    rows.push(leaf(
+        MenuAction::SetInput(toggled_input),
+        "Click-through",
+        area.input == Input::PassThrough,
+    ));
+    rows.push(leaf(MenuAction::Dismiss, "Dismiss", false));
+    rows
 }
 
 /// Closes any open area menu. Returns whether one was open, which is what lets
@@ -2769,29 +3121,51 @@ pub fn close_menu(app: &AppHandle) -> bool {
     was_open
 }
 
-/// The index of the menu row containing `point`, if a menu is open at all.
-fn menu_item_at(point: Point) -> Option<usize> {
+/// The menu row containing `point`, if a menu is open at all.
+fn menu_item_at(point: Point) -> Option<MenuHit> {
     let guard = lock(&MENU);
-    let menu = guard.as_ref()?;
-    menu.items.iter().position(|item| item.rect.contains(point))
+    menu_hit(guard.as_ref()?, point)
 }
 
-/// Whether `point` is inside the open menu's outer rectangle.
+/// Whether `menu` covers `point` with **either list**.
+///
+/// The child list is not inside the parent's rectangle: it opens flush beside
+/// it, so a press on a child row is outside `bounds` entirely. Testing only the
+/// parent here would have made every press on a type row read as a press *away*
+/// from the menu, which closes it and swallows the click, so the rows would have
+/// been unclickable while looking perfectly normal.
+///
+/// Split from [`menu_contains`] so it can be drilled: that one reads the global
+/// [`MENU`], which no unit test can populate, so a test of it could only have
+/// restated this predicate beside it and passed whatever it said.
+fn menu_covers(menu: &AreaMenu, point: Point) -> bool {
+    menu.bounds.contains(point)
+        || menu
+            .open
+            .as_ref()
+            .is_some_and(|open| open.bounds.contains(point))
+}
+
+/// Whether `point` is inside the open menu, either list.
 fn menu_contains(point: Point) -> bool {
     lock(&MENU)
         .as_ref()
-        .is_some_and(|menu| menu.bounds.contains(point))
+        .is_some_and(|menu| menu_covers(menu, point))
 }
 
 /// Performs the action of a menu row, if the release landed on the row the press
 /// started on, the same press-and-release contract the close control uses.
-fn activate_menu_item(app: &AppHandle, index: usize, release: Point) {
-    let action = {
+fn activate_menu_item(app: &AppHandle, hit: MenuHit, release: Point) {
+    let resolved = {
         let guard = lock(&MENU);
         let Some(menu) = guard.as_ref() else {
             return;
         };
-        let Some(entry) = menu.items.get(index) else {
+        let entry = match hit {
+            MenuHit::Row(index) => menu.items.get(index),
+            MenuHit::Child(index) => menu.open.as_ref().and_then(|open| open.items.get(index)),
+        };
+        let Some(entry) = entry else {
             return;
         };
         if !entry.rect.contains(release) {
@@ -2799,13 +3173,30 @@ fn activate_menu_item(app: &AppHandle, index: usize, release: Point) {
         }
         (menu.area, entry.action)
     };
-    let (area, action) = action;
+    let (area, action) = resolved;
+    // A press on a parent row opens its list at once and leaves the menu up:
+    // this is the only action that does not act on the area, so it is also the
+    // only one that must not close the menu it is navigating. It bypasses
+    // `SUBMENU_OPEN_MS` because a click is not an accidental hover; a user who
+    // clicked has already decided.
+    if action == MenuAction::OpenSubmenu {
+        let MenuHit::Row(parent) = hit else {
+            return;
+        };
+        let monitor = overlay::monitor_bounds_at(app, release);
+        if open_submenu(parent, monitor) {
+            emit_menu(app);
+        }
+        return;
+    }
     close_menu(app);
     let changed = match action {
         MenuAction::SetLayer(layer) => overlay::set_area_layer(app, area, layer),
         MenuAction::SetInput(input) => overlay::set_area_input(app, area, input),
         MenuAction::SetType(kind) => overlay::convert_area(app, area, kind),
         MenuAction::Dismiss => overlay::dismiss_area(app, area),
+        // Returned above, before the menu was closed.
+        MenuAction::OpenSubmenu => false,
         // Neither touches the area store (nothing to re-emit), and both are
         // spawned onto their own thread rather than run here: a capture is
         // ~100-300 ms even warm (`uptake_capture` crate docs, F-29), and this
@@ -2833,6 +3224,21 @@ fn activate_menu_item(app: &AppHandle, index: usize, release: Point) {
     }
 }
 
+/// One list's rows as the frontend draws them.
+fn item_views(items: &[MenuEntry]) -> Vec<MenuItemView> {
+    items
+        .iter()
+        .map(|item| MenuItemView {
+            rect: overlay::as_tuple(item.rect),
+            label: item.label,
+            checked: item.checked,
+            // Derived from the row's own children rather than from a flag set
+            // beside them, so a row cannot advertise a list it does not have.
+            parent: !item.children.is_empty(),
+        })
+        .collect()
+}
+
 /// Emits the open menu (or its absence) for the frontend to draw.
 fn emit_menu(app: &AppHandle) {
     let payload = {
@@ -2841,15 +3247,12 @@ fn emit_menu(app: &AppHandle) {
             menu: guard.as_ref().map(|menu| MenuView {
                 rect: overlay::as_tuple(menu.bounds),
                 hovered: menu.hovered,
-                items: menu
-                    .items
-                    .iter()
-                    .map(|item| MenuItemView {
-                        rect: overlay::as_tuple(item.rect),
-                        label: item.label,
-                        checked: item.checked,
-                    })
-                    .collect(),
+                items: item_views(&menu.items),
+                child: menu.open.as_ref().map(|open| ChildMenuView {
+                    rect: overlay::as_tuple(open.bounds),
+                    hovered: open.hovered,
+                    items: item_views(&open.items),
+                }),
             }),
         }
     };
@@ -2873,9 +3276,13 @@ mod tests {
 
     use uptake_core::area::{AreaType, Input, Layer};
 
+    use uptake_core::geometry::{Point, Rect};
+    use uptake_core::interaction;
+
     use super::{
-        ALL_SHAPES, CURSOR_SNAPSHOT_LEN, HoverPayload, MenuAction, NO_HOVER, WHEEL_STEP,
-        conversion_label, living_hover, menu_rows, wheel_notches,
+        ALL_SHAPES, CURSOR_SNAPSHOT_LEN, ChildMenuView, HoverPayload, MenuAction, MenuItemView,
+        MenuPayload, MenuView, NO_HOVER, SUBMENU_CLOSE_MS, SUBMENU_OPEN_MS, SubmenuStep,
+        WHEEL_STEP, conversion_label, living_hover, menu_rows, submenu_step, wheel_notches,
     };
 
     #[test]
@@ -2983,19 +3390,317 @@ mod tests {
         rows.iter().map(|row| row.label).collect()
     }
 
+    /// An open menu over a Default area, laid out with the real geometry.
+    ///
+    /// The rectangles come from `menu_bounds`/`menu_item_bounds` rather than
+    /// from made-up numbers, so a hit-testing test is asking the question the
+    /// running program asks. `open_menu` itself needs an `AppHandle`; this is
+    /// everything it does apart from finding the area and the monitor.
+    fn open_menu_over_default() -> super::AreaMenu {
+        let area = summary(AreaType::Default, Layer::Auto, Input::Interactive);
+        let rows = menu_rows(&area);
+        let monitor = Rect::new(0, 0, 1920, 1080);
+        let bounds = interaction::menu_bounds(Point::new(400, 300), rows.len() as u32, monitor);
+        super::AreaMenu {
+            area: area.id,
+            bounds,
+            items: super::laid_out(rows, bounds),
+            hovered: None,
+            open: None,
+            argument: (None, 0),
+        }
+    }
+
+    /// The index of the row that opens the type list.
+    fn parent_index(menu: &super::AreaMenu) -> usize {
+        let Some(index) = menu
+            .items
+            .iter()
+            .position(|item| item.action == MenuAction::OpenSubmenu)
+        else {
+            panic!("the menu has a type parent row")
+        };
+        index
+    }
+
+    /// Opens the type list, as `open_submenu` does with a monitor in hand.
+    fn with_type_list_open(menu: &mut super::AreaMenu) -> usize {
+        let parent = parent_index(menu);
+        let row = &menu.items[parent];
+        let monitor = Rect::new(0, 0, 1920, 1080);
+        let bounds = interaction::submenu_bounds(row.rect, row.children.len() as u32, monitor);
+        menu.open = Some(super::Submenu {
+            parent,
+            bounds,
+            items: super::laid_out(row.children.clone(), bounds),
+            hovered: None,
+        });
+        parent
+    }
+
+    /// The centre of a rectangle, so a hit test is asked about a point that is
+    /// unambiguously inside rather than on an edge.
+    fn centre(rect: Rect) -> Point {
+        Point::new(
+            rect.origin.x + (rect.size.width / 2) as i32,
+            rect.origin.y + (rect.size.height / 2) as i32,
+        )
+    }
+
     #[test]
-    fn a_default_areas_menu_offers_the_three_types_that_do_something() {
-        // Roadmap 1.27. The other four are modelled and have no behaviour, so a
-        // row for them would convert a working area into one indistinguishable
-        // from a bug. Asserted as the whole list rather than as "contains", so
-        // adding a row nobody decided on also fails here.
+    fn a_child_list_opens_only_once_the_hover_delay_has_passed() {
+        // Roadmap 1.27 priced this and 1.28 pays it: an instant open flickers as
+        // the cursor crosses the parent row on its way somewhere else. The value
+        // is the rig's to settle; that the delay is obeyed at all is not.
+        let start = (Some(2), 1_000);
+        assert_eq!(
+            submenu_step(1_000 + SUBMENU_OPEN_MS - 1, Some(2), None, start).0,
+            SubmenuStep::Hold
+        );
+        assert_eq!(
+            submenu_step(1_000 + SUBMENU_OPEN_MS, Some(2), None, start).0,
+            SubmenuStep::Open(2)
+        );
+    }
+
+    #[test]
+    fn a_child_list_closes_only_once_the_longer_delay_has_passed() {
+        let start = (None, 1_000);
+        assert_eq!(
+            submenu_step(1_000 + SUBMENU_CLOSE_MS - 1, None, Some(2), start).0,
+            SubmenuStep::Hold
+        );
+        assert_eq!(
+            submenu_step(1_000 + SUBMENU_CLOSE_MS, None, Some(2), start).0,
+            SubmenuStep::Close
+        );
+    }
+
+    #[test]
+    fn the_close_delay_is_the_longer_of_the_two() {
+        // Not a taste question. The close delay is what the pointer spends
+        // travelling from the parent row to a child row, and the open delay is
+        // how long a row it crosses on the way needs to steal the list. Invert
+        // them and the diagonal-travel test below stops being satisfiable by any
+        // implementation.
+        const { assert!(SUBMENU_CLOSE_MS > SUBMENU_OPEN_MS) };
+    }
+
+    #[test]
+    fn a_pointer_resting_in_an_open_list_never_re_opens_it() {
+        // Re-opening rebuilds the child list's rectangles and drops its hovered
+        // row, so a pointer sitting still would flicker at the poll's rate.
+        assert_eq!(
+            submenu_step(u64::MAX, Some(2), Some(2), (Some(2), 0)).0,
+            SubmenuStep::Hold
+        );
+    }
+
+    #[test]
+    fn crossing_the_rows_between_a_parent_and_its_list_does_not_close_it() {
+        // The diagonal travel roadmap 1.27 named as the third cost. The pointer
+        // leaves the parent row, crosses two rows that each argue *close*, and
+        // arrives inside the list. Every tick in between is a real tick of the
+        // real function, so this is the property rather than a restatement of
+        // the constants.
+        let parent = 2;
+        let mut since = (Some(parent), 0);
+        let mut open = None;
+
+        // Rest on the parent row until it opens.
+        for now in [0, 100, SUBMENU_OPEN_MS] {
+            let (step, next) = submenu_step(now, Some(parent), open, since);
+            since = next;
+            if let SubmenuStep::Open(index) = step {
+                open = Some(index);
+            }
+        }
+        assert_eq!(open, Some(parent), "the list never opened");
+
+        // Cross the rows beneath it. Each argues `None`, and each is a fresh
+        // argument only on the first tick, so the clock runs from there.
+        let departure = SUBMENU_OPEN_MS;
+        for elapsed in 1..SUBMENU_CLOSE_MS {
+            let (step, next) = submenu_step(departure + elapsed, None, open, since);
+            since = next;
+            assert_eq!(
+                step,
+                SubmenuStep::Hold,
+                "closed after {elapsed} ms of travel"
+            );
+        }
+
+        // Arrive inside the list with the deadline not yet reached.
+        let (step, _) = submenu_step(departure + SUBMENU_CLOSE_MS - 1, Some(parent), open, since);
+        assert_eq!(step, SubmenuStep::Hold);
+        assert_eq!(open, Some(parent), "the list did not survive the journey");
+    }
+
+    #[test]
+    fn a_pointer_that_leaves_and_stays_away_does_close_the_list() {
+        // The other half of the test above, and the reason it is a separate one:
+        // a `Hold` for every input would satisfy that test on its own.
+        let mut since = (Some(2), 0);
+        let mut closed = false;
+        // To `+ 1` because the first tick away is the one that restarts the
+        // clock, so the deadline falls a tick after the bare constant. Worth
+        // stating: the first draft stopped at the constant and went red.
+        for elapsed in 1..=SUBMENU_CLOSE_MS + 1 {
+            let (step, next) = submenu_step(elapsed, None, Some(2), since);
+            since = next;
+            closed |= step == SubmenuStep::Close;
+        }
+        assert!(closed, "the list stayed open forever");
+    }
+
+    #[test]
+    fn a_point_on_a_child_row_resolves_to_that_row_and_not_the_one_beneath_it() {
+        let mut menu = open_menu_over_default();
+        let parent = with_type_list_open(&mut menu);
+        let Some(list) = menu.open.as_ref() else {
+            panic!("the list was just opened")
+        };
+        for (index, item) in list.items.iter().enumerate() {
+            assert_eq!(
+                super::menu_hit(&menu, centre(item.rect)),
+                Some(super::MenuHit::Child(index))
+            );
+        }
+        // The parent row still resolves to itself while its list is open.
+        assert_eq!(
+            super::menu_hit(&menu, centre(menu.items[parent].rect)),
+            Some(super::MenuHit::Row(parent))
+        );
+    }
+
+    #[test]
+    fn a_press_on_a_child_row_is_inside_the_menu() {
+        // `menu_contains` decides whether a press belongs to the menu at all. A
+        // child list opens flush BESIDE the parent list, so every child row is
+        // outside `bounds`: testing only that rectangle would make each type row
+        // read as a press away from the menu, which closes it and swallows the
+        // click. The rows would look right and do nothing.
+        let mut menu = open_menu_over_default();
+        with_type_list_open(&mut menu);
+        let child_row = {
+            let Some(list) = menu.open.as_ref() else {
+                panic!("the list was just opened")
+            };
+            centre(list.items[0].rect)
+        };
+        // Without this the test would pass against a `menu_covers` that ignored
+        // the child list entirely, because the point would be in both.
+        assert!(
+            !menu.bounds.contains(child_row),
+            "the two lists overlap, so this test proves nothing"
+        );
+        assert!(super::menu_covers(&menu, child_row));
+        // And a point in neither is still outside.
+        assert!(!super::menu_covers(&menu, Point::new(10, 10)));
+    }
+
+    #[test]
+    fn a_parent_row_stays_lit_while_its_list_is_open() {
+        // The highlight is what says which row the list beside it belongs to.
+        let mut menu = open_menu_over_default();
+        let parent = with_type_list_open(&mut menu);
+        let child_centre = {
+            let Some(list) = menu.open.as_ref() else {
+                panic!("the list was just opened")
+            };
+            centre(list.items[1].rect)
+        };
+        let hit = super::menu_hit(&menu, child_centre);
+        super::apply_menu_hover(&mut menu, hit);
+        assert_eq!(menu.hovered, Some(parent));
+        assert_eq!(menu.open.as_ref().and_then(|open| open.hovered), Some(1));
+
+        // And across the padding between the two lists, where the hit is None.
+        super::apply_menu_hover(&mut menu, None);
+        assert_eq!(menu.hovered, Some(parent));
+        assert_eq!(menu.open.as_ref().and_then(|open| open.hovered), None);
+    }
+
+    #[test]
+    fn being_anywhere_in_an_open_list_argues_for_keeping_it_open() {
+        // Including its padding: a pointer that has arrived is not asked to stay
+        // on a row, or the list would close whenever it passed between two.
+        let mut menu = open_menu_over_default();
+        let parent = with_type_list_open(&mut menu);
+        let Some(list) = menu.open.as_ref() else {
+            panic!("the list was just opened")
+        };
+        let list_bounds = list.bounds;
+        let padding = Point::new(centre(list_bounds).x, list_bounds.origin.y);
+        assert_eq!(super::submenu_argument(&menu, padding), Some(parent));
+        assert_eq!(super::menu_hit(&menu, padding), None);
+        // Well outside argues to close.
+        assert_eq!(super::submenu_argument(&menu, Point::new(10, 10)), None);
+    }
+
+    #[test]
+    fn the_menu_payload_reaches_the_frontend_under_the_keys_it_reads() {
+        // `UT-F-72`, one field over. `HoverPayload` needed a `rename_all` and
+        // nothing in this repository could see it being removed. These field
+        // names are single lowercase words so that they need no attribute at
+        // all, and this pins that: a rename here is a rename the frontend reads,
+        // and it fails on this side rather than silently in the WebView.
+        let view = MenuView {
+            rect: (1, 2, 3, 4),
+            hovered: Some(0),
+            items: vec![MenuItemView {
+                rect: (1, 2, 3, 4),
+                label: "Area type",
+                checked: false,
+                parent: true,
+            }],
+            child: Some(ChildMenuView {
+                rect: (5, 6, 7, 8),
+                hovered: None,
+                items: Vec::new(),
+            }),
+        };
+        let Ok(json) = serde_json::to_string(&MenuPayload { menu: Some(view) }) else {
+            panic!("the menu payload serializes")
+        };
+        for key in [
+            "\"menu\"",
+            "\"rect\"",
+            "\"items\"",
+            "\"hovered\"",
+            "\"child\"",
+            "\"label\"",
+            "\"checked\"",
+            "\"parent\"",
+        ] {
+            assert!(json.contains(key), "{key} is missing from {json}");
+        }
+    }
+
+    /// The children of the one row that has any.
+    fn type_rows(rows: &[super::MenuRow]) -> &[super::MenuRow] {
+        let Some(parent) = rows
+            .iter()
+            .find(|row| row.action == MenuAction::OpenSubmenu)
+        else {
+            panic!("the menu has a type parent row")
+        };
+        &parent.children
+    }
+
+    #[test]
+    fn the_top_level_menu_holds_one_radio_group_and_the_types_are_not_in_it() {
+        // Roadmap 1.28, and this assertion IS the row's reason for existing. The
+        // rig found `Type: Default` and `Auto` ticked at once on 2026-08-14:
+        // both correct, and unreadable together, because a flat list holding two
+        // radio groups reads as one group with two selections. Asserted as the
+        // whole list rather than as "contains", so a row nobody decided on also
+        // fails here.
         let rows = menu_rows(&summary(AreaType::Default, Layer::Auto, Input::Interactive));
         assert_eq!(
             labels(&rows),
             vec![
-                "Type: Default",
-                "Type: Screenshot",
-                "Type: Filter",
+                "Area type",
                 "Always on top",
                 "Auto",
                 "Always behind",
@@ -3003,13 +3708,54 @@ mod tests {
                 "Dismiss",
             ]
         );
+        // The Layer tier is the only radio group left at this level, so at most
+        // one row of one can be ticked here. `Click-through` is a checkbox and
+        // is allowed to be ticked beside it; that pairing is not what the rig
+        // read as two selections, and it is not this row's to change.
+        let radio_ticks = rows
+            .iter()
+            .filter(|row| matches!(row.action, MenuAction::SetLayer(_)) && row.checked)
+            .count();
+        assert_eq!(radio_ticks, 1);
+        assert!(
+            !rows
+                .iter()
+                .any(|row| matches!(row.action, MenuAction::SetType(_))),
+            "a type row escaped back into the top level"
+        );
+    }
+
+    #[test]
+    fn the_type_list_offers_the_three_types_that_do_something() {
+        // The other four are modelled and have no behaviour, so a row for them
+        // would convert a working area into one indistinguishable from a bug.
+        let rows = menu_rows(&summary(AreaType::Default, Layer::Auto, Input::Interactive));
+        assert_eq!(
+            labels(type_rows(&rows)),
+            vec!["Type: Default", "Type: Screenshot", "Type: Filter"]
+        );
+    }
+
+    #[test]
+    fn exactly_one_row_opens_a_list_and_no_child_opens_another() {
+        // Two deep, and `MenuHit` can address exactly two. A third level would
+        // be built here and be unreachable everywhere else, which is the shape
+        // of a defect that draws correctly and cannot be clicked.
+        for kind in AreaType::ALL {
+            let rows = menu_rows(&summary(kind, Layer::Auto, Input::Interactive));
+            let parents = rows.iter().filter(|row| !row.children.is_empty()).count();
+            assert_eq!(parents, 1, "{kind:?}");
+            for child in type_rows(&rows) {
+                assert!(child.children.is_empty(), "{kind:?} {}", child.label);
+            }
+        }
     }
 
     #[test]
     fn the_type_rows_tick_the_type_the_area_already_is_and_no_other() {
         for kind in AreaType::ALL {
             let rows = menu_rows(&summary(kind, Layer::Auto, Input::Interactive));
-            let ticked: Vec<&'static str> = rows
+            let ticked: Vec<&'static str> = type_rows(&rows)
                 .iter()
                 .filter(|row| matches!(row.action, MenuAction::SetType(_)) && row.checked)
                 .map(|row| row.label)
@@ -3025,30 +3771,57 @@ mod tests {
     }
 
     #[test]
+    fn the_parent_row_itself_is_never_ticked() {
+        // It is not a member of the group it opens. A tick on it would put a
+        // second mark at the top level and re-create, one row up, exactly the
+        // misreading roadmap 1.28 exists to remove.
+        for kind in AreaType::ALL {
+            let rows = menu_rows(&summary(kind, Layer::Auto, Input::Interactive));
+            let Some(parent) = rows
+                .iter()
+                .find(|row| row.action == MenuAction::OpenSubmenu)
+            else {
+                panic!("the menu has a type parent row")
+            };
+            assert!(!parent.checked, "{kind:?}");
+        }
+    }
+
+    #[test]
     fn a_screenshots_menu_still_leads_with_copy_and_save() {
-        // The type rows went in above Layer and below these two. Pinned because
-        // the export actions are the primary ones for the only type that holds a
-        // capture, and a reordering that buries them is a regression.
+        // Pinned because the export actions are the primary ones for the only
+        // type that holds a capture, and a reordering that buries them is a
+        // regression. The type parent row went in above Layer and below these
+        // two, where the flat type rows used to sit.
         let rows = menu_rows(&summary(
             AreaType::Screenshot,
             Layer::Auto,
             Input::Interactive,
         ));
-        assert_eq!(labels(&rows)[..3], ["Copy", "Save image", "Type: Default"]);
+        assert_eq!(labels(&rows)[..3], ["Copy", "Save image", "Area type"]);
     }
 
     #[test]
-    fn no_two_menu_rows_share_a_label() {
+    fn no_two_rows_of_one_list_share_a_label() {
         // The rows are identified to the user by their text alone, and the type
-        // rows are the first group whose labels are generated rather than
-        // written out one at a time.
-        for kind in AreaType::ALL {
-            let rows = menu_rows(&summary(kind, Layer::Front, Input::PassThrough));
-            let mut seen = labels(&rows);
+        // rows are the only group whose labels are generated rather than written
+        // out one at a time.
+        //
+        // Per list rather than across both, and the distinction is real since
+        // 1.28: two rows with one label are ambiguous only when they are on
+        // screen together, and a parent row named after the type it opens would
+        // be a deliberate repeat rather than a collision.
+        let unique = |rows: &[super::MenuRow], what: &str, kind: AreaType| {
+            let mut seen = labels(rows);
             let before = seen.len();
             seen.sort_unstable();
             seen.dedup();
-            assert_eq!(seen.len(), before, "{kind:?}");
+            assert_eq!(seen.len(), before, "{kind:?} {what}");
+        };
+        for kind in AreaType::ALL {
+            let rows = menu_rows(&summary(kind, Layer::Front, Input::PassThrough));
+            unique(&rows, "top level", kind);
+            unique(type_rows(&rows), "type list", kind);
         }
     }
 
