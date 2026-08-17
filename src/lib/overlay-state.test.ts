@@ -277,6 +277,7 @@ describe('menuFrameCss', () => {
         },
       ],
       hovered: 0,
+      owner: 0,
     },
   };
 
@@ -347,11 +348,22 @@ describe('menuFrameCss', () => {
     expect(menuFrameCss(menu, [0, 0], Number.NaN)).toBeNull();
   });
 
-  it('drops the whole menu when the child list cannot be converted', () => {
-    // Rather than drawing the parent alone. Rust has already opened the child
-    // and is hit-testing its rows, so a parent drawn without it leaves a strip
-    // of screen that swallows clicks and shows nothing.
-    expect(menuFrameCss(withChild, [0, 0], Number.NaN)).toBeNull();
+  it('marks the row whose child list is open, and only that row', () => {
+    // The invariant an earlier build spent `hovered` on and could not keep: the
+    // parent went dark whenever the pointer crossed another top-level row,
+    // leaving the open list with nothing pointing at it. `owner` is a fact
+    // about the list, so it holds whatever the hover is doing -- and here the
+    // hover is on row 1 while row 0 owns the list.
+    const frame = menuFrameCss(withChild, [0, 0], 1);
+
+    expect(frame?.items.map((item) => item.open)).toEqual([true, false]);
+    expect(frame?.items.map((item) => item.hovered)).toEqual([false, true]);
+  });
+
+  it('marks no row open when no child list is open', () => {
+    expect(menuFrameCss(menu, [0, 0], 1)?.items.every((item) => !item.open)).toBe(
+      true,
+    );
   });
 });
 

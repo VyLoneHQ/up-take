@@ -230,6 +230,13 @@ export interface ChildMenuView {
   rect: PhysRect;
   items: MenuItemView[];
   hovered: number | null;
+  /**
+   * Index into {@link MenuView.items} of the row this list belongs to, drawn as
+   * open. Separate from `hovered` because both are true at once: while the
+   * pointer is in this list nothing at the top level is hovered, and the row it
+   * came from still has to read as its source.
+   */
+  owner: number;
 }
 
 /** The open per-area menu (ADR-0013's Layer control). */
@@ -288,6 +295,8 @@ export interface MenuItemFrame {
   hovered: boolean;
   /** Draw the marker that says this row opens a child list. */
   parent: boolean;
+  /** This row's child list is open, so draw it as the list's source. */
+  open: boolean;
 }
 
 /** The open menu ready to draw. */
@@ -354,6 +363,7 @@ function menuItemsCss(
   view: { items: MenuItemView[]; hovered: number | null },
   origin: Origin,
   dpr: number,
+  openIndex: number | null = null,
 ): MenuItemFrame[] | null {
   const rects = physRectsToCss(
     view.items.map((item) => item.rect),
@@ -367,16 +377,26 @@ function menuItemsCss(
     checked: item.checked,
     hovered: index === view.hovered,
     parent: item.parent,
+    open: index === openIndex,
   }));
 }
 
 /**
  * Converts the open menu into drawable geometry, or `null` when none is open.
  *
- * **A child list that cannot be converted drops the whole menu**, rather than
- * drawing the parent alone. Rust has already opened it and is hit-testing its
- * rows; a parent list drawn without the child beside it would leave a strip of
- * screen that swallows clicks and shows nothing, which is worse than no menu.
+ * The child list's own `null` checks are **forced by the types and unreachable
+ * in practice**, and saying so is the point. The only way a conversion fails is
+ * an unusable `dpr` ({@link physRectsToCss}), `dpr` is one scalar shared by both
+ * lists, and the parent is converted first, so there is no input for which the
+ * parent succeeds and the child does not.
+ *
+ * An earlier version of this comment claimed the branch *"drops the whole menu,
+ * rather than drawing the parent alone"*, and a test asserted it. Both were
+ * describing behaviour no input can produce: an independent review mutated the
+ * branch to draw the parent alone and the whole suite stayed green, because the
+ * only case reaching it is the `dpr` case that returns two lines earlier. The
+ * claim is gone and the test with it; the `null` handling stays because
+ * TypeScript requires it, which is a different and honest reason.
  */
 export function menuFrameCss(
   menu: MenuView | null,
@@ -386,7 +406,7 @@ export function menuFrameCss(
   if (menu === null) return null;
   const rect = physRectToCss(menu.rect, origin, dpr);
   if (rect === null) return null;
-  const items = menuItemsCss(menu, origin, dpr);
+  const items = menuItemsCss(menu, origin, dpr, menu.child?.owner ?? null);
   if (items === null) return null;
   let child: MenuFrame['child'] = null;
   if (menu.child !== null) {
