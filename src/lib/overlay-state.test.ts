@@ -361,9 +361,9 @@ describe('menuFrameCss', () => {
   });
 
   it('marks no row open when no child list is open', () => {
-    expect(menuFrameCss(menu, [0, 0], 1)?.items.every((item) => !item.open)).toBe(
-      true,
-    );
+    expect(
+      menuFrameCss(menu, [0, 0], 1)?.items.every((item) => !item.open),
+    ).toBe(true);
   });
 });
 
