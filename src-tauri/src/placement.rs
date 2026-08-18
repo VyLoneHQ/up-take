@@ -1243,12 +1243,17 @@ const fn living_hover(
 /// ⚠️ **This paragraph cited Windows' `MenuShowDelay` as "400 ms for both
 /// edges" and both halves were unsound.** There is one such value under
 /// `HKCU\Control Panel\Desktop` and it governs the *show* edge only, so there
-/// was nothing for the close edge to be the default of; and on the founder's own
-/// workstation it reads `0`, so the OS's submenus open instantly there. It was
-/// an unprobed claim about a system this repository does not own, cited to
-/// justify a number it cannot justify. Removed rather than corrected, because
-/// the rig is the authority here and a borrowed default was never going to be.
-/// Found by the independent review of `1.28` under attack `A7`.
+/// was nothing for the close edge to be the default of. It was an unprobed claim
+/// about a system this repository does not own, cited to justify a number it
+/// cannot justify. Removed rather than corrected, because the rig is the
+/// authority here and a borrowed default was never going to be.
+///
+/// ⚠️ **The correction that replaced it named a reading from one machine's
+/// registry, and that was the same defect one layer down**: a claim about
+/// foreign state, unprobed, un-registered, and true only on the day it was
+/// typed. It is struck rather than restated. Whatever that key holds anywhere,
+/// it is not evidence about these two constants, which is the point the
+/// paragraph above already makes.
 const SUBMENU_OPEN_MS: u64 = 220;
 
 /// How long the pointer must argue against the open child list before it closes.
@@ -3169,8 +3174,16 @@ fn menu_item_at(point: Point) -> Option<MenuHit> {
 /// been unclickable while looking perfectly normal.
 ///
 /// Split from [`menu_contains`] so it can be drilled: that one reads the global
-/// [`MENU`], which no unit test can populate, so a test of it could only have
-/// restated this predicate beside it and passed whatever it said.
+/// [`MENU`], and a test of it would either restate this predicate beside it and
+/// pass whatever it said, or reach for the static and race every other test in
+/// the binary that does.
+///
+/// ⚠️ **This said the global was one "no unit test can populate", and this
+/// change's own `the_production_site_anchors_the_child_list_to_its_parent_row`
+/// populates it.** Populating it is possible and is deliberately done exactly
+/// once, because tests in one binary share the static; what the split buys is
+/// that everything else can be asked the same question without contending for
+/// it. Corrected after the round that falsified the sentence.
 fn menu_covers(menu: &AreaMenu, point: Point) -> bool {
     menu.bounds.contains(point)
         || menu
@@ -3283,23 +3296,36 @@ fn item_views(items: &[MenuEntry]) -> Vec<MenuItemView> {
         .collect()
 }
 
+/// The payload for `menu`, split out from [`emit_menu`] so that a test can
+/// observe what actually goes on the wire.
+///
+/// ⚠️ **Separated because the mapping was unobserved, not for tidiness.** Round
+/// 2 of the `1.28` review set `owner` here to `0` and to
+/// `menu.hovered.unwrap_or(open.parent)` -- both of which reintroduce exactly
+/// the defect [`ChildMenuView::owner`] exists to fix -- and all 314 tests stayed
+/// green, because every test reached into [`AreaMenu`] and nothing built the
+/// view. A field is only as pinned as the assignment that fills it.
+fn menu_payload(menu: Option<&AreaMenu>) -> MenuPayload {
+    MenuPayload {
+        menu: menu.map(|menu| MenuView {
+            rect: overlay::as_tuple(menu.bounds),
+            hovered: menu.hovered,
+            items: item_views(&menu.items),
+            child: menu.open.as_ref().map(|open| ChildMenuView {
+                rect: overlay::as_tuple(open.bounds),
+                hovered: open.hovered,
+                items: item_views(&open.items),
+                owner: open.parent,
+            }),
+        }),
+    }
+}
+
 /// Emits the open menu (or its absence) for the frontend to draw.
 fn emit_menu(app: &AppHandle) {
     let payload = {
         let guard = lock(&MENU);
-        MenuPayload {
-            menu: guard.as_ref().map(|menu| MenuView {
-                rect: overlay::as_tuple(menu.bounds),
-                hovered: menu.hovered,
-                items: item_views(&menu.items),
-                child: menu.open.as_ref().map(|open| ChildMenuView {
-                    rect: overlay::as_tuple(open.bounds),
-                    hovered: open.hovered,
-                    items: item_views(&open.items),
-                    owner: open.parent,
-                }),
-            }),
-        }
+        menu_payload(guard.as_ref())
     };
     let _ = app.emit(MENU_EVENT, payload);
 }
@@ -3442,7 +3468,18 @@ mod tests {
     /// running program asks. `open_menu` itself needs an `AppHandle`; this is
     /// everything it does apart from finding the area and the monitor.
     fn open_menu_over_default() -> super::AreaMenu {
-        let area = summary(AreaType::Default, Layer::Auto, Input::Interactive);
+        open_menu_over(AreaType::Default)
+    }
+
+    /// The same fixture over an area of any type.
+    ///
+    /// The type decides the row order: `Copy` and `Save image` lead a
+    /// `Screenshot` area's menu and are absent from every other, so the parent
+    /// row that owns the type list sits at index 2 there and at index 0 over a
+    /// `Default` area. A test that wants to tell a real index from a hard-coded
+    /// zero has to ask for the former.
+    fn open_menu_over(kind: AreaType) -> super::AreaMenu {
+        let area = summary(kind, Layer::Auto, Input::Interactive);
         let rows = menu_rows(&area);
         let monitor = Rect::new(0, 0, 1920, 1080);
         let bounds = interaction::menu_bounds(Point::new(400, 300), rows.len() as u32, monitor);
@@ -3650,8 +3687,8 @@ mod tests {
     /// **Every other test here builds its geometry with `with_type_list_open`,
     /// which re-implements that call**, so an independent review could swap
     /// `submenu_bounds` for `menu_bounds` at `open_submenu` and watch all 310
-    /// tests stay green. That is `A10`'s case exactly: a guard drilled from a
-    /// fixture position rather than from the position it runs in. The wrong
+    /// tests stay green -- a guard drilled from a fixture that copies the
+    /// production call rather than from the call itself. The wrong
     /// geometry there loses the top-alignment, the flush edge and the
     /// parent-row anchor at once, which is the whole of what makes the diagonal
     /// travel reachable.
@@ -3807,10 +3844,17 @@ mod tests {
         let Some(other) = menu.items.iter().position(|item| item.children.is_empty()) else {
             panic!("the menu has a leaf row")
         };
-        for hit in [
-            None,
-            Some(super::MenuHit::Row(other)),
-            Some(super::MenuHit::Child(0)),
+        //
+        // ⚠️ **The expected hover travels with each case on purpose.** This test
+        // asserted `open.parent` alone until round 2 of the review, and
+        // `apply_menu_hover` never writes that field -- so the test named for
+        // this function's invariant passed with the function gutted to
+        // `return false`. Owner surviving is only interesting while the hover is
+        // actually moving underneath it.
+        for (hit, row, child) in [
+            (None, None, None),
+            (Some(super::MenuHit::Row(other)), Some(other), None),
+            (Some(super::MenuHit::Child(0)), None, Some(0)),
         ] {
             super::apply_menu_hover(&mut menu, hit);
             assert_eq!(
@@ -3818,7 +3862,61 @@ mod tests {
                 Some(parent),
                 "the list lost its owner with hit {hit:?}"
             );
+            assert_eq!(menu.hovered, row, "the top-level hover with hit {hit:?}");
+            assert_eq!(
+                menu.open.as_ref().and_then(|open| open.hovered),
+                child,
+                "the child hover with hit {hit:?}"
+            );
         }
+    }
+
+    #[test]
+    fn the_wire_names_the_row_that_owns_the_open_list() {
+        // `owner` on the wire is the whole of the parent-stays-lit fix, and
+        // nothing observed the assignment that fills it: every other test in
+        // this file reaches into `AreaMenu`, so round 2 of the `1.28` review set
+        // the field to `0` and to `menu.hovered.unwrap_or(open.parent)` -- both
+        // of which restore the exact defect it exists to fix -- and all 314
+        // tests stayed green. This one builds the payload.
+        //
+        // Over a **Screenshot** area deliberately: `Copy` and `Save image` lead
+        // that menu, so the parent row is index 2, and a wire field hard-coded
+        // to `0` fails here rather than passing by coincidence.
+        let mut menu = open_menu_over(AreaType::Screenshot);
+        let parent = with_type_list_open(&mut menu);
+        assert_ne!(parent, 0, "the fixture puts the parent row off index zero");
+        let Some(other) = menu.items.iter().position(|item| item.children.is_empty()) else {
+            panic!("the menu has a leaf row")
+        };
+        assert_ne!(other, parent);
+        // The pointer on some *other* top-level row is the case the fix is
+        // about: the hover moves away and the list must still say where it came
+        // from. This is also what separates `owner` from the hover: a wire field
+        // borrowed from `hovered` reads `other` here and is wrong.
+        super::apply_menu_hover(&mut menu, Some(super::MenuHit::Row(other)));
+
+        let payload = super::menu_payload(Some(&menu));
+        let Some(view) = payload.menu else {
+            panic!("the payload carries the open menu")
+        };
+        let Some(child) = view.child else {
+            panic!("the payload carries the open child list")
+        };
+        assert_eq!(
+            child.owner, parent,
+            "the wire lost the row that owns the list"
+        );
+        assert_eq!(view.hovered, Some(other), "the wire lost the hovered row");
+    }
+
+    #[test]
+    fn an_absent_menu_reaches_the_wire_as_an_absent_menu() {
+        // The other arm of the same mapping: dismissal is an emit of `None`, so
+        // a `menu_payload` that always produced a view would leave a dead menu
+        // drawn on screen.
+        let payload = super::menu_payload(None);
+        assert!(payload.menu.is_none());
     }
 
     #[test]
