@@ -4085,15 +4085,25 @@ mod tests {
         // so a reordering that put the tests first would let a control read its
         // own expectations back and pass on a gutted function.
         let production = production_of(source);
-        let Some(body) = production
-            .split_once(signature)
-            .and_then(|(_, rest)| rest.split_once("\nfn "))
-            .map(|(body, _)| body.to_owned())
-        else {
+        // Two failure modes, two messages, and that is `R5-F5` rather than
+        // pedantry: they used to share one, so a `#[should_panic]` for the
+        // missing-signature case also passed when the fixture merely lost its
+        // trailing `fn` -- and the fixture comment that says the terminator is
+        // load-bearing was itself the only thing guarding it.
+        let Some((_, after)) = production.split_once(signature) else {
             panic!(
-                "`{signature}` not found -- renamed? An unfound function must not read as a pass"
+                "`{signature}` not found in production code -- renamed? An unfound function \
+                 must not read as a pass"
             )
         };
+        let Some((body, _)) = after.split_once("\nfn ") else {
+            panic!(
+                "`{signature}` has no following top-level `fn` to slice to -- the fixture or \
+                 the file lost its terminator, which is not the same as the signature being \
+                 absent"
+            )
+        };
+        let body = body.to_owned();
         strip_comments(&body)
     }
 
@@ -4115,6 +4125,45 @@ mod tests {
     /// acceptable because it is only ever asked about function bodies whose
     /// required tokens are calls.
     fn strip_comments(source: &str) -> String {
+        strip_strings(&strip_comment_syntax(source))
+    }
+
+    /// `source` with double-quoted string literals emptied.
+    ///
+    /// **`R5-F2`, second half.** The exactly-once check on `emit_menu(app);`
+    /// catches a string literal ADDED beside a live call and not one that
+    /// REPLACES it: `if changed { let _s = "emit_menu(app);"; }` leaves the
+    /// count at one, `#[cfg(` absent and `if changed {` present, and every gate
+    /// green. Emptying literals makes the token disappear entirely, so the
+    /// required-token check fails, which is the right answer for a call that no
+    /// longer exists.
+    ///
+    /// Escapes are honoured so a literal ending in `" is not read as still open.
+    fn strip_strings(source: &str) -> String {
+        let mut out = String::with_capacity(source.len());
+        let mut chars = source.chars();
+        while let Some(c) = chars.next() {
+            if c != '"' {
+                out.push(c);
+                continue;
+            }
+            out.push('"');
+            let mut escaped = false;
+            for inner in chars.by_ref() {
+                if escaped {
+                    escaped = false;
+                } else if inner == '\\' {
+                    escaped = true;
+                } else if inner == '"' {
+                    break;
+                }
+            }
+            out.push('"');
+        }
+        out
+    }
+
+    fn strip_comment_syntax(source: &str) -> String {
         let mut out = String::with_capacity(source.len());
         let mut rest = source;
         loop {
@@ -4229,7 +4278,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "not found")]
+    #[should_panic(expected = "not found in production code")]
     fn fn_body_refuses_to_read_the_test_module() {
         // `R5-F3`. `fn_body` truncates at `#[cfg(test)]` because `include_str!`
         // pulls that module in too, and every token the source controls require
@@ -4243,6 +4292,18 @@ mod tests {
         // pinned at the point it is used.
         const SIGNATURE: &str = "fn target(app: &AppHandle) {";
         let _ = fn_body(&signature_only_in_the_test_module(SIGNATURE), SIGNATURE);
+    }
+
+    #[test]
+    #[should_panic(expected = "no following top-level")]
+    fn fn_body_says_so_when_it_has_nothing_to_slice_to() {
+        // The other panic, and the reason it is a separate message. Both
+        // failures used to say "not found", so the `#[should_panic]` above
+        // passed when the fixture merely lost its trailing `fn` -- which is the
+        // fourth way that test has been wrong, found by the confirmation pass
+        // drilling my own fixture rather than the code.
+        const SIGNATURE: &str = "fn target(app: &AppHandle) {";
+        let _ = fn_body(&format!("{SIGNATURE}\n    let x = 1;\n}}\n"), SIGNATURE);
     }
 
     #[test]
@@ -4346,6 +4407,20 @@ mod tests {
         // round-5 reviewer and both mechanically detectable, unlike `S4`:
         // `#[cfg(any())]` keeps the token and removes the call at compile time,
         // and a string literal parks the token where nothing runs it.
+        //
+        // ⚠️ **The string-literal half needed TWO fixes and the first was
+        // reported as complete when it was not.** The exactly-once check below
+        // caught a literal ADDED beside a live call and NOT one that REPLACES
+        // the call, which leaves the count at exactly one -- the confirmation
+        // pass re-ran its own mutation to show it. Literals are emptied in
+        // `strip_comments` now, so a replaced call has no token at all and the
+        // required-token loop above fails. Drilled.
+        //
+        // Which changes what the count below means, and it is worth saying
+        // rather than leaving the reader to work out: it now counts REAL calls,
+        // because a decoy in a literal is gone before it is asked. A decoy
+        // sitting beside a working call therefore passes, and that is correct --
+        // the call still runs, so there is nothing to report.
         assert!(
             !body.contains("#[cfg("),
             "a `#[cfg(...)]` inside `pump_menu` can remove a call while leaving its \
@@ -4354,9 +4429,10 @@ mod tests {
         assert_eq!(
             body.matches("emit_menu(app);").count(),
             1,
-            "`emit_menu(app);` must appear in `pump_menu` exactly once. A second copy means \
-             one of them is parked somewhere that never runs -- a string literal is the cheap \
-             way -- and this control would find that one and be satisfied."
+            "`emit_menu(app);` must appear in `pump_menu` exactly once, counting real calls \
+             only -- string literals are emptied before this. Two means one of them is in a \
+             branch that never runs, and the required-token loop above would find that one \
+             and be satisfied."
         );
     }
 
