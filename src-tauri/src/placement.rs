@@ -4080,7 +4080,14 @@ mod tests {
     /// `fn`, which is enough because every function it is asked about is at
     /// module level.
     fn fn_body(source: &str, signature: &str) -> String {
-        let Some(body) = source
+        // Production code only. `include_str!` pulls in this test module too,
+        // and every required token below appears in it as an assertion string,
+        // so a reordering that put the tests first would let a control read its
+        // own expectations back and pass on a gutted function.
+        let production = source
+            .split_once("\n#[cfg(test)]")
+            .map_or(source, |(head, _)| head);
+        let Some(body) = production
             .split_once(signature)
             .and_then(|(_, rest)| rest.split_once("\nfn "))
             .map(|(body, _)| body.to_owned())
@@ -4089,7 +4096,72 @@ mod tests {
                 "`{signature}` not found -- renamed? An unfound function must not read as a pass"
             )
         };
-        body
+        strip_comments(&body)
+    }
+
+    /// `source` with `//` and `/* */` comments removed.
+    ///
+    /// **The whole of `R4-F1`.** Round 4's source controls searched the raw
+    /// text, so `// emit_menu(app);` left the token sitting in a comment for
+    /// `contains` to find: the menu never redrew, the child list opened
+    /// invisibly, hover highlighting died across the whole menu, and every gate
+    /// in the repository stayed green. Commenting a line out is the most
+    /// ordinary way there is to disable it, and it was the one form the control
+    /// could not see.
+    ///
+    /// `menu-styles.test.ts` strips CSS comments before matching, in this same
+    /// change, for exactly this reason. A class fixed at one member is a class
+    /// not fixed, and this file is where it was not fixed.
+    ///
+    /// Naive about string literals containing comment markers, which is
+    /// acceptable because it is only ever asked about function bodies whose
+    /// required tokens are calls.
+    fn strip_comments(source: &str) -> String {
+        let mut out = String::with_capacity(source.len());
+        let mut rest = source;
+        loop {
+            let line = rest.find("//");
+            let block = rest.find("/*");
+            match (line, block) {
+                (None, None) => {
+                    out.push_str(rest);
+                    return out;
+                }
+                (Some(at), None) => {
+                    out.push_str(&rest[..at]);
+                    rest = rest[at..].find('\n').map_or("", |end| &rest[at + end..]);
+                }
+                (None, Some(at)) => {
+                    out.push_str(&rest[..at]);
+                    rest = rest[at..]
+                        .find("*/")
+                        .map_or("", |end| &rest[at + end + 2..]);
+                }
+                (Some(l), Some(b)) if l < b => {
+                    out.push_str(&rest[..l]);
+                    rest = rest[l..].find('\n').map_or("", |end| &rest[l + end..]);
+                }
+                (Some(_), Some(b)) => {
+                    out.push_str(&rest[..b]);
+                    rest = rest[b..].find("*/").map_or("", |end| &rest[b + end + 2..]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_commented_out_call_is_not_a_call() {
+        // The control on the control. `R4-F1` was found by an independent
+        // review that commented out `emit_menu(app);` and watched every gate
+        // stay green, so this pins the stripping itself rather than trusting
+        // that the helper above does what its name says.
+        // The blank line left behind is deliberate and harmless: only the
+        // presence of tokens is ever asked about, never the layout.
+        assert_eq!(strip_comments("a();\n// b();\nc();\n"), "a();\n\nc();\n");
+        assert_eq!(strip_comments("a(); /* b(); */ c();"), "a();  c();");
+        assert!(!strip_comments("    // emit_menu(app);\n").contains("emit_menu"));
+        // And it must not eat live code that merely follows a comment.
+        assert!(strip_comments("// note\nemit_menu(app);\n").contains("emit_menu(app);"));
     }
 
     #[test]
@@ -4146,12 +4218,21 @@ mod tests {
         // and emitting both need an `AppHandle`, and there is no seam for one.
         //
         // ⚠️ **This is a SOURCE control and it is weaker than the test above.**
-        // It pins the shape of three lines rather than their behaviour, so it
-        // catches deletion and neutering (`if changed` -> `if false`) and would
-        // not catch a subtler rewrite that kept the same text. It is here
-        // because the alternative measured by the review is nothing at all:
-        // disabling the emit left 316 tests green. Stated rather than implied,
-        // so nobody reads this as equivalent to the drill.
+        // It pins the shape of three lines rather than their behaviour. It is
+        // here because the alternative measured by the review is nothing at
+        // all: disabling the emit left 316 tests green.
+        //
+        // **What it catches**: deletion, neutering (`if changed` -> `if false`),
+        // and -- since `R4-F1` -- commenting the line out, which is the ordinary
+        // way a line gets disabled and the way this control could not see.
+        //
+        // ⚠️ **What it does NOT catch, measured rather than guessed**: a
+        // token-preserving move, such as the call being lifted into a closure
+        // that is never invoked. Round 4's `S4` did exactly that and passed both
+        // this control and `clippy -D warnings`. No source control can catch
+        // that class; only a seam that lets a test observe the emit can, and
+        // there is none because it needs an `AppHandle`. Recorded as UP-TAKE
+        // `I-81` rather than left as a gap this comment implies away.
         let body = fn_body(
             include_str!("placement.rs"),
             "fn pump_menu(app: &AppHandle, point: Point) -> Option<MenuHit> {",

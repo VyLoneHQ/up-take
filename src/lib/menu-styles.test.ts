@@ -42,6 +42,16 @@ import pageSvelte from '../routes/+page.svelte?raw';
  * A background arriving from an inline style, or from a rule outside the
  * `<style>` block. Anything about layout, geometry or actual rendering.
  *
+ * ⚠️ **The stated limits used to cover only "a rewrite that kept the same
+ * tokens while changing what they do", and round 4 walked in through the
+ * inverse** -- a rewrite that changes the tokens while keeping what they do.
+ * `.menu-item:is(.open)` and `.menu-item.open:not(.nothing)` both restored the
+ * defect while matching no string this file looked for. That direction is now
+ * closed for the cascade rule by asserting a property instead of a spelling. It
+ * is NOT closed for the `toContain` assertions in the markup block below: those
+ * pin tokens, so a rename that kept the feature working fails them for no
+ * reason, and a rewrite that kept the token while moving the behaviour passes.
+ *
  * ⚠️ **This list used to include "the two alphas being swapped so the guard is
  * satisfied while the row still dims", and that was false** -- the third test
  * below compares them and goes red in both directions. Round 3 `F5`: a stated
@@ -130,18 +140,34 @@ describe('the open parent row keeps its hover highlight', () => {
     expect(() => rule(GUARDED)).not.toThrow();
   });
 
-  it('leaves an unguarded .menu-item.open in no rule at all', () => {
-    // ⚠️ Round 3 `F3`: this compared whole trimmed LINES against one exact
-    // spelling, so a selector LIST reintroduced the defect untouched --
-    // `.menu-item.open,\n.menu-item.dummy {` declared later wins on a row
-    // that is both, and the suite stayed at 71/71. Selector lists are split
-    // now, so the shape of the declaration cannot hide it.
+  it('excludes the hovered row from every rule that styles an open one', () => {
+    // ⚠️ **Twice defeated, and the second defeat is why this no longer names
+    // a spelling at all.**
+    //
+    // Round 3 `F3`: it compared whole trimmed LINES against one exact string,
+    // so a selector LIST walked straight past it at 71/71.
+    //
+    // Round 4 `R4-F2`: splitting the list fixed that spelling and two more
+    // survived, each verified against vitest, svelte-check, `vite build` and
+    // biome. `.menu-item:is(.open)` has specificity (0,2,0), equal to
+    // `.menu-item.hovered` and declared later, so it wins on a row that is
+    // both -- the round-2 defect exactly. `.menu-item.open:not(.nothing)` is
+    // (0,3,0) and wins on specificity outright, which is worse.
+    //
+    // So this asserts the PROPERTY rather than a list of known-bad spellings:
+    // any rule that styles an open menu row must exclude a hovered one.
+    // `:not(.hovered)` is the only way to say that here, and a selector that
+    // does not carry it cannot have meant to.
     const unguarded = rules()
-      .filter((one) => one.selectors.includes('.menu-item.open'))
-      .map((one) => one.selectors.join(', '));
+      .flatMap((one) => one.selectors)
+      .filter(
+        (selector) =>
+          selector.includes('menu-item') && selector.includes('open'),
+      )
+      .filter((selector) => !selector.includes(':not(.hovered)'));
     expect(
       unguarded,
-      'an unguarded `.menu-item.open` selector is back; a row that is hovered AND open takes it',
+      'a rule styles an open menu row without excluding a hovered one, so a row that is hovered AND open takes it and dims',
     ).toEqual([]);
   });
 
