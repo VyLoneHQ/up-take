@@ -9,6 +9,11 @@ mod overlay;
 mod overlay_state;
 #[cfg(windows)]
 mod overlay_wndproc;
+// Test-only. `I-67`: a payload key reaches the frontend by a route no guard in
+// this repository can see, so each module pins its own key sets and this holds
+// the machinery they share.
+#[cfg(test)]
+mod payload_keys;
 mod placement;
 // Not `cfg(windows)`-gated, for the same reason `output` is not: it calls
 // `uptake_capture::capture_region`, which is itself Windows-only, and the

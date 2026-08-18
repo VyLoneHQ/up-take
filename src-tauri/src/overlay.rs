@@ -1699,6 +1699,105 @@ pub fn overlay_request_state(app: AppHandle) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    use crate::payload_keys::{assert_keys, assert_payload_coverage};
+
+    /// Every payload this module emits, and the keys the frontend indexes it
+    /// with (`I-67`).
+    ///
+    /// **Read as a wire contract, not as a list of Rust fields.** A `rename` or
+    /// a `rename_all` is invisible to anything reading the struct definition and
+    /// is the only thing that decides these strings, which is `UT-F-72`: the
+    /// single `rename_all` in `src-tauri` can be deleted with every gate in the
+    /// repository staying green.
+    ///
+    /// **Nothing in this module has a rename, and that is the fact being
+    /// pinned.** `state_payload_keys` includes `freeze_probe`, snake_case,
+    /// because `+page.svelte` reads `event.payload.freeze_probe`. Adding a
+    /// `rename_all` here to match `HoverPayload` would look like tidying,
+    /// compile, pass clippy, and break the freeze latency probe silently.
+    const STATE_PAYLOAD_KEYS: &[&str] = &[
+        "state",
+        "origin",
+        "monitors",
+        "armed",
+        "frozen",
+        "stills",
+        "freeze_probe",
+    ];
+
+    #[test]
+    fn every_payload_this_module_emits_keeps_the_keys_the_frontend_reads() {
+        assert_keys(
+            "StatePayload",
+            &StatePayload {
+                state: "placement",
+                origin: (0, 0),
+                monitors: Vec::new(),
+                armed: None,
+                frozen: false,
+                stills: Vec::new(),
+                freeze_probe: None,
+            },
+            STATE_PAYLOAD_KEYS,
+        );
+        let area = AreaPayload {
+            id: 1,
+            rect: (0, 0, 10, 10),
+            close: (0, 0, 18, 18),
+            layer: "auto",
+            kind: "default",
+            zoom: 1.0,
+        };
+        assert_keys(
+            "AreaPayload",
+            &area,
+            &["id", "rect", "close", "layer", "kind", "zoom"],
+        );
+        assert_keys(
+            "AreasPayload",
+            &AreasPayload { areas: vec![area] },
+            &["areas"],
+        );
+        assert_keys(
+            "ActiveMonitorPayload",
+            &ActiveMonitorPayload { index: Some(0) },
+            &["index"],
+        );
+        assert_keys(
+            "FlashPayload",
+            &FlashPayload { id: 1, nonce: 7 },
+            &["id", "nonce"],
+        );
+        assert_keys(
+            "PinPayload",
+            &PinPayload { id: 1, url: None },
+            &["id", "url"],
+        );
+    }
+
+    #[test]
+    fn no_payload_in_this_module_escapes_the_key_table() {
+        // The completeness half, and the half a hand-maintained table cannot
+        // supply for itself. A new `Serialize` struct here reaches the frontend
+        // through a route `area-kinds.test.ts` says in its own doc it cannot
+        // see, so the only thing that can notice one is a control that reads
+        // this file. See `payload_keys` for why a regex is defensible as a
+        // control when `I-67`'s constraint warns against one as a check.
+        assert_payload_coverage(
+            "overlay.rs",
+            include_str!("overlay.rs"),
+            &[
+                "StatePayload",
+                "AreaPayload",
+                "AreasPayload",
+                "ActiveMonitorPayload",
+                "FlashPayload",
+                "PinPayload",
+            ],
+            &[],
+        );
+    }
+
     /// The termination property of the sync ↔ window-event cycle. Everything
     /// else in this module needs a real window; this one decision does not, and
     /// it is the one whose failure mode is an infinite loop.
