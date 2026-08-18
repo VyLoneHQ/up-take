@@ -855,8 +855,17 @@ onMount(() => {
    hover on purpose: the pointer is somewhere else, and this says "the list
    beside you came from here" rather than "a click lands here". Without it the
    parent goes dark the moment the pointer crosses another row, and the open
-   list sits there with nothing pointing at it. */
-.menu-item.open {
+   list sits there with nothing pointing at it.
+
+   `:not(.hovered)` is load-bearing, not decoration. A parent row carries BOTH
+   classes for the whole time the pointer rests on it -- which is the ordinary
+   state, since resting there is what opens the list -- and these two rules have
+   equal specificity, so without the guard the later declaration wins and the row
+   DIMS from 0.22 to 0.12 at the exact moment it is pointed at. Found by round 2
+   of the `1.28` review. Guarding the selector rather than reordering the file is
+   deliberate: order is invisible at the point of edit, and a later tidy that
+   sorts these rules alphabetically would put the defect straight back. */
+.menu-item.open:not(.hovered) {
   background: rgba(120, 180, 255, 0.12);
 }
 

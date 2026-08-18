@@ -2185,9 +2185,9 @@ mod tests {
         assert!(error.contains("3000"), "{error}");
         assert!(error.contains("1300"), "{error}");
         // The count, with its noun. `contains('4')` was the first version and it
-        // passed for 4, 14, 40 and a hardcoded literal alike: a check whose
-        // falsifying input is hard to name is one of `A3`'s greens that could
-        // not have been earned.
+        // passed for 4, 14, 40 and a hardcoded literal alike -- a green nobody
+        // could name a falsifying input for, which is a green that was never
+        // earned.
         assert!(error.contains("4 monitor(s)"), "{error}");
     }
 
