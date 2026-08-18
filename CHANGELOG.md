@@ -25,12 +25,18 @@ Until then it is written by hand.
 - System tray icon and menu, and a single-instance guard.
 - Areas: drag to create, then move, resize and dismiss them. Areas live until dismissed or until the
   app exits, and do not survive a restart.
-- Two area types. A plain pinned region, and a screenshot area that captures what is under it and
-  keeps the still. Copy to clipboard or save to a file.
+- Three area types, chosen from the area's own right-click menu. A plain pinned region; a screenshot
+  area that captures what is under it and keeps the still, which Copy and Save export; and a filter
+  area that tints what is underneath and lets clicks pass through to it.
 - Freeze the screen while placing an area, with `Ctrl+Space`.
 - The overlay is excluded from screen capture, so other recording tools do not see it.
 
-<!-- source: STATUS.md Phase 1 (1A merged, 1B partial, 1D partial); ROADMAP.md tasks 1.1 to 1.9f.
+<!-- source: STATUS.md Phase 1 (1A merged, 1B partial, 1D partial); ROADMAP.md tasks 1.1 to 1.9f,
+     plus 1.27 (area types chosen from the area's own menu) and 1.28 (those types in a submenu),
+     which the "Three area types" entry above derives from and which sit outside the 1.1-1.9f range
+     this line used to name on its own. `P-6` asks for the source of the claim rather than of the
+     page, and that range stopped covering the entry when the entry was rewritten. Corrected after
+     the independent review of 1.28.
      The previous entry read "Project scaffolding: license, community files, CI groundwork" and had
      not been touched since Phase 0. -->
 

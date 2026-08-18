@@ -213,6 +213,30 @@ export interface MenuItemView {
   rect: PhysRect;
   label: string;
   checked: boolean;
+  /**
+   * This row opens a child list, so it draws the marker that says so.
+   *
+   * One lowercase word, like every other key in this payload, and that is
+   * deliberate rather than incidental: `UT-F-72` is a payload key that reached
+   * this side only because of a `#[serde(rename_all)]` no gate in the repository
+   * could see being removed. A name that is identical in both conventions needs
+   * no attribute and so has nothing to lose.
+   */
+  parent: boolean;
+}
+
+/** The open child list of one parent row (roadmap 1.28). */
+export interface ChildMenuView {
+  rect: PhysRect;
+  items: MenuItemView[];
+  hovered: number | null;
+  /**
+   * Index into {@link MenuView.items} of the row this list belongs to, drawn as
+   * open. Separate from `hovered` because both are true at once: while the
+   * pointer is in this list nothing at the top level is hovered, and the row it
+   * came from still has to read as its source.
+   */
+  owner: number;
 }
 
 /** The open per-area menu (ADR-0013's Layer control). */
@@ -220,6 +244,8 @@ export interface MenuView {
   rect: PhysRect;
   items: MenuItemView[];
   hovered: number | null;
+  /** The open child list, drawn on top of the rows beneath it. */
+  child: ChildMenuView | null;
 }
 
 /** The payload of the `overlay://menu` event; `menu` is null when none is open. */
@@ -261,10 +287,24 @@ export interface AreaFrame {
   source: boolean;
 }
 
+/** One drawable row. */
+export interface MenuItemFrame {
+  rect: CssRect;
+  label: string;
+  checked: boolean;
+  hovered: boolean;
+  /** Draw the marker that says this row opens a child list. */
+  parent: boolean;
+  /** This row's child list is open, so draw it as the list's source. */
+  open: boolean;
+}
+
 /** The open menu ready to draw. */
 export interface MenuFrame {
   rect: CssRect;
-  items: { rect: CssRect; label: string; checked: boolean; hovered: boolean }[];
+  items: MenuItemFrame[];
+  /** The open child list, or null when no parent row has one open. */
+  child: { rect: CssRect; items: MenuItemFrame[] } | null;
 }
 
 /**
@@ -318,7 +358,46 @@ export function areaFramesCss(
   }));
 }
 
-/** Converts the open menu into drawable geometry, or `null` when none is open. */
+/** One list's rows in CSS geometry, or `null` when the conversion fails. */
+function menuItemsCss(
+  view: { items: MenuItemView[]; hovered: number | null },
+  origin: Origin,
+  dpr: number,
+  openIndex: number | null = null,
+): MenuItemFrame[] | null {
+  const rects = physRectsToCss(
+    view.items.map((item) => item.rect),
+    origin,
+    dpr,
+  );
+  if (rects.length !== view.items.length) return null;
+  return view.items.map((item, index) => ({
+    rect: rects[index] as CssRect,
+    label: item.label,
+    checked: item.checked,
+    hovered: index === view.hovered,
+    parent: item.parent,
+    open: index === openIndex,
+  }));
+}
+
+/**
+ * Converts the open menu into drawable geometry, or `null` when none is open.
+ *
+ * The child list's own `null` checks are **forced by the types and unreachable
+ * in practice**, and saying so is the point. The only way a conversion fails is
+ * an unusable `dpr` ({@link physRectsToCss}), `dpr` is one scalar shared by both
+ * lists, and the parent is converted first, so there is no input for which the
+ * parent succeeds and the child does not.
+ *
+ * An earlier version of this comment claimed the branch *"drops the whole menu,
+ * rather than drawing the parent alone"*, and a test asserted it. Both were
+ * describing behaviour no input can produce: an independent review mutated the
+ * branch to draw the parent alone and the whole suite stayed green, because the
+ * only case reaching it is the `dpr` case that returns two lines earlier. The
+ * claim is gone and the test with it; the `null` handling stays because
+ * TypeScript requires it, which is a different and honest reason.
+ */
 export function menuFrameCss(
   menu: MenuView | null,
   origin: Origin,
@@ -327,21 +406,16 @@ export function menuFrameCss(
   if (menu === null) return null;
   const rect = physRectToCss(menu.rect, origin, dpr);
   if (rect === null) return null;
-  const items = physRectsToCss(
-    menu.items.map((item) => item.rect),
-    origin,
-    dpr,
-  );
-  if (items.length !== menu.items.length) return null;
-  return {
-    rect,
-    items: menu.items.map((item, index) => ({
-      rect: items[index] as CssRect,
-      label: item.label,
-      checked: item.checked,
-      hovered: index === menu.hovered,
-    })),
-  };
+  const items = menuItemsCss(menu, origin, dpr, menu.child?.owner ?? null);
+  if (items === null) return null;
+  let child: MenuFrame['child'] = null;
+  if (menu.child !== null) {
+    const childRect = physRectToCss(menu.child.rect, origin, dpr);
+    const childItems = menuItemsCss(menu.child, origin, dpr);
+    if (childRect === null || childItems === null) return null;
+    child = { rect: childRect, items: childItems };
+  }
+  return { rect, items, child };
 }
 
 /**
