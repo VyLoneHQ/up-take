@@ -31,7 +31,12 @@ Until then it is written by hand.
 - Freeze the screen while placing an area, with `Ctrl+Space`.
 - The overlay is excluded from screen capture, so other recording tools do not see it.
 
-<!-- source: STATUS.md Phase 1 (1A merged, 1B partial, 1D partial); ROADMAP.md tasks 1.1 to 1.9f.
+<!-- source: STATUS.md Phase 1 (1A merged, 1B partial, 1D partial); ROADMAP.md tasks 1.1 to 1.9f,
+     plus 1.27 (area types chosen from the area's own menu) and 1.28 (those types in a submenu),
+     which the "Three area types" entry above derives from and which sit outside the 1.1-1.9f range
+     this line used to name on its own. `P-6` asks for the source of the claim rather than of the
+     page, and that range stopped covering the entry when the entry was rewritten. Corrected after
+     the independent review of 1.28.
      The previous entry read "Project scaffolding: license, community files, CI groundwork" and had
      not been touched since Phase 0. -->
 

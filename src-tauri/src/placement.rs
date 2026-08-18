@@ -1338,11 +1338,28 @@ fn submenu_argument(menu: &AreaMenu, point: Point) -> Option<usize> {
 
 /// Where `point` falls in an open menu.
 ///
-/// **The child list is tested first, because it draws on top.** The two lists
-/// are placed flush and do not overlap today, so the order is currently
-/// unobservable; it is written this way because the drawing order is the thing
-/// that decides it, and a later change to the geometry must not silently make
-/// the rows underneath win.
+/// **The child list is tested first, because it draws on top.**
+///
+/// ⚠️ **This said the two lists "do not overlap today, so the order is
+/// currently unobservable", and that is false.** Measured by the independent
+/// review of `1.28` over the real [`interaction::menu_bounds`] and
+/// [`interaction::submenu_bounds`]: below roughly `2 x MENU_WIDTH` of monitor
+/// width the left-flip clamps the child list into the parent's rectangle, and
+/// they overlap.
+///
+/// ```text
+/// monitor width   menu.x   child.x   child.right   overlap
+///           200       23         0           176   yes
+///           300      123         0           176   yes
+///           400      223        47           223   no
+/// ```
+///
+/// No real monitor is that narrow, so nothing is broken. But the ordering is
+/// **already load-bearing at the margin** rather than merely prudent, which is a
+/// better argument for it than the one this comment used to make -- and a reader
+/// who checks the old premise finds it false and concludes the constraint has
+/// lapsed. Same failure as the `monitor_bounds_at` note in [`pump_menu`], found
+/// in the same review.
 fn menu_hit(menu: &AreaMenu, point: Point) -> Option<MenuHit> {
     if let Some(open) = menu.open.as_ref() {
         if let Some(index) = open.items.iter().position(|item| item.rect.contains(point)) {
@@ -1397,31 +1414,86 @@ fn apply_menu_hover(menu: &mut AreaMenu, hit: Option<MenuHit>) -> bool {
     changed
 }
 
+/// Everything one pointer tick decides about the open menu.
+///
+/// Returned by [`menu_pump_step`] so that the decisions are separable from the
+/// two things that need an [`AppHandle`] -- resolving the monitor and emitting.
+#[derive(Debug, PartialEq, Eq)]
+#[must_use = "a tick that is computed and dropped leaves the frontend drawing a stale menu"]
+struct MenuPump {
+    /// Whether anything the frontend draws has changed.
+    changed: bool,
+    /// Where the pointer landed, so the caller can pick a cursor shape.
+    hit: Option<MenuHit>,
+    /// The top-level row whose child list this tick has earned, if any.
+    to_open: Option<usize>,
+}
+
+/// Advances the open menu by one pointer tick, and decides nothing else.
+///
+/// # Why this is a function
+///
+/// **Every unit this composes was drilled and this composition was not.** The
+/// independent review of `1.28` applied seven mutations to `pump_menu`'s body
+/// and every one of them left all 316 tests green, five of them removing the
+/// feature the roadmap row exists to ship: swapping the two arguments to
+/// [`submenu_step`], dropping the clock advance, replacing the `Open` arm with
+/// `Hold`, and disabling the emit each mean the child list never opens, or
+/// opens and is never drawn. Twenty-four unit-level mutations went red in the
+/// same pass. The units were never the problem.
+///
+/// So the locked block became this, taking `now` rather than reading the clock,
+/// and returning the open decision rather than acting on it. That is the same
+/// refactor this change already performed twice on itself -- `menu_payload` out
+/// of `emit_menu`, `menu_covers` out of `menu_contains` -- and for the same
+/// reason both times.
+///
+/// **What is still not reachable from a test**, and is held by
+/// `pump_menu_composes_the_step_it_is_given` instead: resolving the monitor and
+/// calling [`emit_menu`], both of which need an `AppHandle`.
+fn menu_pump_step(menu: &mut AreaMenu, point: Point, now: u64) -> MenuPump {
+    let hit = menu_hit(menu, point);
+    let mut changed = apply_menu_hover(menu, hit);
+    let argument = submenu_argument(menu, point);
+    let (step, since) = submenu_step(
+        now,
+        argument,
+        menu.open.as_ref().map(|open| open.parent),
+        menu.argument,
+    );
+    menu.argument = since;
+    if step == SubmenuStep::Close {
+        menu.open = None;
+        changed = true;
+    }
+    MenuPump {
+        changed,
+        hit,
+        to_open: match step {
+            SubmenuStep::Open(parent) => Some(parent),
+            SubmenuStep::Close | SubmenuStep::Hold => None,
+        },
+    }
+}
+
 /// Advances the open menu for a pointer at `point`: the hover highlight in
 /// whichever list holds it, and the child list's own open and close timing.
 /// Emits when anything the frontend draws has changed, and returns where the
 /// pointer landed so the caller can pick a cursor shape without asking twice.
+///
+/// The deciding is [`menu_pump_step`]'s; this holds the lock around it and does
+/// the two things that need an `AppHandle`.
 fn pump_menu(app: &AppHandle, point: Point) -> Option<MenuHit> {
-    let (mut changed, hit, step) = {
+    let MenuPump {
+        mut changed,
+        hit,
+        to_open,
+    } = {
         let mut guard = lock(&MENU);
         let menu = guard.as_mut()?;
-        let hit = menu_hit(menu, point);
-        let mut changed = apply_menu_hover(menu, hit);
-        let argument = submenu_argument(menu, point);
-        let (step, since) = submenu_step(
-            elapsed_ms(),
-            argument,
-            menu.open.as_ref().map(|open| open.parent),
-            menu.argument,
-        );
-        menu.argument = since;
-        if step == SubmenuStep::Close {
-            menu.open = None;
-            changed = true;
-        }
-        (changed, hit, step)
+        menu_pump_step(menu, point, elapsed_ms())
     };
-    if let SubmenuStep::Open(parent) = step {
+    if let Some(parent) = to_open {
         // The monitor is resolved with `MENU` unlocked, matching `open_menu`,
         // which also resolves it before locking `MENU`. One nesting order for
         // this pair is cheaper than reasoning about whether a second is safe.
@@ -3867,6 +3939,237 @@ mod tests {
                 menu.open.as_ref().and_then(|open| open.hovered),
                 child,
                 "the child hover with hit {hit:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn one_whole_gesture_opens_holds_and_closes_the_child_list() {
+        // `F1` of round 3, and the reason it is a SEQUENCE rather than five
+        // assertions: every unit below was already drilled and every unit drill
+        // went red, and then seven mutations to the site that COMPOSES them all
+        // stayed green at 316/316. Five of those seven mean the list never opens
+        // or never closes. A composition is its own unit.
+        //
+        // The gesture, as the pointer actually performs it: arrive on the parent
+        // row, wait out the open delay, travel across a sibling row toward the
+        // list, arrive inside it, then leave entirely.
+        let mut menu = open_menu_over_default();
+        let parent = parent_index(&menu);
+        let on_parent = centre(menu.items[parent].rect);
+
+        // Arrival argues for opening and nothing more: the delay is not served.
+        let step = super::menu_pump_step(&mut menu, on_parent, 1_000);
+        assert_eq!(step.to_open, None, "it opened before the delay was served");
+        assert_eq!(step.hit, Some(super::MenuHit::Row(parent)));
+        assert!(menu.open.is_none());
+
+        // The delay passes with the pointer still there. THIS is the tick the
+        // argument-swap and the dropped clock advance both kill.
+        let step = super::menu_pump_step(&mut menu, on_parent, 1_000 + super::SUBMENU_OPEN_MS);
+        assert_eq!(
+            step.to_open,
+            Some(parent),
+            "the list never opened, which is the whole of roadmap 1.28"
+        );
+        // NOT `changed`, and that is the design rather than an oversight: the
+        // hover has not moved, so this tick changes nothing by itself. The
+        // opening is a DECISION here, and its frontend change is contributed
+        // by `open_submenu`'s return value in `pump_menu` -- which is exactly
+        // why dropping `to_open` on the floor is silent, and why `MenuPump`
+        // is `#[must_use]`.
+        assert!(
+            !step.changed,
+            "the step claimed a change of its own; the open is `pump_menu`'s to contribute"
+        );
+
+        // `to_open` is a decision, not an act -- `pump_menu` needs a monitor for
+        // that -- so the fixture performs it, exactly as `open_submenu` would.
+        let opened = with_type_list_open(&mut menu);
+        assert_eq!(opened, parent);
+
+        // Travel: the pointer crosses a sibling row on its way to the list. That
+        // argues CLOSE on every tick, and the clock restart is what buys the
+        // diagonal. If the list dies here the feature is unusable by pointer.
+        let Some(other) = menu
+            .items
+            .iter()
+            .enumerate()
+            .find(|(index, item)| *index != parent && item.children.is_empty())
+            .map(|(index, _)| index)
+        else {
+            panic!("the menu has a leaf row that is not the parent")
+        };
+        let travelling = centre(menu.items[other].rect);
+        let mut now = 1_000 + super::SUBMENU_OPEN_MS;
+        for tick in 1..super::SUBMENU_CLOSE_MS {
+            now += 1;
+            let step = super::menu_pump_step(&mut menu, travelling, now);
+            assert!(
+                menu.open.is_some(),
+                "the list closed {tick} ms into the diagonal travel, before SUBMENU_CLOSE_MS"
+            );
+            assert_eq!(step.to_open, None, "it re-opened while travelling away");
+        }
+
+        // Arrival inside the list stops the argument and keeps it open.
+        let Some(list) = menu.open.as_ref() else {
+            panic!("the list is open")
+        };
+        let inside = centre(list.items[0].rect);
+        now += 1;
+        let step = super::menu_pump_step(&mut menu, inside, now);
+        assert!(
+            menu.open.is_some(),
+            "the list closed after the pointer arrived in it"
+        );
+        assert_eq!(step.hit, Some(super::MenuHit::Child(0)));
+
+        // Leaving entirely closes it, but not before the close delay. Driven
+        // until it actually closes rather than for a count someone worked out:
+        // the clock restarts on the first tick away, so an off-by-one in the
+        // loop bound reads as "the list never closed" and hides which of the two
+        // properties failed. This asserts both separately.
+        let away = Point::new(10, 10);
+        let departure = now;
+        let mut closed_at = None;
+        for _ in 0..=(super::SUBMENU_CLOSE_MS * 2) {
+            now += 1;
+            // Only the effect on `menu` matters here; `#[must_use]` is right
+            // to ask, and this is the acknowledgement rather than a silencing.
+            let _ = super::menu_pump_step(&mut menu, away, now);
+            if menu.open.is_none() {
+                closed_at = Some(now);
+                break;
+            }
+        }
+        let Some(closed_at) = closed_at else {
+            panic!(
+                "the list never closed, {}ms after the pointer left",
+                now - departure
+            )
+        };
+        assert!(
+            closed_at - departure >= super::SUBMENU_CLOSE_MS,
+            "the list closed {}ms after the pointer left, inside SUBMENU_CLOSE_MS ({}ms) --              the grace that buys the diagonal travel is gone",
+            closed_at - departure,
+            super::SUBMENU_CLOSE_MS
+        );
+    }
+
+    #[test]
+    fn a_tick_that_changes_nothing_says_so() {
+        // The other side of `changed`, and the reason `pump_menu` may emit
+        // conditionally at all: a pointer resting still must not re-emit the
+        // menu on every tick of the pump.
+        let mut menu = open_menu_over_default();
+        let resting = centre(menu.items[parent_index(&menu)].rect);
+        assert!(super::menu_pump_step(&mut menu, resting, 1_000).changed);
+        for now in [1_001, 1_002, 1_003] {
+            let step = super::menu_pump_step(&mut menu, resting, now);
+            assert!(
+                !step.changed,
+                "a still pointer reported a change at {now}, so the menu re-emits every tick"
+            );
+        }
+    }
+
+    /// The body of one top-level `fn` in this file, or a panic naming it.
+    ///
+    /// Used by the composition controls below. It slices to the next top-level
+    /// `fn`, which is enough because every function it is asked about is at
+    /// module level.
+    fn fn_body(source: &str, signature: &str) -> String {
+        let Some(body) = source
+            .split_once(signature)
+            .and_then(|(_, rest)| rest.split_once("\nfn "))
+            .map(|(body, _)| body.to_owned())
+        else {
+            panic!(
+                "`{signature}` not found -- renamed? An unfound function must not read as a pass"
+            )
+        };
+        body
+    }
+
+    #[test]
+    fn clicking_a_parent_row_opens_its_list_and_leaves_the_menu_up() {
+        // The seventh of round 3's `F1` mutations, and the one that is not on
+        // the pump path at all: `if action == MenuAction::OpenSubmenu` -> `if
+        // false && ...` killed click-to-open with 316 tests green.
+        //
+        // A press on a parent row is the only action that does not act on the
+        // area, so it is the only one that must NOT close the menu it is
+        // navigating -- and it bypasses `SUBMENU_OPEN_MS`, because a click is
+        // not an accidental hover.
+        //
+        // Source control, with the same weakness as the one below and for the
+        // same reason: the branch needs an `AppHandle` for both the monitor and
+        // the emit, and there is no seam for one.
+        let body = fn_body(
+            include_str!("placement.rs"),
+            "fn activate_menu_item(app: &AppHandle, hit: MenuHit, release: Point) {",
+        );
+        for required in [
+            // The branch exists and is taken on the real action.
+            "if action == MenuAction::OpenSubmenu {",
+            // It opens at the monitor under the release point...
+            "open_submenu(parent, monitor)",
+            // ...draws the result...
+            "emit_menu(app);",
+            // ...and returns WITHOUT falling through to `close_menu`.
+            "        return;",
+        ] {
+            assert!(
+                body.contains(required),
+                "`activate_menu_item` no longer contains `{required}` -- click-to-open is dead, \
+                 or the navigating action now closes the menu it is navigating"
+            );
+        }
+        // The ordering half: the early return must precede `close_menu`, or the
+        // menu closes under the list it just opened.
+        let Some(returns) = body.find("        return;") else {
+            panic!("the early return is gone")
+        };
+        let Some(closes) = body.find("close_menu(app);") else {
+            panic!("`activate_menu_item` no longer closes the menu for ordinary actions")
+        };
+        assert!(
+            returns < closes,
+            "the parent-row branch no longer returns before `close_menu`"
+        );
+    }
+
+    #[test]
+    fn pump_menu_composes_the_step_it_is_given() {
+        // The residue of `F1` that no unit test can reach: resolving the monitor
+        // and emitting both need an `AppHandle`, and there is no seam for one.
+        //
+        // ⚠️ **This is a SOURCE control and it is weaker than the test above.**
+        // It pins the shape of three lines rather than their behaviour, so it
+        // catches deletion and neutering (`if changed` -> `if false`) and would
+        // not catch a subtler rewrite that kept the same text. It is here
+        // because the alternative measured by the review is nothing at all:
+        // disabling the emit left 316 tests green. Stated rather than implied,
+        // so nobody reads this as equivalent to the drill.
+        let body = fn_body(
+            include_str!("placement.rs"),
+            "fn pump_menu(app: &AppHandle, point: Point) -> Option<MenuHit> {",
+        );
+        for required in [
+            // The decision comes from the extracted step, not from a second copy.
+            "menu_pump_step(menu, point, elapsed_ms())",
+            // An earned list is actually opened, at the monitor under the pointer.
+            "if let Some(parent) = to_open {",
+            "open_submenu(parent, monitor)",
+            // ...and a change is actually drawn. `if false {` fails this.
+            "if changed {",
+            "emit_menu(app);",
+        ] {
+            assert!(
+                body.contains(required),
+                "`pump_menu` no longer contains `{required}` -- the composition the review \
+                 drilled seven times is unguarded again"
             );
         }
     }

@@ -488,9 +488,14 @@ onMount(() => {
       </div>
     {/each}
     <!-- The child list is drawn after the parent's rows so it paints over
-         them. It opens flush beside the panel rather than inside it, so today
-         nothing overlaps; the order matches `menu_hit`, which tests the child
-         list first for the same reason. -->
+         them, and the order matches `menu_hit`, which tests the child list
+         first for the same reason.
+
+         This said "it opens flush beside the panel rather than inside it, so
+         today nothing overlaps". Measured false: below about 2x the menu width
+         of monitor space the left-flip clamps the child list into the parent's
+         rectangle. Unreachable on real hardware, but the paint order is what
+         decides the result there, not a tidiness preference. See `menu_hit`. -->
     {#if menuFrame.child}
       <div
         class="menu"
