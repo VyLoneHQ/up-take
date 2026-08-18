@@ -43,8 +43,17 @@
 //! That is true of a regex used as **the check**, and this is not that. The
 //! regex here is a **completeness control over a hand-maintained list**: it
 //! reports exactly one condition, a payload type that no test names, which is a
-//! real defect every time rather than a candidate for one. It cannot produce the
-//! false positives `OS-F74` is about, because it makes no judgement.
+//! real defect every time rather than a candidate for one.
+//!
+//! ⚠️ **This said it "cannot produce the false positives `OS-F74` is about,
+//! because it makes no judgement", and that was false as written.** Making no
+//! judgement is not the same as reporting no non-defects: a `Serialize` fixture
+//! declared inside a scanned file's own `#[cfg(test)]` module is not a payload
+//! and was reported as an uncovered one. The review round that found it wrote
+//! that fixture and watched the control demand a reason for it. Test code is now
+//! skipped, so the claim holds of what the code does rather than of what its
+//! author meant -- and the honest form of it is narrower: **within production
+//! code** it reports one condition and makes no judgement.
 //!
 //! It still has a failure mode, and it is the opposite one: a reshaped attribute
 //! or a renamed `struct` keyword makes it match nothing, and a silent empty set
@@ -105,6 +114,17 @@ pub(crate) fn assert_payload_coverage(
     covered: &[&str],
     exempt: &[(&str, &str)],
 ) {
+    let test_modules = source
+        .lines()
+        .filter(|line| line.trim_start() == "#[cfg(test)]")
+        .count();
+    assert!(
+        test_modules <= 1,
+        "{what}: {test_modules} `#[cfg(test)]` blocks. `serialize_structs` skips to \
+         end-of-file at the first one, so a second means it scanned less of this \
+         file than this list claims to cover. Split the file, or teach the \
+         extractor to track nesting."
+    );
     let found = serialize_structs(source);
     assert!(
         !found.is_empty(),
@@ -123,40 +143,91 @@ pub(crate) fn assert_payload_coverage(
     }
 }
 
-/// Every `struct` name in `source` whose `derive` mentions `Serialize`.
+/// Every `struct` or `enum` name in `source` whose `derive` mentions
+/// `Serialize`, excluding anything inside the file's `#[cfg(test)]` module.
 ///
-/// Deliberately blind to what sits between the `derive` and the `struct`, so a
-/// `#[serde(...)]` attribute in between does not hide the type. It matches
-/// `derive` lines rather than parsing Rust, which is why the caller asserts the
-/// result is non-empty.
+/// Deliberately blind to what sits between the `derive` and the type, so a
+/// `#[serde(...)]` attribute in between does not hide it. It matches `derive`
+/// lines rather than parsing Rust, which is why the caller asserts the result is
+/// non-empty.
+///
+/// # Three things it got wrong, all found by the same review round
+///
+/// **Visibility defeated it.** The match was `strip_prefix("struct ")` on a
+/// trimmed line, so `pub struct` and `pub(crate) struct` were skipped in
+/// silence -- one keyword, and the completeness control that the whole *this is
+/// the class* claim rests on reported nothing. Every payload in this repository
+/// happens to be private today, which is why the suite was green; a single `pub`
+/// on a new one would have made this control blind at the moment it was most
+/// needed.
+///
+/// **Enums were invisible.** A `#[derive(Serialize)] enum` crosses the wire with
+/// the same consequences and was matched by nothing here.
+///
+/// **`#[cfg(test)]` produced a false positive**, which matters because this
+/// module's own doc claimed it could not produce any. A fixture struct declared
+/// inside a scanned file's test module is not a payload, never reaches the
+/// frontend, and was reported as an uncovered one -- a demand to document a
+/// non-defect, which is how a check gets muted. Test code is skipped rather than
+/// exempted one name at a time.
+///
+/// # Why skipping test code is safe here, and is checked rather than assumed
+///
+/// Skipping to end-of-file at `#[cfg(test)]` is right only while the attribute
+/// appears once and last, which is true of every file in this crate and is not a
+/// property of Rust. So [`assert_payload_coverage`] refuses a source carrying
+/// more than one, rather than silently scanning less of the file than the caller
+/// believes. Under-scanning is the failure this control cannot survive: a short
+/// scan agrees with any list, which is the empty-extraction case one step short.
 fn serialize_structs(source: &str) -> Vec<String> {
     let mut names = Vec::new();
     let mut derives_serialize = false;
     for line in source.lines() {
         let trimmed = line.trim_start();
+        if trimmed == "#[cfg(test)]" {
+            break;
+        }
         if trimmed.starts_with("#[derive(") {
             derives_serialize = trimmed.contains("Serialize");
             continue;
         }
         if derives_serialize && trimmed.starts_with("#[") {
             // A `#[serde(...)]` or a `#[allow(...)]` between the derive and the
-            // struct. Keep looking rather than losing the type.
+            // type. Keep looking rather than losing it.
             continue;
         }
         if derives_serialize {
-            if let Some(rest) = trimmed.strip_prefix("struct ") {
-                let name: String = rest
-                    .chars()
-                    .take_while(|c| c.is_alphanumeric() || *c == '_')
-                    .collect();
-                if !name.is_empty() {
-                    names.push(name);
-                }
+            if let Some(name) = type_name(trimmed) {
+                names.push(name);
             }
             derives_serialize = false;
         }
     }
     names
+}
+
+/// The name declared by `struct X` or `enum X`, with any visibility in front.
+///
+/// Returns `None` for a line that declares neither, which is how a derive
+/// followed by something else stops being tracked.
+fn type_name(trimmed: &str) -> Option<String> {
+    let rest = trimmed
+        .strip_prefix("pub ")
+        .or_else(|| {
+            trimmed
+                .strip_prefix("pub(")
+                .and_then(|after| after.split_once(") "))
+                .map(|(_, after)| after)
+        })
+        .unwrap_or(trimmed);
+    let rest = rest
+        .strip_prefix("struct ")
+        .or_else(|| rest.strip_prefix("enum "))?;
+    let name: String = rest
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    if name.is_empty() { None } else { Some(name) }
 }
 
 #[cfg(test)]
@@ -260,6 +331,116 @@ mod tests {
             a: bool,
         }
         assert_keys("Two", &Two { b: true, a: true }, &["a", "b"]);
+    }
+
+    #[test]
+    fn the_extractor_sees_a_public_struct() {
+        // `F1` of round 2, and the sharpest of the round: the match was
+        // `strip_prefix("struct ")`, so one keyword in front of it defeated the
+        // control that the whole "this is the class" claim rests on. Both
+        // spellings, because `pub(crate)` is the one this crate actually uses
+        // for anything shared.
+        let public = "#[derive(Serialize)]\npub struct Exported {\n    id: u64,\n}\n";
+        assert_eq!(serialize_structs(public), vec!["Exported"]);
+        let restricted = "#[derive(Serialize)]\npub(crate) struct Shared {\n    id: u64,\n}\n";
+        assert_eq!(serialize_structs(restricted), vec!["Shared"]);
+    }
+
+    #[test]
+    fn the_extractor_sees_a_serializable_enum() {
+        // `F2`. An enum crosses the wire with the same consequences and was
+        // matched by nothing, so the class was closed over structs alone.
+        let source = "#[derive(Serialize)]\nenum Verdict {\n    Ok,\n}\n";
+        assert_eq!(serialize_structs(source), vec!["Verdict"]);
+        let public = "#[derive(Serialize)]\npub enum Outcome {\n    Ok,\n}\n";
+        assert_eq!(serialize_structs(public), vec!["Outcome"]);
+    }
+
+    #[test]
+    fn the_extractor_skips_a_fixture_in_the_test_module() {
+        // `F3`. A fixture inside a scanned file's own `#[cfg(test)]` module is
+        // not a payload, and reporting one is a demand to document a non-defect
+        // -- which this module's doc claimed it could not produce.
+        let source = "#[derive(Serialize)]\nstruct Real {\n    a: bool,\n}\n\
+                      #[cfg(test)]\nmod tests {\n    #[derive(Serialize)]\n\
+                      struct Fixture {\n        b: bool,\n    }\n}\n";
+        assert_eq!(serialize_structs(source), vec!["Real"]);
+    }
+
+    #[test]
+    #[should_panic(expected = "`#[cfg(test)]` blocks")]
+    fn the_coverage_control_refuses_a_file_with_two_test_modules() {
+        // The cost of skipping to end-of-file: it is only sound while the
+        // attribute appears once. A second one means the scan stopped early, and
+        // a short scan agrees with any list -- the empty-extraction failure one
+        // step short of empty, and therefore one step short of the arm that
+        // already catches it.
+        assert_payload_coverage(
+            "a fixture",
+            "#[derive(Serialize)]\nstruct Real {\n    a: bool,\n}\n\
+             #[cfg(test)]\nmod a {}\n#[cfg(test)]\nmod b {}\n",
+            &["Real"],
+            &[],
+        );
+    }
+
+    #[test]
+    fn every_module_that_emits_a_payload_is_covered_by_a_test_that_names_it() {
+        // `F4`/`F5`: the class was closed per FILE. Two call sites pass
+        // `include_str!` for `overlay.rs` and `placement.rs`, so a payload
+        // declared in a THIRD module reached the frontend with nothing to notice
+        // -- the completeness control had itself no completeness control. This
+        // reads the source directory instead of a list of files someone
+        // remembered to extend.
+        //
+        // It cannot use `include_str!`, which needs a literal path, so it reads
+        // from `CARGO_MANIFEST_DIR`. That is resolved at compile time and the
+        // sources are beside the test, so it works in CI exactly as it does
+        // here; a missing directory panics rather than passing empty.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            panic!(
+                "the crate source directory is readable at {}",
+                dir.display()
+            )
+        };
+        let mut emitting: Vec<String> = Vec::new();
+        for entry in entries {
+            let Ok(entry) = entry else {
+                panic!("the crate source directory is readable")
+            };
+            let path = entry.path();
+            if path.extension().is_none_or(|ext| ext != "rs") {
+                continue;
+            }
+            let Ok(source) = std::fs::read_to_string(&path) else {
+                panic!("{} is readable", path.display())
+            };
+            if serialize_structs(&source).is_empty() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                panic!("{} has a name", path.display())
+            };
+            emitting.push(name.to_owned());
+        }
+        emitting.sort();
+        assert!(
+            !emitting.is_empty(),
+            "no module in {} declares a Serialize type. The extractor is broken, \
+             not the crate.",
+            dir.display()
+        );
+        // The two modules whose tests call `assert_payload_coverage`. A third
+        // name here is a module whose payloads nothing pins: give it a coverage
+        // test of its own, and add it here in the same change.
+        assert_eq!(
+            emitting,
+            vec!["overlay.rs", "placement.rs"],
+            "a module declares a Serialize type and no `assert_payload_coverage` \
+             call names it. `I-67`: a payload key is reachable by no other guard \
+             in this repository."
+        );
     }
 
     #[test]
