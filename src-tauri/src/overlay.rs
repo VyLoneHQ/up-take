@@ -1476,8 +1476,15 @@ struct PinPayload {
 /// first asking whether they have. See that type for why this is an argument
 /// rather than a check the caller is trusted to perform.
 ///
+/// **By value, and that is the second half of the guarantee.** A `&FreshPin`
+/// makes the proof re-usable: one call to `still_holds` could answer for any
+/// number of later emits, including emits after the pixels had gone, which is
+/// `I-61` with an extra step rather than `I-61` fixed. Consuming it makes the
+/// proof single-use, so each announcement is backed by its own question. The
+/// type is deliberately neither `Copy` nor `Clone` for the same reason.
+///
 /// [`FreshPin`]: crate::captures::FreshPin
-pub(crate) fn emit_pin(app: &AppHandle, pin: &crate::captures::FreshPin) -> Result<(), String> {
+pub(crate) fn emit_pin(app: &AppHandle, pin: crate::captures::FreshPin) -> Result<(), String> {
     app.emit(
         PIN_EVENT,
         PinPayload {

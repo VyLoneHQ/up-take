@@ -605,7 +605,7 @@ pub(crate) fn capture_into_area(app: &AppHandle, id: AreaId, bounds: Rect) {
             // closed and has been corrected below.
             match crate::captures::still_holds(&app, id, version) {
                 Some(fresh) => {
-                    if let Err(error) = crate::overlay::emit_pin(&app, &fresh) {
+                    if let Err(error) = crate::overlay::emit_pin(&app, fresh) {
                         eprintln!("output: pinned the capture but could not announce it: {error}");
                     }
                 }
@@ -836,7 +836,7 @@ fn magnify_once(app: &AppHandle, id: AreaId, source: Rect, generation: u64) {
         let Some(fresh) = crate::captures::still_holds(app, id, version) else {
             return Ok(());
         };
-        crate::overlay::emit_pin(app, &fresh)
+        crate::overlay::emit_pin(app, fresh)
     });
     report("magnify", started, &split, outcome);
 }

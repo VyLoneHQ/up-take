@@ -158,6 +158,13 @@ impl CaptureStore {
 /// future.** The store can be emptied between this being made and the emit that
 /// consumes it. That race is narrower than the one it replaces and it is real;
 /// it is recorded as a backlog row rather than implied away by the type.
+///
+/// **Single-use, and neither `Copy` nor `Clone` on purpose.**
+/// [`crate::overlay::emit_pin`] takes it by value, so one answer from
+/// [`still_holds`] backs exactly one announcement. A shared reference would let
+/// a single question answer for every later emit, including emits after the
+/// pixels had gone -- which is the defect this type exists for, with one more
+/// step in front of it. Adding either derive re-opens that, so neither is here.
 pub(crate) struct FreshPin {
     id: AreaId,
     version: u64,
