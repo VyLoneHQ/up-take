@@ -4084,9 +4084,7 @@ mod tests {
         // and every required token below appears in it as an assertion string,
         // so a reordering that put the tests first would let a control read its
         // own expectations back and pass on a gutted function.
-        let production = source
-            .split_once("\n#[cfg(test)]")
-            .map_or(source, |(head, _)| head);
+        let production = production_of(source);
         let Some(body) = production
             .split_once(signature)
             .and_then(|(_, rest)| rest.split_once("\nfn "))
@@ -4177,7 +4175,11 @@ mod tests {
         //
         // Source control, with the same weakness as the one below and for the
         // same reason: the branch needs an `AppHandle` for both the monitor and
-        // the emit, and there is no seam for one.
+        // the emit, and no seam for one exists TODAY. ⚠️ One is possible: the
+        // round-5 reviewer built `pump_menu_tail(changed, to_open, monitor_of,
+        // open, emit)` -- five plain parameters, three of them closures,
+        // touching neither `MENU` nor an `AppHandle` -- and measured the
+        // `if changed` branch becoming observable. See `I-81`.
         let body = fn_body(
             include_str!("placement.rs"),
             "fn activate_menu_item(app: &AppHandle, hit: MenuHit, release: Point) {",
@@ -4212,10 +4214,90 @@ mod tests {
         );
     }
 
+    /// A source whose only matching signature lives inside `#[cfg(test)]`.
+    ///
+    /// Shared by the two tests below so the fixture cannot drift between them.
+    fn signature_only_in_the_test_module(signature: &str) -> String {
+        // The trailing `fn after` is load-bearing. `fn_body` slices from the
+        // signature to the NEXT top-level `fn`, so a fixture that ends without
+        // one makes it panic for lack of a terminator rather than for lack of
+        // the signature -- and the `#[should_panic]` below then passes whether
+        // the truncation works or not. Caught by drilling the drill.
+        format!(
+            "fn other() {{}}\n#[cfg(test)]\nmod tests {{\n    {signature}\n        assert!(true);\n    }}\n}}\nfn after() {{}}\n"
+        )
+    }
+
+    #[test]
+    #[should_panic(expected = "not found")]
+    fn fn_body_refuses_to_read_the_test_module() {
+        // `R5-F3`. `fn_body` truncates at `#[cfg(test)]` because `include_str!`
+        // pulls that module in too, and every token the source controls require
+        // appears there as an assertion string -- so a reordering would let a
+        // control read its own expectations back and pass against a gutted
+        // function.
+        //
+        // Asserted THROUGH `fn_body` rather than through the helper it calls,
+        // because the first two attempts at this test checked the helper and
+        // stayed green when `fn_body` stopped calling it. A defence is only
+        // pinned at the point it is used.
+        const SIGNATURE: &str = "fn target(app: &AppHandle) {";
+        let _ = fn_body(&signature_only_in_the_test_module(SIGNATURE), SIGNATURE);
+    }
+
+    #[test]
+    fn fn_body_reads_production_code_with_its_comments_removed() {
+        // `R5-F3`, and the first version of this test did not have a falsifying
+        // input either -- it asserted a property of THIS file, where the
+        // production definition already precedes the test module, so both
+        // defences could be deleted and it stayed green. The reviewer said as
+        // much about the truncation; the same was true of the stripping, because
+        // `a_commented_out_call_is_not_a_call` exercises `strip_comments`
+        // directly and nothing observed `fn_body` still calling it.
+        //
+        // Synthetic sources fix that: each defence gets an input that fails
+        // without it, independent of how this file happens to be ordered.
+        const SIGNATURE: &str = "fn target(app: &AppHandle) {";
+
+        // Truncation. The signature appears ONLY inside the test module, so
+        // production code contains no such function and `fn_body` must say so.
+        // Without the `#[cfg(test)]` cut it finds the test-module copy and
+        // happily returns assertions as if they were production code.
+        // Stripping, observed through `fn_body` rather than through
+        // `strip_comments`. A body whose only mention of the call is commented
+        // out must come back without it.
+        let commented =
+            format!("{SIGNATURE}\n    // emit_menu(app);\n    let x = 1;\n}}\nfn after() {{}}\n");
+        let body = fn_body(&commented, SIGNATURE);
+        assert!(
+            !body.contains("emit_menu"),
+            "`fn_body` returned a commented-out call as if it were live code: {body:?}"
+        );
+        // ...and a live call after a comment must survive, or the controls go
+        // red on working code and get deleted for crying wolf.
+        let live = format!("{SIGNATURE}\n    // note\n    emit_menu(app);\n}}\nfn after() {{}}\n");
+        assert!(
+            fn_body(&live, SIGNATURE).contains("emit_menu(app);"),
+            "`fn_body` ate a live call that merely followed a comment"
+        );
+    }
+
+    /// The production half of `source`, by the same rule [`fn_body`] uses.
+    ///
+    /// Split out so the truncation has an input that can falsify it without
+    /// depending on the order this file happens to be written in.
+    fn production_of(source: &str) -> &str {
+        source
+            .split_once("\n#[cfg(test)]")
+            .map_or(source, |(head, _)| head)
+    }
+
     #[test]
     fn pump_menu_composes_the_step_it_is_given() {
         // The residue of `F1` that no unit test can reach: resolving the monitor
-        // and emitting both need an `AppHandle`, and there is no seam for one.
+        // and emitting both need an `AppHandle`, and no seam for one exists
+        // today. One is possible; see `I-81` and the note in `pump_menu`'s
+        // control above.
         //
         // ⚠️ **This is a SOURCE control and it is weaker than the test above.**
         // It pins the shape of three lines rather than their behaviour. It is
@@ -4230,9 +4312,16 @@ mod tests {
         // token-preserving move, such as the call being lifted into a closure
         // that is never invoked. Round 4's `S4` did exactly that and passed both
         // this control and `clippy -D warnings`. No source control can catch
-        // that class; only a seam that lets a test observe the emit can, and
-        // there is none because it needs an `AppHandle`. Recorded as UP-TAKE
-        // `I-81` rather than left as a gap this comment implies away.
+        // that class by itself; a seam that lets a test observe the emit
+        // shrinks it a long way, and the round-5 reviewer built and ran one.
+        //
+        // ⚠️ **This said "there is none because it needs an `AppHandle`", and
+        // that was measured false.** The seam replaces the calls that need the
+        // handle rather than reading through them, so it needs neither the
+        // handle nor the `MENU` static. It does not close `S4` -- the closure
+        // then sits in an argument list, still shape-pinned -- but it makes the
+        // tail's branching genuinely observable. Recorded as UP-TAKE `I-81`,
+        // whose remediation column carries the measurement.
         let body = fn_body(
             include_str!("placement.rs"),
             "fn pump_menu(app: &AppHandle, point: Point) -> Option<MenuHit> {",
@@ -4253,6 +4342,22 @@ mod tests {
                  drilled seven times is unguarded again"
             );
         }
+        // Two further token-preserving ways to disable a call, both found by the
+        // round-5 reviewer and both mechanically detectable, unlike `S4`:
+        // `#[cfg(any())]` keeps the token and removes the call at compile time,
+        // and a string literal parks the token where nothing runs it.
+        assert!(
+            !body.contains("#[cfg("),
+            "a `#[cfg(...)]` inside `pump_menu` can remove a call while leaving its \
+             text for this control to find"
+        );
+        assert_eq!(
+            body.matches("emit_menu(app);").count(),
+            1,
+            "`emit_menu(app);` must appear in `pump_menu` exactly once. A second copy means \
+             one of them is parked somewhere that never runs -- a string literal is the cheap \
+             way -- and this control would find that one and be satisfied."
+        );
     }
 
     #[test]

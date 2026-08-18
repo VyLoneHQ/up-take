@@ -47,7 +47,11 @@ import pageSvelte from '../routes/+page.svelte?raw';
  * inverse** -- a rewrite that changes the tokens while keeping what they do.
  * `.menu-item:is(.open)` and `.menu-item.open:not(.nothing)` both restored the
  * defect while matching no string this file looked for. That direction is now
- * closed for the cascade rule by asserting a property instead of a spelling. It
+ * closed for the cascade rule by asserting a property instead of a spelling --
+ * but only for spellings that NAME the class. Round 5 found two that do not and
+ * still survive: `[class*="ope"]` and `:is([class*="pen"])` reach `.open` by
+ * substring, restore the round-2 dimming at (0,2,0), and pass every gate.
+ * Nobody writes those by accident, so they are disclosed rather than chased. It
  * is NOT closed for the `toContain` assertions in the markup block below: those
  * pin tokens, so a rename that kept the feature working fails them for no
  * reason, and a rewrite that kept the token while moving the behaviour passes.
