@@ -164,11 +164,40 @@ impl CaptureStore {
 /// [`still_holds`] backs exactly one announcement. A shared reference would let
 /// a single question answer for every later emit, including emits after the
 /// pixels had gone -- which is the defect this type exists for, with one more
-/// step in front of it. Adding either derive re-opens that, so neither is here.
+/// step in front of it.
+///
+/// ⚠️ **That paragraph used to end "adding either derive re-opens that, so
+/// neither is here", and an independent review measured what that sentence was
+/// worth: nothing.** It drilled the revert three ways -- restoring `&FreshPin`
+/// at both call sites, adding `#[derive(Clone)]`, and cloning to announce twice
+/// -- and all 296 tests stayed green each time. The `use of moved value` error
+/// the commit message cited is a property of today's source, not a control on
+/// it: it catches an accident and not an edit. **That is the same shape as the
+/// finding this type was built to answer** -- a guard nothing can drill -- which
+/// is how it got past its author twice.
+///
+/// [`SingleUse`] is the answer to half of it. It implements neither trait, so
+/// `#[derive(Clone)]` or `#[derive(Copy)]` here is now a **compile error** with
+/// the field named in it, rather than a comment asking to be obeyed. The other
+/// half -- that `emit_pin` takes this by value and not by reference -- has no
+/// type-level expression in Rust, and is held by
+/// `the_pin_proof_is_taken_by_value` in the tests below.
 pub(crate) struct FreshPin {
     id: AreaId,
     version: u64,
+    /// Present to make the absence of `Clone` and `Copy` mechanical. Never read.
+    _single_use: SingleUse,
 }
+
+/// A field type with no `Clone` and no `Copy`, so `FreshPin` cannot gain either
+/// by derive.
+///
+/// Zero-sized, so it costs nothing at runtime. The alternative the reviewer
+/// named is a `trybuild`/`compile_fail` harness, which is a dev-dependency on a
+/// public GPL-3.0 binary for one assertion and has no existing home in this
+/// repository; a `compile_fail` doctest cannot reach `pub(crate)` items, so that
+/// route is closed too. This needs neither.
+struct SingleUse;
 
 impl FreshPin {
     pub(crate) const fn id(&self) -> AreaId {
@@ -192,7 +221,11 @@ impl FreshPin {
 pub(crate) fn still_holds(app: &AppHandle, id: AreaId, version: u64) -> Option<FreshPin> {
     let store = app.state::<Mutex<CaptureStore>>();
     let guard = store.lock().unwrap_or_else(PoisonError::into_inner);
-    guard.holds(id, version).then_some(FreshPin { id, version })
+    guard.holds(id, version).then_some(FreshPin {
+        id,
+        version,
+        _single_use: SingleUse,
+    })
 }
 
 /// The URL a pinned capture is served at, for the frontend to request.
@@ -357,6 +390,45 @@ mod tests {
     use uptake_core::geometry::{Rect, Size};
 
     use super::*;
+
+    #[test]
+    fn the_pin_proof_is_taken_by_value() {
+        // The half of `FreshPin`'s single-use property that Rust cannot express
+        // in the type system, and the half an independent review drilled green:
+        // restoring `&FreshPin` at both call sites left all 296 tests passing,
+        // because every one of them tested the property HOLDING rather than
+        // anything NOTICING it go.
+        //
+        // A reference re-opens the defect the type exists for. One call to
+        // `still_holds` would answer for every later announcement, including
+        // announcements made after `forget` had dropped the pixels -- `I-61`
+        // with one more step in front of it.
+        //
+        // Read from the source because there is nowhere else to read it from:
+        // the signature is the whole property, and `trybuild` is a
+        // dev-dependency on a public binary for one assertion.
+        let source = include_str!("overlay.rs");
+        let Some(line) = source
+            .lines()
+            .find(|line| line.trim_start().starts_with("pub(crate) fn emit_pin("))
+        else {
+            panic!(
+                "no `pub(crate) fn emit_pin(` in overlay.rs -- renamed, or its \
+                 visibility changed? This test cannot answer for a function it \
+                 cannot find, and an unfound signature must not read as a pass."
+            )
+        };
+        assert!(
+            line.contains("pin: crate::captures::FreshPin"),
+            "`emit_pin` must take the freshness proof BY VALUE, so one proof backs \
+             one announcement. Found: {line}"
+        );
+        assert!(
+            !line.contains("&crate::captures::FreshPin"),
+            "`emit_pin` takes the freshness proof by reference, which lets a single \
+             call to `still_holds` answer for any number of later emits. Found: {line}"
+        );
+    }
 
     /// A 1×1 bitmap, standing in for the raw pixels a real pin carries. Only the
     /// clipboard path reads them, and nothing here decodes one.
