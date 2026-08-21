@@ -1758,9 +1758,20 @@ mod tests {
     /// assertion is worth.
     #[test]
     fn every_armable_name_round_trips_through_type_name() {
+        // `upscale` ADDED 2026-08-21 (roadmap 1.24). **The review of that
+        // change drilled this gap:** mutating the arm to
+        // `"upscale" => Some(AreaType::Screenshot)` -- pressing `U` and
+        // getting a Screenshot area -- left all 329 Rust tests and all 75
+        // vitest tests GREEN. `area-kinds.test.ts` does not close it either:
+        // it compares extracted NAME SETS and never the variant, so it catches
+        // a deleted arm and not a mis-mapped one.
+        //
+        // The refusing side of this same fact WAS updated in that commit and
+        // this accepting side was not, which is OS-F100 in one function.
         for (name, kind) in [
             ("screenshot", AreaType::Screenshot),
             ("filter", AreaType::Filter),
+            ("upscale", AreaType::Upscale),
         ] {
             assert_eq!(armable_type(name), Some(kind), "{name} must arm");
             assert_eq!(type_name(kind), name, "{name} must round trip");

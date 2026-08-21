@@ -613,7 +613,10 @@ export function isFreezeKey(
  * has no shared schema. Rust rejects a name it does not know, so a drift here
  * fails as a refused arm rather than as an area of the wrong type.
  */
-export type ArmableType = Extract<AreaKind, 'screenshot' | 'filter' | 'upscale'>;
+export type ArmableType = Extract<
+  AreaKind,
+  'screenshot' | 'filter' | 'upscale'
+>;
 
 /**
  * Which type this key arms, or `null` if it arms nothing.
