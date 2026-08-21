@@ -1470,6 +1470,7 @@ struct PinPayload {
 /// different timing: an area appears the instant the drag ends, and its capture
 /// lands ~200 ms later. Making the area wait for its pixels would put a visible
 /// hole where the user just dragged.
+///
 /// **Takes proof that the pixels still exist rather than an id and a version**
 /// (`I-61`). A [`FreshPin`] can only come from `captures::still_holds`, so a
 /// caller cannot announce a URL for pixels that have been forgotten without

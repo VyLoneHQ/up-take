@@ -178,9 +178,18 @@ impl CaptureStore {
 ///
 /// [`SingleUse`] is the answer to half of it. It implements neither trait, so
 /// `#[derive(Clone)]` or `#[derive(Copy)]` here is now a **compile error** with
-/// the field named in it, rather than a comment asking to be obeyed. The other
-/// half -- that `emit_pin` takes this by value and not by reference -- has no
-/// type-level expression in Rust, and is held by
+/// the field named in it, rather than a comment asking to be obeyed.
+///
+/// **It blocks the DERIVE spelling and nothing else, and this paragraph said
+/// otherwise until 2026-08-21.** A hand-written impl of either trait for this
+/// type compiles, lets one proof back two announcements, and leaves the whole
+/// suite green -- drilled by an independent review, which is the third time
+/// this property has been asserted at one spelling and left open at another.
+/// That spelling is now held by `no_hand_written_escape_from_the_single_use_property`
+/// below, so the claim and its control finally cover the same ground.
+///
+/// The other half -- that `emit_pin` takes this by value and not by reference
+/// -- has no type-level expression in Rust either, and is held by
 /// `the_pin_proof_is_taken_by_value` in the tests below.
 pub(crate) struct FreshPin {
     id: AreaId,
@@ -427,6 +436,73 @@ mod tests {
             !line.contains("&crate::captures::FreshPin"),
             "`emit_pin` takes the freshness proof by reference, which lets a single \
              call to `still_holds` answer for any number of later emits. Found: {line}"
+        );
+    }
+
+    #[test]
+    fn no_hand_written_escape_from_the_single_use_property() {
+        // `SingleUse` makes `#[derive(Clone)]` and `#[derive(Copy)]` compile
+        // errors on `FreshPin`. It does NOT reach a hand-written impl, and the
+        // doc comment on the type claimed it did until an independent review
+        // drilled the gap: four lines of `impl Clone`, a `.clone()` before the
+        // emit, and one freshness proof backs two announcements with the whole
+        // suite green and nothing red anywhere.
+        //
+        // That is the same shape as the finding this type was built to answer,
+        // for the third time: the property was tested at the spelling its
+        // author had in mind and left open at the one he did not.
+        //
+        // **Scanned over the whole crate rather than this file, and that is not
+        // belt-and-braces.** `FreshPin` is `pub(crate)`, so Rust's orphan rule
+        // lets the impl live in ANY module of `src-tauri`, and the first draft
+        // of this very test read `captures.rs` alone -- which would have been
+        // the same defect a fourth time, in the control written to stop it.
+        //
+        // The needles are assembled at run time on purpose. Written out whole
+        // they would appear in this file and match themselves, and a source
+        // control defeated by the text describing it reads green forever. Test
+        // modules are cut for the same reason: the drill that proves this test
+        // works has to be able to live in one without tripping it, and an impl
+        // behind `#[cfg(test)]` cannot reach a release binary anyway.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut scanned = 0_usize;
+        let mut saw_the_type = false;
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|e| e != "rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).unwrap();
+            let production = source
+                .split_once("mod tests {")
+                .map_or(source.as_str(), |(before, _)| before)
+                // A same-crate impl may spell the type by any path it likes, so
+                // compare on the bare name rather than on one of them.
+                .replace("crate::captures::", "")
+                .replace("captures::", "");
+            scanned += 1;
+            saw_the_type |= production.contains("struct FreshPin");
+            for trait_name in ["Clone", "Copy"] {
+                let needle = format!("impl {trait_name} for FreshPin");
+                assert!(
+                    !production.contains(&needle),
+                    "{}: hand-written `{trait_name}` impl for `FreshPin`.                      `SingleUse` blocks only the derive spelling, so this                      re-opens the defect the type exists for: one call to                      `still_holds` backing more than one announcement,                      including announcements made after `forget` dropped the                      pixels.",
+                    path.display()
+                );
+            }
+        }
+        // Both halves of the positive control. A sweep that reads nothing, or
+        // that reads files but never meets the type, is indistinguishable from
+        // a sweep that found no violation -- which is exactly the green that
+        // could not have been earned.
+        assert!(
+            scanned >= 2,
+            "scanned {scanned} file(s) under {} -- the sweep found no crate to              read, so its silence means nothing.",
+            dir.display()
+        );
+        assert!(
+            saw_the_type,
+            "swept {scanned} file(s) and never saw `struct FreshPin`. Renamed,              moved out of this crate, or cut away with a test module -- either              way this test just passed over a type it never read, and an              unfound type must not read as a pass."
         );
     }
 

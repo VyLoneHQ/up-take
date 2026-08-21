@@ -581,7 +581,22 @@ pub struct AreaStore {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Conversion {
     /// Whether the area's pinned pixels are now wrong for it, so the caller must
-    /// drop them along with any capture still in flight for the same area.
+    /// drop them along with any MAGNIFY capture still in flight for the same
+    /// area.
+    ///
+    /// **The narrowing is load-bearing and was not always here.** This sentence
+    /// said "any capture still in flight", which promises more than the caller
+    /// can deliver: `cancel_magnification` stops the workers that consult
+    /// `MAGNIFY`, and a `capture_into_area` worker is not one of those. Such a
+    /// worker can still `insert` for an area that has already been converted or
+    /// dismissed, and nothing will ever `remove` it -- that residue is tracked
+    /// as `I-74` and is not closed here.
+    ///
+    /// Corrected 2026-08-21 as the third site of one claim. The other two were
+    /// fixed together: the over-broad copy at `src-tauri/src/output.rs` and its
+    /// already-narrow twin at `overlay.rs`, which is the wording this now
+    /// matches. This copy is in a different crate, which is why a sweep scoped
+    /// to `src-tauri` did not reach it.
     ///
     /// True when the area was showing something its new type cannot mean: a
     /// magnified still it can no longer be scrolled out of, or the pinned
