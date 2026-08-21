@@ -2767,6 +2767,23 @@ fn finish_gesture(release: Point) {
 /// pixels?" has exactly one answer today, and inventing a fourth per-type axis
 /// on one data point is how the other three got harder to change.
 fn capture_on_create(app: &AppHandle, kind: AreaType, id: AreaId, bounds: Rect) {
+    // **A TYPE THAT IS BORN MAGNIFIED TAKES ITS FIRST CAPTURE HERE TOO**
+    // (roadmap 1.24). `AreaStore::create` gives the area `kind.default_zoom()`,
+    // so an `Upscale` area exists at 2x the instant the drag ends -- and would
+    // sit there showing the live screen at natural size until the user happened
+    // to move it, because `refresh_magnification` is only called from move and
+    // resize. That is the magnifying type not magnifying, which is the same
+    // defect a converted `Screenshot` holding no pin was.
+    //
+    // Asked through `refresh_magnification`, which reads the area's OWN zoom
+    // and no-ops at natural size, rather than through a second `AreaType`
+    // predicate: `captures_on_create` below already documents why a
+    // hand-maintained per-type list drifts, and this needs no list at all.
+    //
+    // Before the `captures_on_create` branch, because the two are exclusive
+    // today and the magnified path must not have its generation bumped by a
+    // capture dispatched after it.
+    overlay::refresh_magnification(app, id);
     if captures_on_create(kind) {
         crate::output::capture_into_area(app, id, bounds);
         // The spawned capture is what consumes the held frame, so the drag is
@@ -2825,13 +2842,15 @@ pub(crate) const fn captures_on_create(kind: AreaType) -> bool {
 /// # Why only three of the seven
 ///
 /// A conversion has to leave the user with an area that does something.
-/// `Default`, `Screenshot` and `Filter` have behaviour on the screen today;
-/// `Record`, `Ocr`, `Upscale` and `Analysis` are modelled and have none, so
-/// offering them would ship four rows that turn a working area into a rectangle
-/// indistinguishable from a bug. Two of the four have a roadmap task that will
-/// give them behaviour and their row arrives with it: 1.24 for `Upscale`, 1.26
-/// for `Ocr`. **`Record` and `Analysis` have no roadmap row at all**, so they are
-/// not merely unbuilt, they are unplanned. Said "each earns its row with the
+/// `Default`, `Screenshot`, `Filter` and -- since roadmap 1.24 -- `Upscale`
+/// have behaviour on the screen today; `Record`, `Ocr` and `Analysis` are
+/// modelled and have none, so offering them would ship three rows that turn a
+/// working area into a rectangle indistinguishable from a bug. One of the three
+/// has a roadmap task that will give it behaviour and its row arrives with it:
+/// 1.26 for `Ocr`. **`Record` and `Analysis` have no roadmap row at all**, so
+/// they are not merely unbuilt, they are unplanned (UP-TAKE `I-64`).
+/// **`Upscale` was in the second list until 2026-08-21** and this paragraph
+/// said "four rows" and "two of the four"; both counts moved with it. Said "each earns its row with the
 /// roadmap task that gives it behaviour" until the independent review of `#55`
 /// resolved the ids and found the quantifier true of half the set.
 ///
@@ -2853,7 +2872,11 @@ const fn conversion_label(kind: AreaType) -> Option<&'static str> {
         AreaType::Default => Some("Type: Default"),
         AreaType::Screenshot => Some("Type: Screenshot"),
         AreaType::Filter => Some("Type: Filter"),
-        AreaType::Record | AreaType::Ocr | AreaType::Upscale | AreaType::Analysis => None,
+        // Arrived with roadmap 1.24, which is what the doc above said would
+        // happen: "1.24 for `Upscale` ... this is one line on the day the
+        // behaviour lands". It has behaviour now, so it earns the row.
+        AreaType::Upscale => Some("Type: Upscale"),
+        AreaType::Record | AreaType::Ocr | AreaType::Analysis => None,
     }
 }
 
@@ -3794,7 +3817,11 @@ mod tests {
         };
         assert_eq!(opened.0, parent);
         assert_eq!(opened.1, expected, "the child list is not where it belongs");
-        assert_eq!(opened.2, 3);
+        // FOUR type rows since roadmap 1.24 added `Type: Upscale`; this was 3.
+        // Asserted as a count rather than a set because the set is pinned whole
+        // by `the_type_list_offers_the_four_types_that_do_something`; what this
+        // one is for is that the CHILD LIST holds them, not the top level.
+        assert_eq!(opened.2, 4);
         // The three properties the geometry buys, asserted here rather than
         // trusted: flush against the parent row, top-aligned with it, and
         // anchored to that row rather than to the menu or the cursor.
@@ -4591,13 +4618,27 @@ mod tests {
     }
 
     #[test]
-    fn the_type_list_offers_the_three_types_that_do_something() {
-        // The other four are modelled and have no behaviour, so a row for them
+    fn the_type_list_offers_the_four_types_that_do_something() {
+        // The other three are modelled and have no behaviour, so a row for them
         // would convert a working area into one indistinguishable from a bug.
+        //
+        // **THREE became FOUR on 2026-08-21**: roadmap 1.24 gave `Upscale`
+        // behaviour, and `conversion_label`'s own doc had promised the row
+        // would arrive with it. The list is asserted WHOLE and ordered, so a
+        // fifth row cannot appear without this going red.
         let rows = menu_rows(&summary(AreaType::Default, Layer::Auto, Input::Interactive));
         assert_eq!(
             labels(type_rows(&rows)),
-            vec!["Type: Default", "Type: Screenshot", "Type: Filter"]
+            // ORDER IS `AreaType::ALL`'s, not the order the rows were added
+            // in, so `Upscale` sits before `Filter`. Asserted as a sequence
+            // rather than a set because the row order is what the user sees
+            // and nothing else pins it.
+            vec![
+                "Type: Default",
+                "Type: Screenshot",
+                "Type: Upscale",
+                "Type: Filter"
+            ]
         );
     }
 

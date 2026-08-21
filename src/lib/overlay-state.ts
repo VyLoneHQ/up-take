@@ -613,7 +613,7 @@ export function isFreezeKey(
  * has no shared schema. Rust rejects a name it does not know, so a drift here
  * fails as a refused arm rather than as an area of the wrong type.
  */
-export type ArmableType = Extract<AreaKind, 'screenshot' | 'filter'>;
+export type ArmableType = Extract<AreaKind, 'screenshot' | 'filter' | 'upscale'>;
 
 /**
  * Which type this key arms, or `null` if it arms nothing.
@@ -638,6 +638,10 @@ export function armedTypeForKey(
       return 'screenshot';
     case 'f':
       return 'filter';
+    // Roadmap 1.24. `U` for Upscale; the area is born magnified on the Rust
+    // side, so this arms it and nothing here knows the factor.
+    case 'u':
+      return 'upscale';
     default:
       return null;
   }

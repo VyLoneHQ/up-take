@@ -144,15 +144,25 @@ impl AreaType {
     #[must_use]
     pub const fn default_visual(self) -> Visual {
         match self {
-            // Both are named as live in §3.2's own prose.
-            Self::Record | Self::Upscale => Visual::Live,
+            // `Record` is named as live in §3.2's own prose and is the only
+            // member left. **`Upscale` was here until 2026-08-21 and moved by
+            // ADR-0030**, which scopes v1 Upscale to GPU resampling with no
+            // model: the pixels come from the path 1.25 built, re-taken on the
+            // events a zoomed area is re-taken on, so it costs no continuous
+            // capture and is passive like everything else that is not
+            // inherently live. §3.2 carries the correction; the target is
+            // an image ENHANCER over live video, and that is a later row.
+            Self::Record => Visual::Live,
             // Screenshot is the "pinned still capture" §3.2 lists as passive;
             // OCR and Analysis run over a captured frame and then display a
             // result; a Filter is a tint; an idle Default area is named
             // passive outright.
-            Self::Default | Self::Screenshot | Self::Ocr | Self::Analysis | Self::Filter => {
-                Visual::Passive
-            }
+            Self::Default
+            | Self::Screenshot
+            | Self::Ocr
+            | Self::Upscale
+            | Self::Analysis
+            | Self::Filter => Visual::Passive,
         }
     }
 
@@ -246,6 +256,38 @@ impl AreaType {
             | Self::Upscale
             | Self::Analysis
             | Self::Filter => false,
+        }
+    }
+
+    /// The magnification an area of this type is CREATED with.
+    ///
+    /// `Upscale` is the only type born magnified, and that is the whole of what
+    /// roadmap 1.24 adds: [`AreaType::supports_zoom`]'s own doc already says
+    /// *"an Upscale is magnification by definition"*, so it does not get the
+    /// scroll gesture and does not need one. It arrives at its factor and stays
+    /// there.
+    ///
+    /// **Why this exists rather than a literal at the create site.** A literal
+    /// there is invisible to `set_kind`, and a conversion INTO `Upscale` would
+    /// then produce an area of the magnifying type at natural size -- a
+    /// rectangle showing the live screen, indistinguishable from `Default`,
+    /// which is the exact failure `convert_area`'s capture branch was added to
+    /// fix for `Screenshot`.
+    ///
+    /// Exhaustive rather than a `_` arm, so an eighth [`AreaType`] answers here
+    /// the way it already answers [`default_visual`] and [`supports_zoom`].
+    ///
+    /// [`default_visual`]: Self::default_visual
+    #[must_use]
+    pub const fn default_zoom(self) -> Zoom {
+        match self {
+            Self::Upscale => Zoom::UPSCALE,
+            Self::Default
+            | Self::Screenshot
+            | Self::Record
+            | Self::Ocr
+            | Self::Analysis
+            | Self::Filter => Zoom::NATURAL,
         }
     }
 }
@@ -360,8 +402,21 @@ pub enum Layer {
 pub struct Zoom(u8);
 
 impl Zoom {
-    /// Natural size. §3.4's floor, and the value every area starts at.
+    /// Natural size. §3.4's floor.
+    ///
+    /// **Said "and the value every area starts at" until 2026-08-21.** Roadmap
+    /// 1.24 gave `Upscale` a non-natural [`AreaType::default_zoom`], so the
+    /// starting value is now per type and this is merely the common one.
     pub const NATURAL: Self = Self(0);
+
+    /// The factor an `Upscale` area is created at: 2x, i.e. four [`Zoom::STEP`]s.
+    ///
+    /// A round number chosen for being legible rather than measured, and it is
+    /// the one thing in roadmap 1.24 a hardware sitting is expected to change.
+    /// It is a constant so that changing it is one edit and cannot disagree
+    /// with itself; nothing in a unit test can have an opinion about whether 2x
+    /// is the right amount of bigger.
+    pub const UPSCALE: Self = Self(4);
 
     /// What one scroll notch adds to the factor.
     pub const STEP: f32 = 0.25;
@@ -636,7 +691,11 @@ impl AreaStore {
             visual: kind.default_visual(),
             input: kind.default_input(),
             layer: Layer::default(),
-            zoom: Zoom::NATURAL,
+            // Per type since 1.24, not a constant: `Upscale` is born magnified
+            // because it IS a magnifier, and an Upscale area at natural size is
+            // a rectangle showing the live screen, indistinguishable from a
+            // `Default` one.
+            zoom: kind.default_zoom(),
         };
         let index = self.top_of_tier(area.layer);
         self.areas.insert(index, area);
@@ -781,14 +840,33 @@ impl AreaStore {
         area.kind = kind;
         area.visual = kind.default_visual();
         area.input = kind.default_input();
+        // THE NEW TYPE'S DEFAULT, not `NATURAL`, and the difference only shows
+        // on a type that is born magnified. Converting to `Upscale` used to
+        // land at natural size -- the magnifying type, not magnifying -- which
+        // is the same shape as a converted `Screenshot` holding no pin, the
+        // defect `convert_area`'s capture branch exists to fix.
+        //
+        // Unchanged for every type whose `default_zoom` is `NATURAL`, which is
+        // all six others, so this is a generalisation and not a behaviour
+        // change anywhere it did not need to be one.
         if !kind.supports_zoom() {
-            area.zoom = Zoom::NATURAL;
+            area.zoom = kind.default_zoom();
         }
         // `was_magnified && supports_zoom` is unreachable today, because only
         // `Default` zooms and `Default` to `Default` returned above. It is
         // written as a conjunction anyway, so that widening `supports_zoom` to a
         // second type cannot silently start throwing away a magnification the
         // new type would have kept.
+        //
+        // **`discard_capture` stays right for a conversion INTO `Upscale`, and
+        // it is worth saying why rather than leaving it to be re-derived.**
+        // From a magnified `Default` the old pixels were taken at the OLD
+        // factor over the OLD sub-rectangle, so they are wrong for the new type
+        // and `was_magnified` is true -- discard, correct. From a natural
+        // `Default` there are no pixels to discard and the caller has to TAKE
+        // the first ones; that is `convert_area`'s job and not this one's,
+        // which is why this returns `false` there rather than inventing a
+        // third state.
         Some(Conversion {
             discard_capture: (was_magnified && !kind.supports_zoom()) || was_pinned_capture,
             changed: true,
@@ -1102,7 +1180,12 @@ mod tests {
         // The battery boundary. A type quietly defaulting to Live is the
         // failure §3.2 names outright, so the default set is pinned whole.
         for kind in ALL_TYPES {
-            let expected = matches!(kind, AreaType::Record | AreaType::Upscale);
+            // `Upscale` LEFT this set on 2026-08-21 (ADR-0030). The set is
+            // still pinned WHOLE rather than narrowed to a subset -- the
+            // comment above calls this the battery boundary, and a suite that
+            // stops pinning the whole set is the guard this file keeps
+            // rediscovering it needs.
+            let expected = matches!(kind, AreaType::Record);
             assert_eq!(
                 kind.default_visual() == Visual::Live,
                 expected,
@@ -1584,6 +1667,118 @@ mod tests {
     }
 
     #[test]
+    fn only_upscale_is_born_magnified() {
+        // The set pinned WHOLE, the way `live_is_opt_in_...` pins the live set,
+        // so an eighth type has to answer here rather than defaulting to
+        // natural and silently being a rectangle that shows the live screen.
+        for kind in ALL_TYPES {
+            let expected = matches!(kind, AreaType::Upscale);
+            assert_eq!(
+                !kind.default_zoom().is_natural(),
+                expected,
+                "{kind:?} default_zoom"
+            );
+        }
+    }
+
+    #[test]
+    fn an_upscale_area_exists_at_its_factor_the_moment_it_is_created() {
+        // Roadmap 1.24's whole visible claim. `create` reads `default_zoom`, so
+        // this fails the moment someone puts `Zoom::NATURAL` back at that site
+        // -- which is what it looked like before 1.24 and is a one-word revert.
+        let mut store = AreaStore::new();
+        let id = store
+            .create(AreaType::Upscale, rect(0, 0, 100, 100))
+            .unwrap();
+        let area = store.get(id).unwrap();
+        assert_eq!(area.zoom, Zoom::UPSCALE);
+        assert!(
+            !area.zoom.is_natural(),
+            "an Upscale area must not be natural"
+        );
+
+        // The negative half, so the assertion above cannot be satisfied by a
+        // create that magnifies everything.
+        let other = store
+            .create(AreaType::Default, rect(200, 0, 100, 100))
+            .unwrap();
+        assert!(store.get(other).unwrap().zoom.is_natural());
+    }
+
+    #[test]
+    fn converting_into_upscale_arrives_magnified_rather_than_natural() {
+        // `set_kind` reset the zoom to NATURAL unconditionally before 1.24,
+        // which produced the magnifying type at natural size: a rectangle
+        // showing the live screen, indistinguishable from Default, under a menu
+        // row that says "Upscale". Same shape as a converted Screenshot holding
+        // no pin, which is a defect this codebase has already shipped once.
+        let mut store = AreaStore::new();
+        let id = store
+            .create(AreaType::Default, rect(0, 0, 100, 100))
+            .unwrap();
+        assert!(store.get(id).unwrap().zoom.is_natural());
+
+        let conversion = store.set_kind(id, AreaType::Upscale).unwrap();
+        assert!(conversion.changed);
+        assert_eq!(store.get(id).unwrap().zoom, Zoom::UPSCALE);
+
+        // From a MAGNIFIED Default the old pixels were taken at another factor
+        // over another rectangle, so the host is told to drop them.
+        let mut store = AreaStore::new();
+        let id = store
+            .create(AreaType::Default, rect(0, 0, 100, 100))
+            .unwrap();
+        store.zoom_by(id, 6);
+        let conversion = store.set_kind(id, AreaType::Upscale).unwrap();
+        assert!(
+            conversion.discard_capture,
+            "a magnified Default converted to Upscale keeps pixels taken at the \
+             wrong factor unless the host is told to drop them"
+        );
+        assert_eq!(store.get(id).unwrap().zoom, Zoom::UPSCALE);
+    }
+
+    #[test]
+    fn an_upscale_area_cannot_be_scrolled_off_its_factor() {
+        // `supports_zoom` is false for Upscale and its doc says why: "an Upscale
+        // is magnification by definition". So the scroll gesture must not move
+        // it -- otherwise the factor is a starting point rather than the type's
+        // identity, and an Upscale area at natural size is Default again.
+        let mut store = AreaStore::new();
+        let id = store
+            .create(AreaType::Upscale, rect(0, 0, 100, 100))
+            .unwrap();
+        assert!(
+            store.zoom_by(id, 4).is_none(),
+            "Upscale must refuse a zoom gesture"
+        );
+        assert_eq!(store.get(id).unwrap().zoom, Zoom::UPSCALE);
+        assert!(
+            store.zoom_by(id, -99).is_none(),
+            "and must refuse it downward too"
+        );
+        assert_eq!(store.get(id).unwrap().zoom, Zoom::UPSCALE);
+    }
+
+    #[test]
+    fn upscale_shows_a_smaller_rectangle_of_screen_than_itself() {
+        // What "upscaled" means geometrically, asserted rather than assumed: the
+        // area is a window onto LESS screen, stretched to fill. If this ever
+        // returns the bounds unchanged the area renders the live screen at 1:1
+        // and the feature is a no-op that still passes every test above.
+        let bounds = Rect::new(0, 0, 400, 300);
+        let source = Zoom::UPSCALE.source_rect(bounds);
+        assert!(
+            source.size.width < bounds.size.width && source.size.height < bounds.size.height,
+            "UPSCALE must select a smaller rectangle than the area, got {source:?}"
+        );
+        assert!(
+            source.size.width > 0 && source.size.height > 0,
+            "and a capturable one"
+        );
+    }
+
+    #[test]
     fn every_conversion_leaves_an_area_whose_zoom_its_type_allows() {
         // The invariant stated over the whole matrix rather than on one pair, so
         // an eighth type cannot arrive with a hole in it. Seven by seven, with
@@ -1596,9 +1791,20 @@ mod tests {
                 store.set_kind(id, to).unwrap();
                 let area = store.get(id).unwrap();
                 assert_eq!(area.kind, to, "{from:?} to {to:?}");
+                // **STRENGTHENED 2026-08-21, not relaxed.** This read
+                // `supports_zoom() || zoom.is_natural()`, which is the same
+                // assertion while NATURAL is the only default. 1.24 gives
+                // `Upscale` a non-natural `default_zoom`, and the honest
+                // invariant was never "natural" -- it is "a zoom this type
+                // would have chosen for itself", so a conversion cannot strand
+                // an area at a magnification belonging to the type it used to
+                // be. Note which way this moved: the old form would have PASSED
+                // an Upscale area left at some other type's factor.
                 assert!(
-                    area.kind.supports_zoom() || area.zoom.is_natural(),
-                    "{from:?} to {to:?} left a zoom the type cannot undo"
+                    area.kind.supports_zoom() || area.zoom == area.kind.default_zoom(),
+                    "{from:?} to {to:?} left {:?}, which is neither this type's                      default {:?} nor a zoom it can undo",
+                    area.zoom,
+                    area.kind.default_zoom()
                 );
             }
         }

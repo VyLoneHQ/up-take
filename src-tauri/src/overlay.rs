@@ -1004,6 +1004,22 @@ pub(crate) fn convert_area(app: &AppHandle, id: AreaId, kind: AreaType) -> bool 
     if conversion.changed && placement::captures_on_create(kind) {
         crate::output::capture_into_area(app, id, bounds);
     }
+    // **AND A CONVERSION INTO A BORN-MAGNIFIED TYPE HAS TO TAKE ITS FIRST
+    // MAGNIFIED CAPTURE**, which is the same argument one paragraph up wearing
+    // different clothes: an `Upscale` area showing nothing is a rectangle
+    // showing the live screen, indistinguishable from `Default`, and the menu
+    // row says "Upscale".
+    //
+    // `refresh_magnification` rather than a second `magnify_into_area` call,
+    // because it already asks the area for its own source rectangle and no-ops
+    // at natural size -- so this line is correct for every type without
+    // knowing which ones are magnified, and stays correct when an eighth is.
+    // Ordered AFTER the discard above for the same reason the capture is: the
+    // discard bumps the magnify generation, so magnifying first would throw the
+    // new capture away.
+    if conversion.changed {
+        refresh_magnification(app, id);
+    }
     conversion.changed
 }
 
@@ -1603,6 +1619,12 @@ fn armable_type(name: &str) -> Option<AreaType> {
         // key `F`). It is passive and pass-through by model default, so the
         // area draws a tint and the user keeps working underneath it.
         "filter" => Some(AreaType::Filter),
+        // Upscale is the third (roadmap 1.24, key `U`). It is born magnified --
+        // `AreaType::default_zoom` -- so the drag produces a window onto a
+        // smaller rectangle of screen, stretched to fill it. Passive in v1 by
+        // ADR-0030: the pixels are re-taken on move and resize, not at
+        // framerate, and there is no model.
+        "upscale" => Some(AreaType::Upscale),
         _ => None,
     }
 }
@@ -1751,7 +1773,11 @@ mod tests {
     /// other five would be invisible from the accepting side alone.
     #[test]
     fn a_modelled_type_with_no_gesture_is_still_refused() {
-        for name in ["default", "record", "ocr", "upscale", "analysis"] {
+        // `upscale` LEFT this list on 2026-08-21: roadmap 1.24 gave it a
+        // gesture, so it is armable now and refusing it would be the defect.
+        // The list is still the WHOLE refused set rather than a sample, which
+        // is the property the doc above names.
+        for name in ["default", "record", "ocr", "analysis"] {
             assert_eq!(armable_type(name), None, "{name} has no gesture yet");
         }
         assert_eq!(armable_type("Filter"), None, "the wire name is lowercase");
