@@ -185,8 +185,44 @@ impl CaptureStore {
 /// type compiles, lets one proof back two announcements, and leaves the whole
 /// suite green -- drilled by an independent review, which is the third time
 /// this property has been asserted at one spelling and left open at another.
-/// That spelling is now held by `no_hand_written_escape_from_the_single_use_property`
-/// below, so the claim and its control finally cover the same ground.
+/// `no_hand_written_escape_from_the_single_use_property` below catches SOME of
+/// that, and **an earlier revision of this paragraph claimed it closed the
+/// class. A second independent review falsified that in seven drills, and the
+/// honest description is here instead.**
+///
+/// What it reaches: a hand-written `Clone` impl for this type, in any `.rs`
+/// file directly under `src-tauri/src`, outside a test module, spelled with
+/// the bare trait name and the bare type name.
+///
+/// **The spellings below are described rather than written out, and that is
+/// not fussiness.** Writing one of them here put it in the file the sweep
+/// reads, and the guard went red against its own documentation on the first
+/// run after this paragraph was added. A control that its own description
+/// trips is the same class as a control its own description defeats.
+///
+/// What it does NOT reach, each constructed and run GREEN by that review:
+///
+/// - the trait named by a path (`std::clone::Clone`) instead of bare.
+/// - `#[derive(Clone, Copy)]` on [`SingleUse`] itself, after which the derive
+///   on this type compiles. **rustc SUGGESTS this**: the `E0277` carries
+///   `help: consider annotating 'SingleUse' with '#[derive(Clone)]'`, so the
+///   compiler's own advice disables the control, in the file the control lives
+///   in, with nothing red.
+/// - the type named through `super::` from a nested module of this file.
+/// - a type alias, then the impl written against the alias.
+/// - the impl in a SUBDIRECTORY of `src-tauri/src`. The scan is one
+///   `read_dir`, which is not recursive, and the orphan rule does not care.
+///
+/// And the property is defeatable with no `Clone` and no `Copy` at all: an
+/// inherent `fn again(&self) -> Self` here, or a second announcer beside
+/// `emit_pin` with a different name, each give one proof two announcements
+/// with the suite green.
+///
+/// **So the control is a text sweep and the property is a semantic one, which
+/// is the wrong tool rather than a tool with gaps.** What would actually hold
+/// it is holding the property at the ANNOUNCEMENT site instead of on this
+/// type. That is `I-83` and it is not done here; the text sweep is kept only
+/// because it catches the one spelling that has actually been written twice.
 ///
 /// The other half -- that `emit_pin` takes this by value and not by reference
 /// -- has no type-level expression in Rust either, and is held by
@@ -452,11 +488,17 @@ mod tests {
         // for the third time: the property was tested at the spelling its
         // author had in mind and left open at the one he did not.
         //
-        // **Scanned over the whole crate rather than this file, and that is not
-        // belt-and-braces.** `FreshPin` is `pub(crate)`, so Rust's orphan rule
-        // lets the impl live in ANY module of `src-tauri`, and the first draft
-        // of this very test read `captures.rs` alone -- which would have been
-        // the same defect a fourth time, in the control written to stop it.
+        // **Scanned over the `.rs` files directly under `src-tauri/src`, which
+        // is more than this file and LESS than the crate.** `FreshPin` is
+        // `pub(crate)`, so the orphan rule lets the impl live in any module of
+        // `src-tauri` -- including a subdirectory, which `read_dir` does not
+        // descend into. An earlier revision of this comment and of `56cae0e`'s
+        // commit message both said "the whole crate"; a second independent
+        // review built the subdirectory case and watched this pass over it.
+        //
+        // See the type's own doc for the full list of what this does not
+        // reach, and for why a text sweep is the wrong tool for a semantic
+        // property. `I-83` carries the real fix.
         //
         // The needles are assembled at run time on purpose. Written out whole
         // they would appear in this file and match themselves, and a source
