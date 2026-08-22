@@ -4,10 +4,25 @@
 //! # The defect this exists for
 //!
 //! `UT-F-72`: `HoverPayload`'s Rust field `chrome_only` arrives as `chromeOnly`
-//! solely because of `#[serde(rename_all = "camelCase")]`. Remove that attribute
-//! and `cargo test`, `clippy`, `vitest`, `biome` and `svelte-check` are **all
-//! green** while the frontend reads `undefined`, its default fires, and the
-//! defect the branch removed comes back.
+//! solely because of `#[serde(rename_all = "camelCase")]`, and when that was
+//! found, removing the attribute left `cargo test`, `clippy`, `vitest`, `biome`
+//! and `svelte-check` **all green** while the frontend read `undefined`.
+//!
+//! ⚠️ **That was true on 2026-08-14 and is NOT true now, and this module was
+//! argued from the obsolete half of its own backlog row.** `#56` merged a
+//! covering test, `the_hover_payload_reaches_the_frontend_as_camel_case`, so
+//! `cargo test` goes **RED** on that one struct today. Measured 2026-08-22 by
+//! deleting the attribute at this branch's head: **two** tests fail, `#56`'s and
+//! this module's own. `I-67`'s row already said so, in the sentence directly
+//! after the one quoted here: *"`#56` covered that one instance with a
+//! serialization test; the CLASS is still open"*.
+//!
+//! **The class argument is untouched by the correction, which is why this module
+//! stands.** One instance is covered by one hand-written test naming one struct.
+//! Twelve payload types exist and the other eleven have nothing; a rename added
+//! to any of them, or removed from one that gains one, is still green. What
+//! `#56` bought is a single guard rail on the single struct that has already
+//! failed, and generalising from it is exactly what this module does instead.
 //!
 //! `src/lib/area-kinds.test.ts` is the guard for wire names written twice, and
 //! its own closing sentence says it "cannot see a name that reaches the frontend

@@ -218,9 +218,11 @@ export interface MenuItemView {
    *
    * One lowercase word, like every other key in this payload, and that is
    * deliberate rather than incidental: `UT-F-72` is a payload key that reached
-   * this side only because of a `#[serde(rename_all)]` no gate in the repository
-   * could see being removed. A name that is identical in both conventions needs
-   * no attribute and so has nothing to lose.
+   * this side only because of a `#[serde(rename_all)]` that, at the time, no
+   * gate in the repository could see being removed. `#56` has since covered that
+   * one struct, so it is the eleven payloads without a rename that carry the
+   * open class now. A name that is identical in both conventions needs no
+   * attribute and so has nothing to lose either way.
    */
   parent: boolean;
 }

@@ -1707,8 +1707,11 @@ mod tests {
     /// **Read as a wire contract, not as a list of Rust fields.** A `rename` or
     /// a `rename_all` is invisible to anything reading the struct definition and
     /// is the only thing that decides these strings, which is `UT-F-72`: the
-    /// single `rename_all` in `src-tauri` can be deleted with every gate in the
-    /// repository staying green.
+    /// single `rename_all` in `src-tauri` could be deleted with every gate in
+    /// the repository staying green. ⚠️ **Past tense on purpose. `#56` covered
+    /// that one struct with a test, so deleting it goes red today** (measured
+    /// 2026-08-22). The eleven payload types with no rename are the class that
+    /// is still open, and this table is that class's cover.
     ///
     /// **Nothing in this module has a rename, and that is the fact being
     /// pinned.** `state_payload_keys` includes `freeze_probe`, snake_case,

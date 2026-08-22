@@ -647,10 +647,14 @@ struct MenuPayload {
 /// # Every field name here is one word, and that is a decision
 ///
 /// `UT-F-72`: `HoverPayload` needs `#[serde(rename_all = "camelCase")]` to reach
-/// the frontend at all, that attribute is the only one in `src-tauri`, removing
-/// it leaves **every gate in this repository green** while the frontend silently
-/// reads `undefined`, and the guard written for twice-written wire names says in
-/// its own doc that it cannot see a payload key. Roadmap 1.28 adds three fields
+/// the frontend at all, and that attribute is the only one in `src-tauri`. When
+/// `UT-F-72` was found, removing it left **every gate in this repository green**
+/// while the frontend silently read `undefined`. ⚠️ **That is no longer true for
+/// this struct**: `#56` merged a covering test and `cargo test` goes red on it
+/// now (measured 2026-08-22). It remains true for the other eleven payload
+/// types, which have no such test, and the guard written for twice-written wire
+/// names still says in its own doc that it cannot see a payload key. Roadmap 1.28
+/// adds three fields
 /// to this payload, and a `has_children` among them would have joined that
 /// class. A single lowercase word serializes identically under both conventions,
 /// so `child` and `parent` need no attribute and cannot be broken by deleting
@@ -3436,10 +3440,18 @@ mod tests {
         // The whole fix hangs on this one attribute and nothing else could see
         // it. `#[serde(rename_all = "camelCase")]` is the only reason the Rust
         // field `chrome_only` arrives as `chromeOnly`, which is the key
-        // `+page.svelte` reads. Remove the attribute and every gate in this
-        // repository stays green: the frontend then reads `undefined`,
-        // `areaFramesCss`'s default fires, and the highlight comes back on every
-        // hovered Filter area, which is the exact defect this branch removed.
+        // `+page.svelte` reads. Before this test existed, removing the attribute
+        // left every gate in this repository green: the frontend then read
+        // `undefined`, `areaFramesCss`'s default fired, and the highlight came
+        // back on every hovered Filter area, which is the exact defect `#56`
+        // removed.
+        //
+        // **This test is what changed that, so do not read the paragraph above
+        // in the present tense.** It said "Remove the attribute and every gate
+        // stays green" until 2026-08-22, written inside the test that makes the
+        // sentence false. Drilled at that date: deleting the attribute fails
+        // this test and `every_payload_this_module_emits_keeps_the_keys_the_
+        // frontend_reads`, two red rather than none.
         //
         // `area-kinds.test.ts` is the guard for twice-written wire names and its
         // own doc says it "cannot see a name that reaches the frontend by any
