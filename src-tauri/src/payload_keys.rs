@@ -129,17 +129,16 @@ pub(crate) fn assert_payload_coverage(
     covered: &[&str],
     exempt: &[(&str, &str)],
 ) {
-    let test_modules = source
-        .lines()
-        .filter(|line| line.trim_start() == "#[cfg(test)]")
-        .count();
-    assert!(
-        test_modules <= 1,
-        "{what}: {test_modules} `#[cfg(test)]` blocks. `serialize_structs` skips to \
-         end-of-file at the first one, so a second means it scanned less of this \
-         file than this list claims to cover. Split the file, or teach the \
-         extractor to track nesting."
-    );
+    // **The `test_modules <= 1` refusal that stood here is GONE, and its removal
+    // is the fix rather than a relaxation.** It existed because
+    // `serialize_structs` used to stop dead at the first `#[cfg(test)]`, so a
+    // second one meant the scan covered less of the file than this list claimed.
+    // `I-96`'s `F2` is that the repository-level sweep called the extractor
+    // directly and never reached this refusal at all -- and the refusal was the
+    // weaker half of the answer anyway, since it can only refuse, never scan.
+    // The extractor now skips each test item and carries on, so there is no
+    // under-scan left for a precondition to guard, and the sweep and this
+    // function get identical treatment because they call identical code.
     let found = serialize_structs(source);
     assert!(
         !found.is_empty(),
@@ -159,7 +158,7 @@ pub(crate) fn assert_payload_coverage(
 }
 
 /// Every `struct` or `enum` name in `source` whose `derive` mentions
-/// `Serialize`, excluding anything inside the file's `#[cfg(test)]` module.
+/// `Serialize`, excluding anything declared inside a `#[cfg(test)]` item.
 ///
 /// Deliberately blind to what sits between the `derive` and the type, so a
 /// `#[serde(...)]` attribute in between does not hide it. It matches `derive`
@@ -197,10 +196,31 @@ pub(crate) fn assert_payload_coverage(
 fn serialize_structs(source: &str) -> Vec<String> {
     let mut names = Vec::new();
     let mut derives_serialize = false;
+    let mut skipping_test_item = false;
     for line in source.lines() {
         let trimmed = line.trim_start();
+        if skipping_test_item {
+            // Test items in this crate are declared at column 0, so their
+            // closing brace is the only `}` at column 0 inside them: everything
+            // nested is indented. That is `cargo fmt --check`'s doing rather
+            // than a hope, and CI runs it. Reaching end-of-file still skipping
+            // is the ordinary case of a test module written last.
+            if line == "}" {
+                skipping_test_item = false;
+            }
+            continue;
+        }
         if trimmed == "#[cfg(test)]" {
-            break;
+            // **Skip THIS item, not the rest of the file.** This was `break`
+            // until 2026-08-22, and `I-96`'s `F2` is what that cost: a payload
+            // declared after any `#[cfg(test)]` was invisible. Live in two files
+            // at the time, not hypothetical -- `lib.rs` carries the attribute at
+            // line 15 of 296, leaving 281 lines unscanned, and `precapture.rs`
+            // carries three, two of them on plain functions rather than on the
+            // test module.
+            skipping_test_item = true;
+            derives_serialize = false;
+            continue;
         }
         if trimmed.starts_with("#[derive(") {
             derives_serialize = trimmed.contains("Serialize");
@@ -383,19 +403,66 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "`#[cfg(test)]` blocks")]
-    fn the_coverage_control_refuses_a_file_with_two_test_modules() {
-        // The cost of skipping to end-of-file: it is only sound while the
-        // attribute appears once. A second one means the scan stopped early, and
-        // a short scan agrees with any list -- the empty-extraction failure one
-        // step short of empty, and therefore one step short of the arm that
-        // already catches it.
-        assert_payload_coverage(
-            "a fixture",
-            "#[derive(Serialize)]\nstruct Real {\n    a: bool,\n}\n\
-             #[cfg(test)]\nmod a {}\n#[cfg(test)]\nmod b {}\n",
-            &["Real"],
-            &[],
+    fn a_payload_declared_after_a_test_item_is_still_found() {
+        // `I-96` `F2`, and this is the drill for it. The extractor used to
+        // `break` at the first `#[cfg(test)]`, so everything below one was
+        // invisible -- and the sweep called it directly, so no precondition
+        // stood between that and a green run. `Late` is the payload that used to
+        // be missed.
+        let source = "#[derive(Serialize)]\nstruct Early {\n    a: bool,\n}\n\
+                      #[cfg(test)]\nmod tests {\n    #[derive(Serialize)]\n\
+                      struct Fixture {\n        b: bool,\n    }\n}\n\
+                      #[derive(Serialize)]\nstruct Late {\n    c: bool,\n}\n";
+        assert_eq!(serialize_structs(source), vec!["Early", "Late"]);
+    }
+
+    #[test]
+    fn several_test_items_are_each_skipped_rather_than_ending_the_scan() {
+        // `precapture.rs`'s real shape at the time of the fix: two `#[cfg(test)]`
+        // attributes on plain FUNCTIONS and one on the test module. Two of the
+        // three are not modules at all, which is why "count the test modules"
+        // was the wrong question as well as the wrong mechanism.
+        let source = "#[cfg(test)]\npub(crate) fn helper() {\n    let _ = 1;\n}\n\
+                      #[derive(Serialize)]\nstruct Between {\n    a: bool,\n}\n\
+                      #[cfg(test)]\npub(crate) fn other() {\n    let _ = 2;\n}\n\
+                      #[derive(Serialize)]\nstruct After {\n    b: bool,\n}\n\
+                      #[cfg(test)]\nmod tests {\n    #[derive(Serialize)]\n\
+                      struct Fixture {\n        c: bool,\n    }\n}\n";
+        assert_eq!(serialize_structs(source), vec!["Between", "After"]);
+    }
+
+    #[test]
+    fn the_real_crate_sources_are_scanned_past_their_test_items() {
+        // The drills above are fixtures, and a fixture can agree with a broken
+        // extractor if both are wrong in the same way. This one reads the actual
+        // files `F2` named: `lib.rs` carries `#[cfg(test)]` at line 15 of 296, so
+        // the old extractor saw 5% of it. Asserted as "the scan reaches the end"
+        // rather than by naming line numbers that will drift.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let Ok(source) = std::fs::read_to_string(dir.join("lib.rs")) else {
+            panic!("lib.rs is readable")
+        };
+        let Some(attribute_line) = source
+            .lines()
+            .position(|line| line.trim_start() == "#[cfg(test)]")
+        else {
+            panic!(
+                "lib.rs still carries a `#[cfg(test)]`; if it does not, this drill needs a new subject"
+            )
+        };
+        let total = source.lines().count();
+        assert!(
+            attribute_line * 4 < total,
+            "this drill assumes the attribute sits early in lib.rs; it is at {attribute_line} of {total}"
+        );
+        // The property: scanning stops at the closing brace of the test item and
+        // resumes, so a `Serialize` type appended to lib.rs would be seen. The
+        // file declares none today, so assert the resumption directly.
+        let appended =
+            format!("{source}\n#[derive(Serialize)]\nstruct Appended {{\n    a: bool,\n}}\n");
+        assert!(
+            serialize_structs(&appended).contains(&"Appended".to_owned()),
+            "a payload appended to lib.rs after its test module must be visible"
         );
     }
 
