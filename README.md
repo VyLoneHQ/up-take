@@ -46,7 +46,6 @@ Four of seven area types are built.
   <!-- NOT YET DRIVEN ON HARDWARE at the time of writing. If a rig pass finds that the passive
        re-take reads as broken rather than as a still, this bullet is what has to change. -->
 
-
 Around those:
 
 - **A three state model.** The hotkey toggles between placing areas and using your machine normally.

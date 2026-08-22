@@ -25,9 +25,10 @@ Until then it is written by hand.
 - System tray icon and menu, and a single-instance guard.
 - Areas: drag to create, then move, resize and dismiss them. Areas live until dismissed or until the
   app exits, and do not survive a restart.
-- Three area types, chosen from the area's own right-click menu. A plain pinned region; a screenshot
-  area that captures what is under it and keeps the still, which Copy and Save export; and a filter
-  area that tints what is underneath and lets clicks pass through to it.
+- Four area types, chosen from the area's own right-click menu. A plain pinned region; a screenshot
+  area that captures what is under it and keeps the still, which Copy and Save export; a filter
+  area that tints what is underneath and lets clicks pass through to it; and an upscale area that
+  shows the piece of screen under it magnified, as a still rather than a live view.
 - Freeze the screen while placing an area, with `Ctrl+Space`.
 - The overlay is excluded from screen capture, so other recording tools do not see it.
 

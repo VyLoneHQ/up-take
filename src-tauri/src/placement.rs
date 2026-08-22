@@ -2885,7 +2885,7 @@ pub(crate) const fn captures_on_create(kind: AreaType) -> bool {
 /// The menu label for converting an area *to* this type, or `None` when the
 /// menu does not offer it (roadmap task 1.27).
 ///
-/// # Why only three of the seven
+/// # Why only four of the seven
 ///
 /// A conversion has to leave the user with an area that does something.
 /// `Default`, `Screenshot`, `Filter` and -- since roadmap 1.24 -- `Upscale`
@@ -2896,7 +2896,8 @@ pub(crate) const fn captures_on_create(kind: AreaType) -> bool {
 /// 1.26 for `Ocr`. **`Record` and `Analysis` have no roadmap row at all**, so
 /// they are not merely unbuilt, they are unplanned (UP-TAKE `I-64`).
 /// **`Upscale` was in the second list until 2026-08-21** and this paragraph
-/// said "four rows" and "two of the four"; both counts moved with it. Said "each earns its row with the
+/// said "four rows" and "two of the four"; both counts moved with it.
+/// Said "each earns its row with the
 /// roadmap task that gives it behaviour" until the independent review of `#55`
 /// resolved the ids and found the quantifier true of half the set.
 ///
@@ -2919,8 +2920,13 @@ const fn conversion_label(kind: AreaType) -> Option<&'static str> {
         AreaType::Screenshot => Some("Type: Screenshot"),
         AreaType::Filter => Some("Type: Filter"),
         // Arrived with roadmap 1.24, which is what the doc above said would
-        // happen: "1.24 for `Upscale` ... this is one line on the day the
-        // behaviour lands". It has behaviour now, so it earns the row.
+        // happen: "this is one line on the day the behaviour lands". It has
+        // behaviour now, so it earns the row.
+        //
+        // The quotation used to open with "1.24 for `Upscale` ...", which this
+        // same change had rewritten to "1.26 for `Ocr`" fourteen lines up, so
+        // half of it could no longer be found anywhere in the tree. A quotation
+        // a reader can check has to survive the edit it describes.
         AreaType::Upscale => Some("Type: Upscale"),
         AreaType::Record | AreaType::Ocr | AreaType::Analysis => None,
     }
