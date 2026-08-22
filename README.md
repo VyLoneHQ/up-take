@@ -16,13 +16,35 @@ what actually runs today if you build it yourself.
 
 ## What works today
 
-Two of seven area types are built.
-<!-- source: STATUS.md Phase 1 (1A merged, 1B partial); ROADMAP.md task 1.9b (Screenshot type
-     merged); PRODUCT-VISION.md section 3.1 (the seven types) -->
+Four of seven area types are built.
+<!-- source: STATUS.md Phase 1 (1A merged, 1B partial); ROADMAP.md tasks 1.9b (Screenshot),
+     1.23 (Filter, merged 2026-08-12) and 1.24 (Upscale); PRODUCT-VISION.md section 3.1 (the
+     seven types).
+     This line said "Two of seven" until 2026-08-21. Filter shipped on 2026-08-12 and the
+     count was never updated, so the front page of a public repository under-reported what
+     was built for ten days. Update it in the same change that ships a type. -->
 
 - **A plain pinned region.** A box you place and keep. Move it, resize it, dismiss it.
 - **A screenshot area.** Captures what is under it and keeps the still, pinned inside the area.
   Copy it or save it to a file.
+- **A tint area.** A warm translucent wash you leave over part of the screen and go on working
+  underneath. Clicks fall straight through it, which is the point. That is also why you cannot
+  move it by dragging its middle yet: its border and its close control are its handle.
+  <!-- source: ROADMAP.md task 1.23 (merged 2026-08-12, PR #53, a59181a). The move limitation is
+       that row's own "ships degraded and knowingly" note; the fix is task 1.17(b2), which is
+       blocked on ADR-0028. Do not drop this sentence before b2 lands. -->
+- **An upscale area.** Shows the piece of screen under it magnified, so something small is easier
+  to read without moving closer. Two things it is not. It does not invent detail: the pixels are
+  the ones already on your screen, stretched by the graphics card. And it is a still rather than a
+  live view, re-taken when you move or resize the area, so pointing it at a playing video shows you
+  a frame and not the video.
+  <!-- source: ROADMAP.md task 1.24; ADR-0030 (upscale v1 is GPU resampling, no model, passive).
+       Both negative sentences are ADR-0030's own scope and must not be softened away: the image
+       enhancer over live video is the TARGET, is a Phase 2 row (2.12), and claiming it here is
+       the P-6 failure this file has already had five of. The 2x factor is deliberately not
+       quoted, because ROADMAP 1.24 leaves it for a hardware sitting to settle. -->
+  <!-- NOT YET DRIVEN ON HARDWARE at the time of writing. If a rig pass finds that the passive
+       re-take reads as broken rather than as a still, this bullet is what has to change. -->
 
 Around those:
 
@@ -58,7 +80,7 @@ Around those:
 
 ## What is designed and not built
 
-Five more area types: record, upscale, read the text, describe the image and tint. Areas that work
+Three more area types: record, read the text and describe the image. Areas that work
 on each other are the goal and are not a feature yet.
 <!-- source: PRODUCT-VISION.md section 3.1; ROADMAP.md section 1C (OCR unstarted) and Phase 2
      (TTS, analysis); BACKLOG.md I-3 (composition unscheduled) -->

@@ -240,10 +240,45 @@ describe('menuFrameCss', () => {
   const menu: MenuView = {
     rect: [400, 300, 176, 122],
     items: [
-      { rect: [400, 305, 176, 28], label: 'Always on top', checked: false },
-      { rect: [400, 333, 176, 28], label: 'Auto', checked: true },
+      {
+        rect: [400, 305, 176, 28],
+        label: 'Area type',
+        checked: false,
+        parent: true,
+      },
+      {
+        rect: [400, 333, 176, 28],
+        label: 'Auto',
+        checked: true,
+        parent: false,
+      },
     ],
     hovered: 1,
+    child: null,
+  };
+
+  /** The same menu with its type list open, as Rust lays it out beside it. */
+  const withChild: MenuView = {
+    ...menu,
+    child: {
+      rect: [576, 300, 176, 94],
+      items: [
+        {
+          rect: [576, 305, 176, 28],
+          label: 'Type: Default',
+          checked: true,
+          parent: false,
+        },
+        {
+          rect: [576, 333, 176, 28],
+          label: 'Type: Screenshot',
+          checked: false,
+          parent: false,
+        },
+      ],
+      hovered: 0,
+      owner: 0,
+    },
   };
 
   it('positions every row from the rect Rust hit-tests', () => {
@@ -260,9 +295,75 @@ describe('menuFrameCss', () => {
     expect(frame?.items.map((item) => item.checked)).toEqual([false, true]);
   });
 
+  it('marks the row that opens a child list and no other', () => {
+    const frame = menuFrameCss(menu, [0, 0], 1);
+
+    expect(frame?.items.map((item) => item.parent)).toEqual([true, false]);
+  });
+
+  it('draws no child list until one is open', () => {
+    expect(menuFrameCss(menu, [0, 0], 1)?.child).toBeNull();
+  });
+
+  it('positions the child list from its own rects, not the parent list', () => {
+    // The child opens flush beside the panel, so its x is the parent's right
+    // edge. Deriving it here instead of reading it would put the rows where
+    // this side thinks they are rather than where Rust hit-tests them, which
+    // is the failure the whole menu is laid out in Rust to avoid.
+    const frame = menuFrameCss(withChild, [0, 0], 1);
+
+    expect(frame?.child?.rect).toEqual({
+      x: 576,
+      y: 300,
+      width: 176,
+      height: 94,
+    });
+    expect(frame?.child?.items[1]?.rect).toEqual({
+      x: 576,
+      y: 333,
+      width: 176,
+      height: 28,
+    });
+    expect(frame?.child?.items.map((item) => item.checked)).toEqual([
+      true,
+      false,
+    ]);
+  });
+
+  it('highlights the child list from its own hovered index', () => {
+    // Two lists, two indices. Reading the parent's `hovered` for both would
+    // light row 1 of the child list here, which is a plausible highlight on the
+    // wrong row: it looks like a working menu and points at the wrong type.
+    const frame = menuFrameCss(withChild, [0, 0], 1);
+
+    expect(frame?.items.map((item) => item.hovered)).toEqual([false, true]);
+    expect(frame?.child?.items.map((item) => item.hovered)).toEqual([
+      true,
+      false,
+    ]);
+  });
+
   it('is null when no menu is open or the scale is unusable', () => {
     expect(menuFrameCss(null, [0, 0], 1)).toBeNull();
     expect(menuFrameCss(menu, [0, 0], Number.NaN)).toBeNull();
+  });
+
+  it('marks the row whose child list is open, and only that row', () => {
+    // The invariant an earlier build spent `hovered` on and could not keep: the
+    // parent went dark whenever the pointer crossed another top-level row,
+    // leaving the open list with nothing pointing at it. `owner` is a fact
+    // about the list, so it holds whatever the hover is doing -- and here the
+    // hover is on row 1 while row 0 owns the list.
+    const frame = menuFrameCss(withChild, [0, 0], 1);
+
+    expect(frame?.items.map((item) => item.open)).toEqual([true, false]);
+    expect(frame?.items.map((item) => item.hovered)).toEqual([false, true]);
+  });
+
+  it('marks no row open when no child list is open', () => {
+    expect(
+      menuFrameCss(menu, [0, 0], 1)?.items.every((item) => !item.open),
+    ).toBe(true);
   });
 });
 
@@ -374,15 +475,22 @@ describe('armedTypeForKey', () => {
 
   it('arms Filter on F, in either case', () => {
     expect(armedTypeForKey(key({ key: 'f' }))).toBe('filter');
+    // Roadmap 1.24. The review of that change deleted the `case 'u'` arm
+    // outright and all 75 tests stayed green -- the entire user-facing entry
+    // point of the feature, and the one line nothing could catch.
+    expect(armedTypeForKey(key({ key: 'u' }))).toBe('upscale');
+    expect(armedTypeForKey(key({ key: 'U' }))).toBe('upscale');
     expect(armedTypeForKey(key({ key: 'F' }))).toBe('filter');
   });
 
-  it('keeps the two armable types distinct', () => {
+  it('keeps the armable types distinct from each other', () => {
     // The switch returned one value for every key it matched until Filter
     // arrived, so a fallthrough between the arms would have been invisible.
-    expect(armedTypeForKey(key({ key: 'f' }))).not.toBe(
-      armedTypeForKey(key({ key: 's' })),
-    );
+    // ALL THREE PAIRWISE since 1.24, not just the first two: comparing one
+    // pair cannot see a third arm falling through into either of them.
+    const armed = ['s', 'f', 'u'].map((k) => armedTypeForKey(key({ key: k })));
+    expect(new Set(armed).size).toBe(armed.length);
+    expect(armed.every((a) => a !== null)).toBe(true);
   });
 
   it('arms nothing under Ctrl, Alt or Meta', () => {
