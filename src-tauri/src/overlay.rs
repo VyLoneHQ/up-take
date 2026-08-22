@@ -1031,7 +1031,7 @@ pub(crate) fn convert_area(app: &AppHandle, id: AreaId, kind: AreaType) -> bool 
     // Not the same mechanism as the capture's ordering one paragraph up, which
     // turns on `captures::forget` instead. Two orderings, two reasons, both
     // "after the discard"; they were given one shared reason until 2026-08-21
-    // and it was the wrong one for the capture. See UP-TAKE `I-285` for what
+    // and it was the wrong one for the capture. See UP-TAKE `I-286` for what
     // neither of these lines is observed by.
     if conversion.changed {
         refresh_magnification(app, id);

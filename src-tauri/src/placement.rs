@@ -2828,7 +2828,7 @@ fn capture_on_create(app: &AppHandle, kind: AreaType, id: AreaId, bounds: Rect) 
     // and 214 lines and swallow neighbours that mention `refresh_magnification`
     // themselves. A control built on that would pass for the wrong reason,
     // which is the defect class this branch's review kept finding. Recorded as
-    // UP-TAKE `I-285`; the honest gap is here until a real seam exists.
+    // UP-TAKE `I-286`; the honest gap is here until a real seam exists.
     overlay::refresh_magnification(app, id);
     if captures_on_create(kind) {
         crate::output::capture_into_area(app, id, bounds);
