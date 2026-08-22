@@ -1502,12 +1502,27 @@ struct PinPayload {
 /// different timing: an area appears the instant the drag ends, and its capture
 /// lands ~200 ms later. Making the area wait for its pixels would put a visible
 /// hole where the user just dragged.
-pub(crate) fn emit_pin(app: &AppHandle, id: AreaId, version: u64) -> Result<(), String> {
+///
+/// **Takes proof that the pixels still exist rather than an id and a version**
+/// (`I-61`). A [`FreshPin`] can only come from `captures::still_holds`, so a
+/// caller cannot announce a URL for pixels that have been forgotten without
+/// first asking whether they have. See that type for why this is an argument
+/// rather than a check the caller is trusted to perform.
+///
+/// **By value, and that is the second half of the guarantee.** A `&FreshPin`
+/// makes the proof re-usable: one call to `still_holds` could answer for any
+/// number of later emits, including emits after the pixels had gone, which is
+/// `I-61` with an extra step rather than `I-61` fixed. Consuming it makes the
+/// proof single-use, so each announcement is backed by its own question. The
+/// type is deliberately neither `Copy` nor `Clone` for the same reason.
+///
+/// [`FreshPin`]: crate::captures::FreshPin
+pub(crate) fn emit_pin(app: &AppHandle, pin: crate::captures::FreshPin) -> Result<(), String> {
     app.emit(
         PIN_EVENT,
         PinPayload {
-            id: id.get(),
-            url: Some(crate::captures::pin_url(id, version)),
+            id: pin.id().get(),
+            url: Some(crate::captures::pin_url(pin.id(), pin.version())),
         },
     )
     .map_err(|e| format!("Could not emit the pin: {e}"))
