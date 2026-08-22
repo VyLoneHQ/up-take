@@ -75,6 +75,31 @@
 //! would agree with any list at all. So [`assert_payload_coverage`] **refuses an
 //! empty extraction**, the same way `area-kinds.test.ts` throws rather than
 //! comparing two empty sets.
+//!
+//! # WHAT THIS MODULE DOES NOT COVER, and the claim is narrowed on purpose
+//!
+//! **The class `I-67` names is wider than the construct this closes.** The class
+//! is *a wire name that reaches the frontend as a payload key*. What is
+//! mechanised here is narrower: **the twelve `#[derive(Serialize)]` payload types
+//! that exist in `overlay.rs` and `placement.rs` today.** That narrowing is the
+//! founder's decision of 2026-08-21, taken over widening the mechanism, and it is
+//! written down here because a scope decision recorded only in a backlog row is
+//! one the next reader re-derives from the code and gets wrong.
+//!
+//! **The route deliberately left open, so nobody reads a green here as covering
+//! it:** an inline `app.emit("overlay://x", serde_json::json!({ "someKey": 1 }))`
+//! carries wire keys past every check in this file. There is no `Serialize` type
+//! to enumerate, so the completeness control cannot see it, the key tables cannot
+//! name it, and `src/lib/payload-keys.test.ts` cannot pair it. Drilled by the
+//! round-2 independent review, which planted exactly that emit and watched the
+//! whole suite stay green.
+//!
+//! Two things follow, and the second is the one that matters. **Prefer a named
+//! `Serialize` struct for any new payload** -- not because `json!` is wrong, but
+//! because a struct is the shape every guard in this repository can see. And
+//! **`no_payload_in_this_module_escapes_the_key_table` is named for what it
+//! checks, which is the derive-based payloads**; it is not a claim that nothing
+//! escapes. Recorded as `I-96`'s `F6`, open by choice rather than by oversight.
 
 use serde::Serialize;
 
@@ -145,6 +170,35 @@ pub(crate) fn assert_payload_coverage(
         "{what}: extracted no Serialize structs. Has the attribute or the struct \
          keyword been reshaped? An empty set agrees with any list."
     );
+    // **The reason is READ, not destructured away.** `I-96`'s `F4`: this was
+    // `.any(|(exempt_name, _)| ...)`, so `("GhostPayload", "")` passed and the
+    // parameter's whole documented purpose -- that the first exemption arrives
+    // with a reason beside it -- was executed by nothing. A blank reason is now
+    // a refusal, which is the same rule `dash-ratchet.py` applies to its own
+    // `EXEMPT` list and for the same argument: a list that can fill up with
+    // silent entries stops being a record of anything.
+    // **A name in `covered` has to be backed by a real `assert_keys` call.**
+    // `I-96`'s `F3`: this control's own panic said *"Add it to the key table"*,
+    // and doing exactly that -- adding the name and writing no assertion --
+    // was green. Following a control's remediation message must not be how you
+    // mute it. Nothing tied `covered` to the calls, so the list could claim
+    // coverage it did not have, which is the same defect one level up from the
+    // one this function exists to catch.
+    let asserted = assert_keys_subjects(source);
+    for name in covered {
+        assert!(
+            asserted.iter().any(|subject| subject == name),
+            "{what}: `{name}` is listed as covered and no `assert_keys(\"{name}\", ...)` \
+             call exists in this file. The list claims a pin that was never written."
+        );
+    }
+    for (exempt_name, reason) in exempt {
+        assert!(
+            !reason.trim().is_empty(),
+            "{what}: `{exempt_name}` is exempt with a blank reason. An exemption \
+             nobody had to justify is one nobody notices has stopped applying."
+        );
+    }
     for name in &found {
         let known = covered.contains(&name.as_str())
             || exempt.iter().any(|(exempt_name, _)| exempt_name == name);
@@ -155,6 +209,48 @@ pub(crate) fn assert_payload_coverage(
              a payload key is reachable by no other guard in this repository."
         );
     }
+}
+
+/// The subject of every `assert_keys` call in `source`, as written.
+///
+/// `assert_keys`'s first argument is the type name, so this is the set of
+/// payloads a file actually pins, as opposed to the set its `covered` list
+/// claims. Comment lines are dropped before matching: a doc comment quoting a
+/// call is prose, not a call, and `src/lib/payload-keys.test.ts` shipped exactly
+/// that false positive on its own Rust-side extractor.
+///
+/// Returns what it finds without judging it. The caller decides, because the
+/// interesting condition is a `covered` entry with nothing behind it rather
+/// than an assertion nobody listed.
+fn assert_keys_subjects(source: &str) -> Vec<String> {
+    let mut subjects = Vec::new();
+    // True when the previous code line was a bare `assert_keys(`, which is how
+    // rustfmt wraps every call in this crate. The subject is then the leading
+    // string literal of the NEXT line, and nothing else in the file may be read
+    // that way -- a `"..."` at the start of a line is only a subject when this
+    // flag says the call opened immediately above it.
+    let mut expecting_subject = false;
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        let candidate = if expecting_subject {
+            Some(trimmed)
+        } else {
+            trimmed.strip_prefix("assert_keys(")
+        };
+        expecting_subject = trimmed == "assert_keys(";
+        if let Some(rest) = candidate
+            && let Some(inner) = rest.strip_prefix('"')
+            && let Some((name, _)) = inner.split_once('"')
+            && !name.is_empty()
+        {
+            subjects.push(name.to_owned());
+            expecting_subject = false;
+        }
+    }
+    subjects
 }
 
 /// Every `struct` or `enum` name in `source` whose `derive` mentions
@@ -395,10 +491,14 @@ mod tests {
     #[test]
     #[should_panic(expected = "derives Serialize and no test pins its keys")]
     fn the_coverage_control_refuses_a_payload_that_no_test_names() {
+        // The fixture carries a real `assert_keys` line for `Known`, because
+        // `covered` must now be backed by one. A fixture that omits it is
+        // testing a module shape that cannot exist.
         assert_payload_coverage(
             "a fixture",
             "#[derive(Serialize)]\nstruct Known {\n    a: bool,\n}\n\
-             #[derive(Serialize)]\nstruct Stray {\n    b: bool,\n}\n",
+             #[derive(Serialize)]\nstruct Stray {\n    b: bool,\n}\n\
+             assert_keys(\"Known\", &known, &[\"a\"]);\n",
             &["Known"],
             &[],
         );

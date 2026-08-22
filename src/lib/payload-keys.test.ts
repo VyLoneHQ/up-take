@@ -1,8 +1,23 @@
 import { describe, expect, it } from 'vitest';
 
-import overlayRs from '../../src-tauri/src/overlay.rs?raw';
-import placementRs from '../../src-tauri/src/placement.rs?raw';
 import overlayStateTs from './overlay-state.ts?raw';
+
+/**
+ * Every Rust module in the crate, read eagerly.
+ *
+ * `I-96` `F5`: this file imported `overlay.rs` and `placement.rs` by literal
+ * path, so a payload declared in a THIRD module needed somebody to remember a
+ * third `import` line. That is the per-file closure the Rust half had already
+ * removed by reading its source directory, reintroduced on this side in the same
+ * change -- and an obligation on an author is the class `A6` calls weak by
+ * construction. The glob is resolved by Vite at build time, so a new `.rs` file
+ * arrives here without an edit.
+ */
+const RUST_SOURCES = import.meta.glob('../../src-tauri/src/*.rs', {
+  eager: true,
+  query: '?raw',
+  import: 'default',
+}) as Record<string, string>;
 
 /**
  * UP-TAKE `I-67`, round 2 finding `F7`: `overlay-state.ts` is a second
@@ -53,6 +68,32 @@ const RENAMED: Record<string, string> = {
   // tidiness, and the point of this file is that the two are checked, not that
   // they are spelled alike.
   AreaPayload: 'AreaView',
+};
+
+/**
+ * TypeScript interfaces that deliberately have no Rust sender.
+ *
+ * The reason is READ, not decorative: a blank one is refused below, for the same
+ * argument `assert_payload_coverage`'s exempt list makes on the Rust side. An
+ * exemption nobody had to justify is one nobody notices has stopped applying.
+ *
+ * These four are the reason the reverse pairing needs an escape hatch at all:
+ * `overlay-state.ts` is not purely a mirror of the wire, and a reader told it is
+ * "a second hand-written copy of all twelve payload shapes" will misread the
+ * first entry below. That misreading was raised as unease by the round-2
+ * independent review; writing the distinction down here is the answer to it.
+ */
+const PAIRS_EXEMPT: Record<string, string> = {
+  FrozenStill:
+    'wire-derived but not a Rust payload TYPE: serde sends a bare tuple ' +
+    '(x, y, w, h, url) and `stillsFromWire` builds this shape on arrival, so ' +
+    'there is no named Serialize struct on the other side to pair with.',
+  AreaFrame:
+    'computed on this side. CSS geometry plus styling state, derived from an ' +
+    'AreaView after it arrives; nothing sends it.',
+  MenuItemFrame:
+    'computed on this side, like AreaFrame. Laid out from MenuView.',
+  MenuFrame: 'computed on this side, like AreaFrame. Laid out from MenuView.',
 };
 
 /** The arguments of a call, split at top level, given the text inside its parens. */
@@ -143,11 +184,16 @@ function rustPayloadKeys(source: string, what: string): Map<string, string[]> {
     }
     at = source.indexOf('assert_keys(', end);
   }
-  if (found.size === 0) {
-    throw new Error(
-      `no assert_keys calls found in ${what} -- renamed, or reshaped? An empty set agrees with anything.`,
-    );
-  }
+  // A module with no `assert_keys` calls is ORDINARY, not a failure: since the
+  // glob replaced two literal imports, most of the fifteen crate sources have no
+  // payloads at all. This threw per file until 2026-08-22, which was right when
+  // only `overlay.rs` and `placement.rs` were read and wrong the moment the file
+  // list stopped being hand-picked.
+  //
+  // The silent-empty case the throw existed for is not lost, only moved to the
+  // granularity where it is true: `finds a payload table on both sides` asserts
+  // the COMBINED map has at least twelve entries, so a renamed or reshaped
+  // `assert_keys` still turns this file red rather than agreeing with anything.
   return found;
 }
 
@@ -182,10 +228,12 @@ function tsInterfaceKeys(source: string): Map<string, string[]> {
   return found;
 }
 
-const rust = new Map([
-  ...rustPayloadKeys(overlayRs, 'overlay.rs'),
-  ...rustPayloadKeys(placementRs, 'placement.rs'),
-]);
+const rust = new Map(
+  Object.entries(RUST_SOURCES).flatMap(([path, source]) => {
+    const file = path.slice(path.lastIndexOf('/') + 1);
+    return [...rustPayloadKeys(source, file)];
+  }),
+);
 const ts = tsInterfaceKeys(overlayStateTs);
 
 describe('every payload arrives under the keys this side reads', () => {
@@ -213,5 +261,40 @@ describe('every payload arrives under the keys this side reads', () => {
       (name) => !ts.has(RENAMED[name] ?? name),
     );
     expect(unpaired).toEqual([]);
+  });
+
+  it('refuses a PAIRS_EXEMPT entry with a blank reason', () => {
+    const blank = Object.entries(PAIRS_EXEMPT)
+      .filter(([, reason]) => reason.trim() === '')
+      .map(([name]) => name);
+    expect(
+      blank,
+      'an exemption nobody had to justify is one nobody notices has stopped applying',
+    ).toEqual([]);
+  });
+
+  it('leaves no TypeScript payload interface unpaired', () => {
+    // `I-96` `F7`: the pairing ran Rust -> TypeScript only, while this file's
+    // own doc called it complete. A ghost interface with no Rust counterpart
+    // passed, and `overlay-state.ts` carries more exported interfaces than
+    // there are payloads, so the `ts.size >= 12` floor had slack to hide it in.
+    //
+    // The other direction is not symmetric and must not be written as though it
+    // were: `overlay-state.ts` legitimately declares interfaces that are not
+    // payloads at all. So this compares against the set the extractor already
+    // decided are payload-shaped, and PAIRS_EXEMPT names the ones that are
+    // deliberately TypeScript-only, with a reason each.
+    const rustNames = new Set(
+      [...rust.keys()].map((name) => RENAMED[name] ?? name),
+    );
+    const unpaired = [...ts.keys()].filter(
+      (name) => !rustNames.has(name) && !(name in PAIRS_EXEMPT),
+    );
+    expect(
+      unpaired,
+      'a TypeScript interface describes a payload no Rust module sends. Either ' +
+        'Rust stopped sending it and this side still claims it, or it never ' +
+        'existed. Add it to PAIRS_EXEMPT with a reason if it is deliberate.',
+    ).toEqual([]);
   });
 });
