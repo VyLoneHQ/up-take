@@ -2761,11 +2761,23 @@ fn finish_gesture(release: Point) {
 
 /// Dispatches the capture a freshly created area needs, if its type has one.
 ///
-/// Only `Screenshot` captures on create: ADR-0018 settles that for the one type
-/// it decided, and the rest have no gesture yet. Written as an explicit match
-/// rather than as another `AreaType` method because "does creating this capture
-/// pixels?" has exactly one answer today, and inventing a fourth per-type axis
-/// on one data point is how the other three got harder to change.
+/// **Two types take pixels here, by two different routes.** `Screenshot` takes
+/// a pin through [`captures_on_create`], which ADR-0018 settled for the one type
+/// it decided; `Upscale` takes its first magnified capture through
+/// [`overlay::refresh_magnification`], because roadmap 1.24 gives it a
+/// non-natural [`AreaType::default_zoom`] and an area born at 2x showing the
+/// live screen at 1:1 is the magnifying type not magnifying.
+///
+/// **Said "Only `Screenshot` captures on create [...] and the rest have no
+/// gesture yet" until 2026-08-21**, and roadmap 1.24 falsified both halves in
+/// the change that added the line above it. The second half had been false since
+/// 1.23 besides: `f` arms `Filter` and `u` arms `Upscale` (`armable_type`).
+///
+/// [`captures_on_create`] stays an explicit match rather than another `AreaType`
+/// method because "does creating this pin pixels?" still has exactly one answer,
+/// and inventing a further per-type axis on one data point is how the other
+/// three got harder to change. The magnified route needs no list at all, which
+/// is the point of asking it through the area's own zoom.
 fn capture_on_create(app: &AppHandle, kind: AreaType, id: AreaId, bounds: Rect) {
     // **A TYPE THAT IS BORN MAGNIFIED TAKES ITS FIRST CAPTURE HERE TOO**
     // (roadmap 1.24). `AreaStore::create` gives the area `kind.default_zoom()`,
@@ -2780,9 +2792,43 @@ fn capture_on_create(app: &AppHandle, kind: AreaType, id: AreaId, bounds: Rect) 
     // predicate: `captures_on_create` below already documents why a
     // hand-maintained per-type list drifts, and this needs no list at all.
     //
-    // Before the `captures_on_create` branch, because the two are exclusive
-    // today and the magnified path must not have its generation bumped by a
-    // capture dispatched after it.
+    // **The order of these two lines is NOT load-bearing, and the reason given
+    // here until 2026-08-21 was false.** It said the magnified path "must not
+    // have its generation bumped by a capture dispatched after it".
+    // `output::capture_into_area` never touches `MAGNIFY`: it inserts into
+    // `CaptureStore` and emits a pin, and the magnify generation is issued and
+    // cancelled only by `magnify_into_area` and `cancel_magnification`. Read the
+    // function, not this comment, if it ever matters again.
+    //
+    // What is true is the half the old text also carried: **the two are mutually
+    // exclusive today.** `captures_on_create` is `Screenshot`-only,
+    // `Screenshot::default_zoom()` is `NATURAL`, and `refresh_magnification`
+    // no-ops at natural size -- so on any given area exactly one of these two
+    // lines does work, and neither can observe the other.
+    //
+    // **What would actually matter for an eighth type that is both**, so the
+    // next reader does not re-derive the wrong constraint: both dispatch to
+    // background threads, so the order of the *statements* would not decide the
+    // order of the *completions*. The two would race through
+    // `CaptureStore::insert` for one id and the later thread would win. That is
+    // a real design question and it is not answered by moving a line.
+    //
+    // ⚠️ **NEITHER THIS CALL NOR THE ONE IN `overlay::convert_area` IS OBSERVED
+    // BY ANY TEST, and the measurement is the disclosure.** Delete both and
+    // every born-magnified area renders the live screen at 1:1 -- the feature
+    // gone, in the one way a user notices immediately -- with the whole host
+    // suite still green. `I-81` is this repository's precedent for saying that
+    // out loud rather than papering it over.
+    //
+    // **The source control that covers `pump_menu` cannot be reused here**, and
+    // that is measured rather than assumed: `fn_body` slices from the signature
+    // to the next `\nfn `, which matches only a PRIVATE top-level item. This
+    // function is followed by `pub(crate) const fn captures_on_create` and
+    // `convert_area` by `pub(crate) fn area_handle_at`, so the slices run 133
+    // and 214 lines and swallow neighbours that mention `refresh_magnification`
+    // themselves. A control built on that would pass for the wrong reason,
+    // which is the defect class this branch's review kept finding. Recorded as
+    // UP-TAKE `I-285`; the honest gap is here until a real seam exists.
     overlay::refresh_magnification(app, id);
     if captures_on_create(kind) {
         crate::output::capture_into_area(app, id, bounds);

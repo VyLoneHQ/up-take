@@ -404,6 +404,15 @@ def main() -> int:
             )
             + "\n",
             encoding="utf-8",
+            # `newline="\n"` or Python's text mode turns every `\n` into `\r\n`
+            # on Windows, which silently converts this whole file from LF to
+            # CRLF on every `--write-baseline`. `.gitattributes` then normalizes
+            # it back at staging, so `git diff` shows only the count line and
+            # nothing in the commit path can see the damage. Observed here on
+            # 2026-08-21: the file was 6 LF at `HEAD` and 6 CRLF in the working
+            # tree straight after a write. UP-TAKE `I-68` is the workspace-level
+            # record of this hazard.
+            newline="\n",
         )
         print(f"baseline written: {total} in {len(counts)} file(s)")
         if exempt_total:

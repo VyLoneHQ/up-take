@@ -585,11 +585,16 @@ export function isRemoveKey(key: string): boolean {
  *
  * # Why a chord where arming uses a bare letter
  *
- * Bare single letters are the *arming* namespace: `s` is Screenshot today, and
- * OCR, Analysis, Record, Filter and Upscale each want their initial. A view
- * toggle taking one would spend a slot the type system needs. `armedTypeForKey`
- * below rejects every `Ctrl`/`Alt`/`Meta` chord by construction, so this chord
- * **cannot** collide with arming however many types are added.
+ * Bare single letters are the *arming* namespace: `s` is Screenshot, `f` is
+ * Filter and `u` is Upscale today, and OCR, Analysis and Record each want their
+ * initial. A view toggle taking one would spend a slot the type system needs.
+ * `armedTypeForKey` below rejects every `Ctrl`/`Alt`/`Meta` chord by
+ * construction, so this chord **cannot** collide with arming however many types
+ * are added.
+ *
+ * This listed Filter and Upscale among the types that merely *want* an initial
+ * until 2026-08-21, 54 lines above the arms that give them one. Roadmap 1.23
+ * spent `f` and 1.24 spent `u`; three of the seven are claimed, not one.
  *
  * `Space` alone was the better key on ergonomics and was deliberately left
  * unclaimed for a future area-level action (ADR-0026 decision 8).

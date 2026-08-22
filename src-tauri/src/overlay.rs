@@ -985,8 +985,16 @@ pub(crate) fn convert_area(app: &AppHandle, id: AreaId, kind: AreaType) -> bool 
         crate::output::clear_magnification(app, id);
     }
     // **A conversion INTO a capturing type has to take that capture**, and the
-    // order matters: the discard above bumps the magnify generation and drops any
-    // old pin, so doing these the other way round would throw the new one away.
+    // order matters: the discard above reaches `captures::forget`, which removes
+    // the area's entry from `CaptureStore` synchronously, while this capture
+    // inserts from a spawned thread. Doing these the other way round would let
+    // the discard erase the pin the capture had just stored.
+    //
+    // **The generation is NOT what makes this ordering necessary**, and the two
+    // are worth keeping apart: `output::capture_into_area` never reads or writes
+    // `MAGNIFY`, so a generation bump cannot touch it. The magnify generation is
+    // what orders the line further down. Corrected 2026-08-21; the previous
+    // wording gave one mechanism for both and it was the right one for only one.
     //
     // ADR-0018 §6 says every type must answer "and then what?", and roadmap 1.27
     // reserved this exact question: *"a conversion to `Screenshot` has to decide
@@ -1014,9 +1022,17 @@ pub(crate) fn convert_area(app: &AppHandle, id: AreaId, kind: AreaType) -> bool 
     // because it already asks the area for its own source rectangle and no-ops
     // at natural size -- so this line is correct for every type without
     // knowing which ones are magnified, and stays correct when an eighth is.
-    // Ordered AFTER the discard above for the same reason the capture is: the
-    // discard bumps the magnify generation, so magnifying first would throw the
-    // new capture away.
+    // Ordered AFTER the discard above, and THIS is the line the generation
+    // orders: `clear_magnification` reaches `Magnify::cancel`, which bumps
+    // `next_generation` and stamps it as `id`'s current one. A request issued
+    // before that is superseded, and `magnify_once` drops it at `is_current` --
+    // so magnifying first would do the work and throw the result away.
+    //
+    // Not the same mechanism as the capture's ordering one paragraph up, which
+    // turns on `captures::forget` instead. Two orderings, two reasons, both
+    // "after the discard"; they were given one shared reason until 2026-08-21
+    // and it was the wrong one for the capture. See UP-TAKE `I-285` for what
+    // neither of these lines is observed by.
     if conversion.changed {
         refresh_magnification(app, id);
     }
@@ -1781,7 +1797,7 @@ mod tests {
     /// The half that matters. `armable_type` is the gate that stops a frontend
     /// typo becoming an area of a type the app cannot draw, so what it
     /// *refuses* is the property, and a widening that quietly accepted the
-    /// other five would be invisible from the accepting side alone.
+    /// other four would be invisible from the accepting side alone.
     #[test]
     fn a_modelled_type_with_no_gesture_is_still_refused() {
         // `upscale` LEFT this list on 2026-08-21: roadmap 1.24 gave it a

@@ -103,7 +103,14 @@ pub enum AreaType {
     Record,
     /// Text recognition over the region.
     Ocr,
-    /// An upscaled live view of the region.
+    /// A magnified view of the region, re-taken rather than live in v1.
+    ///
+    /// Said "an upscaled **live** view" until 2026-08-21, and
+    /// [ADR-0030](ADR-0030-upscale-v1-is-gpu-resampling.md) scopes v1 to GPU
+    /// resampling with no model and [`Visual::Passive`], so the word was false
+    /// at the variant's own definition site while `default_visual` two hundred
+    /// lines below carried the correction. Live upscaling is the target and a
+    /// later roadmap row, which is why the type is not renamed.
     Upscale,
     /// A region handed to an analysis pipeline.
     Analysis,
@@ -196,8 +203,14 @@ impl AreaType {
     ///
     /// ADR-0018 names the cost of this axis out loud: every future type must now
     /// answer "and then what?", and getting it wrong strands the user in the
-    /// wrong state. So the five unbuilt types below are **not** answered here —
-    /// they take the conservative value and say so.
+    /// wrong state. So the three types below that have no gesture yet, `Record`,
+    /// `Ocr` and `Analysis`, are **not** answered here: they take the
+    /// conservative value and say so.
+    ///
+    /// Said "the five unbuilt types" until 2026-08-21. `Filter` earned a gesture
+    /// in roadmap 1.23 and `Upscale` in 1.24, so the count was two out of date
+    /// and drifting once per shipped type. Naming the three is what stops it
+    /// drifting again.
     ///
     /// # Every type stays, as of ADR-0023
     ///
@@ -558,12 +571,20 @@ pub struct Area {
     /// Which stacking tier it is pinned to. [`Layer::Auto`] — plain recency —
     /// unless the user has said otherwise.
     pub layer: Layer,
-    /// How far its contents are magnified (§3.4). [`Zoom::NATURAL`] on every
-    /// area of every type, including the types [`AreaType::supports_zoom`]
-    /// refuses: the field is what the area *is*, and the predicate is what the
-    /// gesture is allowed to change. Keeping them separate means a type that
-    /// gains zoom later gains it by answering the predicate, with no migration
-    /// of the model.
+    /// How far its contents are magnified (§3.4). Whatever
+    /// [`AreaType::default_zoom`] the creating type chose: [`Zoom::NATURAL`] for
+    /// six of the seven, [`Zoom::UPSCALE`] for [`AreaType::Upscale`].
+    ///
+    /// **Said "[`Zoom::NATURAL`] on every area of every type, including the
+    /// types [`AreaType::supports_zoom`] refuses" until 2026-08-21**, which
+    /// roadmap 1.24 made false of exactly the type that clause named to make its
+    /// point. The point it was making survives and is the reason the field and
+    /// the predicate stay separate: the field is what the area *is*, the
+    /// predicate is what the **gesture** is allowed to change, and `Upscale` is
+    /// now the worked example rather than a hypothetical -- born at 2x and
+    /// refusing the scroll that would move it. A type that gains the gesture
+    /// later gains it by answering the predicate, with no migration of the
+    /// model.
     pub zoom: Zoom,
 }
 
@@ -807,11 +828,19 @@ impl AreaStore {
     /// - **[`AfterCreate`] does not apply at all.** It is a property of the
     ///   creating gesture, and a conversion is not one. There is no drag in
     ///   progress and no mode to return from.
-    /// - **[`Zoom`] resets whenever the new type does not support it**, and this
-    ///   is the invariant the row is *for*. [`AreaType::supports_zoom`] is
-    ///   `Default`-only, so a converted area left holding a non-natural zoom
-    ///   could never be scrolled back: [`AreaStore::zoom_by`] refuses on the
-    ///   type before it ever reaches the value.
+    /// - **[`Zoom`] is re-taken from the new type's [`AreaType::default_zoom`]
+    ///   whenever the new type does not support the gesture**, and this is the
+    ///   invariant the row is *for*. [`AreaType::supports_zoom`] is
+    ///   `Default`-only, so a converted area left holding a zoom of its own
+    ///   choosing could never be scrolled back: [`AreaStore::zoom_by`] refuses
+    ///   on the type before it ever reaches the value.
+    ///
+    ///   **This said "resets" until 2026-08-21 and the body said otherwise
+    ///   eight lines below**, in nine lines of inline comment explaining the
+    ///   difference. `default_zoom` rather than [`Zoom::NATURAL`] is what lets a
+    ///   conversion *into* `Upscale` arrive magnified; the two readings agree
+    ///   for the six types whose default is natural, which is why the wrong word
+    ///   survived roadmap 1.27.
     /// - **[`Visual`] and [`Input`] are re-taken from the new type's defaults.**
     ///   §3.2 calls all three properties orthogonal and says a type supplies a
     ///   *starting* value rather than a constraint, so carrying the old values
@@ -852,11 +881,35 @@ impl AreaStore {
         if !kind.supports_zoom() {
             area.zoom = kind.default_zoom();
         }
-        // `was_magnified && supports_zoom` is unreachable today, because only
-        // `Default` zooms and `Default` to `Default` returned above. It is
-        // written as a conjunction anyway, so that widening `supports_zoom` to a
-        // second type cannot silently start throwing away a magnification the
-        // new type would have kept.
+        // **`was_magnified && supports_zoom` IS REACHABLE, as of roadmap 1.24.**
+        // It said "unreachable today, because only `Default` zooms and `Default`
+        // to `Default` returned above" until 2026-08-21, and 1.24 falsified it
+        // in the same change that wrote it: `Upscale` is born non-natural, so
+        // `Upscale` to `Default` arrives here with `was_magnified` true and the
+        // new type supporting the gesture. It is the ordinary menu conversion
+        // 1.27 made offerable, not a corner.
+        //
+        // **The behaviour on that pair is DECIDED, not inherited: the converted
+        // `Default` KEEPS the 2x.** Three reasons, and the third is why the
+        // pixels are kept with it.
+        //
+        // - `Default` supports the gesture, so 2x is a state the user could have
+        //   reached by scrolling. It strands nothing.
+        // - `Zoom::UPSCALE` is four steps against a `MAX_STEP` of 28, and §3.4's
+        //   floor makes scrolling out always a way back. Four notches undo it.
+        //   Recoverability is the property the floor exists for, and it holds
+        //   here without a special case.
+        // - The pin stays VALID, which is why `discard_capture` is false below
+        //   rather than by omission: `refresh_magnification` reads the area's
+        //   own zoom and bounds, and the conversion changes neither, so the
+        //   pixels already on screen were taken at the factor and over the
+        //   sub-rectangle the area still has. Resetting to natural would have to
+        //   discard them and re-take, which is more machinery for a view the
+        //   user did not ask to lose.
+        //
+        // The conjunction is still written as one so that widening
+        // `supports_zoom` to a further type cannot silently start throwing away
+        // a magnification the new type would have kept.
         //
         // **`discard_capture` stays right for a conversion INTO `Upscale`, and
         // it is worth saying why rather than leaving it to be re-derived.**
@@ -1800,14 +1853,61 @@ mod tests {
                 // an area at a magnification belonging to the type it used to
                 // be. Note which way this moved: the old form would have PASSED
                 // an Upscale area left at some other type's factor.
+                //
+                // **What it still cannot see, stated rather than left to be
+                // discovered:** the left arm short-circuits for every `to ==
+                // Default`, so this says nothing about what a conversion INTO a
+                // zoom-supporting type leaves. `Upscale` to `Default` is the
+                // pair that makes that reachable, and it has a test of its own
+                // below because a matrix assertion phrased this way cannot hold
+                // it.
                 assert!(
                     area.kind.supports_zoom() || area.zoom == area.kind.default_zoom(),
-                    "{from:?} to {to:?} left {:?}, which is neither this type's                      default {:?} nor a zoom it can undo",
+                    "{from:?} to {to:?} left {:?}, which is neither this type's \
+                     default {:?} nor a zoom it can undo",
                     area.zoom,
                     area.kind.default_zoom()
                 );
             }
         }
+    }
+
+    #[test]
+    fn upscale_to_default_keeps_the_magnification_and_can_scroll_out_of_it() {
+        // The pair the matrix above cannot assert on, and the one roadmap 1.24
+        // made reachable: `Upscale` is born at 2x, `Default` supports the
+        // gesture, so `was_magnified && supports_zoom` is live for the first
+        // time. `set_kind`'s own comment records the decision this asserts --
+        // the converted area KEEPS the factor, because it is a state the user
+        // could have scrolled to and can scroll back out of.
+        let mut store = AreaStore::new();
+        let id = store
+            .create(AreaType::Upscale, rect(0, 0, 100, 100))
+            .unwrap();
+        assert_eq!(store.get(id).unwrap().zoom, Zoom::UPSCALE);
+
+        let conversion = store.set_kind(id, AreaType::Default).unwrap();
+        assert!(conversion.changed);
+        assert_eq!(
+            store.get(id).unwrap().zoom,
+            Zoom::UPSCALE,
+            "the magnification is kept: Default supports the gesture, so this is \
+             not a stranded state"
+        );
+        assert!(
+            !conversion.discard_capture,
+            "and the pixels are kept with it -- the factor and the source \
+             rectangle are unchanged, so what is already on screen is still right"
+        );
+
+        // Recoverable, which is the whole reason keeping it is safe. Four
+        // notches is what `Zoom::UPSCALE` costs, and §3.4's floor does the rest.
+        assert_eq!(
+            store.zoom_by(id, -4),
+            Some(Zoom::NATURAL),
+            "a Default area must be able to scroll out of an inherited factor"
+        );
+        assert!(store.get(id).unwrap().zoom.is_natural());
     }
 
     #[test]
