@@ -404,14 +404,20 @@ def main() -> int:
             )
             + "\n",
             encoding="utf-8",
-            # `newline="\n"` or Python's text mode turns every `\n` into `\r\n`
-            # on Windows, which silently converts this whole file from LF to
-            # CRLF on every `--write-baseline`. `.gitattributes` then normalizes
-            # it back at staging, so `git diff` shows only the count line and
-            # nothing in the commit path can see the damage. Observed here on
-            # 2026-08-21: the file was 6 LF at `HEAD` and 6 CRLF in the working
-            # tree straight after a write. UP-TAKE `I-68` is the workspace-level
-            # record of this hazard.
+            # KEEP THIS ARGUMENT. Without it, Python's text mode turns every
+            # `\n` into `\r\n` on Windows, silently converting this whole file
+            # from LF to CRLF on every `--write-baseline`. `.gitattributes` then
+            # normalizes it back at staging, so `git diff` shows only the count
+            # line and nothing in the commit path can see the damage. Observed
+            # here on 2026-08-21: the file was 6 LF at `HEAD` and 6 CRLF in the
+            # working tree straight after a write. UP-TAKE `I-68` is the
+            # workspace-level record of the hazard, and
+            # `test_the_written_baseline_keeps_LF_line_endings` is the guard, so
+            # deleting this line now goes red instead of going unnoticed.
+            #
+            # The first version of this comment began "`newline="\n"` or Python's
+            # text mode turns every `\n` into `\r\n`", which reads as blaming the
+            # argument for the damage it prevents -- an instruction to delete it.
             newline="\n",
         )
         print(f"baseline written: {total} in {len(counts)} file(s)")

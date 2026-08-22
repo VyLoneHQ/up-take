@@ -33,11 +33,14 @@ Until then it is written by hand.
 - The overlay is excluded from screen capture, so other recording tools do not see it.
 
 <!-- source: STATUS.md Phase 1 (1A merged, 1B partial, 1D partial); ROADMAP.md tasks 1.1 to 1.9f,
-     plus 1.27 (area types chosen from the area's own menu) and 1.28 (those types in a submenu),
-     which the "Three area types" entry above derives from and which sit outside the 1.1-1.9f range
-     this line used to name on its own. `P-6` asks for the source of the claim rather than of the
-     page, and that range stopped covering the entry when the entry was rewritten. Corrected after
-     the independent review of 1.28.
+     plus 1.23 (Filter), 1.24 (Upscale), 1.27 (area types chosen from the area's own menu) and
+     1.28 (those types in a submenu), which the "Four area types" entry above derives from and
+     which sit outside the 1.1-1.9f range this line used to name on its own. `P-6` asks for the
+     source of the claim rather than of the page, and that range stopped covering the entry when
+     the entry was rewritten. Corrected after the independent review of 1.28.
+     This quoted the entry as "Three area types" until 2026-08-22, three lines below the line that
+     had just been corrected to four, and named neither 1.23 nor 1.24 as a source for types the
+     entry describes. The control in `src/lib/built-type-count.test.ts` now reads this sentence too.
      The previous entry read "Project scaffolding: license, community files, CI groundwork" and had
      not been touched since Phase 0. -->
 

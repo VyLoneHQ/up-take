@@ -175,10 +175,16 @@ export interface PinPayload {
   /**
    * `null` means this area's pixels are **gone** and it must draw the live
    * screen again. Two cases produce it: a scroll back to natural size (§3.4's
-   * floor), and a type conversion away from a magnified `Default` or from a
+   * floor), and a type conversion away from **any magnified area** or from a
    * `Screenshot` whose pin was its whole content (roadmap 1.27). Before zoom
    * existed a pin was only ever dropped along with its area, so this event never
    * had to say so.
+   *
+   * The second case said "a magnified `Default`" until 2026-08-22, when roadmap
+   * 1.24 made it under-describe its own set: every `Upscale` area is magnified
+   * by construction, so `Upscale` to `Screenshot` and `Upscale` to `Filter` --
+   * both offered in the menu -- reach it too. `set_kind`'s condition is
+   * `was_magnified && !supports_zoom(new)`, which never named a type.
    */
   url: string | null;
 }
