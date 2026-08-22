@@ -985,8 +985,16 @@ pub(crate) fn convert_area(app: &AppHandle, id: AreaId, kind: AreaType) -> bool 
         crate::output::clear_magnification(app, id);
     }
     // **A conversion INTO a capturing type has to take that capture**, and the
-    // order matters: the discard above bumps the magnify generation and drops any
-    // old pin, so doing these the other way round would throw the new one away.
+    // order matters: the discard above reaches `captures::forget`, which removes
+    // the area's entry from `CaptureStore` synchronously, while this capture
+    // inserts from a spawned thread. Doing these the other way round would let
+    // the discard erase the pin the capture had just stored.
+    //
+    // **The generation is NOT what makes this ordering necessary**, and the two
+    // are worth keeping apart: `output::capture_into_area` never reads or writes
+    // `MAGNIFY`, so a generation bump cannot touch it. The magnify generation is
+    // what orders the line further down. Corrected 2026-08-21; the previous
+    // wording gave one mechanism for both and it was the right one for only one.
     //
     // ADR-0018 §6 says every type must answer "and then what?", and roadmap 1.27
     // reserved this exact question: *"a conversion to `Screenshot` has to decide
@@ -1003,6 +1011,30 @@ pub(crate) fn convert_area(app: &AppHandle, id: AreaId, kind: AreaType) -> bool 
     // capture?* agree today and drift the moment a type is added.
     if conversion.changed && placement::captures_on_create(kind) {
         crate::output::capture_into_area(app, id, bounds);
+    }
+    // **AND A CONVERSION INTO A BORN-MAGNIFIED TYPE HAS TO TAKE ITS FIRST
+    // MAGNIFIED CAPTURE**, which is the same argument one paragraph up wearing
+    // different clothes: an `Upscale` area showing nothing is a rectangle
+    // showing the live screen, indistinguishable from `Default`, and the menu
+    // row says "Upscale".
+    //
+    // `refresh_magnification` rather than a second `magnify_into_area` call,
+    // because it already asks the area for its own source rectangle and no-ops
+    // at natural size -- so this line is correct for every type without
+    // knowing which ones are magnified, and stays correct when an eighth is.
+    // Ordered AFTER the discard above, and THIS is the line the generation
+    // orders: `clear_magnification` reaches `Magnify::cancel`, which bumps
+    // `next_generation` and stamps it as `id`'s current one. A request issued
+    // before that is superseded, and `magnify_once` drops it at `is_current` --
+    // so magnifying first would do the work and throw the result away.
+    //
+    // Not the same mechanism as the capture's ordering one paragraph up, which
+    // turns on `captures::forget` instead. Two orderings, two reasons, both
+    // "after the discard"; they were given one shared reason until 2026-08-21
+    // and it was the wrong one for the capture. See UP-TAKE `I-286` for what
+    // neither of these lines is observed by.
+    if conversion.changed {
+        refresh_magnification(app, id);
     }
     conversion.changed
 }
@@ -1603,6 +1635,12 @@ fn armable_type(name: &str) -> Option<AreaType> {
         // key `F`). It is passive and pass-through by model default, so the
         // area draws a tint and the user keeps working underneath it.
         "filter" => Some(AreaType::Filter),
+        // Upscale is the third (roadmap 1.24, key `U`). It is born magnified --
+        // `AreaType::default_zoom` -- so the drag produces a window onto a
+        // smaller rectangle of screen, stretched to fill it. Passive in v1 by
+        // ADR-0030: the pixels are re-taken on move and resize, not at
+        // framerate, and there is no model.
+        "upscale" => Some(AreaType::Upscale),
         _ => None,
     }
 }
@@ -1736,9 +1774,20 @@ mod tests {
     /// assertion is worth.
     #[test]
     fn every_armable_name_round_trips_through_type_name() {
+        // `upscale` ADDED 2026-08-21 (roadmap 1.24). **The review of that
+        // change drilled this gap:** mutating the arm to
+        // `"upscale" => Some(AreaType::Screenshot)` -- pressing `U` and
+        // getting a Screenshot area -- left all 329 Rust tests and all 75
+        // vitest tests GREEN. `area-kinds.test.ts` does not close it either:
+        // it compares extracted NAME SETS and never the variant, so it catches
+        // a deleted arm and not a mis-mapped one.
+        //
+        // The refusing side of this same fact WAS updated in that commit and
+        // this accepting side was not, which is OS-F100 in one function.
         for (name, kind) in [
             ("screenshot", AreaType::Screenshot),
             ("filter", AreaType::Filter),
+            ("upscale", AreaType::Upscale),
         ] {
             assert_eq!(armable_type(name), Some(kind), "{name} must arm");
             assert_eq!(type_name(kind), name, "{name} must round trip");
@@ -1748,10 +1797,14 @@ mod tests {
     /// The half that matters. `armable_type` is the gate that stops a frontend
     /// typo becoming an area of a type the app cannot draw, so what it
     /// *refuses* is the property, and a widening that quietly accepted the
-    /// other five would be invisible from the accepting side alone.
+    /// other four would be invisible from the accepting side alone.
     #[test]
     fn a_modelled_type_with_no_gesture_is_still_refused() {
-        for name in ["default", "record", "ocr", "upscale", "analysis"] {
+        // `upscale` LEFT this list on 2026-08-21: roadmap 1.24 gave it a
+        // gesture, so it is armable now and refusing it would be the defect.
+        // The list is still the WHOLE refused set rather than a sample, which
+        // is the property the doc above names.
+        for name in ["default", "record", "ocr", "analysis"] {
             assert_eq!(armable_type(name), None, "{name} has no gesture yet");
         }
         assert_eq!(armable_type("Filter"), None, "the wire name is lowercase");

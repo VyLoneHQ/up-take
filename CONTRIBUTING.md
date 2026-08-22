@@ -13,10 +13,13 @@ on an assumption that is about to change is work nobody gets to keep.
 
 ## What state the project is in
 
-Two of seven area types are built and there is no release yet. The
+Four of seven area types are built and there is no release yet. The
 [README](README.md) says what runs today. If you are looking for the text extraction, read aloud or
 AI description features, those are designed and not written, so there is no code there to improve.
-<!-- source: STATUS.md Phase 1; ROADMAP.md section 1C and Phase 2; README.md -->
+<!-- source: STATUS.md Phase 1; ROADMAP.md section 1C and Phase 2; README.md. This count is a
+     RESTATEMENT of the README's, so it has to move whenever that one does. It said "Two" until
+     2026-08-22, when the README was corrected to four and this file was missed in the same change
+     that wrote "update it in the same change that ships a type" into the README. -->
 
 ## Contributor License Agreement
 

@@ -175,10 +175,16 @@ export interface PinPayload {
   /**
    * `null` means this area's pixels are **gone** and it must draw the live
    * screen again. Two cases produce it: a scroll back to natural size (§3.4's
-   * floor), and a type conversion away from a magnified `Default` or from a
+   * floor), and a type conversion away from **any magnified area** or from a
    * `Screenshot` whose pin was its whole content (roadmap 1.27). Before zoom
    * existed a pin was only ever dropped along with its area, so this event never
    * had to say so.
+   *
+   * The second case said "a magnified `Default`" until 2026-08-22, when roadmap
+   * 1.24 made it under-describe its own set: every `Upscale` area is magnified
+   * by construction, so `Upscale` to `Screenshot` and `Upscale` to `Filter` --
+   * both offered in the menu -- reach it too. `set_kind`'s condition is
+   * `was_magnified && !supports_zoom(new)`, which never named a type.
    */
   url: string | null;
 }
@@ -585,11 +591,16 @@ export function isRemoveKey(key: string): boolean {
  *
  * # Why a chord where arming uses a bare letter
  *
- * Bare single letters are the *arming* namespace: `s` is Screenshot today, and
- * OCR, Analysis, Record, Filter and Upscale each want their initial. A view
- * toggle taking one would spend a slot the type system needs. `armedTypeForKey`
- * below rejects every `Ctrl`/`Alt`/`Meta` chord by construction, so this chord
- * **cannot** collide with arming however many types are added.
+ * Bare single letters are the *arming* namespace: `s` is Screenshot, `f` is
+ * Filter and `u` is Upscale today, and OCR, Analysis and Record each want their
+ * initial. A view toggle taking one would spend a slot the type system needs.
+ * `armedTypeForKey` below rejects every `Ctrl`/`Alt`/`Meta` chord by
+ * construction, so this chord **cannot** collide with arming however many types
+ * are added.
+ *
+ * This listed Filter and Upscale among the types that merely *want* an initial
+ * until 2026-08-21, 54 lines above the arms that give them one. Roadmap 1.23
+ * spent `f` and 1.24 spent `u`; three of the seven are claimed, not one.
  *
  * `Space` alone was the better key on ergonomics and was deliberately left
  * unclaimed for a future area-level action (ADR-0026 decision 8).
@@ -613,7 +624,10 @@ export function isFreezeKey(
  * has no shared schema. Rust rejects a name it does not know, so a drift here
  * fails as a refused arm rather than as an area of the wrong type.
  */
-export type ArmableType = Extract<AreaKind, 'screenshot' | 'filter'>;
+export type ArmableType = Extract<
+  AreaKind,
+  'screenshot' | 'filter' | 'upscale'
+>;
 
 /**
  * Which type this key arms, or `null` if it arms nothing.
@@ -638,6 +652,10 @@ export function armedTypeForKey(
       return 'screenshot';
     case 'f':
       return 'filter';
+    // Roadmap 1.24. `U` for Upscale; the area is born magnified on the Rust
+    // side, so this arms it and nothing here knows the factor.
+    case 'u':
+      return 'upscale';
     default:
       return null;
   }

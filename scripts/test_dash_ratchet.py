@@ -230,6 +230,29 @@ class RatchetCase(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertIn("baseline written", out)
 
+    def test_the_written_baseline_keeps_LF_line_endings(self):
+        """`write_text` without `newline=` turns every LF into CRLF on Windows.
+
+        The damage is invisible to git, because `.gitattributes` normalizes it
+        back at staging: `git diff` shows only the count line and nothing in the
+        commit path can see the whole file was rewritten. UP-TAKE `I-68` is the
+        workspace-level record of the hazard, and this is the guard the fix
+        shipped without.
+
+        Read as BYTES. Text mode translates the endings back on the way in, so
+        the obvious version of this assertion passes against the very defect it
+        exists to catch.
+        """
+        self.write_prose(3)
+        self.commit("three")
+
+        code, _, err = run_main(self.repo, "--write-baseline", "--against", "main")
+        self.assertEqual(code, 0, err)
+
+        written = (self.repo / "scripts" / "dash-baseline.json").read_bytes()
+        self.assertNotIn(b"\r\n", written, "the baseline was written with CRLF")
+        self.assertIn(b"\n", written, "the baseline has no line endings at all")
+
     def test_a_boolean_baseline_is_refused(self):
         """`bool` is an `int`, so a bare isinstance check accepts `true` as 1."""
         (self.repo / "scripts" / "dash-baseline.json").write_text(
