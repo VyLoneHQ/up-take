@@ -301,8 +301,9 @@ enum Gesture {
     /// contract every button on every platform honours, and the only way to
     /// change your mind about a gesture with no undo.
     Close { id: AreaId, control: Rect },
-    /// A press on a row of the open area menu, resolved the same way.
-    MenuItem { index: usize },
+    /// A press on a row of the open area menu, resolved the same way. The hit
+    /// names which of the two lists the row is in (roadmap 1.28).
+    MenuItem { hit: MenuHit },
     /// A press that has already done its job and must do nothing more on
     /// release: closing an open menu by clicking away from it, or landing on
     /// menu padding between rows. It still exists as a gesture so the release is
@@ -320,16 +321,63 @@ struct AreaMenu {
     items: Vec<MenuEntry>,
     /// The row under the cursor, for the hover highlight.
     hovered: Option<usize>,
+    /// The open child list, if a parent row has earned one (roadmap 1.28).
+    open: Option<Submenu>,
+    /// What the pointer currently argues the open state should be, and the
+    /// millisecond since [`EPOCH`] at which it started arguing it.
+    ///
+    /// **The timestamp is what buys the diagonal travel**, which is one of the
+    /// three costs roadmap 1.27 named and 1.28 pays. A pointer moving from the
+    /// parent row to a child row crosses the rows between them, and each of
+    /// those ticks argues *close*. Restarting the clock on every change rather
+    /// than acting on it means those ticks cost time and nothing else: arrive
+    /// inside the child list within [`SUBMENU_CLOSE_MS`] and the argument flips
+    /// back before it was ever acted on. See [`submenu_step`].
+    argument: (Option<usize>, u64),
+}
+
+/// The open child list of one parent row.
+struct Submenu {
+    /// The index in [`AreaMenu::items`] of the row this list belongs to.
+    parent: usize,
+    /// The list's outer rectangle, physical px.
+    bounds: Rect,
+    /// One entry per child row, in draw order.
+    items: Vec<MenuEntry>,
+    /// The child row under the cursor.
+    hovered: Option<usize>,
 }
 
 /// One row of the area menu.
-#[derive(Clone, Copy)]
+///
+/// `Clone` rather than `Copy` since 1.28: a parent row carries the rows it
+/// opens, so that the child list is laid out from the same spec the top level
+/// was built from rather than from a second call to [`menu_rows`] that could
+/// answer differently.
+#[derive(Clone)]
 struct MenuEntry {
     rect: Rect,
     action: MenuAction,
     label: &'static str,
     /// Whether this row shows a tick: the area's current tier.
     checked: bool,
+    /// The rows this row opens as a child list. Empty on a leaf row, and empty
+    /// on every row of a child list: menus here are two deep.
+    children: Vec<MenuRow>,
+}
+
+/// Where a point falls inside an open menu.
+///
+/// The two lists are separate hit targets, which is the first of the three costs
+/// roadmap 1.27 priced. One `usize` cannot carry both, and the failure of
+/// pretending otherwise is silent: an index into the wrong list still resolves
+/// to a row and still performs its action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MenuHit {
+    /// A row of the top-level list.
+    Row(usize),
+    /// A row of the open child list.
+    Child(usize),
 }
 
 /// What a menu row does when activated.
@@ -341,6 +389,11 @@ enum MenuAction {
     /// menu row is a toggle, so the action carries the value the row would
     /// switch *to*.
     SetInput(Input),
+    /// Open this row's child list (roadmap 1.28). The only action that leaves
+    /// the menu up: it is a way *into* the menu rather than something done to
+    /// the area. Which list to open is the row's own position, so the action
+    /// carries nothing.
+    OpenSubmenu,
     /// Convert the area to another type (roadmap 1.27). Unlike
     /// [`MenuAction::SetInput`] these are radio rows rather than a toggle, so
     /// the action carries the type the row *names*, and the row for the area's
@@ -590,12 +643,52 @@ struct MenuPayload {
 
 /// The menu's geometry in physical px: every rectangle is already laid out
 /// here, so the frontend positions rows rather than computing them.
+///
+/// # Every field name here is one word, and that is a decision
+///
+/// `UT-F-72`: `HoverPayload` needs `#[serde(rename_all = "camelCase")]` to reach
+/// the frontend at all, that attribute is the only one in `src-tauri`, removing
+/// it leaves **every gate in this repository green** while the frontend silently
+/// reads `undefined`, and the guard written for twice-written wire names says in
+/// its own doc that it cannot see a payload key. Roadmap 1.28 adds three fields
+/// to this payload, and a `has_children` among them would have joined that
+/// class. A single lowercase word serializes identically under both conventions,
+/// so `child` and `parent` need no attribute and cannot be broken by deleting
+/// one. It is a narrower fix than `I-67`'s and does not replace it: the class is
+/// still open for every payload that *does* need a rename.
 #[derive(Serialize, Clone)]
 struct MenuView {
     rect: (i32, i32, u32, u32),
     items: Vec<MenuItemView>,
     /// The row under the cursor, for the highlight.
     hovered: Option<usize>,
+    /// The open child list, drawn on top of the rows beneath it (roadmap 1.28).
+    child: Option<ChildMenuView>,
+}
+
+/// The open child list of one parent row.
+///
+/// Not a `MenuView` holding another `MenuView`: menus here are exactly two deep
+/// (`menu_rows` builds one level of children and nothing builds a third), and a
+/// recursive payload would advertise a nesting the hit-testing does not
+/// implement. A reader who sees `Option<Box<MenuView>>` reasonably expects
+/// arbitrary depth to work.
+#[derive(Serialize, Clone)]
+struct ChildMenuView {
+    rect: (i32, i32, u32, u32),
+    items: Vec<MenuItemView>,
+    /// The child row under the cursor.
+    hovered: Option<usize>,
+    /// The index in [`MenuView::items`] of the row this list belongs to, so the
+    /// frontend can draw that row as **open** independently of what is hovered.
+    ///
+    /// Separate from `hovered` because both are true at once and neither is the
+    /// other: while the pointer is inside this list, no top-level row is
+    /// hovered, and the row that opened it must still read as the one it came
+    /// from. An earlier build spent `hovered` on both and the parent went dark
+    /// whenever the pointer crossed any other top-level row, leaving the list
+    /// beside it with nothing pointing at it.
+    owner: usize,
 }
 
 /// One drawn menu row.
@@ -605,6 +698,9 @@ struct MenuItemView {
     label: &'static str,
     /// Whether to show a tick: this is the area's current tier.
     checked: bool,
+    /// Whether this row opens a child list, so the frontend draws the marker
+    /// that says so. Never true of a row in a child list.
+    parent: bool,
 }
 
 /// Which area the cursor is over, so its chrome can be revealed on hover.
@@ -748,8 +844,6 @@ pub struct PumpState {
     /// its body without changing the id, and that transition has to reach the
     /// frontend or the highlight sticks.
     hovered_chrome_only: bool,
-    /// The menu row the previous tick reported as hovered.
-    hovered_item: Option<usize>,
     /// The real cursor position the previous tick read, for the hook health
     /// check.
     last_cursor: Option<Point>,
@@ -1136,18 +1230,302 @@ const fn living_hover(
     resolved
 }
 
+/// How long the pointer must argue for a child list before it opens.
+///
+/// Roadmap 1.27 named the hazard at both ends: an instant open flickers as the
+/// cursor crosses the parent row on its way somewhere else, and a slow one reads
+/// as broken.
+///
+/// **These two numbers are the rig's to settle** -- they are a judgement about
+/// feel, and nothing in a unit test can have an opinion about them. What the
+/// tests below pin is that the delay is *obeyed*, never its value.
+///
+/// ⚠️ **This paragraph cited Windows' `MenuShowDelay` as "400 ms for both
+/// edges" and both halves were unsound.** There is one such value under
+/// `HKCU\Control Panel\Desktop` and it governs the *show* edge only, so there
+/// was nothing for the close edge to be the default of. It was an unprobed claim
+/// about a system this repository does not own, cited to justify a number it
+/// cannot justify. Removed rather than corrected, because the rig is the
+/// authority here and a borrowed default was never going to be.
+///
+/// ⚠️ **The correction that replaced it named a reading from one machine's
+/// registry, and that was the same defect one layer down**: a claim about
+/// foreign state, unprobed, un-registered, and true only on the day it was
+/// typed. It is struck rather than restated. Whatever that key holds anywhere,
+/// it is not evidence about these two constants, which is the point the
+/// paragraph above already makes.
+const SUBMENU_OPEN_MS: u64 = 220;
+
+/// How long the pointer must argue against the open child list before it closes.
+///
+/// Longer than the open delay, and that asymmetry is the diagonal-travel
+/// allowance rather than a hedge: a pointer moving from the parent row to a
+/// child row spends these milliseconds over rows that argue *close*, and it must
+/// be able to arrive before they are acted on. See [`AreaMenu::argument`].
+const SUBMENU_CLOSE_MS: u64 = 400;
+
+/// Milliseconds since [`EPOCH`], the process's one monotonic clock.
+fn elapsed_ms() -> u64 {
+    u64::try_from(EPOCH.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// What the child list should do this tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubmenuStep {
+    /// Open the child list of this top-level row, replacing any other.
+    Open(usize),
+    /// Close the open child list.
+    Close,
+    /// Leave it as it is.
+    Hold,
+}
+
+/// Advances the child list's clock by one tick: what to do now, and the
+/// argument state to carry into the next tick.
+///
+/// Extracted so it can be drilled, the same reason [`living_hover`] is, and
+/// **the restart is inside it rather than at the call site on purpose**. The
+/// diagonal-travel allowance is not the two constants; it is the interaction
+/// between them and the restart, so a version of this function that took an
+/// already-computed `elapsed` would leave the only interesting half in
+/// [`pump_menu`], where no test can step a clock. It was written that way first.
+///
+/// The `argument == open` arm is not an optimisation. Without it a pointer
+/// resting inside an already-open child list would re-`Open` it every tick past
+/// the delay, rebuilding its rectangles and dropping its hovered row each time.
+fn submenu_step(
+    now_ms: u64,
+    argument: Option<usize>,
+    open: Option<usize>,
+    since: (Option<usize>, u64),
+) -> (SubmenuStep, (Option<usize>, u64)) {
+    // A changed argument starts its own clock. Every tick the pointer spends
+    // over the rows between a parent row and its list argues *close* and costs
+    // time and nothing else, which is what lets it arrive.
+    let since = if since.0 == argument {
+        since
+    } else {
+        (argument, now_ms)
+    };
+    if argument == open {
+        return (SubmenuStep::Hold, since);
+    }
+    let elapsed = now_ms.saturating_sub(since.1);
+    let step = match argument {
+        Some(parent) if elapsed >= SUBMENU_OPEN_MS => SubmenuStep::Open(parent),
+        None if elapsed >= SUBMENU_CLOSE_MS => SubmenuStep::Close,
+        _ => SubmenuStep::Hold,
+    };
+    (step, since)
+}
+
+/// Which parent row the pointer at `point` argues should have its list open, or
+/// `None` for none of them.
+///
+/// **Being anywhere inside the open child list argues for that list**, including
+/// its padding, and that is what makes it dismissable without being fragile: a
+/// pointer that has arrived is not asked to stay on a row.
+fn submenu_argument(menu: &AreaMenu, point: Point) -> Option<usize> {
+    if let Some(open) = menu.open.as_ref()
+        && open.bounds.contains(point)
+    {
+        return Some(open.parent);
+    }
+    menu.items
+        .iter()
+        .position(|item| item.rect.contains(point) && !item.children.is_empty())
+}
+
+/// Where `point` falls in an open menu.
+///
+/// **The child list is tested first, because it draws on top.**
+///
+/// ⚠️ **This said the two lists "do not overlap today, so the order is
+/// currently unobservable", and that is false.** Measured by the independent
+/// review of `1.28` over the real [`interaction::menu_bounds`] and
+/// [`interaction::submenu_bounds`]: below roughly `2 x MENU_WIDTH` of monitor
+/// width the left-flip clamps the child list into the parent's rectangle, and
+/// they overlap.
+///
+/// ```text
+/// monitor width   menu.x   child.x   child.right   overlap
+///           200       23         0           176   yes
+///           300      123         0           176   yes
+///           400      223        47           223   no
+/// ```
+///
+/// No real monitor is that narrow, so nothing is broken. But the ordering is
+/// **already load-bearing at the margin** rather than merely prudent, which is a
+/// better argument for it than the one this comment used to make -- and a reader
+/// who checks the old premise finds it false and concludes the constraint has
+/// lapsed. Same failure as the `monitor_bounds_at` note in [`pump_menu`], found
+/// in the same review.
+fn menu_hit(menu: &AreaMenu, point: Point) -> Option<MenuHit> {
+    if let Some(open) = menu.open.as_ref() {
+        if let Some(index) = open.items.iter().position(|item| item.rect.contains(point)) {
+            return Some(MenuHit::Child(index));
+        }
+        // Inside the child list but on its padding: it belongs to the child
+        // list, and must not resolve to whatever is drawn beneath it.
+        if open.bounds.contains(point) {
+            return None;
+        }
+    }
+    menu.items
+        .iter()
+        .position(|item| item.rect.contains(point))
+        .map(MenuHit::Row)
+}
+
+/// Points the hover highlights at `hit`, returning whether either moved.
+///
+/// **Hover is hover: exactly the row under the pointer, or none.** Which row
+/// owns the open child list is a separate fact and travels separately, as
+/// [`ChildMenuView::owner`], because the two are independently true and one
+/// `Option<usize>` cannot carry both.
+///
+/// ⚠️ **This function used to answer `open_parent` on the `Child` and `None`
+/// arms**, under a doc comment claiming a parent row "stays lit for as long as
+/// its list is open, whatever the pointer is doing". Its own `Row` arm
+/// falsified that in the ordinary case: hover any other top-level row while the
+/// list is open and the parent went dark while its list stayed up for the whole
+/// of [`SUBMENU_CLOSE_MS`], which is precisely the orphaned list the sentence
+/// said must not happen, on precisely the path the diagonal-travel grace exists
+/// to allow. Found by the independent review of `1.28`, which drilled the arm
+/// the test did not cover. The invariant was worth keeping and the mechanism
+/// was wrong: a highlight borrowed from another row cannot express it.
+fn apply_menu_hover(menu: &mut AreaMenu, hit: Option<MenuHit>) -> bool {
+    let (row, child) = match hit {
+        Some(MenuHit::Child(index)) => (None, Some(index)),
+        Some(MenuHit::Row(index)) => (Some(index), None),
+        None => (None, None),
+    };
+    let mut changed = false;
+    if menu.hovered != row {
+        menu.hovered = row;
+        changed = true;
+    }
+    if let Some(open) = menu.open.as_mut()
+        && open.hovered != child
+    {
+        open.hovered = child;
+        changed = true;
+    }
+    changed
+}
+
+/// Everything one pointer tick decides about the open menu.
+///
+/// Returned by [`menu_pump_step`] so that the decisions are separable from the
+/// two things that need an [`AppHandle`] -- resolving the monitor and emitting.
+#[derive(Debug, PartialEq, Eq)]
+#[must_use = "a tick that is computed and dropped leaves the frontend drawing a stale menu"]
+struct MenuPump {
+    /// Whether anything the frontend draws has changed.
+    changed: bool,
+    /// Where the pointer landed, so the caller can pick a cursor shape.
+    hit: Option<MenuHit>,
+    /// The top-level row whose child list this tick has earned, if any.
+    to_open: Option<usize>,
+}
+
+/// Advances the open menu by one pointer tick, and decides nothing else.
+///
+/// # Why this is a function
+///
+/// **Every unit this composes was drilled and this composition was not.** The
+/// independent review of `1.28` applied seven mutations to `pump_menu`'s body
+/// and every one of them left all 316 tests green, five of them removing the
+/// feature the roadmap row exists to ship: swapping the two arguments to
+/// [`submenu_step`], dropping the clock advance, replacing the `Open` arm with
+/// `Hold`, and disabling the emit each mean the child list never opens, or
+/// opens and is never drawn. Twenty-four unit-level mutations went red in the
+/// same pass. The units were never the problem.
+///
+/// So the locked block became this, taking `now` rather than reading the clock,
+/// and returning the open decision rather than acting on it. That is the same
+/// refactor this change already performed twice on itself -- `menu_payload` out
+/// of `emit_menu`, `menu_covers` out of `menu_contains` -- and for the same
+/// reason both times.
+///
+/// **What is still not reachable from a test**, and is held by
+/// `pump_menu_composes_the_step_it_is_given` instead: resolving the monitor and
+/// calling [`emit_menu`], both of which need an `AppHandle`.
+fn menu_pump_step(menu: &mut AreaMenu, point: Point, now: u64) -> MenuPump {
+    let hit = menu_hit(menu, point);
+    let mut changed = apply_menu_hover(menu, hit);
+    let argument = submenu_argument(menu, point);
+    let (step, since) = submenu_step(
+        now,
+        argument,
+        menu.open.as_ref().map(|open| open.parent),
+        menu.argument,
+    );
+    menu.argument = since;
+    if step == SubmenuStep::Close {
+        menu.open = None;
+        changed = true;
+    }
+    MenuPump {
+        changed,
+        hit,
+        to_open: match step {
+            SubmenuStep::Open(parent) => Some(parent),
+            SubmenuStep::Close | SubmenuStep::Hold => None,
+        },
+    }
+}
+
+/// Advances the open menu for a pointer at `point`: the hover highlight in
+/// whichever list holds it, and the child list's own open and close timing.
+/// Emits when anything the frontend draws has changed, and returns where the
+/// pointer landed so the caller can pick a cursor shape without asking twice.
+///
+/// The deciding is [`menu_pump_step`]'s; this holds the lock around it and does
+/// the two things that need an `AppHandle`.
+fn pump_menu(app: &AppHandle, point: Point) -> Option<MenuHit> {
+    let MenuPump {
+        mut changed,
+        hit,
+        to_open,
+    } = {
+        let mut guard = lock(&MENU);
+        let menu = guard.as_mut()?;
+        menu_pump_step(menu, point, elapsed_ms())
+    };
+    if let Some(parent) = to_open {
+        // The monitor is resolved with `MENU` unlocked, matching `open_menu`,
+        // which also resolves it before locking `MENU`. One nesting order for
+        // this pair is cheaper than reasoning about whether a second is safe.
+        //
+        // ⚠️ **The reason given here until 2026-08-17 was that
+        // `monitor_bounds_at` "takes the area store's lock". It takes no lock at
+        // all** -- it reaches the window and the monitor list, and the area
+        // store is never touched on that path. The conclusion survives the
+        // correction and the argument for it does not, which is worse than
+        // having no argument: a reader who checks the premise finds it false and
+        // concludes the constraint has lapsed. Found by the independent review
+        // of `1.28`.
+        let monitor = overlay::monitor_bounds_at(app, point);
+        changed |= open_submenu(parent, monitor);
+    }
+    if changed {
+        emit_menu(app);
+    }
+    hit
+}
+
 fn pump_hover(app: &AppHandle, state: &mut PumpState) {
     if mode() == Mode::Hidden {
         return;
     }
     let point = Point::new(CUR_X.load(Ordering::SeqCst), CUR_Y.load(Ordering::SeqCst));
 
-    // A menu, while open, owns the pointer above everything under it.
-    let menu_item = menu_item_at(point);
-    if let Some(menu_hover) = menu_hover_changed(menu_item) {
-        state.hovered_item = menu_hover;
-        emit_menu(app);
-    }
+    // A menu, while open, owns the pointer above everything under it. Since
+    // roadmap 1.28 that includes running the child list's open and close clock,
+    // which is why this is a call rather than two lines: the hover highlight and
+    // the timing read the same hit and must not resolve it separately.
+    let menu_item = pump_menu(app, point);
     let placing = mode() == Mode::Placement;
     if !placing {
         // Forget the reported monitor so the next entry into Placement re-emits
@@ -1309,18 +1687,6 @@ const fn gesture_cursor(gesture: Gesture) -> CursorShape {
         Gesture::Close { .. } | Gesture::MenuItem { .. } => CursorShape::Hand,
         Gesture::Inert => CursorShape::Cross,
     }
-}
-
-/// Updates the open menu's hovered row, returning the new value only when it
-/// changed (so the caller emits once rather than every tick).
-fn menu_hover_changed(item: Option<usize>) -> Option<Option<usize>> {
-    let mut guard = lock(&MENU);
-    let menu = guard.as_mut()?;
-    if menu.hovered == item {
-        return None;
-    }
-    menu.hovered = item;
-    Some(item)
 }
 
 /// The rectangle the current gesture would commit, or `None` when no gesture is
@@ -2054,9 +2420,9 @@ fn start_precapture(gesture: Gesture, point: Point) {
 fn living_lbutton_down(point: Point) -> bool {
     if menu_contains(point) {
         let gesture = match menu_item_at(point) {
-            Some(index) => Gesture::MenuItem { index },
-            // Menu padding: a press that does nothing, rather than one that
-            // falls through to whatever is underneath the menu.
+            Some(hit) => Gesture::MenuItem { hit },
+            // Menu padding, in either list: a press that does nothing, rather
+            // than one that falls through to whatever is underneath the menu.
             None => Gesture::Inert,
         };
         *lock(&GESTURE) = Some(gesture);
@@ -2270,9 +2636,10 @@ fn shadowed_by_another_window(point: Point) -> bool {
 fn classify_press(point: Point) -> Gesture {
     if menu_contains(point) {
         return match menu_item_at(point) {
-            Some(index) => Gesture::MenuItem { index },
-            // Inside the menu but on its padding: a press that does nothing,
-            // rather than one that falls through to the area underneath.
+            Some(hit) => Gesture::MenuItem { hit },
+            // Inside the menu but on its padding, in either list: a press that
+            // does nothing, rather than one that falls through to the area
+            // underneath.
             None => Gesture::Inert,
         };
     }
@@ -2384,7 +2751,7 @@ fn finish_gesture(release: Point) {
         Gesture::Close { id, control } => {
             control.contains(release) && overlay::dismiss_area(app, id)
         }
-        Gesture::MenuItem { index } => return activate_menu_item(app, index, release),
+        Gesture::MenuItem { hit } => return activate_menu_item(app, hit, release),
         Gesture::Inert => return,
     };
     if changed && let Err(error) = overlay::emit_areas(app) {
@@ -2394,12 +2761,75 @@ fn finish_gesture(release: Point) {
 
 /// Dispatches the capture a freshly created area needs, if its type has one.
 ///
-/// Only `Screenshot` captures on create: ADR-0018 settles that for the one type
-/// it decided, and the rest have no gesture yet. Written as an explicit match
-/// rather than as another `AreaType` method because "does creating this capture
-/// pixels?" has exactly one answer today, and inventing a fourth per-type axis
-/// on one data point is how the other three got harder to change.
+/// **Two types take pixels here, by two different routes.** `Screenshot` takes
+/// a pin through [`captures_on_create`], which ADR-0018 settled for the one type
+/// it decided; `Upscale` takes its first magnified capture through
+/// [`overlay::refresh_magnification`], because roadmap 1.24 gives it a
+/// non-natural [`AreaType::default_zoom`] and an area born at 2x showing the
+/// live screen at 1:1 is the magnifying type not magnifying.
+///
+/// **Said "Only `Screenshot` captures on create [...] and the rest have no
+/// gesture yet" until 2026-08-21**, and roadmap 1.24 falsified both halves in
+/// the change that added the line above it. The second half had been false since
+/// 1.23 besides: `f` arms `Filter` and `u` arms `Upscale` (`armable_type`).
+///
+/// [`captures_on_create`] stays an explicit match rather than another `AreaType`
+/// method because "does creating this pin pixels?" still has exactly one answer,
+/// and inventing a further per-type axis on one data point is how the other
+/// three got harder to change. The magnified route needs no list at all, which
+/// is the point of asking it through the area's own zoom.
 fn capture_on_create(app: &AppHandle, kind: AreaType, id: AreaId, bounds: Rect) {
+    // **A TYPE THAT IS BORN MAGNIFIED TAKES ITS FIRST CAPTURE HERE TOO**
+    // (roadmap 1.24). `AreaStore::create` gives the area `kind.default_zoom()`,
+    // so an `Upscale` area exists at 2x the instant the drag ends -- and would
+    // sit there showing the live screen at natural size until the user happened
+    // to move it, because `refresh_magnification` is only called from move and
+    // resize. That is the magnifying type not magnifying, which is the same
+    // defect a converted `Screenshot` holding no pin was.
+    //
+    // Asked through `refresh_magnification`, which reads the area's OWN zoom
+    // and no-ops at natural size, rather than through a second `AreaType`
+    // predicate: `captures_on_create` below already documents why a
+    // hand-maintained per-type list drifts, and this needs no list at all.
+    //
+    // **The order of these two lines is NOT load-bearing, and the reason given
+    // here until 2026-08-21 was false.** It said the magnified path "must not
+    // have its generation bumped by a capture dispatched after it".
+    // `output::capture_into_area` never touches `MAGNIFY`: it inserts into
+    // `CaptureStore` and emits a pin, and the magnify generation is issued and
+    // cancelled only by `magnify_into_area` and `cancel_magnification`. Read the
+    // function, not this comment, if it ever matters again.
+    //
+    // What is true is the half the old text also carried: **the two are mutually
+    // exclusive today.** `captures_on_create` is `Screenshot`-only,
+    // `Screenshot::default_zoom()` is `NATURAL`, and `refresh_magnification`
+    // no-ops at natural size -- so on any given area exactly one of these two
+    // lines does work, and neither can observe the other.
+    //
+    // **What would actually matter for an eighth type that is both**, so the
+    // next reader does not re-derive the wrong constraint: both dispatch to
+    // background threads, so the order of the *statements* would not decide the
+    // order of the *completions*. The two would race through
+    // `CaptureStore::insert` for one id and the later thread would win. That is
+    // a real design question and it is not answered by moving a line.
+    //
+    // ⚠️ **NEITHER THIS CALL NOR THE ONE IN `overlay::convert_area` IS OBSERVED
+    // BY ANY TEST, and the measurement is the disclosure.** Delete both and
+    // every born-magnified area renders the live screen at 1:1 -- the feature
+    // gone, in the one way a user notices immediately -- with the whole host
+    // suite still green. `I-81` is this repository's precedent for saying that
+    // out loud rather than papering it over.
+    //
+    // **The source control that covers `pump_menu` cannot be reused here**, and
+    // that is measured rather than assumed: `fn_body` slices from the signature
+    // to the next `\nfn `, which matches only a PRIVATE top-level item. This
+    // function is followed by `pub(crate) const fn captures_on_create` and
+    // `convert_area` by `pub(crate) fn area_handle_at`, so the slices run 133
+    // and 214 lines and swallow neighbours that mention `refresh_magnification`
+    // themselves. A control built on that would pass for the wrong reason,
+    // which is the defect class this branch's review kept finding. Recorded as
+    // UP-TAKE `I-286`; the honest gap is here until a real seam exists.
+    overlay::refresh_magnification(app, id);
     if captures_on_create(kind) {
         crate::output::capture_into_area(app, id, bounds);
         // The spawned capture is what consumes the held frame, so the drag is
@@ -2455,16 +2885,19 @@ pub(crate) const fn captures_on_create(kind: AreaType) -> bool {
 /// The menu label for converting an area *to* this type, or `None` when the
 /// menu does not offer it (roadmap task 1.27).
 ///
-/// # Why only three of the seven
+/// # Why only four of the seven
 ///
 /// A conversion has to leave the user with an area that does something.
-/// `Default`, `Screenshot` and `Filter` have behaviour on the screen today;
-/// `Record`, `Ocr`, `Upscale` and `Analysis` are modelled and have none, so
-/// offering them would ship four rows that turn a working area into a rectangle
-/// indistinguishable from a bug. Two of the four have a roadmap task that will
-/// give them behaviour and their row arrives with it: 1.24 for `Upscale`, 1.26
-/// for `Ocr`. **`Record` and `Analysis` have no roadmap row at all**, so they are
-/// not merely unbuilt, they are unplanned. Said "each earns its row with the
+/// `Default`, `Screenshot`, `Filter` and -- since roadmap 1.24 -- `Upscale`
+/// have behaviour on the screen today; `Record`, `Ocr` and `Analysis` are
+/// modelled and have none, so offering them would ship three rows that turn a
+/// working area into a rectangle indistinguishable from a bug. One of the three
+/// has a roadmap task that will give it behaviour and its row arrives with it:
+/// 1.26 for `Ocr`. **`Record` and `Analysis` have no roadmap row at all**, so
+/// they are not merely unbuilt, they are unplanned (UP-TAKE `I-64`).
+/// **`Upscale` was in the second list until 2026-08-21** and this paragraph
+/// said "four rows" and "two of the four"; both counts moved with it.
+/// Said "each earns its row with the
 /// roadmap task that gives it behaviour" until the independent review of `#55`
 /// resolved the ids and found the quantifier true of half the set.
 ///
@@ -2486,7 +2919,16 @@ const fn conversion_label(kind: AreaType) -> Option<&'static str> {
         AreaType::Default => Some("Type: Default"),
         AreaType::Screenshot => Some("Type: Screenshot"),
         AreaType::Filter => Some("Type: Filter"),
-        AreaType::Record | AreaType::Ocr | AreaType::Upscale | AreaType::Analysis => None,
+        // Arrived with roadmap 1.24, which is what the doc above said would
+        // happen: "this is one line on the day the behaviour lands". It has
+        // behaviour now, so it earns the row.
+        //
+        // The quotation used to open with "1.24 for `Upscale` ...", which this
+        // same change had rewritten to "1.26 for `Ocr`" fourteen lines up, so
+        // half of it could no longer be found anywhere in the tree. A quotation
+        // a reader can check has to survive the edit it describes.
+        AreaType::Upscale => Some("Type: Upscale"),
+        AreaType::Record | AreaType::Ocr | AreaType::Analysis => None,
     }
 }
 
@@ -2630,8 +3072,26 @@ fn open_menu(app: &AppHandle, point: Point) {
         reason = "a menu this short cannot overflow u32"
     )]
     let bounds = interaction::menu_bounds(point, spec.len() as u32, monitor);
-    let items = spec
-        .into_iter()
+    let items = laid_out(spec, bounds);
+    *lock(&MENU) = Some(AreaMenu {
+        area: area.id,
+        bounds,
+        items,
+        hovered: None,
+        // A fresh menu has no child list open and nothing argued for yet. The
+        // timestamp is `0` rather than `now` on purpose: the first tick after
+        // this resolves the pointer's real argument and restarts the clock from
+        // there, so a menu opened with the cursor already on the parent row does
+        // not inherit an age it never earned.
+        open: None,
+        argument: (None, 0),
+    });
+    emit_menu(app);
+}
+
+/// Gives a row spec its rectangles, top to bottom inside `bounds`.
+fn laid_out(spec: Vec<MenuRow>, bounds: Rect) -> Vec<MenuEntry> {
+    spec.into_iter()
         .enumerate()
         .map(|(index, row)| MenuEntry {
             #[allow(
@@ -2642,15 +3102,47 @@ fn open_menu(app: &AppHandle, point: Point) {
             action: row.action,
             label: row.label,
             checked: row.checked,
+            children: row.children,
         })
-        .collect();
-    *lock(&MENU) = Some(AreaMenu {
-        area: area.id,
+        .collect()
+}
+
+/// Opens the child list of the top-level row at `parent`, replacing any other.
+/// Returns whether anything changed, so the caller emits once.
+///
+/// Does nothing when the row has no children, which is every row but one: the
+/// hover machinery only ever nominates a parent row, and a press only reaches
+/// here through [`MenuAction::OpenSubmenu`], so this is a guard against a future
+/// caller rather than a live case.
+fn open_submenu(parent: usize, monitor: Rect) -> bool {
+    let mut guard = lock(&MENU);
+    let Some(menu) = guard.as_mut() else {
+        return false;
+    };
+    if menu.open.as_ref().is_some_and(|open| open.parent == parent) {
+        return false;
+    }
+    let Some(row) = menu.items.get(parent) else {
+        return false;
+    };
+    if row.children.is_empty() {
+        return false;
+    }
+    // Anchored to the parent ROW rather than to the cursor, and clamped against
+    // the monitor under it (F-13). See `interaction::submenu_bounds`.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "a menu this short cannot overflow u32"
+    )]
+    let bounds = interaction::submenu_bounds(row.rect, row.children.len() as u32, monitor);
+    let items = laid_out(row.children.clone(), bounds);
+    menu.open = Some(Submenu {
+        parent,
         bounds,
         items,
         hovered: None,
     });
-    emit_menu(app);
+    true
 }
 
 /// One row of the area menu, before it has been given a rectangle.
@@ -2659,11 +3151,24 @@ fn open_menu(app: &AppHandle, point: Point) {
 /// puts the whole menu out of reach of a unit test. This is the half that has no
 /// such dependency: which rows appear, in what order, with which ticks. Those
 /// are the parts a change to the menu is most likely to get wrong.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct MenuRow {
     action: MenuAction,
     label: &'static str,
     checked: bool,
+    /// The rows this one opens as a child list (roadmap 1.28), empty on a leaf.
+    /// Nothing builds a third level and [`MenuHit`] could not address one.
+    children: Vec<MenuRow>,
+}
+
+/// A row with no child list, which is every row but one.
+fn leaf(action: MenuAction, label: &'static str, checked: bool) -> MenuRow {
+    MenuRow {
+        action,
+        label,
+        checked,
+        children: Vec::new(),
+    }
 }
 
 /// The rows an area's menu shows, top to bottom.
@@ -2674,7 +3179,7 @@ fn menu_rows(area: &overlay::AreaSummary) -> Vec<MenuRow> {
         Input::Interactive => Input::PassThrough,
         Input::PassThrough => Input::Interactive,
     };
-    let mut spec: Vec<(MenuAction, &'static str)> = Vec::with_capacity(10);
+    let mut rows: Vec<MenuRow> = Vec::with_capacity(8);
     // Copy/Save lead the menu (the primary actions, ahead of the layout
     // settings below them) and are scoped to **`Screenshot` areas only**.
     //
@@ -2692,26 +3197,45 @@ fn menu_rows(area: &overlay::AreaSummary) -> Vec<MenuRow> {
     // movable in the same PR, so the moment arrived immediately, and the rig
     // found it on 2026-07-27. A predicted defect left in place is still a defect.
     if area.kind == AreaType::Screenshot {
-        spec.push((MenuAction::Copy, "Copy"));
-        spec.push((MenuAction::SaveToFile, "Save image"));
+        rows.push(leaf(MenuAction::Copy, "Copy", false));
+        rows.push(leaf(MenuAction::SaveToFile, "Save image", false));
     }
     // Type conversion (roadmap 1.27). It sits above Layer because it says what
     // the area *is*, where everything below says how it is placed or how it
     // takes input: a Default area is a claimed rectangle whose purpose is not
     // yet decided, and this is where it gets decided.
     //
-    // **Flat radio rows rather than a `Type` submenu**, which is a deviation
-    // from the founder's sketch of 2026-08-12 and is reversible. The Layer tier
-    // directly below is already three flat ticked rows, so this needs no new
-    // interaction machinery at all: a submenu means nested bounds, hover-to-open
-    // timing and its own dismissal, for three rows. Revisit when the offered set
-    // is long enough that a flat list is the worse read.
+    // **A child list of its own, which is roadmap 1.28 and the founder's sketch
+    // of 2026-08-12 restored.**
     //
-    // ⚠️ **REVERSED by the founder on 2026-08-14, on the rig, and the trigger was
-    // not list length.** A flat list holds two independent radio groups, Type and
-    // Layer, so two rows are ticked at once and the menu misreports its own state.
-    // Roadmap 1.28 is the submenu; the three costs named above are still the
-    // costs, and they are that row's to pay.
+    // ~~Flat radio rows rather than a `Type` submenu. The Layer tier directly
+    // below is already three flat ticked rows, so this needs no new interaction
+    // machinery at all: a submenu means nested bounds, hover-to-open timing and
+    // its own dismissal, for three rows. Revisit when the offered set is long
+    // enough that a flat list is the worse read.~~ **Struck rather than deleted,
+    // because the argument was sound and lost to evidence rather than to a
+    // better argument, and a reader who remembers it needs to see it go.**
+    //
+    // **The trigger was not list length, which is what that comment predicted
+    // would reverse it.** The set never grew. Check 1 of the `1.27` rig pass,
+    // 2026-08-14, found `Type: Default` and `Auto` ticked at the same time: both
+    // ticks are correct, and a flat list holding two independent radio groups
+    // still reads as one group with two selections, so the menu misreported its
+    // own state to the only person who has ever used it. A divider would have
+    // hinted at the grouping; a child list makes it visible.
+    //
+    // **All three costs it priced were real and are paid here rather than
+    // avoided**: nested bounds are [`MenuHit`], hover-to-open timing is
+    // [`submenu_step`], and dismissal is the same function's `Close` arm with
+    // [`AreaMenu::argument`] buying the diagonal travel.
+    //
+    // ⚠️ **The parent row names no type and carries no tick, which is a choice
+    // the rig can overturn in one line.** `conversion_label(area.kind)` is a
+    // ready-made "Type: Screenshot" for it, so the current type could be read
+    // without opening the list. It is not used because the roadmap row asked for
+    // a parent row, a plain one is unambiguous, and putting a radio group's
+    // value on a row that is not in that group is the ambiguity this change
+    // exists to remove, one level up. Worth trying on hardware before deciding.
     //
     // ⚠️ **`Type: Filter` is a one-click route into a state that was the hardest
     // this product had, and the sharpest edge is off it.** Filter is pass-through by
@@ -2735,28 +3259,41 @@ fn menu_rows(area: &overlay::AreaSummary) -> Vec<MenuRow> {
     // sits among the Layer rows that share its recovery path; these rows sit
     // above them and inherit no such neighbour. Raised by the independent review
     // of `#55`; a real mitigation is a design call, not a comment.
-    for kind in AreaType::ALL {
-        if let Some(label) = conversion_label(kind) {
-            spec.push((MenuAction::SetType(kind), label));
-        }
-    }
-    spec.push((MenuAction::SetLayer(Layer::Front), "Always on top"));
-    spec.push((MenuAction::SetLayer(Layer::Auto), "Auto"));
-    spec.push((MenuAction::SetLayer(Layer::Back), "Always behind"));
-    spec.push((MenuAction::SetInput(toggled_input), "Click-through"));
-    spec.push((MenuAction::Dismiss, "Dismiss"));
-    spec.into_iter()
-        .map(|(action, label)| MenuRow {
-            action,
-            label,
-            checked: match action {
-                MenuAction::SetLayer(layer) => layer == area.layer,
-                MenuAction::SetInput(_) => area.input == Input::PassThrough,
-                MenuAction::SetType(kind) => kind == area.kind,
-                MenuAction::Dismiss | MenuAction::Copy | MenuAction::SaveToFile => false,
-            },
+    let types: Vec<MenuRow> = AreaType::ALL
+        .into_iter()
+        .filter_map(|kind| {
+            conversion_label(kind)
+                .map(|label| leaf(MenuAction::SetType(kind), label, kind == area.kind))
         })
-        .collect()
+        .collect();
+    rows.push(MenuRow {
+        action: MenuAction::OpenSubmenu,
+        label: "Area type",
+        checked: false,
+        children: types,
+    });
+    rows.push(leaf(
+        MenuAction::SetLayer(Layer::Front),
+        "Always on top",
+        area.layer == Layer::Front,
+    ));
+    rows.push(leaf(
+        MenuAction::SetLayer(Layer::Auto),
+        "Auto",
+        area.layer == Layer::Auto,
+    ));
+    rows.push(leaf(
+        MenuAction::SetLayer(Layer::Back),
+        "Always behind",
+        area.layer == Layer::Back,
+    ));
+    rows.push(leaf(
+        MenuAction::SetInput(toggled_input),
+        "Click-through",
+        area.input == Input::PassThrough,
+    ));
+    rows.push(leaf(MenuAction::Dismiss, "Dismiss", false));
+    rows
 }
 
 /// Closes any open area menu. Returns whether one was open, which is what lets
@@ -2769,29 +3306,70 @@ pub fn close_menu(app: &AppHandle) -> bool {
     was_open
 }
 
-/// The index of the menu row containing `point`, if a menu is open at all.
-fn menu_item_at(point: Point) -> Option<usize> {
+/// The menu row containing `point`, if a menu is open at all.
+fn menu_item_at(point: Point) -> Option<MenuHit> {
     let guard = lock(&MENU);
-    let menu = guard.as_ref()?;
-    menu.items.iter().position(|item| item.rect.contains(point))
+    menu_hit(guard.as_ref()?, point)
 }
 
-/// Whether `point` is inside the open menu's outer rectangle.
+/// Whether `menu` covers `point` with **either list**.
+///
+/// The child list is not inside the parent's rectangle: it opens flush beside
+/// it, so a press on a child row is outside `bounds` entirely. Testing only the
+/// parent here would have made every press on a type row read as a press *away*
+/// from the menu, which closes it and swallows the click, so the rows would have
+/// been unclickable while looking perfectly normal.
+///
+/// Split from [`menu_contains`] so it can be drilled: that one reads the global
+/// [`MENU`], and a test of it would either restate this predicate beside it and
+/// pass whatever it said, or reach for the static and race every other test in
+/// the binary that does.
+///
+/// ⚠️ **This said the global was one "no unit test can populate", and this
+/// change's own `the_production_site_anchors_the_child_list_to_its_parent_row`
+/// populates it.** Populating it is possible and is deliberately done exactly
+/// once, because tests in one binary share the static; what the split buys is
+/// that everything else can be asked the same question without contending for
+/// it. Corrected after the round that falsified the sentence.
+fn menu_covers(menu: &AreaMenu, point: Point) -> bool {
+    menu.bounds.contains(point)
+        || menu
+            .open
+            .as_ref()
+            .is_some_and(|open| open.bounds.contains(point))
+}
+
+/// Whether `point` is inside the open menu, either list.
 fn menu_contains(point: Point) -> bool {
     lock(&MENU)
         .as_ref()
-        .is_some_and(|menu| menu.bounds.contains(point))
+        .is_some_and(|menu| menu_covers(menu, point))
+}
+
+/// The entry a hit names, in whichever of the two lists it belongs to.
+///
+/// Extracted from [`activate_menu_item`] so it can be drilled, which is the
+/// finding that produced it: swapping the two arms left every test green.
+/// [`MenuHit`]'s own doc says the type exists to stop an index resolving in the
+/// wrong list, and until an independent review wrote the test, nothing checked
+/// that it did. `entry.rect.contains(release)` downstream turns the swap into a
+/// dead click rather than a wrong action, which is a mitigation and not a check.
+fn entry_at(menu: &AreaMenu, hit: MenuHit) -> Option<&MenuEntry> {
+    match hit {
+        MenuHit::Row(index) => menu.items.get(index),
+        MenuHit::Child(index) => menu.open.as_ref()?.items.get(index),
+    }
 }
 
 /// Performs the action of a menu row, if the release landed on the row the press
 /// started on, the same press-and-release contract the close control uses.
-fn activate_menu_item(app: &AppHandle, index: usize, release: Point) {
-    let action = {
+fn activate_menu_item(app: &AppHandle, hit: MenuHit, release: Point) {
+    let resolved = {
         let guard = lock(&MENU);
         let Some(menu) = guard.as_ref() else {
             return;
         };
-        let Some(entry) = menu.items.get(index) else {
+        let Some(entry) = entry_at(menu, hit) else {
             return;
         };
         if !entry.rect.contains(release) {
@@ -2799,13 +3377,30 @@ fn activate_menu_item(app: &AppHandle, index: usize, release: Point) {
         }
         (menu.area, entry.action)
     };
-    let (area, action) = action;
+    let (area, action) = resolved;
+    // A press on a parent row opens its list at once and leaves the menu up:
+    // this is the only action that does not act on the area, so it is also the
+    // only one that must not close the menu it is navigating. It bypasses
+    // `SUBMENU_OPEN_MS` because a click is not an accidental hover; a user who
+    // clicked has already decided.
+    if action == MenuAction::OpenSubmenu {
+        let MenuHit::Row(parent) = hit else {
+            return;
+        };
+        let monitor = overlay::monitor_bounds_at(app, release);
+        if open_submenu(parent, monitor) {
+            emit_menu(app);
+        }
+        return;
+    }
     close_menu(app);
     let changed = match action {
         MenuAction::SetLayer(layer) => overlay::set_area_layer(app, area, layer),
         MenuAction::SetInput(input) => overlay::set_area_input(app, area, input),
         MenuAction::SetType(kind) => overlay::convert_area(app, area, kind),
         MenuAction::Dismiss => overlay::dismiss_area(app, area),
+        // Returned above, before the menu was closed.
+        MenuAction::OpenSubmenu => false,
         // Neither touches the area store (nothing to re-emit), and both are
         // spawned onto their own thread rather than run here: a capture is
         // ~100-300 ms even warm (`uptake_capture` crate docs, F-29), and this
@@ -2833,25 +3428,51 @@ fn activate_menu_item(app: &AppHandle, index: usize, release: Point) {
     }
 }
 
+/// One list's rows as the frontend draws them.
+fn item_views(items: &[MenuEntry]) -> Vec<MenuItemView> {
+    items
+        .iter()
+        .map(|item| MenuItemView {
+            rect: overlay::as_tuple(item.rect),
+            label: item.label,
+            checked: item.checked,
+            // Derived from the row's own children rather than from a flag set
+            // beside them, so a row cannot advertise a list it does not have.
+            parent: !item.children.is_empty(),
+        })
+        .collect()
+}
+
+/// The payload for `menu`, split out from [`emit_menu`] so that a test can
+/// observe what actually goes on the wire.
+///
+/// ⚠️ **Separated because the mapping was unobserved, not for tidiness.** Round
+/// 2 of the `1.28` review set `owner` here to `0` and to
+/// `menu.hovered.unwrap_or(open.parent)` -- both of which reintroduce exactly
+/// the defect [`ChildMenuView::owner`] exists to fix -- and all 314 tests stayed
+/// green, because every test reached into [`AreaMenu`] and nothing built the
+/// view. A field is only as pinned as the assignment that fills it.
+fn menu_payload(menu: Option<&AreaMenu>) -> MenuPayload {
+    MenuPayload {
+        menu: menu.map(|menu| MenuView {
+            rect: overlay::as_tuple(menu.bounds),
+            hovered: menu.hovered,
+            items: item_views(&menu.items),
+            child: menu.open.as_ref().map(|open| ChildMenuView {
+                rect: overlay::as_tuple(open.bounds),
+                hovered: open.hovered,
+                items: item_views(&open.items),
+                owner: open.parent,
+            }),
+        }),
+    }
+}
+
 /// Emits the open menu (or its absence) for the frontend to draw.
 fn emit_menu(app: &AppHandle) {
     let payload = {
         let guard = lock(&MENU);
-        MenuPayload {
-            menu: guard.as_ref().map(|menu| MenuView {
-                rect: overlay::as_tuple(menu.bounds),
-                hovered: menu.hovered,
-                items: menu
-                    .items
-                    .iter()
-                    .map(|item| MenuItemView {
-                        rect: overlay::as_tuple(item.rect),
-                        label: item.label,
-                        checked: item.checked,
-                    })
-                    .collect(),
-            }),
-        }
+        menu_payload(guard.as_ref())
     };
     let _ = app.emit(MENU_EVENT, payload);
 }
@@ -2873,9 +3494,13 @@ mod tests {
 
     use uptake_core::area::{AreaType, Input, Layer};
 
+    use uptake_core::geometry::{Point, Rect};
+    use uptake_core::interaction;
+
     use super::{
-        ALL_SHAPES, CURSOR_SNAPSHOT_LEN, HoverPayload, MenuAction, NO_HOVER, WHEEL_STEP,
-        conversion_label, living_hover, menu_rows, wheel_notches,
+        ALL_SHAPES, CURSOR_SNAPSHOT_LEN, ChildMenuView, HoverPayload, MenuAction, MenuItemView,
+        MenuPayload, MenuView, NO_HOVER, SUBMENU_CLOSE_MS, SUBMENU_OPEN_MS, SubmenuStep,
+        WHEEL_STEP, conversion_label, living_hover, menu_rows, submenu_step, wheel_notches,
     };
 
     #[test]
@@ -2983,19 +3608,1043 @@ mod tests {
         rows.iter().map(|row| row.label).collect()
     }
 
+    /// An open menu over a Default area, laid out with the real geometry.
+    ///
+    /// The rectangles come from `menu_bounds`/`menu_item_bounds` rather than
+    /// from made-up numbers, so a hit-testing test is asking the question the
+    /// running program asks. `open_menu` itself needs an `AppHandle`; this is
+    /// everything it does apart from finding the area and the monitor.
+    fn open_menu_over_default() -> super::AreaMenu {
+        open_menu_over(AreaType::Default)
+    }
+
+    /// The same fixture over an area of any type.
+    ///
+    /// The type decides the row order: `Copy` and `Save image` lead a
+    /// `Screenshot` area's menu and are absent from every other, so the parent
+    /// row that owns the type list sits at index 2 there and at index 0 over a
+    /// `Default` area. A test that wants to tell a real index from a hard-coded
+    /// zero has to ask for the former.
+    fn open_menu_over(kind: AreaType) -> super::AreaMenu {
+        let area = summary(kind, Layer::Auto, Input::Interactive);
+        let rows = menu_rows(&area);
+        let monitor = Rect::new(0, 0, 1920, 1080);
+        let bounds = interaction::menu_bounds(Point::new(400, 300), rows.len() as u32, monitor);
+        super::AreaMenu {
+            area: area.id,
+            bounds,
+            items: super::laid_out(rows, bounds),
+            hovered: None,
+            open: None,
+            argument: (None, 0),
+        }
+    }
+
+    /// The index of the row that opens the type list.
+    fn parent_index(menu: &super::AreaMenu) -> usize {
+        let Some(index) = menu
+            .items
+            .iter()
+            .position(|item| item.action == MenuAction::OpenSubmenu)
+        else {
+            panic!("the menu has a type parent row")
+        };
+        index
+    }
+
+    /// Opens the type list, as `open_submenu` does with a monitor in hand.
+    fn with_type_list_open(menu: &mut super::AreaMenu) -> usize {
+        let parent = parent_index(menu);
+        let row = &menu.items[parent];
+        let monitor = Rect::new(0, 0, 1920, 1080);
+        let bounds = interaction::submenu_bounds(row.rect, row.children.len() as u32, monitor);
+        menu.open = Some(super::Submenu {
+            parent,
+            bounds,
+            items: super::laid_out(row.children.clone(), bounds),
+            hovered: None,
+        });
+        parent
+    }
+
+    /// The centre of a rectangle, so a hit test is asked about a point that is
+    /// unambiguously inside rather than on an edge.
+    fn centre(rect: Rect) -> Point {
+        Point::new(
+            rect.origin.x + (rect.size.width / 2) as i32,
+            rect.origin.y + (rect.size.height / 2) as i32,
+        )
+    }
+
     #[test]
-    fn a_default_areas_menu_offers_the_three_types_that_do_something() {
-        // Roadmap 1.27. The other four are modelled and have no behaviour, so a
-        // row for them would convert a working area into one indistinguishable
-        // from a bug. Asserted as the whole list rather than as "contains", so
-        // adding a row nobody decided on also fails here.
+    fn a_child_list_opens_only_once_the_hover_delay_has_passed() {
+        // Roadmap 1.27 priced this and 1.28 pays it: an instant open flickers as
+        // the cursor crosses the parent row on its way somewhere else. The value
+        // is the rig's to settle; that the delay is obeyed at all is not.
+        let start = (Some(2), 1_000);
+        assert_eq!(
+            submenu_step(1_000 + SUBMENU_OPEN_MS - 1, Some(2), None, start).0,
+            SubmenuStep::Hold
+        );
+        assert_eq!(
+            submenu_step(1_000 + SUBMENU_OPEN_MS, Some(2), None, start).0,
+            SubmenuStep::Open(2)
+        );
+    }
+
+    #[test]
+    fn a_child_list_closes_only_once_the_longer_delay_has_passed() {
+        let start = (None, 1_000);
+        assert_eq!(
+            submenu_step(1_000 + SUBMENU_CLOSE_MS - 1, None, Some(2), start).0,
+            SubmenuStep::Hold
+        );
+        assert_eq!(
+            submenu_step(1_000 + SUBMENU_CLOSE_MS, None, Some(2), start).0,
+            SubmenuStep::Close
+        );
+    }
+
+    #[test]
+    fn the_close_delay_is_the_longer_of_the_two() {
+        // Not a taste question. The close delay is what the pointer spends
+        // travelling from the parent row to a child row, and the open delay is
+        // how long a row it crosses on the way needs to steal the list. Invert
+        // them and the diagonal-travel test below stops being satisfiable by any
+        // implementation.
+        const { assert!(SUBMENU_CLOSE_MS > SUBMENU_OPEN_MS) };
+    }
+
+    #[test]
+    fn a_pointer_resting_in_an_open_list_never_re_opens_it() {
+        // Re-opening rebuilds the child list's rectangles and drops its hovered
+        // row, so a pointer sitting still would flicker at the poll's rate.
+        assert_eq!(
+            submenu_step(u64::MAX, Some(2), Some(2), (Some(2), 0)).0,
+            SubmenuStep::Hold
+        );
+    }
+
+    #[test]
+    fn crossing_the_rows_between_a_parent_and_its_list_does_not_close_it() {
+        // The diagonal travel roadmap 1.27 named as the third cost. The pointer
+        // leaves the parent row, crosses two rows that each argue *close*, and
+        // arrives inside the list. Every tick in between is a real tick of the
+        // real function, so this is the property rather than a restatement of
+        // the constants.
+        let parent = 2;
+        let mut since = (Some(parent), 0);
+        let mut open = None;
+
+        // Rest on the parent row until it opens.
+        for now in [0, 100, SUBMENU_OPEN_MS] {
+            let (step, next) = submenu_step(now, Some(parent), open, since);
+            since = next;
+            if let SubmenuStep::Open(index) = step {
+                open = Some(index);
+            }
+        }
+        assert_eq!(open, Some(parent), "the list never opened");
+
+        // Cross the rows beneath it. Each argues `None`, and each is a fresh
+        // argument only on the first tick, so the clock runs from there.
+        let departure = SUBMENU_OPEN_MS;
+        for elapsed in 1..SUBMENU_CLOSE_MS {
+            let (step, next) = submenu_step(departure + elapsed, None, open, since);
+            since = next;
+            assert_eq!(
+                step,
+                SubmenuStep::Hold,
+                "closed after {elapsed} ms of travel"
+            );
+        }
+
+        // Arrive inside the list with the deadline not yet reached.
+        let (step, _) = submenu_step(departure + SUBMENU_CLOSE_MS - 1, Some(parent), open, since);
+        assert_eq!(step, SubmenuStep::Hold);
+        assert_eq!(open, Some(parent), "the list did not survive the journey");
+    }
+
+    #[test]
+    fn a_pointer_that_leaves_and_stays_away_does_close_the_list() {
+        // The other half of the test above, and the reason it is a separate one:
+        // a `Hold` for every input would satisfy that test on its own.
+        let mut since = (Some(2), 0);
+        let mut closed = false;
+        // To `+ 1` because the first tick away is the one that restarts the
+        // clock, so the deadline falls a tick after the bare constant. Worth
+        // stating: the first draft stopped at the constant and went red.
+        for elapsed in 1..=SUBMENU_CLOSE_MS + 1 {
+            let (step, next) = submenu_step(elapsed, None, Some(2), since);
+            since = next;
+            closed |= step == SubmenuStep::Close;
+        }
+        assert!(closed, "the list stayed open forever");
+    }
+
+    #[test]
+    fn a_point_on_a_child_row_resolves_to_that_row_and_not_the_one_beneath_it() {
+        let mut menu = open_menu_over_default();
+        let parent = with_type_list_open(&mut menu);
+        let Some(list) = menu.open.as_ref() else {
+            panic!("the list was just opened")
+        };
+        for (index, item) in list.items.iter().enumerate() {
+            assert_eq!(
+                super::menu_hit(&menu, centre(item.rect)),
+                Some(super::MenuHit::Child(index))
+            );
+        }
+        // The parent row still resolves to itself while its list is open.
+        assert_eq!(
+            super::menu_hit(&menu, centre(menu.items[parent].rect)),
+            Some(super::MenuHit::Row(parent))
+        );
+    }
+
+    #[test]
+    fn a_press_on_a_child_row_is_inside_the_menu() {
+        // `menu_contains` decides whether a press belongs to the menu at all. A
+        // child list opens flush BESIDE the parent list, so every child row is
+        // outside `bounds`: testing only that rectangle would make each type row
+        // read as a press away from the menu, which closes it and swallows the
+        // click. The rows would look right and do nothing.
+        let mut menu = open_menu_over_default();
+        with_type_list_open(&mut menu);
+        let child_row = {
+            let Some(list) = menu.open.as_ref() else {
+                panic!("the list was just opened")
+            };
+            centre(list.items[0].rect)
+        };
+        // Without this the test would pass against a `menu_covers` that ignored
+        // the child list entirely, because the point would be in both.
+        assert!(
+            !menu.bounds.contains(child_row),
+            "the two lists overlap, so this test proves nothing"
+        );
+        assert!(super::menu_covers(&menu, child_row));
+        // And a point in neither is still outside.
+        assert!(!super::menu_covers(&menu, Point::new(10, 10)));
+    }
+
+    /// Drives the REAL `open_submenu`, through the real `MENU`, which is the
+    /// only production site that positions a child list.
+    ///
+    /// **Every other test here builds its geometry with `with_type_list_open`,
+    /// which re-implements that call**, so an independent review could swap
+    /// `submenu_bounds` for `menu_bounds` at `open_submenu` and watch all 310
+    /// tests stay green -- a guard drilled from a fixture that copies the
+    /// production call rather than from the call itself. The wrong
+    /// geometry there loses the top-alignment, the flush edge and the
+    /// parent-row anchor at once, which is the whole of what makes the diagonal
+    /// travel reachable.
+    ///
+    /// **This is the only test that touches the `MENU` static**, deliberately.
+    /// Tests in one binary share it, so a second would race; the assertions
+    /// that do not need the global stay on locally-built menus.
+    #[test]
+    fn the_production_site_anchors_the_child_list_to_its_parent_row() {
+        let monitor = Rect::new(0, 0, 1920, 1080);
+        let menu = open_menu_over_default();
+        let parent = parent_index(&menu);
+        let parent_rect = menu.items[parent].rect;
+        let expected = interaction::submenu_bounds(
+            parent_rect,
+            menu.items[parent].children.len() as u32,
+            monitor,
+        );
+        *super::lock(&super::MENU) = Some(menu);
+
+        assert!(super::open_submenu(parent, monitor), "it opened");
+        let opened = {
+            let guard = super::lock(&super::MENU);
+            let Some(menu) = guard.as_ref() else {
+                panic!("the menu is open")
+            };
+            let Some(list) = menu.open.as_ref() else {
+                panic!("the list is open")
+            };
+            (list.parent, list.bounds, list.items.len())
+        };
+        assert_eq!(opened.0, parent);
+        assert_eq!(opened.1, expected, "the child list is not where it belongs");
+        // FOUR type rows since roadmap 1.24 added `Type: Upscale`; this was 3.
+        // Asserted as a count rather than a set because the set is pinned whole
+        // by `the_type_list_offers_the_four_types_that_do_something`; what this
+        // one is for is that the CHILD LIST holds them, not the top level.
+        assert_eq!(opened.2, 4);
+        // The three properties the geometry buys, asserted here rather than
+        // trusted: flush against the parent row, top-aligned with it, and
+        // anchored to that row rather than to the menu or the cursor.
+        assert_eq!(i64::from(opened.1.origin.x), parent_rect.right());
+        assert_eq!(
+            interaction::menu_item_bounds(opened.1, 0).origin.y,
+            parent_rect.origin.y
+        );
+
+        // Opening the same row again is a no-op rather than a rebuild, which is
+        // what stops a resting pointer flickering at the poll's rate.
+        assert!(!super::open_submenu(parent, monitor));
+        *super::lock(&super::MENU) = None;
+    }
+
+    #[test]
+    fn a_row_that_opens_a_list_is_marked_for_the_frontend_and_no_other_is() {
+        // `item_views` derives `parent` from the row's own children. Nothing on
+        // the Rust side could see that flag change until this test: the only
+        // other coverage asserts against a hand-written payload rather than
+        // against what `item_views` produces.
+        let menu = open_menu_over_default();
+        let views = super::item_views(&menu.items);
+        let marked: Vec<usize> = views
+            .iter()
+            .enumerate()
+            .filter(|(_, view)| view.parent)
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(marked, vec![parent_index(&menu)]);
+        // And a child list's own rows never claim to open anything.
+        let mut menu = menu;
+        with_type_list_open(&mut menu);
+        let Some(list) = menu.open.as_ref() else {
+            panic!("the list was just opened")
+        };
+        assert!(
+            super::item_views(&list.items)
+                .iter()
+                .all(|view| !view.parent)
+        );
+    }
+
+    #[test]
+    fn a_hit_resolves_in_the_list_it_names_and_not_the_other_one() {
+        // `MenuHit`'s doc says the type exists so that "an index into the wrong
+        // list still resolves to a row and still performs its action" cannot
+        // happen. Nothing checked that it did: swapping the two arms of
+        // `entry_at` left every test green, because downstream
+        // `entry.rect.contains(release)` turns the swap into a dead click,
+        // which is a mitigation and not a check.
+        let mut menu = open_menu_over_default();
+        with_type_list_open(&mut menu);
+        let Some(row) = super::entry_at(&menu, super::MenuHit::Row(0)) else {
+            panic!("row 0 exists")
+        };
+        let Some(child) = super::entry_at(&menu, super::MenuHit::Child(0)) else {
+            panic!("child 0 exists")
+        };
+        assert_eq!(row.label, "Area type");
+        assert_eq!(child.label, "Type: Default");
+        assert_ne!(row.rect, child.rect, "the two lists are separate targets");
+
+        // A child index out of range resolves to nothing rather than to the
+        // top-level row that happens to share the number.
+        let beyond = menu.items.len() - 1;
+        assert!(super::entry_at(&menu, super::MenuHit::Child(beyond)).is_none());
+
+        // And with no list open, a child hit resolves to nothing at all.
+        menu.open = None;
+        assert!(super::entry_at(&menu, super::MenuHit::Child(0)).is_none());
+    }
+
+    #[test]
+    fn hover_names_the_row_under_the_pointer_in_whichever_list_holds_it() {
+        // All THREE arms, which is the finding that rewrote this test: the old
+        // one drove `Child` and `None` and left `Row(other)` uncovered, so a
+        // test named for an invariant passed while its own middle arm falsified
+        // it. Found by the independent review of `1.28`.
+        let mut menu = open_menu_over_default();
+        let parent = with_type_list_open(&mut menu);
+        let child_centre = {
+            let Some(list) = menu.open.as_ref() else {
+                panic!("the list was just opened")
+            };
+            centre(list.items[1].rect)
+        };
+
+        // In the child list: that child row is hovered, nothing at the top.
+        let hit = super::menu_hit(&menu, child_centre);
+        super::apply_menu_hover(&mut menu, hit);
+        assert_eq!(menu.hovered, None);
+        assert_eq!(menu.open.as_ref().and_then(|open| open.hovered), Some(1));
+
+        // On another top-level row while the list is still open. This is the
+        // ordinary path the diagonal-travel grace exists to allow, and it is
+        // where the old invariant broke.
+        let Some(other) = menu.items.iter().position(|item| item.children.is_empty()) else {
+            panic!("the menu has a leaf row")
+        };
+        let hit = super::menu_hit(&menu, centre(menu.items[other].rect));
+        super::apply_menu_hover(&mut menu, hit);
+        assert_eq!(menu.hovered, Some(other));
+        assert_ne!(menu.hovered, Some(parent));
+
+        // Across the padding between the lists: nothing is hovered at all.
+        super::apply_menu_hover(&mut menu, None);
+        assert_eq!(menu.hovered, None);
+        assert_eq!(menu.open.as_ref().and_then(|open| open.hovered), None);
+    }
+
+    #[test]
+    fn the_open_list_names_its_owner_whatever_the_hover_is_doing() {
+        // The invariant the old comment claimed and the old mechanism could not
+        // express. `owner` is a fact about the list, not a borrowed highlight,
+        // so it survives the pointer being anywhere at all.
+        let mut menu = open_menu_over_default();
+        let parent = with_type_list_open(&mut menu);
+        let Some(other) = menu.items.iter().position(|item| item.children.is_empty()) else {
+            panic!("the menu has a leaf row")
+        };
+        //
+        // ⚠️ **The expected hover travels with each case on purpose.** This test
+        // asserted `open.parent` alone until round 2 of the review, and
+        // `apply_menu_hover` never writes that field -- so the test named for
+        // this function's invariant passed with the function gutted to
+        // `return false`. Owner surviving is only interesting while the hover is
+        // actually moving underneath it.
+        for (hit, row, child) in [
+            (None, None, None),
+            (Some(super::MenuHit::Row(other)), Some(other), None),
+            (Some(super::MenuHit::Child(0)), None, Some(0)),
+        ] {
+            super::apply_menu_hover(&mut menu, hit);
+            assert_eq!(
+                menu.open.as_ref().map(|open| open.parent),
+                Some(parent),
+                "the list lost its owner with hit {hit:?}"
+            );
+            assert_eq!(menu.hovered, row, "the top-level hover with hit {hit:?}");
+            assert_eq!(
+                menu.open.as_ref().and_then(|open| open.hovered),
+                child,
+                "the child hover with hit {hit:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn one_whole_gesture_opens_holds_and_closes_the_child_list() {
+        // `F1` of round 3, and the reason it is a SEQUENCE rather than five
+        // assertions: every unit below was already drilled and every unit drill
+        // went red, and then seven mutations to the site that COMPOSES them all
+        // stayed green at 316/316. Five of those seven mean the list never opens
+        // or never closes. A composition is its own unit.
+        //
+        // The gesture, as the pointer actually performs it: arrive on the parent
+        // row, wait out the open delay, travel across a sibling row toward the
+        // list, arrive inside it, then leave entirely.
+        let mut menu = open_menu_over_default();
+        let parent = parent_index(&menu);
+        let on_parent = centre(menu.items[parent].rect);
+
+        // Arrival argues for opening and nothing more: the delay is not served.
+        let step = super::menu_pump_step(&mut menu, on_parent, 1_000);
+        assert_eq!(step.to_open, None, "it opened before the delay was served");
+        assert_eq!(step.hit, Some(super::MenuHit::Row(parent)));
+        assert!(menu.open.is_none());
+
+        // The delay passes with the pointer still there. THIS is the tick the
+        // argument-swap and the dropped clock advance both kill.
+        let step = super::menu_pump_step(&mut menu, on_parent, 1_000 + super::SUBMENU_OPEN_MS);
+        assert_eq!(
+            step.to_open,
+            Some(parent),
+            "the list never opened, which is the whole of roadmap 1.28"
+        );
+        // NOT `changed`, and that is the design rather than an oversight: the
+        // hover has not moved, so this tick changes nothing by itself. The
+        // opening is a DECISION here, and its frontend change is contributed
+        // by `open_submenu`'s return value in `pump_menu` -- which is exactly
+        // why dropping `to_open` on the floor is silent, and why `MenuPump`
+        // is `#[must_use]`.
+        assert!(
+            !step.changed,
+            "the step claimed a change of its own; the open is `pump_menu`'s to contribute"
+        );
+
+        // `to_open` is a decision, not an act -- `pump_menu` needs a monitor for
+        // that -- so the fixture performs it, exactly as `open_submenu` would.
+        let opened = with_type_list_open(&mut menu);
+        assert_eq!(opened, parent);
+
+        // Travel: the pointer crosses a sibling row on its way to the list. That
+        // argues CLOSE on every tick, and the clock restart is what buys the
+        // diagonal. If the list dies here the feature is unusable by pointer.
+        let Some(other) = menu
+            .items
+            .iter()
+            .enumerate()
+            .find(|(index, item)| *index != parent && item.children.is_empty())
+            .map(|(index, _)| index)
+        else {
+            panic!("the menu has a leaf row that is not the parent")
+        };
+        let travelling = centre(menu.items[other].rect);
+        let mut now = 1_000 + super::SUBMENU_OPEN_MS;
+        for tick in 1..super::SUBMENU_CLOSE_MS {
+            now += 1;
+            let step = super::menu_pump_step(&mut menu, travelling, now);
+            assert!(
+                menu.open.is_some(),
+                "the list closed {tick} ms into the diagonal travel, before SUBMENU_CLOSE_MS"
+            );
+            assert_eq!(step.to_open, None, "it re-opened while travelling away");
+        }
+
+        // Arrival inside the list stops the argument and keeps it open.
+        let Some(list) = menu.open.as_ref() else {
+            panic!("the list is open")
+        };
+        let inside = centre(list.items[0].rect);
+        now += 1;
+        let step = super::menu_pump_step(&mut menu, inside, now);
+        assert!(
+            menu.open.is_some(),
+            "the list closed after the pointer arrived in it"
+        );
+        assert_eq!(step.hit, Some(super::MenuHit::Child(0)));
+
+        // Leaving entirely closes it, but not before the close delay. Driven
+        // until it actually closes rather than for a count someone worked out:
+        // the clock restarts on the first tick away, so an off-by-one in the
+        // loop bound reads as "the list never closed" and hides which of the two
+        // properties failed. This asserts both separately.
+        let away = Point::new(10, 10);
+        let departure = now;
+        let mut closed_at = None;
+        for _ in 0..=(super::SUBMENU_CLOSE_MS * 2) {
+            now += 1;
+            // Only the effect on `menu` matters here; `#[must_use]` is right
+            // to ask, and this is the acknowledgement rather than a silencing.
+            let _ = super::menu_pump_step(&mut menu, away, now);
+            if menu.open.is_none() {
+                closed_at = Some(now);
+                break;
+            }
+        }
+        let Some(closed_at) = closed_at else {
+            panic!(
+                "the list never closed, {}ms after the pointer left",
+                now - departure
+            )
+        };
+        assert!(
+            closed_at - departure >= super::SUBMENU_CLOSE_MS,
+            "the list closed {}ms after the pointer left, inside SUBMENU_CLOSE_MS ({}ms) --              the grace that buys the diagonal travel is gone",
+            closed_at - departure,
+            super::SUBMENU_CLOSE_MS
+        );
+    }
+
+    #[test]
+    fn a_tick_that_changes_nothing_says_so() {
+        // The other side of `changed`, and the reason `pump_menu` may emit
+        // conditionally at all: a pointer resting still must not re-emit the
+        // menu on every tick of the pump.
+        let mut menu = open_menu_over_default();
+        let resting = centre(menu.items[parent_index(&menu)].rect);
+        assert!(super::menu_pump_step(&mut menu, resting, 1_000).changed);
+        for now in [1_001, 1_002, 1_003] {
+            let step = super::menu_pump_step(&mut menu, resting, now);
+            assert!(
+                !step.changed,
+                "a still pointer reported a change at {now}, so the menu re-emits every tick"
+            );
+        }
+    }
+
+    /// The body of one top-level `fn` in this file, or a panic naming it.
+    ///
+    /// Used by the composition controls below. It slices to the next top-level
+    /// `fn`, which is enough because every function it is asked about is at
+    /// module level.
+    fn fn_body(source: &str, signature: &str) -> String {
+        // Production code only. `include_str!` pulls in this test module too,
+        // and every required token below appears in it as an assertion string,
+        // so a reordering that put the tests first would let a control read its
+        // own expectations back and pass on a gutted function.
+        let production = production_of(source);
+        // Two failure modes, two messages, and that is `R5-F5` rather than
+        // pedantry: they used to share one, so a `#[should_panic]` for the
+        // missing-signature case also passed when the fixture merely lost its
+        // trailing `fn` -- and the fixture comment that says the terminator is
+        // load-bearing was itself the only thing guarding it.
+        let Some((_, after)) = production.split_once(signature) else {
+            panic!(
+                "`{signature}` not found in production code -- renamed? An unfound function \
+                 must not read as a pass"
+            )
+        };
+        let Some((body, _)) = after.split_once("\nfn ") else {
+            panic!(
+                "`{signature}` has no following top-level `fn` to slice to -- the fixture or \
+                 the file lost its terminator, which is not the same as the signature being \
+                 absent"
+            )
+        };
+        let body = body.to_owned();
+        strip_comments(&body)
+    }
+
+    /// `source` with `//` and `/* */` comments removed.
+    ///
+    /// **The whole of `R4-F1`.** Round 4's source controls searched the raw
+    /// text, so `// emit_menu(app);` left the token sitting in a comment for
+    /// `contains` to find: the menu never redrew, the child list opened
+    /// invisibly, hover highlighting died across the whole menu, and every gate
+    /// in the repository stayed green. Commenting a line out is the most
+    /// ordinary way there is to disable it, and it was the one form the control
+    /// could not see.
+    ///
+    /// `menu-styles.test.ts` strips CSS comments before matching, in this same
+    /// change, for exactly this reason. A class fixed at one member is a class
+    /// not fixed, and this file is where it was not fixed.
+    ///
+    /// Naive about string literals containing comment markers, which is
+    /// acceptable because it is only ever asked about function bodies whose
+    /// required tokens are calls.
+    fn strip_comments(source: &str) -> String {
+        strip_strings(&strip_comment_syntax(source))
+    }
+
+    /// `source` with double-quoted string literals emptied.
+    ///
+    /// **`R5-F2`, second half.** The exactly-once check on `emit_menu(app);`
+    /// catches a string literal ADDED beside a live call and not one that
+    /// REPLACES it: `if changed { let _s = "emit_menu(app);"; }` leaves the
+    /// count at one, `#[cfg(` absent and `if changed {` present, and every gate
+    /// green. Emptying literals makes the token disappear entirely, so the
+    /// required-token check fails, which is the right answer for a call that no
+    /// longer exists.
+    ///
+    /// Escapes are honoured so a literal ending in `" is not read as still open.
+    fn strip_strings(source: &str) -> String {
+        let mut out = String::with_capacity(source.len());
+        let mut chars = source.chars();
+        while let Some(c) = chars.next() {
+            if c != '"' {
+                out.push(c);
+                continue;
+            }
+            out.push('"');
+            let mut escaped = false;
+            for inner in chars.by_ref() {
+                if escaped {
+                    escaped = false;
+                } else if inner == '\\' {
+                    escaped = true;
+                } else if inner == '"' {
+                    break;
+                }
+            }
+            out.push('"');
+        }
+        out
+    }
+
+    fn strip_comment_syntax(source: &str) -> String {
+        let mut out = String::with_capacity(source.len());
+        let mut rest = source;
+        loop {
+            let line = rest.find("//");
+            let block = rest.find("/*");
+            match (line, block) {
+                (None, None) => {
+                    out.push_str(rest);
+                    return out;
+                }
+                (Some(at), None) => {
+                    out.push_str(&rest[..at]);
+                    rest = rest[at..].find('\n').map_or("", |end| &rest[at + end..]);
+                }
+                (None, Some(at)) => {
+                    out.push_str(&rest[..at]);
+                    rest = rest[at..]
+                        .find("*/")
+                        .map_or("", |end| &rest[at + end + 2..]);
+                }
+                (Some(l), Some(b)) if l < b => {
+                    out.push_str(&rest[..l]);
+                    rest = rest[l..].find('\n').map_or("", |end| &rest[l + end..]);
+                }
+                (Some(_), Some(b)) => {
+                    out.push_str(&rest[..b]);
+                    rest = rest[b..].find("*/").map_or("", |end| &rest[b + end + 2..]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_commented_out_call_is_not_a_call() {
+        // The control on the control. `R4-F1` was found by an independent
+        // review that commented out `emit_menu(app);` and watched every gate
+        // stay green, so this pins the stripping itself rather than trusting
+        // that the helper above does what its name says.
+        // The blank line left behind is deliberate and harmless: only the
+        // presence of tokens is ever asked about, never the layout.
+        assert_eq!(strip_comments("a();\n// b();\nc();\n"), "a();\n\nc();\n");
+        assert_eq!(strip_comments("a(); /* b(); */ c();"), "a();  c();");
+        assert!(!strip_comments("    // emit_menu(app);\n").contains("emit_menu"));
+        // And it must not eat live code that merely follows a comment.
+        assert!(strip_comments("// note\nemit_menu(app);\n").contains("emit_menu(app);"));
+    }
+
+    #[test]
+    fn clicking_a_parent_row_opens_its_list_and_leaves_the_menu_up() {
+        // The seventh of round 3's `F1` mutations, and the one that is not on
+        // the pump path at all: `if action == MenuAction::OpenSubmenu` -> `if
+        // false && ...` killed click-to-open with 316 tests green.
+        //
+        // A press on a parent row is the only action that does not act on the
+        // area, so it is the only one that must NOT close the menu it is
+        // navigating -- and it bypasses `SUBMENU_OPEN_MS`, because a click is
+        // not an accidental hover.
+        //
+        // Source control, with the same weakness as the one below and for the
+        // same reason: the branch needs an `AppHandle` for both the monitor and
+        // the emit, and no seam for one exists TODAY. ⚠️ One is possible: the
+        // round-5 reviewer built `pump_menu_tail(changed, to_open, monitor_of,
+        // open, emit)` -- five plain parameters, three of them closures,
+        // touching neither `MENU` nor an `AppHandle` -- and measured the
+        // `if changed` branch becoming observable. See `I-81`.
+        let body = fn_body(
+            include_str!("placement.rs"),
+            "fn activate_menu_item(app: &AppHandle, hit: MenuHit, release: Point) {",
+        );
+        for required in [
+            // The branch exists and is taken on the real action.
+            "if action == MenuAction::OpenSubmenu {",
+            // It opens at the monitor under the release point...
+            "open_submenu(parent, monitor)",
+            // ...draws the result...
+            "emit_menu(app);",
+            // ...and returns WITHOUT falling through to `close_menu`.
+            "        return;",
+        ] {
+            assert!(
+                body.contains(required),
+                "`activate_menu_item` no longer contains `{required}` -- click-to-open is dead, \
+                 or the navigating action now closes the menu it is navigating"
+            );
+        }
+        // The ordering half: the early return must precede `close_menu`, or the
+        // menu closes under the list it just opened.
+        let Some(returns) = body.find("        return;") else {
+            panic!("the early return is gone")
+        };
+        let Some(closes) = body.find("close_menu(app);") else {
+            panic!("`activate_menu_item` no longer closes the menu for ordinary actions")
+        };
+        assert!(
+            returns < closes,
+            "the parent-row branch no longer returns before `close_menu`"
+        );
+    }
+
+    /// A source whose only matching signature lives inside `#[cfg(test)]`.
+    ///
+    /// Shared by the two tests below so the fixture cannot drift between them.
+    fn signature_only_in_the_test_module(signature: &str) -> String {
+        // The trailing `fn after` is load-bearing. `fn_body` slices from the
+        // signature to the NEXT top-level `fn`, so a fixture that ends without
+        // one makes it panic for lack of a terminator rather than for lack of
+        // the signature -- and the `#[should_panic]` below then passes whether
+        // the truncation works or not. Caught by drilling the drill.
+        format!(
+            "fn other() {{}}\n#[cfg(test)]\nmod tests {{\n    {signature}\n        assert!(true);\n    }}\n}}\nfn after() {{}}\n"
+        )
+    }
+
+    #[test]
+    #[should_panic(expected = "not found in production code")]
+    fn fn_body_refuses_to_read_the_test_module() {
+        // `R5-F3`. `fn_body` truncates at `#[cfg(test)]` because `include_str!`
+        // pulls that module in too, and every token the source controls require
+        // appears there as an assertion string -- so a reordering would let a
+        // control read its own expectations back and pass against a gutted
+        // function.
+        //
+        // Asserted THROUGH `fn_body` rather than through the helper it calls,
+        // because the first two attempts at this test checked the helper and
+        // stayed green when `fn_body` stopped calling it. A defence is only
+        // pinned at the point it is used.
+        const SIGNATURE: &str = "fn target(app: &AppHandle) {";
+        let _ = fn_body(&signature_only_in_the_test_module(SIGNATURE), SIGNATURE);
+    }
+
+    #[test]
+    #[should_panic(expected = "no following top-level")]
+    fn fn_body_says_so_when_it_has_nothing_to_slice_to() {
+        // The other panic, and the reason it is a separate message. Both
+        // failures used to say "not found", so the `#[should_panic]` above
+        // passed when the fixture merely lost its trailing `fn` -- which is the
+        // fourth way that test has been wrong, found by the confirmation pass
+        // drilling my own fixture rather than the code.
+        const SIGNATURE: &str = "fn target(app: &AppHandle) {";
+        let _ = fn_body(&format!("{SIGNATURE}\n    let x = 1;\n}}\n"), SIGNATURE);
+    }
+
+    #[test]
+    fn fn_body_reads_production_code_with_its_comments_removed() {
+        // `R5-F3`, and the first version of this test did not have a falsifying
+        // input either -- it asserted a property of THIS file, where the
+        // production definition already precedes the test module, so both
+        // defences could be deleted and it stayed green. The reviewer said as
+        // much about the truncation; the same was true of the stripping, because
+        // `a_commented_out_call_is_not_a_call` exercises `strip_comments`
+        // directly and nothing observed `fn_body` still calling it.
+        //
+        // Synthetic sources fix that: each defence gets an input that fails
+        // without it, independent of how this file happens to be ordered.
+        const SIGNATURE: &str = "fn target(app: &AppHandle) {";
+
+        // Truncation. The signature appears ONLY inside the test module, so
+        // production code contains no such function and `fn_body` must say so.
+        // Without the `#[cfg(test)]` cut it finds the test-module copy and
+        // happily returns assertions as if they were production code.
+        // Stripping, observed through `fn_body` rather than through
+        // `strip_comments`. A body whose only mention of the call is commented
+        // out must come back without it.
+        let commented =
+            format!("{SIGNATURE}\n    // emit_menu(app);\n    let x = 1;\n}}\nfn after() {{}}\n");
+        let body = fn_body(&commented, SIGNATURE);
+        assert!(
+            !body.contains("emit_menu"),
+            "`fn_body` returned a commented-out call as if it were live code: {body:?}"
+        );
+        // ...and a live call after a comment must survive, or the controls go
+        // red on working code and get deleted for crying wolf.
+        let live = format!("{SIGNATURE}\n    // note\n    emit_menu(app);\n}}\nfn after() {{}}\n");
+        assert!(
+            fn_body(&live, SIGNATURE).contains("emit_menu(app);"),
+            "`fn_body` ate a live call that merely followed a comment"
+        );
+    }
+
+    /// The production half of `source`, by the same rule [`fn_body`] uses.
+    ///
+    /// Split out so the truncation has an input that can falsify it without
+    /// depending on the order this file happens to be written in.
+    fn production_of(source: &str) -> &str {
+        source
+            .split_once("\n#[cfg(test)]")
+            .map_or(source, |(head, _)| head)
+    }
+
+    #[test]
+    fn pump_menu_composes_the_step_it_is_given() {
+        // The residue of `F1` that no unit test can reach: resolving the monitor
+        // and emitting both need an `AppHandle`, and no seam for one exists
+        // today. One is possible; see `I-81` and the note in `pump_menu`'s
+        // control above.
+        //
+        // ⚠️ **This is a SOURCE control and it is weaker than the test above.**
+        // It pins the shape of three lines rather than their behaviour. It is
+        // here because the alternative measured by the review is nothing at
+        // all: disabling the emit left 316 tests green.
+        //
+        // **What it catches**: deletion, neutering (`if changed` -> `if false`),
+        // and -- since `R4-F1` -- commenting the line out, which is the ordinary
+        // way a line gets disabled and the way this control could not see.
+        //
+        // ⚠️ **What it does NOT catch, measured rather than guessed**: a
+        // token-preserving move, such as the call being lifted into a closure
+        // that is never invoked. Round 4's `S4` did exactly that and passed both
+        // this control and `clippy -D warnings`. No source control can catch
+        // that class by itself; a seam that lets a test observe the emit
+        // shrinks it a long way, and the round-5 reviewer built and ran one.
+        //
+        // ⚠️ **This said "there is none because it needs an `AppHandle`", and
+        // that was measured false.** The seam replaces the calls that need the
+        // handle rather than reading through them, so it needs neither the
+        // handle nor the `MENU` static. It does not close `S4` -- the closure
+        // then sits in an argument list, still shape-pinned -- but it makes the
+        // tail's branching genuinely observable. Recorded as UP-TAKE `I-81`,
+        // whose remediation column carries the measurement.
+        let body = fn_body(
+            include_str!("placement.rs"),
+            "fn pump_menu(app: &AppHandle, point: Point) -> Option<MenuHit> {",
+        );
+        for required in [
+            // The decision comes from the extracted step, not from a second copy.
+            "menu_pump_step(menu, point, elapsed_ms())",
+            // An earned list is actually opened, at the monitor under the pointer.
+            "if let Some(parent) = to_open {",
+            "open_submenu(parent, monitor)",
+            // ...and a change is actually drawn. `if false {` fails this.
+            "if changed {",
+            "emit_menu(app);",
+        ] {
+            assert!(
+                body.contains(required),
+                "`pump_menu` no longer contains `{required}` -- the composition the review \
+                 drilled seven times is unguarded again"
+            );
+        }
+        // Two further token-preserving ways to disable a call, both found by the
+        // round-5 reviewer and both mechanically detectable, unlike `S4`:
+        // `#[cfg(any())]` keeps the token and removes the call at compile time,
+        // and a string literal parks the token where nothing runs it.
+        //
+        // ⚠️ **The string-literal half needed TWO fixes and the first was
+        // reported as complete when it was not.** The exactly-once check below
+        // caught a literal ADDED beside a live call and NOT one that REPLACES
+        // the call, which leaves the count at exactly one -- the confirmation
+        // pass re-ran its own mutation to show it. Literals are emptied in
+        // `strip_comments` now, so a replaced call has no token at all and the
+        // required-token loop above fails. Drilled.
+        //
+        // Which changes what the count below means, and it is worth saying
+        // rather than leaving the reader to work out: it now counts REAL calls,
+        // because a decoy in a literal is gone before it is asked. A decoy
+        // sitting beside a working call therefore passes, and that is correct --
+        // the call still runs, so there is nothing to report.
+        assert!(
+            !body.contains("#[cfg("),
+            "a `#[cfg(...)]` inside `pump_menu` can remove a call while leaving its \
+             text for this control to find"
+        );
+        assert_eq!(
+            body.matches("emit_menu(app);").count(),
+            1,
+            "`emit_menu(app);` must appear in `pump_menu` exactly once, counting real calls \
+             only -- string literals are emptied before this. Two means one of them is in a \
+             branch that never runs, and the required-token loop above would find that one \
+             and be satisfied."
+        );
+    }
+
+    #[test]
+    fn the_wire_names_the_row_that_owns_the_open_list() {
+        // `owner` on the wire is the whole of the parent-stays-lit fix, and
+        // nothing observed the assignment that fills it: every other test in
+        // this file reaches into `AreaMenu`, so round 2 of the `1.28` review set
+        // the field to `0` and to `menu.hovered.unwrap_or(open.parent)` -- both
+        // of which restore the exact defect it exists to fix -- and all 314
+        // tests stayed green. This one builds the payload.
+        //
+        // Over a **Screenshot** area deliberately: `Copy` and `Save image` lead
+        // that menu, so the parent row is index 2, and a wire field hard-coded
+        // to `0` fails here rather than passing by coincidence.
+        let mut menu = open_menu_over(AreaType::Screenshot);
+        let parent = with_type_list_open(&mut menu);
+        assert_ne!(parent, 0, "the fixture puts the parent row off index zero");
+        let Some(other) = menu.items.iter().position(|item| item.children.is_empty()) else {
+            panic!("the menu has a leaf row")
+        };
+        assert_ne!(other, parent);
+        // The pointer on some *other* top-level row is the case the fix is
+        // about: the hover moves away and the list must still say where it came
+        // from. This is also what separates `owner` from the hover: a wire field
+        // borrowed from `hovered` reads `other` here and is wrong.
+        super::apply_menu_hover(&mut menu, Some(super::MenuHit::Row(other)));
+
+        let payload = super::menu_payload(Some(&menu));
+        let Some(view) = payload.menu else {
+            panic!("the payload carries the open menu")
+        };
+        let Some(child) = view.child else {
+            panic!("the payload carries the open child list")
+        };
+        assert_eq!(
+            child.owner, parent,
+            "the wire lost the row that owns the list"
+        );
+        assert_eq!(view.hovered, Some(other), "the wire lost the hovered row");
+    }
+
+    #[test]
+    fn an_absent_menu_reaches_the_wire_as_an_absent_menu() {
+        // The other arm of the same mapping: dismissal is an emit of `None`, so
+        // a `menu_payload` that always produced a view would leave a dead menu
+        // drawn on screen.
+        let payload = super::menu_payload(None);
+        assert!(payload.menu.is_none());
+    }
+
+    #[test]
+    fn being_anywhere_in_an_open_list_argues_for_keeping_it_open() {
+        // Including its padding: a pointer that has arrived is not asked to stay
+        // on a row, or the list would close whenever it passed between two.
+        let mut menu = open_menu_over_default();
+        let parent = with_type_list_open(&mut menu);
+        let Some(list) = menu.open.as_ref() else {
+            panic!("the list was just opened")
+        };
+        let list_bounds = list.bounds;
+        let padding = Point::new(centre(list_bounds).x, list_bounds.origin.y);
+        assert_eq!(super::submenu_argument(&menu, padding), Some(parent));
+        assert_eq!(super::menu_hit(&menu, padding), None);
+        // Well outside argues to close.
+        assert_eq!(super::submenu_argument(&menu, Point::new(10, 10)), None);
+    }
+
+    #[test]
+    fn the_menu_payload_reaches_the_frontend_under_the_keys_it_reads() {
+        // `UT-F-72`, one field over. `HoverPayload` needed a `rename_all` and
+        // nothing in this repository could see it being removed. These field
+        // names are single lowercase words so that they need no attribute at
+        // all, and this pins that: a rename here is a rename the frontend reads,
+        // and it fails on this side rather than silently in the WebView.
+        let view = MenuView {
+            rect: (1, 2, 3, 4),
+            hovered: Some(0),
+            items: vec![MenuItemView {
+                rect: (1, 2, 3, 4),
+                label: "Area type",
+                checked: false,
+                parent: true,
+            }],
+            child: Some(ChildMenuView {
+                rect: (5, 6, 7, 8),
+                hovered: None,
+                items: Vec::new(),
+                owner: 0,
+            }),
+        };
+        let Ok(json) = serde_json::to_string(&MenuPayload { menu: Some(view) }) else {
+            panic!("the menu payload serializes")
+        };
+        for key in [
+            "\"menu\"",
+            "\"rect\"",
+            "\"items\"",
+            "\"hovered\"",
+            "\"child\"",
+            "\"label\"",
+            "\"checked\"",
+            "\"parent\"",
+            "\"owner\"",
+        ] {
+            assert!(json.contains(key), "{key} is missing from {json}");
+        }
+    }
+
+    /// The children of the one row that has any.
+    fn type_rows(rows: &[super::MenuRow]) -> &[super::MenuRow] {
+        let Some(parent) = rows
+            .iter()
+            .find(|row| row.action == MenuAction::OpenSubmenu)
+        else {
+            panic!("the menu has a type parent row")
+        };
+        &parent.children
+    }
+
+    #[test]
+    fn the_top_level_menu_holds_one_radio_group_and_the_types_are_not_in_it() {
+        // Roadmap 1.28, and this assertion IS the row's reason for existing. The
+        // rig found `Type: Default` and `Auto` ticked at once on 2026-08-14:
+        // both correct, and unreadable together, because a flat list holding two
+        // radio groups reads as one group with two selections. Asserted as the
+        // whole list rather than as "contains", so a row nobody decided on also
+        // fails here.
         let rows = menu_rows(&summary(AreaType::Default, Layer::Auto, Input::Interactive));
         assert_eq!(
             labels(&rows),
             vec![
-                "Type: Default",
-                "Type: Screenshot",
-                "Type: Filter",
+                "Area type",
                 "Always on top",
                 "Auto",
                 "Always behind",
@@ -3003,13 +4652,68 @@ mod tests {
                 "Dismiss",
             ]
         );
+        // The Layer tier is the only radio group left at this level, so at most
+        // one row of one can be ticked here. `Click-through` is a checkbox and
+        // is allowed to be ticked beside it; that pairing is not what the rig
+        // read as two selections, and it is not this row's to change.
+        let radio_ticks = rows
+            .iter()
+            .filter(|row| matches!(row.action, MenuAction::SetLayer(_)) && row.checked)
+            .count();
+        assert_eq!(radio_ticks, 1);
+        assert!(
+            !rows
+                .iter()
+                .any(|row| matches!(row.action, MenuAction::SetType(_))),
+            "a type row escaped back into the top level"
+        );
+    }
+
+    #[test]
+    fn the_type_list_offers_the_four_types_that_do_something() {
+        // The other three are modelled and have no behaviour, so a row for them
+        // would convert a working area into one indistinguishable from a bug.
+        //
+        // **THREE became FOUR on 2026-08-21**: roadmap 1.24 gave `Upscale`
+        // behaviour, and `conversion_label`'s own doc had promised the row
+        // would arrive with it. The list is asserted WHOLE and ordered, so a
+        // fifth row cannot appear without this going red.
+        let rows = menu_rows(&summary(AreaType::Default, Layer::Auto, Input::Interactive));
+        assert_eq!(
+            labels(type_rows(&rows)),
+            // ORDER IS `AreaType::ALL`'s, not the order the rows were added
+            // in, so `Upscale` sits before `Filter`. Asserted as a sequence
+            // rather than a set because the row order is what the user sees
+            // and nothing else pins it.
+            vec![
+                "Type: Default",
+                "Type: Screenshot",
+                "Type: Upscale",
+                "Type: Filter"
+            ]
+        );
+    }
+
+    #[test]
+    fn exactly_one_row_opens_a_list_and_no_child_opens_another() {
+        // Two deep, and `MenuHit` can address exactly two. A third level would
+        // be built here and be unreachable everywhere else, which is the shape
+        // of a defect that draws correctly and cannot be clicked.
+        for kind in AreaType::ALL {
+            let rows = menu_rows(&summary(kind, Layer::Auto, Input::Interactive));
+            let parents = rows.iter().filter(|row| !row.children.is_empty()).count();
+            assert_eq!(parents, 1, "{kind:?}");
+            for child in type_rows(&rows) {
+                assert!(child.children.is_empty(), "{kind:?} {}", child.label);
+            }
+        }
     }
 
     #[test]
     fn the_type_rows_tick_the_type_the_area_already_is_and_no_other() {
         for kind in AreaType::ALL {
             let rows = menu_rows(&summary(kind, Layer::Auto, Input::Interactive));
-            let ticked: Vec<&'static str> = rows
+            let ticked: Vec<&'static str> = type_rows(&rows)
                 .iter()
                 .filter(|row| matches!(row.action, MenuAction::SetType(_)) && row.checked)
                 .map(|row| row.label)
@@ -3025,30 +4729,57 @@ mod tests {
     }
 
     #[test]
+    fn the_parent_row_itself_is_never_ticked() {
+        // It is not a member of the group it opens. A tick on it would put a
+        // second mark at the top level and re-create, one row up, exactly the
+        // misreading roadmap 1.28 exists to remove.
+        for kind in AreaType::ALL {
+            let rows = menu_rows(&summary(kind, Layer::Auto, Input::Interactive));
+            let Some(parent) = rows
+                .iter()
+                .find(|row| row.action == MenuAction::OpenSubmenu)
+            else {
+                panic!("the menu has a type parent row")
+            };
+            assert!(!parent.checked, "{kind:?}");
+        }
+    }
+
+    #[test]
     fn a_screenshots_menu_still_leads_with_copy_and_save() {
-        // The type rows went in above Layer and below these two. Pinned because
-        // the export actions are the primary ones for the only type that holds a
-        // capture, and a reordering that buries them is a regression.
+        // Pinned because the export actions are the primary ones for the only
+        // type that holds a capture, and a reordering that buries them is a
+        // regression. The type parent row went in above Layer and below these
+        // two, where the flat type rows used to sit.
         let rows = menu_rows(&summary(
             AreaType::Screenshot,
             Layer::Auto,
             Input::Interactive,
         ));
-        assert_eq!(labels(&rows)[..3], ["Copy", "Save image", "Type: Default"]);
+        assert_eq!(labels(&rows)[..3], ["Copy", "Save image", "Area type"]);
     }
 
     #[test]
-    fn no_two_menu_rows_share_a_label() {
+    fn no_two_rows_of_one_list_share_a_label() {
         // The rows are identified to the user by their text alone, and the type
-        // rows are the first group whose labels are generated rather than
-        // written out one at a time.
-        for kind in AreaType::ALL {
-            let rows = menu_rows(&summary(kind, Layer::Front, Input::PassThrough));
-            let mut seen = labels(&rows);
+        // rows are the only group whose labels are generated rather than written
+        // out one at a time.
+        //
+        // Per list rather than across both, and the distinction is real since
+        // 1.28: two rows with one label are ambiguous only when they are on
+        // screen together, and a parent row named after the type it opens would
+        // be a deliberate repeat rather than a collision.
+        let unique = |rows: &[super::MenuRow], what: &str, kind: AreaType| {
+            let mut seen = labels(rows);
             let before = seen.len();
             seen.sort_unstable();
             seen.dedup();
-            assert_eq!(seen.len(), before, "{kind:?}");
+            assert_eq!(seen.len(), before, "{kind:?} {what}");
+        };
+        for kind in AreaType::ALL {
+            let rows = menu_rows(&summary(kind, Layer::Front, Input::PassThrough));
+            unique(&rows, "top level", kind);
+            unique(type_rows(&rows), "type list", kind);
         }
     }
 

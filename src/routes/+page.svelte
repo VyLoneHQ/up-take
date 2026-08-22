@@ -478,13 +478,47 @@ onMount(() => {
       <div
         class="menu-item"
         class:hovered={item.hovered}
+        class:open={item.open}
         style="left: {item.rect.x}px; top: {item.rect.y}px; width: {item.rect
           .width}px; height: {item.rect.height}px"
       >
         <span class="tick">{item.checked ? '✓' : ''}</span>
         <span class="label">{item.label}</span>
+        <span class="arrow">{item.parent ? '▸' : ''}</span>
       </div>
     {/each}
+    <!-- The child list is drawn after the parent's rows so it paints over
+         them, and the order matches `menu_hit`, which tests the child list
+         first for the same reason.
+
+         This said "it opens flush beside the panel rather than inside it, so
+         today nothing overlaps". Measured false: below about 2x the menu width
+         of monitor space the left-flip clamps the child list into the parent's
+         rectangle. Unreachable on real hardware, but the paint order is what
+         decides the result there, not a tidiness preference. See `menu_hit`. -->
+    {#if menuFrame.child}
+      <div
+        class="menu"
+        style="left: {menuFrame.child.rect.x}px; top: {menuFrame.child.rect
+          .y}px; width: {menuFrame.child.rect.width}px; height: {menuFrame.child
+          .rect.height}px"
+      ></div>
+      {#each menuFrame.child.items as item (item.label)}
+        <div
+          class="menu-item"
+          class:hovered={item.hovered}
+          style="left: {item.rect.x}px; top: {item.rect.y}px; width: {item.rect
+            .width}px; height: {item.rect.height}px"
+        >
+          <span class="tick">{item.checked ? '✓' : ''}</span>
+          <span class="label">{item.label}</span>
+          <!-- Empty, and present on purpose: `.label` is `flex: 1`, so a list
+               whose rows omit this span lays its labels out over a different
+               width from the list beside it. -->
+          <span class="arrow"></span>
+        </div>
+      {/each}
+    {/if}
   {/if}
 </main>
 
@@ -710,11 +744,17 @@ onMount(() => {
 
 /* An area's captured pixels, filling the area exactly.
 
-   Two callers now. A Screenshot area's pin (ADR-0014 §6) is captured *at* the
-   area's rectangle. A zoomed Default area's (§3.4) is captured at a smaller
-   rectangle inside it, and `fill` is what performs the magnification: the
-   stretch from source to area *is* the zoom, done by the compositor on the GPU
-   rather than by resampling any pixels on the Rust side.
+   Three callers now. A Screenshot area's pin (ADR-0014 §6) is captured *at* the
+   area's rectangle. A zoomed Default area's (§3.4) and an Upscale area's
+   (roadmap 1.24) are captured at a smaller rectangle inside it, and `fill` is
+   what performs the magnification: the stretch from source to area *is* the
+   zoom, done by the compositor on the GPU rather than by resampling any pixels
+   on the Rust side.
+
+   This said "Two callers now" until 2026-08-22. An Upscale area is neither a
+   Screenshot pin nor a zoomed Default, and it renders through this element; the
+   two magnified cases differ only in where the zoom came from, which is why
+   nothing else here had to change.
 
    `fill` rather than `contain` for both. The two rectangles always share an
    aspect ratio (the source is each extent divided by the same factor), so
@@ -822,8 +862,42 @@ onMount(() => {
   background: rgba(120, 180, 255, 0.22);
 }
 
+/* The row whose child list is open, drawn as the list's source. Dimmer than a
+   hover on purpose: the pointer is somewhere else, and this says "the list
+   beside you came from here" rather than "a click lands here". Without it the
+   parent goes dark the moment the pointer crosses another row, and the open
+   list sits there with nothing pointing at it.
+
+   `:not(.hovered)` is load-bearing, not decoration. A parent row carries BOTH
+   classes for the whole time the pointer rests on it -- which is the ordinary
+   state, since resting there is what opens the list -- and these two rules have
+   equal specificity, so without the guard the later declaration wins and the row
+   DIMS from 0.22 to 0.12 at the exact moment it is pointed at. Found by round 2
+   of the `1.28` review. Guarding the selector rather than reordering the file is
+   deliberate: order is invisible at the point of edit, and a later tidy that
+   sorts these rules alphabetically would put the defect straight back. */
+.menu-item.open:not(.hovered) {
+  background: rgba(120, 180, 255, 0.12);
+}
+
 .menu-item .tick {
   width: 12px;
   color: rgba(160, 210, 255, 1);
+}
+
+/* The marker on a row that opens a child list (roadmap 1.28). It sits hard
+   right, where the list itself opens, and `.label` takes the slack so the two
+   cannot collide on a long label. */
+.menu-item .label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.menu-item .arrow {
+  width: 8px;
+  text-align: right;
+  color: rgba(160, 210, 255, 0.8);
 }
 </style>
