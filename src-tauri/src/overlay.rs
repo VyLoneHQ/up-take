@@ -1714,10 +1714,23 @@ mod tests {
     /// is still open, and this table is that class's cover.
     ///
     /// **Nothing in this module has a rename, and that is the fact being
-    /// pinned.** `state_payload_keys` includes `freeze_probe`, snake_case,
+    /// pinned.** [`STATE_PAYLOAD_KEYS`] includes `freeze_probe`, snake_case,
     /// because `+page.svelte` reads `event.payload.freeze_probe`. Adding a
     /// `rename_all` here to match `HoverPayload` would look like tidying,
-    /// compile, pass clippy, and break the freeze latency probe silently.
+    /// compile, and pass clippy -- and then **this table goes red**, which is
+    /// the entire point of the table existing.
+    ///
+    /// ⚠️ **That last clause read "and break the freeze latency probe silently"
+    /// until 2026-08-22, written into the doc comment of the constant that ends
+    /// the silence.** Drilled at that date: adding `rename_all` to
+    /// `StatePayload` fails `every_payload_this_module_emits_keeps_the_keys_the_
+    /// frontend_reads`. The paragraph directly above this one was corrected in
+    /// commit `8440d5c` and this one, four lines below it, was not -- the same
+    /// neighbouring-instance miss that commit was itself fixing, and the sibling
+    /// file warns the reader about by name. Found by the round-3 review.
+    ///
+    /// `state_payload_keys` in the old text was also not the identifier; it is
+    /// `STATE_PAYLOAD_KEYS`, declared below.
     const STATE_PAYLOAD_KEYS: &[&str] = &[
         "state",
         "origin",

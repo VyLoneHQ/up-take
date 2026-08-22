@@ -185,26 +185,65 @@ pub(crate) fn assert_payload_coverage(
 /// non-defect, which is how a check gets muted. Test code is skipped rather than
 /// exempted one name at a time.
 ///
-/// # Why skipping test code is safe here, and is checked rather than assumed
+/// # Why skipping test code is safe here, and how it is bounded
 ///
-/// Skipping to end-of-file at `#[cfg(test)]` is right only while the attribute
-/// appears once and last, which is true of every file in this crate and is not a
-/// property of Rust. So [`assert_payload_coverage`] refuses a source carrying
-/// more than one, rather than silently scanning less of the file than the caller
-/// believes. Under-scanning is the failure this control cannot survive: a short
-/// scan agrees with any list, which is the empty-extraction case one step short.
+/// Under-scanning is the failure this control cannot survive: a short scan
+/// agrees with any list, which is the empty-extraction case one step short of
+/// the arm that catches it. So the skip is bounded to **one item** -- the one
+/// the `#[cfg(test)]` is attached to -- and an item that opens no block starts
+/// no skip at all.
+///
+/// ⚠️ **This paragraph said something else until 2026-08-22, and both halves
+/// were false at the head that carried it.** It read: *"Skipping to end-of-file
+/// at `#[cfg(test)]` is right only while the attribute appears once and last
+/// [...] So [`assert_payload_coverage`] refuses a source carrying more than
+/// one"*. The extractor had stopped skipping to end-of-file, and the refusal had
+/// been **deleted in the same commit**, sixty lines away, by a comment that says
+/// so in as many words. One claim, two sites, one commit, one of them fixed --
+/// which is the shape this whole module exists to argue against. Found by the
+/// round-3 independent review.
 fn serialize_structs(source: &str) -> Vec<String> {
     let mut names = Vec::new();
     let mut derives_serialize = false;
     let mut skipping_test_item = false;
+    let mut pending_test_item = false;
     for line in source.lines() {
         let trimmed = line.trim_start();
+        if pending_test_item {
+            // **Decide what kind of item this is before skipping anything.** An
+            // item that opens a block is skipped to its closing brace; one that
+            // does not is a declaration, holds no types, and must not start a
+            // skip at all.
+            pending_test_item = false;
+            if trimmed.starts_with("#[") {
+                // A further attribute between `#[cfg(test)]` and the item, as in
+                // `precapture.rs`'s `#[expect(...)]`. Keep waiting.
+                pending_test_item = true;
+                continue;
+            }
+            if line.contains('{') {
+                skipping_test_item = true;
+            }
+            continue;
+        }
         if skipping_test_item {
             // Test items in this crate are declared at column 0, so their
             // closing brace is the only `}` at column 0 inside them: everything
             // nested is indented. That is `cargo fmt --check`'s doing rather
             // than a hope, and CI runs it. Reaching end-of-file still skipping
             // is the ordinary case of a test module written last.
+            //
+            // ⚠️ **`cargo fmt` does NOT reach inside a string literal, and that
+            // is this terminator's real bound.** A multi-line string in a test
+            // module whose content has a `}` at column 0 ends the skip early,
+            // after which the fixtures below it read as production payloads.
+            // Not theoretical: it happened while writing the drill above, when
+            // an editing slip turned that fixture's `\n` escapes into real
+            // newlines. **It fails LOUD** -- the sweep reported `payload_keys.rs`
+            // as an uncovered module and the suite went red -- which is why this
+            // is a disclosure rather than a defect. A silent version of it would
+            // be a different matter, and there is not one: ending the skip early
+            // can only ever ADD names.
             if line == "}" {
                 skipping_test_item = false;
             }
@@ -213,12 +252,26 @@ fn serialize_structs(source: &str) -> Vec<String> {
         if trimmed == "#[cfg(test)]" {
             // **Skip THIS item, not the rest of the file.** This was `break`
             // until 2026-08-22, and `I-96`'s `F2` is what that cost: a payload
-            // declared after any `#[cfg(test)]` was invisible. Live in two files
-            // at the time, not hypothetical -- `lib.rs` carries the attribute at
-            // line 15 of 296, leaving 281 lines unscanned, and `precapture.rs`
-            // carries three, two of them on plain functions rather than on the
-            // test module.
-            skipping_test_item = true;
+            // declared after any `#[cfg(test)]` was invisible.
+            //
+            // ⚠️ **The first attempt at this fix, `b4d864e`, was WRONG and its
+            // own drill could not see it.** It began skipping immediately and
+            // stopped at the next `}` at column 0 -- which assumes every
+            // `#[cfg(test)]` item HAS a closing brace. `lib.rs:15` is
+            // `#[cfg(test)]` followed by `mod payload_keys;`, a declaration with
+            // no braces at all, added by this very branch. The skip therefore
+            // ran from line 16 to the file's only column-0 `}` at line 296:
+            // **281 of 296 lines unscanned, the exact figure that commit
+            // attributed to the OLD behaviour.** Found by the round-3
+            // independent review, which also caught why the drill missed it: it
+            // appended its probe struct AFTER the last line, past the point the
+            // skip ended, so it passed against the broken extractor and the
+            // correct one alike.
+            //
+            // So `pending_test_item` looks at the item first. `mod x;`,
+            // `use ...;` and `const ...;` start no skip, which is right twice
+            // over: they declare no types, and skipping them swallowed the file.
+            pending_test_item = true;
             derives_serialize = false;
             continue;
         }
@@ -226,9 +279,20 @@ fn serialize_structs(source: &str) -> Vec<String> {
             derives_serialize = trimmed.contains("Serialize");
             continue;
         }
-        if derives_serialize && trimmed.starts_with("#[") {
-            // A `#[serde(...)]` or a `#[allow(...)]` between the derive and the
-            // type. Keep looking rather than losing it.
+        if derives_serialize && (trimmed.starts_with("#[") || trimmed.starts_with("//")) {
+            // A `#[serde(...)]`, an `#[allow(...)]`, or a comment between the
+            // derive and the type. Keep looking rather than losing it.
+            //
+            // ⚠️ **The comment arm is new on 2026-08-22 and the doc above this
+            // function claimed it was already there**: it said the extractor is
+            // "deliberately blind to what sits between the `derive` and the
+            // type". It was blind to attributes only, so a `///` line between
+            // them -- legal Rust, survives `cargo fmt --all --check` -- made the
+            // payload invisible to the completeness control. Drilled by the
+            // round-3 independent review, which planted exactly that and watched
+            // the suite stay green. Same class as the `pub` and `enum` misses a
+            // previous round found: the doc described the intent and the code
+            // implemented less of it.
             continue;
         }
         if derives_serialize {
@@ -284,6 +348,23 @@ mod tests {
         }
         assert_eq!(keys_of(&Renamed { chrome_only: true }), vec!["chromeOnly"]);
         assert_eq!(keys_of(&Plain { chrome_only: true }), vec!["chrome_only"]);
+    }
+
+    #[test]
+    fn the_extractor_sees_a_struct_behind_a_doc_comment() {
+        // Round 3's drill, kept as a test. A `///` between the derive and the
+        // type is legal Rust and survives `cargo fmt --all --check`, and it made
+        // the payload invisible while this function's doc claimed blindness to
+        // "what sits between the derive and the type".
+        let source = concat!(
+            "#[derive(Serialize, Clone)]\n",
+            "/// A doc comment in the gap.\n",
+            "#[allow(dead_code)]\n",
+            "struct DocCommented {\n",
+            "    a: bool,\n",
+            "}\n",
+        );
+        assert_eq!(serialize_structs(source), vec!["DocCommented"]);
     }
 
     #[test]
@@ -455,14 +536,25 @@ mod tests {
             attribute_line * 4 < total,
             "this drill assumes the attribute sits early in lib.rs; it is at {attribute_line} of {total}"
         );
-        // The property: scanning stops at the closing brace of the test item and
-        // resumes, so a `Serialize` type appended to lib.rs would be seen. The
-        // file declares none today, so assert the resumption directly.
-        let appended =
-            format!("{source}\n#[derive(Serialize)]\nstruct Appended {{\n    a: bool,\n}}\n");
+        // **PLANTED MID-FILE, and that is the whole correction.** This drill
+        // appended its probe to the END of lib.rs until 2026-08-22, which put it
+        // past the point the broken skip stopped at, so it passed against the
+        // broken extractor and the fixed one alike -- a green that could not be
+        // earned. The round-3 reviewer named it: "I can name no input to this
+        // test that distinguishes the fixed extractor from the old break."
+        //
+        // Planted immediately after the `#[cfg(test)] mod payload_keys;` line,
+        // which is the position that was invisible.
+        let mut lines: Vec<&str> = source.lines().collect();
+        lines.insert(
+            attribute_line + 2,
+            "#[derive(Serialize)]\nstruct PlantedPayload {\n    a: bool,\n}",
+        );
+        let planted = lines.join("\n");
         assert!(
-            serialize_structs(&appended).contains(&"Appended".to_owned()),
-            "a payload appended to lib.rs after its test module must be visible"
+            serialize_structs(&planted).contains(&"PlantedPayload".to_owned()),
+            "a payload declared just below lib.rs's `#[cfg(test)]` must be visible; \
+             it was not, which is `I-96` `F2` still open"
         );
     }
 
