@@ -76,6 +76,11 @@ pub fn verdict(requested: Duration, gaps: &[Duration]) -> ThrottleVerdict {
     let mut sorted: Vec<Duration> = gaps.to_vec();
     sorted.sort_unstable();
     let shortest = sorted[0].as_secs_f64() * 1000.0;
+    // On an even count this is the upper-middle element rather than the mean of
+    // the middle two. Deliberate: it biases `NotBinding` toward firing, which
+    // is the conservative direction, because a run wrongly called binding is a
+    // wrong point on the curve while one wrongly called not-binding is only a
+    // re-run.
     let median = sorted[sorted.len() / 2].as_secs_f64() * 1000.0;
 
     if shortest < requested_ms * HONOURED_FLOOR {
@@ -87,25 +92,119 @@ pub fn verdict(requested: Duration, gaps: &[Duration]) -> ThrottleVerdict {
     }
 }
 
-/// A silence this large a fraction of the cost window means the thing being
-/// captured stopped changing partway through, so the two halves of the run were
-/// not the same experiment.
+/// A silence this large a fraction of the cost window is a candidate for the
+/// content having stopped partway.
 const SILENCE_FRACTION: f64 = 0.25;
 
-/// Whether the captured content kept changing for the whole cost window.
+/// Below this rate over the window's ACTIVE portion, the content is not
+/// producing frames continuously, so its silences are its nature rather than a
+/// change in conditions.
 ///
-/// Returns `false` when one silence swallowed a quarter of the window or more.
-/// Added after the instrument's first session, where a paused video produced
-/// 19.7 s of silence inside a 60 s window and every other line of the report
-/// still read as a clean result: the frames that did arrive were spaced
-/// correctly, so the throttle verdict above said honoured and binding. The
-/// operator caught it by remembering what he had done, which is not a check.
+/// The number is a judgement and is named as one. A static desktop sits far
+/// below it: `UT-F-41` measured WGC delivering **2 frames in 8.25 s**, which is
+/// under 0.5 fps even counting only the active stretch. A paused video sits far
+/// above it: the run this check exists for averaged **14.5 fps** across the
+/// 40.3 s it was actually playing. Two orders of magnitude separate the two
+/// cases, so the threshold is not load-bearing anywhere near its own value.
+const MIN_CONTINUOUS_FPS: f64 = 2.0;
+
+/// Whether the captured content behaved the same way for the whole cost window.
+///
+/// Returns `false` only when the content was **demonstrably continuous and then
+/// stopped** (or started late): one silence swallowed [`SILENCE_FRACTION`] of
+/// the window, and outside that silence frames were arriving at a continuous
+/// rate.
+///
+/// # Why a static desktop is NOT a failure, which a first version got wrong
+///
+/// Run 2 of this instrument's documented four-run matrix is *"default, static
+/// desktop"*, described there as *"the row the decision turns on"*. A static
+/// desktop produces almost no frames by definition, so its longest silence is
+/// most of the window. **Refusing that run would refuse the most important
+/// measurement the program takes**, and the first version of this check did
+/// exactly that: pointed at a quiet monitor it voided a perfectly good run.
+///
+/// So silence alone cannot be the test. The test is silence *plus* evidence
+/// that the content was capable of better, which is what the active-rate term
+/// supplies.
+///
+/// # The case it does catch
+///
+/// The founder paused a video 40 s into a 60 s window. Every other line of the
+/// report read clean, because the frames that did arrive were correctly spaced,
+/// and he caught it by remembering what he had done. Active rate 14.5 fps,
+/// silence 19.7 s of 60: refused.
+///
+/// # What it still does not catch
+///
+/// Content that slows without stopping, and content that stops for less than
+/// [`SILENCE_FRACTION`] of the window. Both change the measurement and neither
+/// leaves a silence long enough to see. Stated rather than left to be found.
+///
+/// # There is deliberately no explicit "static desktop" branch
+///
+/// There was one, and a mutation proved it could not fail: a run with no frames
+/// has an active rate of zero, which is below [`MIN_CONTINUOUS_FPS`] by any
+/// value it could take, so the general term already answers the static case.
+/// An untestable branch was removed rather than left in to look reassuring.
 #[must_use]
-pub fn conditions_held(longest_silence: Duration, window: Duration) -> bool {
+pub fn conditions_held(longest_silence: Duration, window: Duration, frames: usize) -> bool {
     if window.is_zero() {
         return false;
     }
-    longest_silence.as_secs_f64() < window.as_secs_f64() * SILENCE_FRACTION
+    if longest_silence.as_secs_f64() < window.as_secs_f64() * SILENCE_FRACTION {
+        return true;
+    }
+    let active = window.as_secs_f64() - longest_silence.as_secs_f64();
+    if active <= 0.0 {
+        return true;
+    }
+    (frames as f64 / active) < MIN_CONTINUOUS_FPS
+}
+
+/// The longest stretch of the cost window during which no frame arrived.
+///
+/// `arrival_offsets` are measured from the start of the window and must be
+/// ascending. The answer considers **three** kinds of silence and the first and
+/// last are the ones that get forgotten:
+///
+/// - from the start of the window to the first frame,
+/// - between consecutive frames,
+/// - from the last frame to the end of the window.
+///
+/// # Why this is a function and not two lines at the call site
+///
+/// It was two lines at the call site, and they were wrong. The first version
+/// built its gap list from `windows(2)` over the arrivals alone, which sees
+/// only the middle kind. A run whose content froze for the first 58 seconds of
+/// a 60 second window and then delivered four frames 500 ms apart reported a
+/// longest silence of **500 ms** and passed as healthy.
+///
+/// That is not a hypothetical: the run this whole check was written for had its
+/// video paused so that the freeze ran to the END of the window, which the
+/// author's own wiring could not see either. An independent review of `PR #67`
+/// found it. The lesson is the one this project keeps re-learning: the guard
+/// was correct in isolation and was fed the wrong data, and the guard's unit
+/// tests could not see the wiring because the wiring lived in an example, which
+/// `cargo test` builds without running.
+///
+/// With no arrivals at all the whole window was silent, which is what is
+/// returned.
+#[must_use]
+pub fn longest_silence(window: Duration, arrival_offsets: &[Duration]) -> Duration {
+    let Some(first) = arrival_offsets.first() else {
+        return window;
+    };
+    let leading = *first;
+    let between = arrival_offsets
+        .windows(2)
+        .map(|pair| pair[1].saturating_sub(pair[0]))
+        .max()
+        .unwrap_or_default();
+    let trailing = arrival_offsets
+        .last()
+        .map_or(window, |last| window.saturating_sub(*last));
+    leading.max(between).max(trailing)
 }
 
 #[cfg(test)]
@@ -208,36 +307,143 @@ mod tests {
     }
 
     #[test]
+    fn no_arrivals_means_the_whole_window_was_silent() {
+        assert_eq!(
+            longest_silence(Duration::from_secs(60), &[]),
+            Duration::from_secs(60)
+        );
+    }
+
+    #[test]
+    fn a_freeze_at_the_start_of_the_window_is_seen() {
+        // The review's scenario: frozen for 58 s, then four frames 500 ms apart.
+        // The wiring this replaces reported 500 ms and passed as healthy.
+        let arrivals = ms(&[58_000, 58_500, 59_000, 59_500]);
+        assert_eq!(
+            longest_silence(Duration::from_secs(60), &arrivals),
+            Duration::from_millis(58_000)
+        );
+    }
+
+    #[test]
+    fn a_freeze_at_the_end_of_the_window_is_seen() {
+        // The run this check was written for: the founder paused a video and
+        // the silence ran to the end of the window.
+        let arrivals = ms(&[0, 10_000, 20_000, 30_000, 40_269]);
+        assert_eq!(
+            longest_silence(Duration::from_secs(60), &arrivals),
+            Duration::from_millis(19_731)
+        );
+    }
+
+    #[test]
+    fn a_freeze_in_the_middle_is_still_seen() {
+        let arrivals = ms(&[100, 30_100, 30_200, 59_900]);
+        assert_eq!(
+            longest_silence(Duration::from_secs(60), &arrivals),
+            Duration::from_millis(30_000)
+        );
+    }
+
+    #[test]
+    fn the_largest_of_the_three_kinds_wins() {
+        // Leading 5 s, middle 9 s, trailing 7 s.
+        let arrivals = ms(&[5_000, 14_000, 23_000]);
+        assert_eq!(
+            longest_silence(Duration::from_secs(30), &arrivals),
+            Duration::from_secs(9)
+        );
+    }
+
+    #[test]
+    fn a_steady_run_is_silent_only_between_its_frames() {
+        let arrivals = ms(&[100, 200, 300, 400]);
+        // Trailing dominates here and that is correct: nothing came after 400.
+        assert_eq!(
+            longest_silence(Duration::from_millis(500), &arrivals),
+            Duration::from_millis(100)
+        );
+    }
+
+    #[test]
+    fn the_leading_freeze_reaches_conditions_held() {
+        // End to end: the composition that was broken, now going red.
+        let arrivals = ms(&[58_000, 58_500, 59_000, 59_500]);
+        let window = Duration::from_secs(60);
+        assert!(!conditions_held(
+            longest_silence(window, &arrivals),
+            window,
+            arrivals.len()
+        ));
+    }
+
+    #[test]
     fn a_steady_run_held_its_conditions() {
         assert!(conditions_held(
             Duration::from_millis(114),
-            Duration::from_secs(60)
+            Duration::from_secs(60),
+            584
         ));
     }
 
     #[test]
     fn a_paused_video_did_not_hold_its_conditions() {
-        // The observed run: 19.7 s of silence inside a 60 s window.
+        // The observed run: 584 frames, 19.7 s of silence inside 60 s, so the
+        // 40.3 s it was actually playing averaged 14.5 fps.
         assert!(!conditions_held(
             Duration::from_millis(19_731),
-            Duration::from_secs(60)
+            Duration::from_secs(60),
+            584
         ));
     }
 
     #[test]
-    fn the_boundary_is_a_quarter_of_the_window() {
+    fn a_static_desktop_is_not_a_changed_run() {
+        // Run 2 of this program's own four-run matrix. Voiding it would refuse
+        // the most important measurement the instrument takes, and the first
+        // version of this check did exactly that.
         assert!(conditions_held(
-            Duration::from_millis(14_999),
-            Duration::from_secs(60)
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+            0
         ));
+    }
+
+    #[test]
+    fn a_nearly_static_desktop_is_not_a_changed_run() {
+        // UT-F-41: WGC delivered 2 frames in 8.25 s on a static desktop. The
+        // silence is most of the window and the content was never continuous.
+        assert!(conditions_held(
+            Duration::from_millis(4_150),
+            Duration::from_millis(8_250),
+            2
+        ));
+    }
+
+    #[test]
+    fn a_late_start_on_busy_content_is_a_changed_run() {
+        // The review's scenario: frozen 58 s, then four frames 500 ms apart.
+        // Active portion is 2 s carrying 4 frames, which is 2 fps.
         assert!(!conditions_held(
-            Duration::from_secs(15),
-            Duration::from_secs(60)
+            Duration::from_millis(58_000),
+            Duration::from_secs(60),
+            4
+        ));
+    }
+
+    #[test]
+    fn a_long_silence_alone_is_not_enough() {
+        // Same silence as the case above, but only ONE frame arrived, so
+        // nothing demonstrates the content could do better.
+        assert!(conditions_held(
+            Duration::from_millis(58_000),
+            Duration::from_secs(60),
+            1
         ));
     }
 
     #[test]
     fn a_zero_window_holds_nothing() {
-        assert!(!conditions_held(Duration::ZERO, Duration::ZERO));
+        assert!(!conditions_held(Duration::ZERO, Duration::ZERO, 0));
     }
 }

@@ -861,9 +861,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The armed signal — is each session actually live and holding pixels?
     // ---------------------------------------------------------------------
 
+    // Reasons this run must not be recorded. Printed AND returned as a
+    // non-zero exit, because these are called refusals and a refusal that only
+    // prints is a warning a reader has to notice among forty other lines --
+    // and this output gets transcribed into a backlog row rather than watched.
+    let mut void: Vec<String> = Vec::new();
     let mut retained_bytes = 0usize;
     let mut frames_in_window = 0usize;
-    let mut gaps_in_window: Vec<Duration> = Vec::new();
+    // Per session: label, the gaps BETWEEN its in-window frames, and each
+    // frame's offset from the start of the window. The two are different
+    // questions and were briefly one vector, which is the defect `PR #67`'s
+    // review found: inter-frame gaps cannot see a freeze at either EDGE of the
+    // window, and the run this check exists for froze at the end.
+    let mut per_slot: Vec<(String, Vec<Duration>, Vec<Duration>)> = Vec::new();
     if !cold {
         println!("      sessions, at the end of the cost window:");
         for slot in &slots {
@@ -898,7 +908,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let bytes = w as usize * h as usize * 4;
                     retained_bytes += bytes * 2;
                     frames_in_window += in_window;
-                    gaps_in_window.extend(in_window_times.windows(2).map(|pair| pair[1] - pair[0]));
+                    per_slot.push((
+                        slot.label.clone(),
+                        in_window_times
+                            .windows(2)
+                            .map(|pair| pair[1] - pair[0])
+                            .collect(),
+                        in_window_times
+                            .iter()
+                            .map(|t| t.saturating_duration_since(held_window_started))
+                            .collect(),
+                    ));
                     let age = at
                         .last()
                         .map(|t| ms(held_window_ended.duration_since(*t)))
@@ -950,61 +970,78 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         let observed_fps = frames_in_window as f64 / held.seconds;
         println!("      observed rate: {observed_fps:.1} fps across the held session(s)");
-        // The judgement itself lives in `uptake_capture::throttle` and is
-        // drilled there, because CI runs `cargo test --all-features`, which
-        // builds examples without running their tests. A refusal written here
-        // would be a refusal nobody tests, which is `I-301` exactly.
-        if let Some(requested) = min_interval {
-            let asked = Duration::from_millis(requested);
-            let mut sorted = gaps_in_window.clone();
-            sorted.sort_unstable();
-            let shortest = sorted.first().copied().unwrap_or_default();
-            let median = sorted.get(sorted.len() / 2).copied().unwrap_or_default();
-            println!(
-                "      throttle asked {requested} ms; shortest {:.0} ms, median {:.0} ms",
-                ms(shortest),
-                ms(median),
-            );
-            match throttle::verdict(asked, &gaps_in_window) {
-                ThrottleVerdict::Unverifiable { gaps } => {
-                    println!("      THROTTLE UNVERIFIED: {gaps} gap(s), too few to judge it.");
-                    println!("      A static desktop makes almost no frames. Play video.");
-                }
-                ThrottleVerdict::NotHonoured => {
-                    println!("      THROTTLE NOT HONOURED, THIS RUN IS VOID: a frame arrived");
-                    println!("      inside the floor that was asked for. WGC ignored the");
-                    println!("      setting, so the cost above is the untuned cost. Discard.");
-                }
-                ThrottleVerdict::NotBinding => {
-                    println!("      THROTTLE NOT BINDING: the CONTENT set the rate, not the");
-                    println!("      throttle. The floor held but nothing reached it, so this");
-                    println!("      run measures how fast the screen changed. To make it bind,");
-                    println!("      ask for an interval LONGER than the median gap above.");
-                }
-                ThrottleVerdict::HonouredAndBinding => {
-                    println!("      throttle honoured AND binding: it set the rate above.");
-                }
+        // The judgement lives in `uptake_capture::throttle` and is drilled
+        // there, because CI runs `cargo test --all-features`, which builds
+        // examples without running their tests. A refusal written here would be
+        // a refusal nobody tests, which is `I-301` exactly.
+        //
+        // JUDGED PER SESSION, not over the pool. Two monitors showing different
+        // things produce one merged gap vector that describes neither, and the
+        // documented workflow avoids that by convention rather than by
+        // enforcement. `PR #67`'s review named it; convention is not a check.
+        for (label, gaps, offsets) in &per_slot {
+            let silence = throttle::longest_silence(window, offsets);
+            let held = throttle::conditions_held(silence, window, offsets.len());
+            if per_slot.len() > 1 {
+                println!("      {label}:");
             }
-        } else {
-            println!("      throttle: none (MinimumUpdateIntervalSettings::Default), the");
-            println!("      setting wgc.rs captures with. This is the untuned point.");
-        }
-        // Did the thing being captured keep changing for the whole window? A
-        // run whose content stopped halfway is two experiments averaged, and
-        // every other line of the report still reads clean: the frames that DID
-        // arrive were spaced correctly, so the verdict above says honoured and
-        // binding. Observed on this instrument's first session, caught by the
-        // operator remembering he had paused a video. That is not a check.
-        let longest_silence = gaps_in_window.iter().copied().max().unwrap_or_default();
-        if !throttle::conditions_held(longest_silence, window) {
-            println!("      CONDITIONS CHANGED MID-RUN, THIS RUN IS VOID: the longest single");
-            println!(
-                "      silence was {:.1} s of a {:.0} s window. Whatever was being captured",
-                ms(longest_silence) / 1000.0,
-                window.as_secs_f64(),
-            );
-            println!("      stopped changing partway through, so the two halves are not the");
-            println!("      same experiment and the cost above is an average of both.");
+            if let Some(requested) = min_interval {
+                let asked = Duration::from_millis(requested);
+                let mut sorted = gaps.clone();
+                sorted.sort_unstable();
+                let shortest = sorted.first().copied().unwrap_or_default();
+                let median = sorted.get(sorted.len() / 2).copied().unwrap_or_default();
+                println!(
+                    "      throttle asked {requested} ms; shortest {:.0} ms, median {:.0} ms",
+                    ms(shortest),
+                    ms(median),
+                );
+                match throttle::verdict(asked, gaps) {
+                    ThrottleVerdict::Unverifiable { gaps: seen } => {
+                        println!("      THROTTLE UNVERIFIED: {seen} gap(s), too few to judge it.");
+                        println!("      A static desktop makes almost no frames. Play video.");
+                    }
+                    ThrottleVerdict::NotHonoured => {
+                        void.push(format!("{label}: the throttle was not honoured"));
+                        println!("      THROTTLE NOT HONOURED, THIS RUN IS VOID: a frame arrived");
+                        println!("      inside the floor that was asked for. WGC ignored the");
+                        println!("      setting, so the cost above is the untuned cost. Discard.");
+                    }
+                    ThrottleVerdict::NotBinding => {
+                        println!("      THROTTLE NOT BINDING: the CONTENT set the rate, not the");
+                        println!("      throttle. The floor held but nothing reached it, so this");
+                        println!("      run measures how fast the screen changed. Not void, but");
+                        println!("      not a point on the curve. Ask for a LONGER interval.");
+                    }
+                    ThrottleVerdict::HonouredAndBinding => {
+                        println!("      throttle honoured AND binding: it set the rate above.");
+                    }
+                }
+            } else {
+                println!("      throttle: none (MinimumUpdateIntervalSettings::Default), the");
+                println!("      setting wgc.rs captures with. This is the untuned point.");
+            }
+            // Did the captured thing keep changing for the WHOLE window? This
+            // counts the silence before the first frame and after the last one
+            // as well as between them. The first version counted only the
+            // middle kind, so a freeze at either edge was invisible -- and the
+            // run it was written for froze at the end.
+            if !held {
+                void.push(format!(
+                    "{label}: {:.1} s of a {:.0} s window was silent",
+                    ms(silence) / 1000.0,
+                    window.as_secs_f64(),
+                ));
+                println!("      CONDITIONS CHANGED MID-RUN, THIS RUN IS VOID: the longest");
+                println!(
+                    "      single silence was {:.1} s of a {:.0} s window, counting the",
+                    ms(silence) / 1000.0,
+                    window.as_secs_f64(),
+                );
+                println!("      stretches before the first frame and after the last. What was");
+                println!("      being captured stopped changing, so the cost above averages");
+                println!("      two different experiments.");
+            }
         }
         println!("      ONE RUN CANNOT SPLIT fixed holding cost from per-frame cost. Record");
         println!("      the `ours` delta together with the rate above; see the header.");
@@ -1186,11 +1223,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "  If holding costs ~nothing on a static desktop, 1.9f's setting is complexity nobody \
          needed and the warm path should be the default (ADR-0026's amendment says so in those words)."
     );
-    println!(
-        "  If it only costs with video playing, the honest options are a setting or throttling \
-         via MinimumUpdateIntervalSettings — which this program deliberately leaves at Default, \
-         the same value wgc.rs captures with."
-    );
+    if min_interval.is_some() {
+        println!("  If it only costs with video playing, the honest options are a setting");
+        println!("  or throttling via MinimumUpdateIntervalSettings. THIS RUN THROTTLED:");
+        println!("  read the throttle line above for what was asked, and whether it was");
+        println!("  honoured and binding. Only honoured AND binding is a point on a curve.");
+    } else {
+        println!("  If it only costs with video playing, the honest options are a setting");
+        println!("  or throttling via MinimumUpdateIntervalSettings, which this run left");
+        println!("  at Default, the same value wgc.rs captures with. Pass");
+        println!("  --min-update-interval-ms N to change that.");
+    }
     println!(
         "  Compare warm against `--cold` before believing any of it: if the shot latencies match, \
          nothing was retained and the run is void."
@@ -1206,6 +1249,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          cold holds nothing, so whatever it reports there is noise, and if that is the size of \
          the warm delta then this channel resolved nothing and dwm's share is still unknown."
     );
+    // A refusal that only prints is a warning. These numbers get transcribed
+    // into a backlog row rather than watched live, so a void run has to be
+    // visible to whatever reads the exit code too. `NotBinding` is deliberately
+    // NOT here: it is a valid measurement of the content's own rate, just not a
+    // point on the throttle's curve.
+    if !void.is_empty() {
+        println!();
+        println!("--- THIS RUN IS VOID, DO NOT RECORD IT ---");
+        for reason in &void {
+            println!("  - {reason}");
+        }
+        return Err(format!("{} void condition(s); see above", void.len()).into());
+    }
+
     Ok(())
 }
 
