@@ -215,6 +215,20 @@ function onKeydown(event: KeyboardEvent) {
 }
 
 onMount(() => {
+  // Report the scale we actually laid out in, once, so `dev_harness::log_scale`
+  // can print it beside every monitor's Rust-side factor. `I-299`: the area
+  // menu is sized from a PER-MONITOR scale while every rect here is converted
+  // with this ONE value, and nobody has ever seen the two together.
+  //
+  // Failure is swallowed: the endpoint is registered in debug builds only, so
+  // in release this rejects and that is the expected outcome rather than an
+  // error worth logging. `debug_assertions` is a Rust concept and does not
+  // reach TypeScript, which is the same stated limit `reportFreezeLatency`
+  // carries.
+  void invoke('overlay_report_scale', { dpr: window.devicePixelRatio }).catch(
+    () => {},
+  );
+
   const unlistenState = listen<StatePayload>('overlay://state', (event) => {
     overlayState = event.payload.state;
     monitors = event.payload.monitors;
