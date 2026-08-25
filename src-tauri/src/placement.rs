@@ -20,8 +20,11 @@
 //!   what the area model assigns to areas: a press on the topmost *interactive*
 //!   area (`AreaStore::hit_test`; pass-through areas are invisible to input,
 //!   V-7) is swallowed and acted on (left raises the area per §3.2a recency,
-//!   right opens its menu); every other press is passed through untouched. No
-//!   cursor override: the pointer belongs to whatever is underneath.
+//!   right opens its menu); every other press is passed through untouched.
+//!   **A NARROW cursor override while the pointer is on an area** -- `OCR_NORMAL`,
+//!   `OCR_IBEAM` and `OCR_HAND`, see [`LIVING_CURSORS`]. This line read *"No
+//!   cursor override: the pointer belongs to whatever is underneath"* until
+//!   2026-08-25, which was true of the body of an area and never of its chrome.
 //! - **`Hidden`** tears the hook down (subject to the pending-button
 //!   deferral below) and everything here is inert.
 //!
@@ -446,8 +449,8 @@ enum CursorShape {
     /// the one it must be able to put back.
     ///
     /// [ADR-0025](../../../Projects/UP-TAKE/DECISIONS/ADR-0025-living-cursor-via-a-narrow-override.md)
-    /// needs this. LIVING overrides `OCR_NORMAL` alone and undoes it by
-    /// overriding again with the genuine arrow, because the alternative
+    /// needs this. LIVING overrides [`LIVING_CURSORS`]' three slots and undoes it
+    /// by overriding again with each slot's genuine cursor, because the alternative
     /// (`SPI_SETCURSORS`) measures 7.9 ms and broadcasts `WM_SETTINGCHANGE`
     /// desktop-wide, which is unaffordable on a per-hover path. Nothing else in
     /// this enum is a "restore" value; this one exists only to be restored to.
@@ -1201,7 +1204,8 @@ fn pump_gesture(app: &AppHandle, state: &mut PumpState) {
 /// `Placement`-only ... hover chrome would advertise gestures (move, resize)
 /// that only `Placement` offers"*. Task 1.17(a) gave `Living` its own move and
 /// resize, which removed the premise, and ADR-0025 scoped the cursor override to
-/// `OCR_NORMAL` alone so it no longer reaches inside the user's apps. The
+/// three named slots so it no longer reaches the rest of the user's cursor table.
+/// (`OCR_NORMAL` alone until 2026-08-25; see [`LIVING_CURSORS`].) The
 /// sentence outlived both by three weeks and was found by the independent review
 /// of `#56`, arguing against the code directly beneath it.
 ///
@@ -1361,12 +1365,19 @@ fn submenu_argument(menu: &AreaMenu, point: Point) -> Option<usize> {
 /// width the left-flip clamps the child list into the parent's rectangle, and
 /// they overlap.
 ///
-/// ```text
-/// monitor width   menu.x   child.x   child.right   overlap
-///           200       23         0           176   yes
-///           300      123         0           176   yes
-///           400      223        47           223   no
-/// ```
+/// ⚠️ **The worked table that stood here carried the numeral `176` in two rows.**
+/// That was [`interaction::MENU_WIDTH`] when the table was written; the constant
+/// became `200` on 2026-08-25 and the rows silently stopped describing the code.
+/// Replaced with the RULE rather than re-tabulated at the new number, because a
+/// table of literals goes stale on exactly the edit that matters and does so
+/// without any gate noticing. Found by the independent review of `PR #65`.
+///
+/// **The rule, stated against the constant instead of against its value:** the
+/// child list opens rightward when there is room for a second list beside the
+/// parent, so the lists are disjoint once the monitor is wider than about
+/// `2 x MENU_WIDTH`. Narrower than that, the left-flip clamps the child list
+/// back over the parent's rectangle and they overlap. The threshold moves with
+/// the constant, which is the whole point of writing it this way.
 ///
 /// No real monitor is that narrow, so nothing is broken. But the ordering is
 /// **already load-bearing at the margin** rather than merely prudent, which is a
@@ -1582,8 +1593,9 @@ fn pump_hover(app: &AppHandle, state: &mut PumpState) {
         // shape for the duration, matching Placement: it must not flicker between
         // move and resize as the pointer crosses an edge mid-drag.
         //
-        // `None` hands the user's own arrow back: this is an `OCR_NORMAL`-only
-        // override, so nothing else in their cursor table is touched. See
+        // `None` hands each claimed slot its own cursor back -- not the arrow, which
+        // would leave every text field on the desktop showing one. Three slots are
+        // touched and the rest of the table is not; see `LIVING_CURSORS`. See
         // `set_living_cursor` for why the restore is not `SPI_SETCURSORS`.
         set_living_cursor(match *lock(&GESTURE) {
             Some(gesture) => Some(gesture_cursor(gesture)),
@@ -1838,13 +1850,15 @@ fn enter_living_on_main_thread() {
     if let Some(app) = APP.get() {
         close_menu(app);
     }
-    // Drop Placement's all-slots override: Living does not own the pointer, so
-    // pinning `OCR_IBEAM` and friends would change the cursor inside the user's
+    // Drop Placement's all-slots override: Living does not own the pointer away
+    // from an area, so pinning the whole table would change the cursor inside the
+    // user's
     // apps. Restore only if one is actually applied: the registry reload is
     // global state other apps see, not a free no-op.
     //
-    // Living then takes its *own*, far narrower override on hover: `OCR_NORMAL`
-    // alone, via `set_living_cursor` (ADR-0025). The two are deliberately not the
+    // Living then takes its *own*, far narrower override on hover: the three slots
+    // in `LIVING_CURSORS`, via `set_living_cursor` (ADR-0025 as amended by the
+    // 2026-08-25 rig report). The two are deliberately not the
     // same mechanism, and this is the boundary between them: the wide one has to
     // be gone before the narrow one starts, or the narrow one's cache would
     // describe a slot the wide one is still holding.
