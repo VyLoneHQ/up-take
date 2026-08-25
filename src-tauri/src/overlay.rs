@@ -1351,15 +1351,30 @@ pub(crate) fn monitor_rects() -> Vec<Rect> {
 /// monitor at all — which happens in the dead zones between mismatched monitors,
 /// where any answer is a guess and the desktop is at least never `None`.
 pub(crate) fn monitor_bounds_at(app: &AppHandle, point: Point) -> Rect {
+    monitor_metrics_at(app, point).0
+}
+
+/// [`monitor_bounds_at`] plus the monitor's scale factor, for chrome that has to
+/// be sized as well as positioned.
+///
+/// The area menu needs both and resolving them separately would walk the monitor
+/// cache twice on a path that ticks (`pump_menu`). The scale falls back to `1.0`
+/// wherever the bounds fall back to the virtual desktop: in a dead zone there is
+/// no monitor to ask, and a menu at the wrong size is a better failure than one
+/// sized from a guess that could be any of four values.
+pub(crate) fn monitor_metrics_at(app: &AppHandle, point: Point) -> (Rect, f64) {
     let fallback = Rect::new(point.x, point.y, 1, 1);
     let Ok(window) = overlay_window(app) else {
-        return fallback;
+        return (fallback, 1.0);
     };
     let monitors = monitors(&window).unwrap_or_default();
     if let Some(monitor) = uptake_core::geometry::monitor_at(&monitors, point) {
-        return monitor.bounds;
+        return (monitor.bounds, monitor.scale_factor);
     }
-    virtual_desktop_bounds(monitors.iter().map(|m| m.bounds)).unwrap_or(fallback)
+    (
+        virtual_desktop_bounds(monitors.iter().map(|m| m.bounds)).unwrap_or(fallback),
+        1.0,
+    )
 }
 
 /// Creates an area of `kind` at the given physical bounds, returning its id and
@@ -1605,6 +1620,32 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// Deliberately does no validation beyond existing: the value is one this
 /// process minted moments earlier, and a nonsense one can only distort a debug
 /// statistic. Rejecting it would be more code guarding less.
+/// IPC surface, **debug builds only**: the frontend reports the
+/// `devicePixelRatio` it actually laid out in, so both sides of the scale
+/// boundary can be printed together.
+///
+/// See [`crate::dev_harness::log_scale`] for why. In short: `I-299` and the
+/// independent review of `PR #65`. Rust cannot ask for this value -- ADR-0011
+/// makes the WebView its sole authority and was written after tao's cached
+/// per-window scale disagreed with it -- so the WebView has to volunteer it.
+///
+/// **This is a diagnostic, not a channel the menu may start reading.** Wiring
+/// menu geometry to a value cached here would reintroduce exactly the staleness
+/// ADR-0011 forbids; making that legitimate is an amendment to that ADR, not a
+/// use of this endpoint.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub fn overlay_report_scale(app: AppHandle, dpr: f64) {
+    let pairs: Vec<(Rect, f64)> = overlay_window(&app)
+        .ok()
+        .and_then(|window| monitors(&window).ok())
+        .unwrap_or_default()
+        .iter()
+        .map(|monitor| (monitor.bounds, monitor.scale_factor))
+        .collect();
+    crate::dev_harness::log_scale(dpr, &pairs);
+}
+
 #[tauri::command]
 pub fn overlay_report_latency(probe: u64) {
     placement::record_latency(probe);
@@ -1751,6 +1792,121 @@ pub fn overlay_request_state(app: AppHandle) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::payload_keys::{assert_keys, assert_payload_coverage};
+
+    /// Every payload this module emits, and the keys the frontend indexes it
+    /// with (`I-67`).
+    ///
+    /// **Read as a wire contract, not as a list of Rust fields.** A `rename` or
+    /// a `rename_all` is invisible to anything reading the struct definition and
+    /// is the only thing that decides these strings, which is `UT-F-72`: the
+    /// single `rename_all` in `src-tauri` could be deleted with every gate in
+    /// the repository staying green. ⚠️ **Past tense on purpose. `#56` covered
+    /// that one struct with a test, so deleting it goes red today** (measured
+    /// 2026-08-22). The eleven payload types with no rename are the class that
+    /// is still open, and this table is that class's cover.
+    ///
+    /// **Nothing in this module has a rename, and that is the fact being
+    /// pinned.** [`STATE_PAYLOAD_KEYS`] includes `freeze_probe`, snake_case,
+    /// because `+page.svelte` reads `event.payload.freeze_probe`. Adding a
+    /// `rename_all` here to match `HoverPayload` would look like tidying,
+    /// compile, and pass clippy -- and then **this table goes red**, which is
+    /// the entire point of the table existing.
+    ///
+    /// ⚠️ **That last clause read "and break the freeze latency probe silently"
+    /// until 2026-08-22, written into the doc comment of the constant that ends
+    /// the silence.** Drilled at that date: adding `rename_all` to
+    /// `StatePayload` fails `every_payload_this_module_emits_keeps_the_keys_the_
+    /// frontend_reads`. The paragraph directly above this one was corrected in
+    /// commit `8440d5c` and this one, four lines below it, was not -- the same
+    /// neighbouring-instance miss that commit was itself fixing, and the sibling
+    /// file warns the reader about by name. Found by the round-3 review.
+    ///
+    /// `state_payload_keys` in the old text was also not the identifier; it is
+    /// `STATE_PAYLOAD_KEYS`, declared below.
+    const STATE_PAYLOAD_KEYS: &[&str] = &[
+        "state",
+        "origin",
+        "monitors",
+        "armed",
+        "frozen",
+        "stills",
+        "freeze_probe",
+    ];
+
+    #[test]
+    fn every_payload_this_module_emits_keeps_the_keys_the_frontend_reads() {
+        assert_keys(
+            "StatePayload",
+            &StatePayload {
+                state: "placement",
+                origin: (0, 0),
+                monitors: Vec::new(),
+                armed: None,
+                frozen: false,
+                stills: Vec::new(),
+                freeze_probe: None,
+            },
+            STATE_PAYLOAD_KEYS,
+        );
+        let area = AreaPayload {
+            id: 1,
+            rect: (0, 0, 10, 10),
+            close: (0, 0, 18, 18),
+            layer: "auto",
+            kind: "default",
+            zoom: 1.0,
+        };
+        assert_keys(
+            "AreaPayload",
+            &area,
+            &["id", "rect", "close", "layer", "kind", "zoom"],
+        );
+        assert_keys(
+            "AreasPayload",
+            &AreasPayload { areas: vec![area] },
+            &["areas"],
+        );
+        assert_keys(
+            "ActiveMonitorPayload",
+            &ActiveMonitorPayload { index: Some(0) },
+            &["index"],
+        );
+        assert_keys(
+            "FlashPayload",
+            &FlashPayload { id: 1, nonce: 7 },
+            &["id", "nonce"],
+        );
+        assert_keys(
+            "PinPayload",
+            &PinPayload { id: 1, url: None },
+            &["id", "url"],
+        );
+    }
+
+    #[test]
+    fn no_payload_in_this_module_escapes_the_key_table() {
+        // The completeness half, and the half a hand-maintained table cannot
+        // supply for itself. A new `Serialize` struct here reaches the frontend
+        // through a route `area-kinds.test.ts` says in its own doc it cannot
+        // see, so the only thing that can notice one is a control that reads
+        // this file. See `payload_keys` for why a regex is defensible as a
+        // control when `I-67`'s constraint warns against one as a check.
+        assert_payload_coverage(
+            "overlay.rs",
+            include_str!("overlay.rs"),
+            &[
+                "StatePayload",
+                "AreaPayload",
+                "AreasPayload",
+                "ActiveMonitorPayload",
+                "FlashPayload",
+                "PinPayload",
+            ],
+            &[],
+        );
+    }
 
     /// The termination property of the sync ↔ window-event cycle. Everything
     /// else in this module needs a real window; this one decision does not, and

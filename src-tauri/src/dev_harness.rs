@@ -245,6 +245,51 @@ pub fn log_summon(caller: &str, origin: Option<(i32, i32)>) {
     );
 }
 
+/// Prints BOTH sides of the scale boundary: the `devicePixelRatio` the WebView
+/// laid out in, and the per-monitor scale factor Rust reads for each monitor.
+///
+/// # Why this exists
+///
+/// `I-299`, and the independent review of `PR #65` that raised it to a blocking
+/// finding. That PR sizes the area menu with the scale factor of the monitor
+/// **under the cursor**, while the frontend converts every physical rect to CSS
+/// with **one** `window.devicePixelRatio` for the whole overlay window, which
+/// spans the virtual desktop. On a mixed-DPI rig those two are not the same
+/// number, and [ADR-0011] says only the WebView's value may convert.
+///
+/// **Nobody has ever observed the two together**, so the sizes that PR produces
+/// on the non-primary monitors rest on an assumption about which monitor a
+/// desktop-spanning WebView reports. This prints the pair, once, so the
+/// assumption becomes a reading.
+///
+/// This module's own header records that the *original* CSS-to-physical scale
+/// mismatch was found exactly this way -- "both sides of the IPC boundary
+/// printing their own numbers" -- which is why this is a harness line rather
+/// than a test. No unit test can see across that boundary.
+///
+/// Unconditional in debug builds rather than gated behind [`RESHOW_VAR`]: it
+/// fires once, at first paint, and the whole point is that it is present
+/// without anyone having to know to ask for it.
+///
+/// [ADR-0011]: ../../../Projects/UP-TAKE/DECISIONS/ADR-0011-webview-owns-its-scale-factor.md
+pub fn log_scale(webview_dpr: f64, monitors: &[(uptake_core::geometry::Rect, f64)]) {
+    eprintln!(
+        "dev-harness: WebView devicePixelRatio = {webview_dpr} -- Rust monitor scales follow. \
+         A disagreement here IS `I-299`; agreement on every monitor retires it."
+    );
+    for (index, (bounds, scale)) in monitors.iter().enumerate() {
+        let verdict = if (scale - webview_dpr).abs() < 1e-9 {
+            "matches the WebView"
+        } else {
+            "DISAGREES -- menu chrome on this monitor is sized wrong"
+        };
+        eprintln!(
+            "dev-harness:   monitor {index}: {}x{} at ({}, {}) scale {scale} -- {verdict}",
+            bounds.size.width, bounds.size.height, bounds.origin.x, bounds.origin.y
+        );
+    }
+}
+
 /// Schedules a re-show of the overlay if [`RESHOW_VAR`] is set.
 ///
 /// Called at the end of `overlay::hide`. Rearrange or unplug a monitor during
