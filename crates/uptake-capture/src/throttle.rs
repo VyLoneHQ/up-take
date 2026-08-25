@@ -96,7 +96,7 @@ pub fn verdict(requested: Duration, gaps: &[Duration]) -> ThrottleVerdict {
 /// content having stopped partway.
 const SILENCE_FRACTION: f64 = 0.25;
 
-/// Below this rate over the window's ACTIVE portion, the content is not
+/// Below this rate over the window's ACTIVE portion, an UNTHROTTLED run is not
 /// producing frames continuously, so its silences are its nature rather than a
 /// change in conditions.
 ///
@@ -107,6 +107,13 @@ const SILENCE_FRACTION: f64 = 0.25;
 /// 40.3 s it was actually playing. Two orders of magnitude separate the two
 /// cases, so the threshold is not load-bearing anywhere near its own value.
 const MIN_CONTINUOUS_FPS: f64 = 2.0;
+
+/// A throttled run counts as continuous at this fraction of the rate its own
+/// throttle allows.
+///
+/// Half, so that a run delivering most of what it asked for is continuous and
+/// one delivering a fraction of it is not.
+const CONTINUOUS_FRACTION_OF_ASKED: f64 = 0.5;
 
 /// Whether the captured content behaved the same way for the whole cost window.
 ///
@@ -135,6 +142,18 @@ const MIN_CONTINUOUS_FPS: f64 = 2.0;
 /// and he caught it by remembering what he had done. Active rate 14.5 fps,
 /// silence 19.7 s of 60: refused.
 ///
+/// # A CONTAMINATED static run is refused, and that is intended
+///
+/// A genuinely static desktop delivers no frames, has an active rate of zero,
+/// and is held. But a static run during which a notification appears, or a
+/// window flashes, delivers a short burst and then falls silent, and that is
+/// refused. It should be: the run claims to measure a static desktop and the
+/// window was not homogeneous. Observed once in six runs against a quiet
+/// monitor while verifying this change.
+///
+/// The asymmetry is deliberate. A spurious refusal costs a re-run; a silent
+/// accept puts a wrong number into a backlog row that arguments then rest on.
+///
 /// # What it still does not catch
 ///
 /// Content that slows without stopping, and content that stops for less than
@@ -148,7 +167,12 @@ const MIN_CONTINUOUS_FPS: f64 = 2.0;
 /// value it could take, so the general term already answers the static case.
 /// An untestable branch was removed rather than left in to look reassuring.
 #[must_use]
-pub fn conditions_held(longest_silence: Duration, window: Duration, frames: usize) -> bool {
+pub fn conditions_held(
+    longest_silence: Duration,
+    window: Duration,
+    frames: usize,
+    asked: Option<Duration>,
+) -> bool {
     if window.is_zero() {
         return false;
     }
@@ -159,7 +183,29 @@ pub fn conditions_held(longest_silence: Duration, window: Duration, frames: usiz
     if active <= 0.0 {
         return true;
     }
-    (frames as f64 / active) < MIN_CONTINUOUS_FPS
+    // What counts as "continuous" has to be measured against what this run
+    // could ACHIEVE, not against a fixed rate. A throttle caps the rate by
+    // design, so a fixed 2 fps floor silently switches this guard off for any
+    // interval slower than about 500 ms: at `--min-update-interval-ms 600` the
+    // run tops out near 1.67 fps, lands under the floor, and a genuine freeze
+    // is waved through as "not continuous content". Found by `PR #67` round 2.
+    // No recorded run uses an interval that slow, so nothing already measured
+    // is implicated, but the guard was blind exactly where a slower run would
+    // have needed it.
+    //
+    // A zero interval needs no special case and deliberately does not have one:
+    // `1.0 / 0.0` is infinity in IEEE arithmetic, infinity times a half is
+    // infinity, and `min` clamps it straight back to the absolute floor. A
+    // guard for it was written, and a mutation proved it could not fail. The
+    // example refuses `--min-update-interval-ms 0` at parse time in any case.
+    let floor = match asked {
+        Some(interval) => {
+            let achievable = 1.0 / interval.as_secs_f64();
+            (achievable * CONTINUOUS_FRACTION_OF_ASKED).min(MIN_CONTINUOUS_FPS)
+        }
+        None => MIN_CONTINUOUS_FPS,
+    };
+    (frames as f64 / active) < floor
 }
 
 /// The longest stretch of the cost window during which no frame arrived.
@@ -358,7 +404,8 @@ mod tests {
     #[test]
     fn a_steady_run_is_silent_only_between_its_frames() {
         let arrivals = ms(&[100, 200, 300, 400]);
-        // Trailing dominates here and that is correct: nothing came after 400.
+        // All three terms tie at 100 ms here, which is the point: whichever
+        // one is taken the answer is the same.
         assert_eq!(
             longest_silence(Duration::from_millis(500), &arrivals),
             Duration::from_millis(100)
@@ -373,7 +420,8 @@ mod tests {
         assert!(!conditions_held(
             longest_silence(window, &arrivals),
             window,
-            arrivals.len()
+            arrivals.len(),
+            None
         ));
     }
 
@@ -382,7 +430,8 @@ mod tests {
         assert!(conditions_held(
             Duration::from_millis(114),
             Duration::from_secs(60),
-            584
+            584,
+            None
         ));
     }
 
@@ -393,7 +442,8 @@ mod tests {
         assert!(!conditions_held(
             Duration::from_millis(19_731),
             Duration::from_secs(60),
-            584
+            584,
+            None
         ));
     }
 
@@ -405,7 +455,8 @@ mod tests {
         assert!(conditions_held(
             Duration::from_secs(60),
             Duration::from_secs(60),
-            0
+            0,
+            None
         ));
     }
 
@@ -416,7 +467,8 @@ mod tests {
         assert!(conditions_held(
             Duration::from_millis(4_150),
             Duration::from_millis(8_250),
-            2
+            2,
+            None
         ));
     }
 
@@ -427,7 +479,8 @@ mod tests {
         assert!(!conditions_held(
             Duration::from_millis(58_000),
             Duration::from_secs(60),
-            4
+            4,
+            None
         ));
     }
 
@@ -438,12 +491,87 @@ mod tests {
         assert!(conditions_held(
             Duration::from_millis(58_000),
             Duration::from_secs(60),
-            1
+            1,
+            None
+        ));
+    }
+
+    #[test]
+    fn a_slow_throttle_does_not_switch_the_guard_off() {
+        // `PR #67` round 2's scenario. --min-update-interval-ms 600 tops out
+        // near 1.67 fps by design, so a fixed 2 fps floor would call this
+        // content "not continuous" and wave the freeze through. Measured
+        // against what the run could ACHIEVE, 1.68 fps is most of 1.67 and the
+        // 20 s freeze is refused.
+        assert!(!conditions_held(
+            Duration::from_secs(20),
+            Duration::from_secs(60),
+            67,
+            Some(Duration::from_millis(600))
+        ));
+    }
+
+    #[test]
+    fn a_slow_throttle_delivering_almost_nothing_is_still_static() {
+        // Same slow throttle, but the content produced a handful of frames in
+        // the active window rather than the ~67 the interval allows. Nothing
+        // demonstrates continuity, so the silence is its nature.
+        assert!(conditions_held(
+            Duration::from_secs(20),
+            Duration::from_secs(60),
+            5,
+            Some(Duration::from_millis(600))
+        ));
+    }
+
+    #[test]
+    fn a_fast_throttle_keeps_the_absolute_floor() {
+        // At 100 ms the achievable rate is 10 fps and half of that is 5, which
+        // is above MIN_CONTINUOUS_FPS, so the floor stays at 2 rather than
+        // rising with the throttle and refusing healthy slow content.
+        assert!(conditions_held(
+            Duration::from_millis(4_150),
+            Duration::from_millis(8_250),
+            2,
+            Some(Duration::from_millis(100))
+        ));
+    }
+
+    #[test]
+    fn the_paused_video_is_still_refused_with_its_throttle_known() {
+        assert!(!conditions_held(
+            Duration::from_millis(19_731),
+            Duration::from_secs(60),
+            584,
+            Some(Duration::from_millis(100))
+        ));
+    }
+
+    #[test]
+    fn a_zero_interval_falls_back_to_the_absolute_floor() {
+        assert!(conditions_held(
+            Duration::from_millis(4_150),
+            Duration::from_millis(8_250),
+            2,
+            Some(Duration::ZERO)
+        ));
+    }
+
+    #[test]
+    fn a_contaminated_static_run_is_refused() {
+        // Something appeared on an otherwise quiet screen: 40 frames in the
+        // first 2 s of a 10 s window, then nothing. The run claims to measure a
+        // static desktop and did not. Re-run it rather than record it.
+        assert!(!conditions_held(
+            Duration::from_secs(8),
+            Duration::from_secs(10),
+            40,
+            None
         ));
     }
 
     #[test]
     fn a_zero_window_holds_nothing() {
-        assert!(!conditions_held(Duration::ZERO, Duration::ZERO, 0));
+        assert!(!conditions_held(Duration::ZERO, Duration::ZERO, 0, None));
     }
 }

@@ -923,15 +923,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .last()
                         .map(|t| ms(held_window_ended.duration_since(*t)))
                         .unwrap_or_default();
-                    let gap = at
-                        .windows(2)
-                        .map(|w| w[1] - w[0])
-                        .chain(
-                            at.last()
-                                .map(|l| held_window_ended.saturating_duration_since(*l)),
-                        )
-                        .max()
-                        .unwrap_or_default();
+                    // ONE source for this number. It used to be computed here
+                    // as well as in the verdict below, from a different input
+                    // (`at` rather than the in-window arrivals) and with no
+                    // leading term, so the same report could print "longest
+                    // silence 500 ms" on this line and "58.0 s" as its reason
+                    // for refusing the run. `PR #67` round 2 found it, and it
+                    // is round 1's defect exactly: a second implementation of
+                    // a rule that has a library home. `I-30` and `I-31` are
+                    // this repository's older record of the same thing.
+                    let gap = throttle::longest_silence(
+                        window,
+                        &in_window_times
+                            .iter()
+                            .map(|t| t.saturating_duration_since(held_window_started))
+                            .collect::<Vec<_>>(),
+                    );
                     println!(
                         "        {} — warm, {w}×{h}, {in_window} frame(s) in the window, \
                          newest {age:.0} ms old, longest silence {:.0} ms",
@@ -981,7 +988,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // enforcement. `PR #67`'s review named it; convention is not a check.
         for (label, gaps, offsets) in &per_slot {
             let silence = throttle::longest_silence(window, offsets);
-            let held = throttle::conditions_held(silence, window, offsets.len());
+            let held = throttle::conditions_held(
+                silence,
+                window,
+                offsets.len(),
+                min_interval.map(Duration::from_millis),
+            );
             if per_slot.len() > 1 {
                 println!("      {label}:");
             }
@@ -1183,6 +1195,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!();
     println!("--- result ---");
+    // The void check has to come BEFORE this early return, not after it. It
+    // used to sit at the end of the function, so a run that was void on the
+    // capture side AND landed no successful shot printed "NO SHOT SUCCEEDED"
+    // and exited 0, discarding void findings it had already computed. Those
+    // two failures are not independent: a broken capture session is exactly
+    // what would also disrupt the shot timing. `PR #67` round 2.
+    if !void.is_empty() {
+        println!();
+        println!("--- THIS RUN IS VOID, DO NOT RECORD IT ---");
+        for reason in &void {
+            println!("  - {reason}");
+        }
+        return Err(format!("{} void condition(s); see above", void.len()).into());
+    }
     if latencies.is_empty() {
         println!(
             "NO SHOT SUCCEEDED ({failures} failed). This is a null result, not a fast one — \
@@ -1249,20 +1275,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          cold holds nothing, so whatever it reports there is noise, and if that is the size of \
          the warm delta then this channel resolved nothing and dwm's share is still unknown."
     );
-    // A refusal that only prints is a warning. These numbers get transcribed
-    // into a backlog row rather than watched live, so a void run has to be
-    // visible to whatever reads the exit code too. `NotBinding` is deliberately
-    // NOT here: it is a valid measurement of the content's own rate, just not a
-    // point on the throttle's curve.
-    if !void.is_empty() {
-        println!();
-        println!("--- THIS RUN IS VOID, DO NOT RECORD IT ---");
-        for reason in &void {
-            println!("  - {reason}");
-        }
-        return Err(format!("{} void condition(s); see above", void.len()).into());
-    }
-
     Ok(())
 }
 
