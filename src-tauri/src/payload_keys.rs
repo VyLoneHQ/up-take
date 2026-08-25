@@ -479,8 +479,27 @@ mod tests {
         assert!(serialize_structs(source).is_empty());
     }
 
-    // The four tests below drill the two helpers' FAILURE paths, and they exist
-    // because a mutation pass found them missing. `assert_payload_coverage` was
+    // The tests below drill the two helpers' FAILURE paths, and they exist
+    // because a mutation pass found them missing.
+    //
+    // ⚠️ **This said "The four tests below", and there were four, covering four
+    // of the arms these two helpers actually have.** Two shipped undrilled on
+    // 2026-08-25 in `#62` --
+    // the `covered`-without-a-call arm and the blank-reason arm -- and the
+    // commit that shipped them said "Drilled", naming a `GhostPayload` probe
+    // that existed only inside a comment. Both were deletable with the whole
+    // suite green at 160. Found by that PR's independent review, closed as
+    // `I-301`. A count in a comment is one more list an author can get wrong,
+    // so this paragraph now names none.
+    //
+    // ⚠️ **It named one anyway on its first attempt, and got it wrong.** It said
+    // "four of the SIX refusal arms"; `assert_payload_coverage` and
+    // `assert_keys` carry **five** assertions between them, and the independent
+    // review of `#66` recounted rather than reading. A correction that replaces
+    // a wrong number with a fresh wrong number in the same breath as explaining
+    // why numbers here go wrong is the whole lesson, arriving twice.
+    //
+    // `assert_payload_coverage` was
     // mutated to `let known = true || ...`, making the control vacuous, and the
     // whole suite stayed green: every call site passes a complete list, so
     // nothing ever exercised the arm that refuses. A control whose refusal is
@@ -511,6 +530,47 @@ mod tests {
         // empty set, which agrees with every list including an empty one, and
         // the control reports success for the reason it exists to prevent.
         assert_payload_coverage("a fixture", "struct NotSerialized {}\n", &["Known"], &[]);
+    }
+
+    #[test]
+    #[should_panic(expected = "is listed as covered and no")]
+    fn the_coverage_control_refuses_a_covered_name_with_no_assertion_behind_it() {
+        // `I-301`. The arm this drills is the one that stops the control being
+        // satisfied by a LIST rather than by a test: a name can be typed into
+        // `covered` and pin nothing, which buys the appearance of coverage at
+        // the cost of the thing itself. That is the defect this whole module
+        // exists to prevent, one level up.
+        //
+        // The fixture is the first test's, minus the `assert_keys` line **and
+        // minus its `Stray` struct**. The second difference is inert -- the
+        // covered-name loop refuses before the found-name loop would ever see
+        // `Stray` -- but it is stated, because this comment claimed the two
+        // fixtures "differ by exactly the fact under test and nothing else"
+        // until the independent review of `#66` compared them and found two
+        // differences. An inert difference is still a difference, and a reader
+        // checking the claim is the person the claim is for.
+        assert_payload_coverage(
+            "a fixture",
+            "#[derive(Serialize)]\nstruct Known {\n    a: bool,\n}\n",
+            &["Known"],
+            &[],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "is exempt with a blank reason")]
+    fn the_coverage_control_refuses_an_exemption_nobody_justified() {
+        // `I-301`. An exemption with no reason is one no reader can re-check,
+        // so nobody notices when it stops applying -- which is the failure the
+        // panic message itself names. Whitespace rather than an empty string,
+        // because `trim` is the part of the guard that can be dropped without
+        // any empty-string test noticing.
+        assert_payload_coverage(
+            "a fixture",
+            "#[derive(Serialize)]\nstruct OnDisk {\n    a: bool,\n}\n",
+            &[],
+            &[("OnDisk", "   ")],
+        );
     }
 
     #[test]
