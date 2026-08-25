@@ -125,7 +125,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CopyIcon, GA_ROOT, GW_HWNDPREV, GetAncestor, GetWindow, HCURSOR, HHOOK,
-    IDC_ARROW, IDC_CROSS, IDC_HAND, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE,
+    IDC_ARROW, IDC_CROSS, IDC_HAND, IDC_IBEAM, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE,
     IDC_SIZEWE, LoadCursorW, MSLLHOOKSTRUCT, OCR_APPSTARTING, OCR_CROSS, OCR_HAND, OCR_IBEAM,
     OCR_NO, OCR_NORMAL, OCR_SIZEALL, OCR_SIZENESW, OCR_SIZENS, OCR_SIZENWSE, OCR_SIZEWE, OCR_UP,
     OCR_WAIT, SPI_SETCURSORS, SetSystemCursor, SetWindowsHookExW, SystemParametersInfoW,
@@ -317,6 +317,9 @@ struct AreaMenu {
     area: AreaId,
     /// The menu's outer rectangle, physical px.
     bounds: Rect,
+    /// The scale factor of the monitor this menu opened on, held so the child
+    /// list is sized to match its parent rather than re-resolved (2026-08-25).
+    scale: f64,
     /// One entry per row, in draw order.
     items: Vec<MenuEntry>,
     /// The row under the cursor, for the hover highlight.
@@ -449,6 +452,15 @@ enum CursorShape {
     /// desktop-wide, which is unaffordable on a per-hover path. Nothing else in
     /// this enum is a "restore" value; this one exists only to be restored to.
     Arrow,
+    /// **The user's own text caret**, the second restore-only value.
+    ///
+    /// LIVING claims `OCR_IBEAM` while the pointer rests on an area, so it needs
+    /// the genuine caret to hand back on the way out. Restoring that slot to
+    /// [`Self::Arrow`] instead would leave every text field on the desktop
+    /// showing an arrow -- a global, persistent defect caused by a hover.
+    ///
+    /// See [`LIVING_CURSORS`] for why the slot is claimed at all.
+    IBeam,
 }
 
 impl CursorShape {
@@ -464,6 +476,7 @@ impl CursorShape {
             Self::SizeNESW => 5,
             Self::Hand => 6,
             Self::Arrow => 7,
+            Self::IBeam => 8,
         }
     }
 
@@ -478,6 +491,7 @@ impl CursorShape {
             Self::SizeNESW => IDC_SIZENESW,
             Self::Hand => IDC_HAND,
             Self::Arrow => IDC_ARROW,
+            Self::IBeam => IDC_IBEAM,
         }
     }
 
@@ -1939,11 +1953,18 @@ static LIVING_CURSOR: Mutex<Option<CursorShape>> = Mutex::new(None);
 ///
 /// # Two ways this is narrower than [`set_cursor`], both deliberate
 ///
-/// **Only `OCR_NORMAL`.** PLACEMENT pins all of [`OVERRIDDEN_CURSORS`] to one
-/// shape because it owns the whole surface and a text caret appearing over a
-/// field underneath would read as the overlay losing the pointer. In LIVING the
-/// user's apps own the pointer: an I-beam over their text or a wait cursor in
-/// another process is theirs, and ours to leave alone.
+/// **Three slots, not all thirteen.** See [`LIVING_CURSORS`].
+///
+/// ⚠️ **This said "Only `OCR_NORMAL`" until 2026-08-25, and the reasoning under
+/// it was right about apps and wrong about areas.** The claim was that in LIVING
+/// the user's apps own the pointer, so an I-beam over their text is theirs. True
+/// while the pointer is over their window -- and the pointer resting on an
+/// UP-TAKE area is not over their window in any sense the user recognises.
+/// Found on the rig 2026-08-25: with a text field behind an area, the caret
+/// showed *through* the area, because the overlay is `WS_EX_TRANSPARENT` and the
+/// application underneath still receives the `WM_SETCURSOR` we never see. The
+/// cursor was asserting a surface the user cannot reach, which is `I-5`'s defect
+/// wearing different clothes.
 ///
 /// **Restored by another `SetSystemCursor`, never by `SPI_SETCURSORS`.** Measured
 /// on the dev rig: the registry reload is **7.9 ms** and broadcasts
@@ -1957,11 +1978,51 @@ fn set_living_cursor(shape: Option<CursorShape>) {
     if *applied == shape {
         return;
     }
-    // `None` is not "install nothing". It is "install the genuine arrow", which
-    // is the whole reason `CursorShape::Arrow` exists.
-    apply_cursor_to(shape.unwrap_or(CursorShape::Arrow), OCR_NORMAL);
+    // `None` is not "install nothing". It is "put each slot's OWN cursor back",
+    // which is why the table below pairs a slot with its original rather than
+    // listing slots alone. Restoring all three to the arrow would leave every
+    // text field and every link on the desktop showing an arrow.
+    for (slot, original) in LIVING_CURSORS {
+        apply_cursor_to(shape.unwrap_or(original), slot);
+    }
     *applied = shape;
 }
+
+/// The cursor slots LIVING claims while the pointer rests on an area, each
+/// paired with the shape that slot is restored to on the way out.
+///
+/// # Why three and not one
+///
+/// The overlay is `WS_EX_TRANSPARENT` in every visible state (ADR-0016), so the
+/// window underneath goes on receiving `WM_SETCURSOR` while the pointer sits on
+/// an UP-TAKE area. Overriding `OCR_NORMAL` alone therefore loses every argument
+/// the application underneath chooses to have: park an area over a text field
+/// and the caret wins, because the caret is `OCR_IBEAM` and we never claimed it.
+/// Rig, 2026-08-25.
+///
+/// `OCR_HAND` is here for the same reason and was found by reading rather than
+/// on the rig -- a link under an area behaves exactly as that text field does.
+///
+/// # Why not the whole of [`OVERRIDDEN_CURSORS`]
+///
+/// `OCR_WAIT` and `OCR_APPSTARTING` say *this machine is busy*, which stays true
+/// and stays useful with a pointer over an area, and ADR-0025's rule that
+/// another process's state is not ours to overwrite still holds for them. The
+/// rest of that list is UP-TAKE's own vocabulary of resize and move shapes; an
+/// application underneath has no reason to be asserting them, so claiming them
+/// buys nothing and costs a `SetSystemCursor` per transition.
+///
+/// # Cost
+///
+/// Three `SetSystemCursor` calls per hover transition rather than one, at
+/// **0.072 ms** each (ADR-0025's measurement): ~0.22 ms against the **7.9 ms**
+/// `SPI_SETCURSORS` restore that ADR rejected as unaffordable. The 110x ratio
+/// its argument actually rests on becomes ~36x, which is the same answer.
+const LIVING_CURSORS: [(u32, CursorShape); 3] = [
+    (OCR_NORMAL, CursorShape::Arrow),
+    (OCR_IBEAM, CursorShape::IBeam),
+    (OCR_HAND, CursorShape::Hand),
+];
 
 /// Private copies of the real system cursors, taken **before** the first
 /// override and reused for every shape after it.
@@ -1992,7 +2053,7 @@ static CURSOR_SNAPSHOT: OnceLock<[isize; CURSOR_SNAPSHOT_LEN]> = OnceLock::new()
 const CURSOR_SNAPSHOT_LEN: usize = ALL_SHAPES.len();
 
 /// Every shape, in [`CursorShape::index`] order.
-const ALL_SHAPES: [CursorShape; 8] = [
+const ALL_SHAPES: [CursorShape; 9] = [
     CursorShape::Cross,
     CursorShape::Move,
     CursorShape::SizeNS,
@@ -2001,6 +2062,7 @@ const ALL_SHAPES: [CursorShape; 8] = [
     CursorShape::SizeNESW,
     CursorShape::Hand,
     CursorShape::Arrow,
+    CursorShape::IBeam,
 ];
 
 /// The real cursor for a shape, loading the whole set on first use.
@@ -3065,17 +3127,18 @@ fn open_menu(app: &AppHandle, point: Point) {
     };
     // Anchored to the monitor under the cursor, never to the virtual desktop:
     // desktop-relative chrome can land in a dead zone no cursor can reach (F-13).
-    let monitor = overlay::monitor_bounds_at(app, point);
+    let (monitor, scale) = overlay::monitor_metrics_at(app, point);
     let spec = menu_rows(&area);
     #[allow(
         clippy::cast_possible_truncation,
         reason = "a menu this short cannot overflow u32"
     )]
-    let bounds = interaction::menu_bounds(point, spec.len() as u32, monitor);
-    let items = laid_out(spec, bounds);
+    let bounds = interaction::menu_bounds(point, spec.len() as u32, monitor, scale);
+    let items = laid_out(spec, bounds, scale);
     *lock(&MENU) = Some(AreaMenu {
         area: area.id,
         bounds,
+        scale,
         items,
         hovered: None,
         // A fresh menu has no child list open and nothing argued for yet. The
@@ -3090,7 +3153,7 @@ fn open_menu(app: &AppHandle, point: Point) {
 }
 
 /// Gives a row spec its rectangles, top to bottom inside `bounds`.
-fn laid_out(spec: Vec<MenuRow>, bounds: Rect) -> Vec<MenuEntry> {
+fn laid_out(spec: Vec<MenuRow>, bounds: Rect, scale: f64) -> Vec<MenuEntry> {
     spec.into_iter()
         .enumerate()
         .map(|(index, row)| MenuEntry {
@@ -3098,7 +3161,7 @@ fn laid_out(spec: Vec<MenuRow>, bounds: Rect) -> Vec<MenuEntry> {
                 clippy::cast_possible_truncation,
                 reason = "a menu this short cannot overflow u32"
             )]
-            rect: interaction::menu_item_bounds(bounds, index as u32),
+            rect: interaction::menu_item_bounds(bounds, index as u32, scale),
             action: row.action,
             label: row.label,
             checked: row.checked,
@@ -3128,14 +3191,18 @@ fn open_submenu(parent: usize, monitor: Rect) -> bool {
     if row.children.is_empty() {
         return false;
     }
+    // The child list is sized by its PARENT's scale, not by a fresh lookup: the
+    // two lists are one piece of chrome and a menu spanning a scale boundary
+    // with two row heights would be worse than one sized for the wrong monitor.
+    let scale = menu.scale;
     // Anchored to the parent ROW rather than to the cursor, and clamped against
     // the monitor under it (F-13). See `interaction::submenu_bounds`.
     #[allow(
         clippy::cast_possible_truncation,
         reason = "a menu this short cannot overflow u32"
     )]
-    let bounds = interaction::submenu_bounds(row.rect, row.children.len() as u32, monitor);
-    let items = laid_out(row.children.clone(), bounds);
+    let bounds = interaction::submenu_bounds(row.rect, row.children.len() as u32, monitor, scale);
+    let items = laid_out(row.children.clone(), bounds, scale);
     menu.open = Some(Submenu {
         parent,
         bounds,
@@ -3272,21 +3339,41 @@ fn menu_rows(area: &overlay::AreaSummary) -> Vec<MenuRow> {
         checked: false,
         children: types,
     });
-    rows.push(leaf(
-        MenuAction::SetLayer(Layer::Front),
-        "Always on top",
-        area.layer == Layer::Front,
-    ));
-    rows.push(leaf(
-        MenuAction::SetLayer(Layer::Auto),
-        "Auto",
-        area.layer == Layer::Auto,
-    ));
-    rows.push(leaf(
-        MenuAction::SetLayer(Layer::Back),
-        "Always behind",
-        area.layer == Layer::Back,
-    ));
+    // The three Layer rows live in a child list of their own, the same shape
+    // roadmap 1.28 gave the type rows. Founder's call at the 2026-08-25 rig
+    // sitting: they are one axis with one answer, and three flat siblings of the
+    // rows around them read as three independent toggles.
+    //
+    // **"Depth" rather than "Layer" or "z-index".** All three were offered. The
+    // model's own word is `Layer`, which is the argument for it -- but the row is
+    // read by a user, not by this file, and `Layer` is the word every drawing
+    // and design tool spends on a stack of *content*, which is exactly what an
+    // UP-TAKE area is not. `z-index` is a CSS term and names the mechanism
+    // rather than the thing. `Depth` says what the axis controls in a word that
+    // carries no other meaning here.
+    let layers: Vec<MenuRow> = vec![
+        leaf(
+            MenuAction::SetLayer(Layer::Front),
+            "Always on top",
+            area.layer == Layer::Front,
+        ),
+        leaf(
+            MenuAction::SetLayer(Layer::Auto),
+            "Auto",
+            area.layer == Layer::Auto,
+        ),
+        leaf(
+            MenuAction::SetLayer(Layer::Back),
+            "Always behind",
+            area.layer == Layer::Back,
+        ),
+    ];
+    rows.push(MenuRow {
+        action: MenuAction::OpenSubmenu,
+        label: "Depth",
+        checked: false,
+        children: layers,
+    });
     rows.push(leaf(
         MenuAction::SetInput(toggled_input),
         "Click-through",
@@ -3629,11 +3716,13 @@ mod tests {
         let area = summary(kind, Layer::Auto, Input::Interactive);
         let rows = menu_rows(&area);
         let monitor = Rect::new(0, 0, 1920, 1080);
-        let bounds = interaction::menu_bounds(Point::new(400, 300), rows.len() as u32, monitor);
+        let bounds =
+            interaction::menu_bounds(Point::new(400, 300), rows.len() as u32, monitor, 1.0);
         super::AreaMenu {
             area: area.id,
             bounds,
-            items: super::laid_out(rows, bounds),
+            scale: 1.0,
+            items: super::laid_out(rows, bounds, 1.0),
             hovered: None,
             open: None,
             argument: (None, 0),
@@ -3657,11 +3746,11 @@ mod tests {
         let parent = parent_index(menu);
         let row = &menu.items[parent];
         let monitor = Rect::new(0, 0, 1920, 1080);
-        let bounds = interaction::submenu_bounds(row.rect, row.children.len() as u32, monitor);
+        let bounds = interaction::submenu_bounds(row.rect, row.children.len() as u32, monitor, 1.0);
         menu.open = Some(super::Submenu {
             parent,
             bounds,
-            items: super::laid_out(row.children.clone(), bounds),
+            items: super::laid_out(row.children.clone(), bounds, 1.0),
             hovered: None,
         });
         parent
@@ -3853,6 +3942,7 @@ mod tests {
             parent_rect,
             menu.items[parent].children.len() as u32,
             monitor,
+            1.0,
         );
         *super::lock(&super::MENU) = Some(menu);
 
@@ -3879,7 +3969,7 @@ mod tests {
         // anchored to that row rather than to the menu or the cursor.
         assert_eq!(i64::from(opened.1.origin.x), parent_rect.right());
         assert_eq!(
-            interaction::menu_item_bounds(opened.1, 0).origin.y,
+            interaction::menu_item_bounds(opened.1, 0, 1.0).origin.y,
             parent_rect.origin.y
         );
 
@@ -3903,7 +3993,19 @@ mod tests {
             .filter(|(_, view)| view.parent)
             .map(|(index, _)| index)
             .collect();
-        assert_eq!(marked, vec![parent_index(&menu)]);
+        // Both parent rows, in top-level order: `Area type` then `Depth`. This
+        // read `vec![parent_index(&menu)]` until 2026-08-25, when `Depth` became
+        // the second -- and `parent_index` returns the FIRST parent, so leaving
+        // it would have asserted that the newer list is not marked at all.
+        let expected: Vec<usize> = menu
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| !entry.children.is_empty())
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(expected.len(), 2, "two rows open lists");
+        assert_eq!(marked, expected);
         // And a child list's own rows never claim to open anything.
         let mut menu = menu;
         with_type_list_open(&mut menu);
@@ -3939,7 +4041,17 @@ mod tests {
 
         // A child index out of range resolves to nothing rather than to the
         // top-level row that happens to share the number.
-        let beyond = menu.items.len() - 1;
+        //
+        // ⚠️ **Derived from the CHILD list, not from `menu.items.len()`, which is
+        // what this line read until 2026-08-25.** That worked only while the top
+        // level happened to be longer than the child list, and it stopped being
+        // true the moment the Layer rows moved into a `Depth` list of their own:
+        // a Default area's menu went from six top-level rows to four against
+        // four children, so the old expression produced a valid child index and
+        // the assertion failed. The property being tested never involved the
+        // top level's length -- an out-of-range child is out of range whatever
+        // the other list is doing.
+        let beyond = menu.open.as_ref().map_or(0, |list| list.items.len());
         assert!(super::entry_at(&menu, super::MenuHit::Child(beyond)).is_none());
 
         // And with no list open, a child hit resolves to nothing at all.
@@ -4643,30 +4755,122 @@ mod tests {
         let rows = menu_rows(&summary(AreaType::Default, Layer::Auto, Input::Interactive));
         assert_eq!(
             labels(&rows),
-            vec![
-                "Area type",
-                "Always on top",
-                "Auto",
-                "Always behind",
-                "Click-through",
-                "Dismiss",
-            ]
+            vec!["Area type", "Depth", "Click-through", "Dismiss"]
         );
-        // The Layer tier is the only radio group left at this level, so at most
-        // one row of one can be ticked here. `Click-through` is a checkbox and
-        // is allowed to be ticked beside it; that pairing is not what the rig
-        // read as two selections, and it is not this row's to change.
+        // ⚠️ **This asserted "one radio group left at this level" until
+        // 2026-08-25. There are now NONE**, which is strictly what the row was
+        // reaching for: the founder's call at the rig sitting was that three
+        // flat Layer siblings read as three independent toggles rather than as
+        // one axis with one answer -- the same complaint 1.28 fixed for types,
+        // arriving eleven days later about the tier directly below it.
+        //
+        // `Click-through` survives as the only ticked row here and is a
+        // checkbox, so nothing at this level can read as a selection among
+        // alternatives any more.
         let radio_ticks = rows
             .iter()
-            .filter(|row| matches!(row.action, MenuAction::SetLayer(_)) && row.checked)
+            .filter(|row| matches!(row.action, MenuAction::SetLayer(_) | MenuAction::SetType(_)))
             .count();
-        assert_eq!(radio_ticks, 1);
-        assert!(
-            !rows
-                .iter()
-                .any(|row| matches!(row.action, MenuAction::SetType(_))),
-            "a type row escaped back into the top level"
+        assert_eq!(
+            radio_ticks, 0,
+            "a radio row escaped back into the top level"
         );
+    }
+
+    /// The `Depth` list holds the whole Layer axis and nothing else, ordered
+    /// front to back, with exactly one tick.
+    ///
+    /// Asserted WHOLE and ordered rather than as "contains", for the reason
+    /// `UT-F-76` records: a list checked member by member is a list whose
+    /// completeness nobody checked. Front-to-back order is the user-facing
+    /// property -- it should read as a spatial axis, not as three toggles.
+    #[test]
+    fn the_depth_list_holds_the_layer_axis_front_to_back_with_one_tick() {
+        for layer in [Layer::Front, Layer::Auto, Layer::Back] {
+            let rows = menu_rows(&summary(AreaType::Default, layer, Input::Interactive));
+            let Some(depth) = rows.iter().find(|row| row.label == "Depth") else {
+                panic!("the menu has a Depth row")
+            };
+            assert_eq!(
+                labels(&depth.children),
+                vec!["Always on top", "Auto", "Always behind"],
+                "{layer:?}"
+            );
+            let ticked: Vec<&str> = depth
+                .children
+                .iter()
+                .filter(|row| row.checked)
+                .map(|row| row.label)
+                .collect();
+            assert_eq!(ticked.len(), 1, "{layer:?} ticks exactly one");
+            // And the tick is on the row that names the CURRENT layer, not
+            // merely on some row: a list that always ticks the first entry
+            // would satisfy the count above and tell the user nothing.
+            let expected = match layer {
+                Layer::Front => "Always on top",
+                Layer::Auto => "Auto",
+                Layer::Back => "Always behind",
+            };
+            assert_eq!(ticked[0], expected);
+        }
+    }
+
+    /// Every slot LIVING claims is restored to **its own** cursor, never to the
+    /// arrow.
+    ///
+    /// This is the one way the 2026-08-25 cursor widening can fail globally and
+    /// persistently: hand `OCR_IBEAM` back a `CursorShape::Arrow` on hover-out
+    /// and every text field on the desktop shows an arrow until something calls
+    /// `SPI_SETCURSORS`. The pairing is the whole guard, so it is asserted
+    /// rather than trusted to the table being read carefully.
+    #[test]
+    fn every_claimed_cursor_slot_is_restored_to_its_own_shape() {
+        for (slot, restore) in super::LIVING_CURSORS {
+            let expected = match slot {
+                super::OCR_NORMAL => super::IDC_ARROW,
+                super::OCR_IBEAM => super::IDC_IBEAM,
+                super::OCR_HAND => super::IDC_HAND,
+                other => panic!("slot {other} is claimed and has no restore shape named here"),
+            };
+            assert!(
+                std::ptr::eq(restore.idc(), expected),
+                "slot {slot} restores to the wrong cursor"
+            );
+        }
+        // The set itself, asserted whole: a slot added to the table without a
+        // restore shape fails the match above, and a slot REMOVED would leave
+        // the app underneath free to assert a cursor over an area again, which
+        // is the defect this table exists to close.
+        let slots: Vec<u32> = super::LIVING_CURSORS
+            .iter()
+            .map(|(slot, _)| *slot)
+            .collect();
+        assert_eq!(
+            slots,
+            vec![super::OCR_NORMAL, super::OCR_IBEAM, super::OCR_HAND]
+        );
+    }
+
+    /// Every shape has a distinct snapshot index and the snapshot is long
+    /// enough to hold it.
+    ///
+    /// `CURSOR_SNAPSHOT_LEN` is derived from `ALL_SHAPES`, so a shape added to
+    /// the enum and forgotten in that array is an out-of-bounds index at
+    /// runtime rather than a compile error. `IBeam` was added on 2026-08-25 and
+    /// had to be wired into three places by hand.
+    #[test]
+    fn every_cursor_shape_has_a_distinct_slot_in_the_snapshot() {
+        let mut seen = vec![false; super::CURSOR_SNAPSHOT_LEN];
+        for shape in super::ALL_SHAPES {
+            let index = shape.index();
+            assert!(
+                index < super::CURSOR_SNAPSHOT_LEN,
+                "{shape:?} indexes past the snapshot"
+            );
+            assert!(!seen[index], "{shape:?} shares an index with another shape");
+            seen[index] = true;
+        }
+        assert!(seen.into_iter().all(|hit| hit), "a snapshot slot is unused");
     }
 
     #[test]
@@ -4695,16 +4899,32 @@ mod tests {
     }
 
     #[test]
-    fn exactly_one_row_opens_a_list_and_no_child_opens_another() {
+    fn every_list_is_two_deep_and_no_child_opens_another() {
         // Two deep, and `MenuHit` can address exactly two. A third level would
         // be built here and be unreachable everywhere else, which is the shape
         // of a defect that draws correctly and cannot be clicked.
+        //
+        // ⚠️ **This asserted `parents == 1` until 2026-08-25**, when the Layer
+        // rows became a `Depth` list and made it two. The count was never the
+        // property worth pinning -- a third parent row is fine and a third
+        // *level* is not -- so the check now walks every parent's children
+        // rather than the one list it knew the name of. The old form would have
+        // passed a menu whose `Depth` list contained a further list, purely
+        // because it only ever looked inside `Area type`.
         for kind in AreaType::ALL {
             let rows = menu_rows(&summary(kind, Layer::Auto, Input::Interactive));
-            let parents = rows.iter().filter(|row| !row.children.is_empty()).count();
-            assert_eq!(parents, 1, "{kind:?}");
-            for child in type_rows(&rows) {
-                assert!(child.children.is_empty(), "{kind:?} {}", child.label);
+            let parents: Vec<&super::MenuRow> =
+                rows.iter().filter(|row| !row.children.is_empty()).collect();
+            assert_eq!(parents.len(), 2, "{kind:?}");
+            for parent in parents {
+                for child in &parent.children {
+                    assert!(
+                        child.children.is_empty(),
+                        "{kind:?} {} > {}",
+                        parent.label,
+                        child.label
+                    );
+                }
             }
         }
     }

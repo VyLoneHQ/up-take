@@ -1351,15 +1351,30 @@ pub(crate) fn monitor_rects() -> Vec<Rect> {
 /// monitor at all — which happens in the dead zones between mismatched monitors,
 /// where any answer is a guess and the desktop is at least never `None`.
 pub(crate) fn monitor_bounds_at(app: &AppHandle, point: Point) -> Rect {
+    monitor_metrics_at(app, point).0
+}
+
+/// [`monitor_bounds_at`] plus the monitor's scale factor, for chrome that has to
+/// be sized as well as positioned.
+///
+/// The area menu needs both and resolving them separately would walk the monitor
+/// cache twice on a path that ticks (`pump_menu`). The scale falls back to `1.0`
+/// wherever the bounds fall back to the virtual desktop: in a dead zone there is
+/// no monitor to ask, and a menu at the wrong size is a better failure than one
+/// sized from a guess that could be any of four values.
+pub(crate) fn monitor_metrics_at(app: &AppHandle, point: Point) -> (Rect, f64) {
     let fallback = Rect::new(point.x, point.y, 1, 1);
     let Ok(window) = overlay_window(app) else {
-        return fallback;
+        return (fallback, 1.0);
     };
     let monitors = monitors(&window).unwrap_or_default();
     if let Some(monitor) = uptake_core::geometry::monitor_at(&monitors, point) {
-        return monitor.bounds;
+        return (monitor.bounds, monitor.scale_factor);
     }
-    virtual_desktop_bounds(monitors.iter().map(|m| m.bounds)).unwrap_or(fallback)
+    (
+        virtual_desktop_bounds(monitors.iter().map(|m| m.bounds)).unwrap_or(fallback),
+        1.0,
+    )
 }
 
 /// Creates an area of `kind` at the given physical bounds, returning its id and
