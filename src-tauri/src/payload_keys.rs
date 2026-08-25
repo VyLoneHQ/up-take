@@ -482,14 +482,24 @@ mod tests {
     // The tests below drill the two helpers' FAILURE paths, and they exist
     // because a mutation pass found them missing.
     //
-    // ⚠️ **This said "The four tests below" and there were four, covering four of
-    // the SIX refusal arms.** Two shipped undrilled on 2026-08-25 in `#62` --
+    // ⚠️ **This said "The four tests below", and there were four, covering four
+    // of the arms these two helpers actually have.** Two shipped undrilled on
+    // 2026-08-25 in `#62` --
     // the `covered`-without-a-call arm and the blank-reason arm -- and the
     // commit that shipped them said "Drilled", naming a `GhostPayload` probe
     // that existed only inside a comment. Both were deletable with the whole
     // suite green at 160. Found by that PR's independent review, closed as
-    // `I-301`. A count in a comment is one more list an author can get wrong;
-    // it is written without a number here for that reason. `assert_payload_coverage` was
+    // `I-301`. A count in a comment is one more list an author can get wrong,
+    // so this paragraph now names none.
+    //
+    // ⚠️ **It named one anyway on its first attempt, and got it wrong.** It said
+    // "four of the SIX refusal arms"; `assert_payload_coverage` and
+    // `assert_keys` carry **five** assertions between them, and the independent
+    // review of `#66` recounted rather than reading. A correction that replaces
+    // a wrong number with a fresh wrong number in the same breath as explaining
+    // why numbers here go wrong is the whole lesson, arriving twice.
+    //
+    // `assert_payload_coverage` was
     // mutated to `let known = true || ...`, making the control vacuous, and the
     // whole suite stayed green: every call site passes a complete list, so
     // nothing ever exercised the arm that refuses. A control whose refusal is
@@ -531,8 +541,14 @@ mod tests {
         // the cost of the thing itself. That is the defect this whole module
         // exists to prevent, one level up.
         //
-        // The fixture is the first test's, minus the `assert_keys` line -- so
-        // the two differ by exactly the fact under test and nothing else.
+        // The fixture is the first test's, minus the `assert_keys` line **and
+        // minus its `Stray` struct**. The second difference is inert -- the
+        // covered-name loop refuses before the found-name loop would ever see
+        // `Stray` -- but it is stated, because this comment claimed the two
+        // fixtures "differ by exactly the fact under test and nothing else"
+        // until the independent review of `#66` compared them and found two
+        // differences. An inert difference is still a difference, and a reader
+        // checking the claim is the person the claim is for.
         assert_payload_coverage(
             "a fixture",
             "#[derive(Serialize)]\nstruct Known {\n    a: bool,\n}\n",
