@@ -664,10 +664,14 @@ struct MenuPayload {
 /// # Every field name here is one word, and that is a decision
 ///
 /// `UT-F-72`: `HoverPayload` needs `#[serde(rename_all = "camelCase")]` to reach
-/// the frontend at all, that attribute is the only one in `src-tauri`, removing
-/// it leaves **every gate in this repository green** while the frontend silently
-/// reads `undefined`, and the guard written for twice-written wire names says in
-/// its own doc that it cannot see a payload key. Roadmap 1.28 adds three fields
+/// the frontend at all, and that attribute is the only one in `src-tauri`. When
+/// `UT-F-72` was found, removing it left **every gate in this repository green**
+/// while the frontend silently read `undefined`. ⚠️ **That is no longer true for
+/// this struct**: `#56` merged a covering test and `cargo test` goes red on it
+/// now (measured 2026-08-22). It remains true for the other eleven payload
+/// types, which have no such test, and the guard written for twice-written wire
+/// names still says in its own doc that it cannot see a payload key. Roadmap 1.28
+/// adds three fields
 /// to this payload, and a `has_children` among them would have joined that
 /// class. A single lowercase word serializes identically under both conventions,
 /// so `child` and `parent` need no attribute and cannot be broken by deleting
@@ -3598,10 +3602,13 @@ mod tests {
     use uptake_core::geometry::{Point, Rect};
     use uptake_core::interaction;
 
+    use crate::payload_keys::{assert_keys, assert_payload_coverage};
+
     use super::{
         ALL_SHAPES, CURSOR_SNAPSHOT_LEN, ChildMenuView, HoverPayload, MenuAction, MenuItemView,
-        MenuPayload, MenuView, NO_HOVER, SUBMENU_CLOSE_MS, SUBMENU_OPEN_MS, SubmenuStep,
-        WHEEL_STEP, conversion_label, living_hover, menu_rows, submenu_step, wheel_notches,
+        MenuPayload, MenuView, NO_HOVER, SUBMENU_CLOSE_MS, SUBMENU_OPEN_MS, SelectionPayload,
+        SubmenuStep, WHEEL_STEP, conversion_label, living_hover, menu_rows, submenu_step,
+        wheel_notches,
     };
 
     #[test]
@@ -3609,10 +3616,18 @@ mod tests {
         // The whole fix hangs on this one attribute and nothing else could see
         // it. `#[serde(rename_all = "camelCase")]` is the only reason the Rust
         // field `chrome_only` arrives as `chromeOnly`, which is the key
-        // `+page.svelte` reads. Remove the attribute and every gate in this
-        // repository stays green: the frontend then reads `undefined`,
-        // `areaFramesCss`'s default fires, and the highlight comes back on every
-        // hovered Filter area, which is the exact defect this branch removed.
+        // `+page.svelte` reads. Before this test existed, removing the attribute
+        // left every gate in this repository green: the frontend then read
+        // `undefined`, `areaFramesCss`'s default fired, and the highlight came
+        // back on every hovered Filter area, which is the exact defect `#56`
+        // removed.
+        //
+        // **This test is what changed that, so do not read the paragraph above
+        // in the present tense.** It said "Remove the attribute and every gate
+        // stays green" until 2026-08-22, written inside the test that makes the
+        // sentence false. Drilled at that date: deleting the attribute fails
+        // this test and `every_payload_this_module_emits_keeps_the_keys_the_
+        // frontend_reads`, two red rather than none.
         //
         // `area-kinds.test.ts` is the guard for twice-written wire names and its
         // own doc says it "cannot see a name that reaches the frontend by any
@@ -4706,45 +4721,89 @@ mod tests {
         assert_eq!(super::submenu_argument(&menu, Point::new(10, 10)), None);
     }
 
+    /// Every payload this module emits, and the keys the frontend indexes it
+    /// with (`I-67`).
+    ///
+    /// **Replaces the single-struct test `1.28` added**, which asserted with
+    /// `json.contains("\"child\"")` over a nested payload. That shape is weaker
+    /// than it looks: a key present at the wrong level satisfies it, and it
+    /// cannot notice a key that should NOT be there. Each struct is asserted on
+    /// its own, as an exact set.
+    ///
+    /// **`HoverPayload` is the only renamed type in `src-tauri`**, and the two
+    /// conventions sitting side by side here is the fact worth pinning rather
+    /// than the rename itself. `chromeOnly` is camelCase because of one
+    /// attribute; everything else is snake_case verbatim. Delete the attribute
+    /// and this goes red, which is what `UT-F-72` says nothing did.
     #[test]
-    fn the_menu_payload_reaches_the_frontend_under_the_keys_it_reads() {
-        // `UT-F-72`, one field over. `HoverPayload` needed a `rename_all` and
-        // nothing in this repository could see it being removed. These field
-        // names are single lowercase words so that they need no attribute at
-        // all, and this pins that: a rename here is a rename the frontend reads,
-        // and it fails on this side rather than silently in the WebView.
+    fn every_payload_this_module_emits_keeps_the_keys_the_frontend_reads() {
+        assert_keys(
+            "SelectionPayload",
+            &SelectionPayload {
+                rect: None,
+                source: None,
+                probe: None,
+            },
+            &["rect", "source", "probe"],
+        );
+        let item = MenuItemView {
+            rect: (1, 2, 3, 4),
+            label: "Area type",
+            checked: false,
+            parent: true,
+        };
+        assert_keys(
+            "MenuItemView",
+            &item,
+            &["rect", "label", "checked", "parent"],
+        );
+        let child = ChildMenuView {
+            rect: (5, 6, 7, 8),
+            items: vec![item.clone()],
+            hovered: None,
+            owner: 0,
+        };
+        assert_keys(
+            "ChildMenuView",
+            &child,
+            &["rect", "items", "hovered", "owner"],
+        );
         let view = MenuView {
             rect: (1, 2, 3, 4),
+            items: vec![item],
             hovered: Some(0),
-            items: vec![MenuItemView {
-                rect: (1, 2, 3, 4),
-                label: "Area type",
-                checked: false,
-                parent: true,
-            }],
-            child: Some(ChildMenuView {
-                rect: (5, 6, 7, 8),
-                hovered: None,
-                items: Vec::new(),
-                owner: 0,
-            }),
+            child: Some(child),
         };
-        let Ok(json) = serde_json::to_string(&MenuPayload { menu: Some(view) }) else {
-            panic!("the menu payload serializes")
-        };
-        for key in [
-            "\"menu\"",
-            "\"rect\"",
-            "\"items\"",
-            "\"hovered\"",
-            "\"child\"",
-            "\"label\"",
-            "\"checked\"",
-            "\"parent\"",
-            "\"owner\"",
-        ] {
-            assert!(json.contains(key), "{key} is missing from {json}");
-        }
+        assert_keys("MenuView", &view, &["rect", "items", "hovered", "child"]);
+        assert_keys("MenuPayload", &MenuPayload { menu: Some(view) }, &["menu"]);
+        assert_keys(
+            "HoverPayload",
+            &HoverPayload {
+                id: Some(7),
+                chrome_only: true,
+            },
+            &["id", "chromeOnly"],
+        );
+    }
+
+    #[test]
+    fn no_payload_in_this_module_escapes_the_key_table() {
+        // The completeness half. A hand-maintained table cannot tell you what it
+        // is missing, and `A9`'s rule is that the completeness of an author's own
+        // list is the one thing the author cannot check. This reads the file.
+        assert_payload_coverage(
+            "placement.rs",
+            include_str!("placement.rs"),
+            &[
+                "SelectionPayload",
+                "MenuPayload",
+                "MenuView",
+                "ChildMenuView",
+                "MenuItemView",
+                "HoverPayload",
+            ],
+            &[],
+        );
     }
 
     /// The children of the one row that has any.
