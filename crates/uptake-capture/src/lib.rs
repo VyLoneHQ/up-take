@@ -62,6 +62,7 @@ mod gdi;
 #[cfg(windows)]
 mod monitors;
 #[cfg(windows)]
+pub mod throttle;
 pub mod warm;
 #[cfg(windows)]
 mod wgc;

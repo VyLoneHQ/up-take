@@ -36,7 +36,9 @@
 //!
 //! Options: `--seconds N` (cost window, default 8), `--shots N` (simulated
 //! keypresses, default 5), `--cold` (the control — see below), `--monitors N`
-//! (hold the first N enumerated instead of every one, default all).
+//! (hold the first N enumerated instead of every one, default all),
+//! `--min-update-interval-ms N` (throttle the sessions; default is the
+//! system's own interval, and the section below says what it is for).
 //!
 //! **`--monitors 1` is what ADR-0026's third amendment needs.** That amendment
 //! flips the warm path to the default only if the *narrowed* configuration lands
@@ -59,6 +61,49 @@
 //!
 //! Run 4 is the one it is tempting to skip. Do not: playing video costs CPU by
 //! itself, and run 3 minus run 1 would charge all of that to the warm sessions.
+//!
+//! # The throttle, and what three runs of it can answer
+//!
+//! `--min-update-interval-ms N` sets `MinimumUpdateIntervalSettings::Custom`,
+//! which every other program in this crate deliberately leaves at `Default`.
+//! It exists for one question. Added 2026-08-25 for `I-41`.
+//!
+//! `I-41` parks the warm default on a measurement that REFUSED: video cost
+//! +1.33 pp against a bar of under +0.40 pp, taken at roughly 60 fps with no
+//! throttle. The route out the instrument named is throttling, and the
+//! arithmetic saying roughly 18 fps would fit is a MODEL of a stage nobody has
+//! measured. `UT-F-53` and `F-39` are this project's record of that exact
+//! reasoning being confidently wrong, and `I-41` says so in its own words:
+//! do not build the throttle on it. So measure the shape first.
+//!
+//! **Three runs, all with video playing, because a static desktop produces
+//! almost no frames and therefore cannot exercise a frame-rate throttle:**
+//!
+//! | # | Command | What it gives |
+//! | - | ------- | ------------- |
+//! | A | no flag | the untuned point, roughly 60 fps |
+//! | B | `--min-update-interval-ms 55` | the candidate, roughly 18 fps |
+//! | C | `--min-update-interval-ms 28` | roughly 36 fps, the point that TESTS the line |
+//!
+//! Each run prints the `ours` delta and the frame count together, which is the
+//! pair the solve needs. Model the cost as a fixed holding charge plus a
+//! per-frame charge, and A and B give two equations in those two unknowns.
+//!
+//! **Run C is the whole point and is the one it is tempting to skip.** Put its
+//! frame count into the line that A and B define, and see whether its measured
+//! cost lands there. If it does, cost is linear in frame rate and the 18 fps
+//! figure is worth something. If it does not, the figure is void, and that is
+//! a RESULT rather than a failure: it would mean the throttle cannot be priced
+//! by arithmetic and `ADR-0031`'s live-loop question needs a different answer.
+//!
+//! Two things this does not settle, stated so neither gets assumed:
+//!
+//! - **Fidelity.** `quality-bars.md` §1 wants frozen pixels under 33 ms old,
+//!   and 55 ms between frames cannot meet that. Whether both bars are reachable
+//!   at once is `I-41`'s open question and no run here answers it.
+//! - **Whether the app should throttle at all.** This measures a setting on a
+//!   test rig. `wgc.rs` and `warm.rs` are untouched and still capture at
+//!   `Default`. Lane C: spending the rig hour is the founder's call.
 //!
 //! # How this is falsifiable, which is the part that matters
 //!
@@ -97,6 +142,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::sync::{Arc, Mutex, PoisonError};
     use std::time::{Duration, Instant};
 
+    use uptake_capture::throttle::{self, ThrottleVerdict};
     use windows::Win32::Graphics::Direct3D11::{
         D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_TEXTURE2D_DESC,
         D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING, ID3D11Device, ID3D11DeviceContext,
@@ -524,6 +570,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut shots = 5usize;
     let mut cold = false;
     let mut limit: Option<usize> = None;
+    let mut min_interval: Option<u64> = None;
+    let mut pick: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -531,8 +579,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--seconds" => seconds = args.next().unwrap_or_default().parse()?,
             "--shots" => shots = args.next().unwrap_or_default().parse()?,
             "--monitors" => limit = Some(args.next().unwrap_or_default().parse()?),
+            "--min-update-interval-ms" => {
+                min_interval = Some(args.next().unwrap_or_default().parse()?);
+            }
+            "--monitor" => pick = Some(args.next().unwrap_or_default()),
             other => return Err(format!("unknown argument {other}").into()),
         }
+    }
+    // A zero interval is not a throttle, and WGC treats it as "no minimum".
+    // Refusing it here keeps a run that measures nothing from wearing a
+    // throttled label, which is this program's standing concern (`I-11`).
+    if min_interval == Some(0) {
+        return Err("--min-update-interval-ms 0 is not a throttle; omit the flag instead".into());
     }
     let window = Duration::from_secs(seconds);
 
@@ -540,6 +598,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut monitors = Monitor::enumerate()?;
     if monitors.is_empty() {
         return Err("no monitors enumerated".into());
+    }
+    // `--monitor <substring>` narrows to monitors whose name contains it,
+    // case-insensitively, BEFORE `--monitors N` counts anything.
+    //
+    // Added 2026-08-25. `--monitors 1` holds the FIRST ENUMERATED monitor, and
+    // on the founder's rig that is a 1080x1920 portrait panel rather than the
+    // 2560x1440 primary. The first throttle session measured 2.07 Mpx while the
+    // screen a user actually watches video on carries 3.69, and nothing in the
+    // output said which had been measured until someone read the label and
+    // asked. Whether cost tracks pixel count is unmeasured and is deliberately
+    // not modelled here (`UT-F-53`, `UT-F-79`); this flag is what lets it be
+    // measured instead.
+    //
+    // An unmatched substring is an ERROR listing what was available, never an
+    // empty selection: a run holding no sessions reports fast zeroes that read
+    // exactly like a cheap result, which is the failure `--cold` exists to make
+    // visible and the one this program keeps having to defend against.
+    if let Some(wanted) = &pick {
+        let needle = wanted.to_lowercase();
+        let available: Vec<String> = monitors
+            .iter()
+            .enumerate()
+            .map(|(index, monitor)| {
+                monitor
+                    .name()
+                    .unwrap_or_else(|_| format!("monitor {}", index + 1))
+            })
+            .collect();
+        let keep: Vec<bool> = available
+            .iter()
+            .map(|name| name.to_lowercase().contains(&needle))
+            .collect();
+        if !keep.iter().any(|hit| *hit) {
+            return Err(format!(
+                "--monitor {wanted} matched none of: {}",
+                available.join(", ")
+            )
+            .into());
+        }
+        let mut cursor = keep.iter();
+        monitors.retain(|_| cursor.next().copied().unwrap_or(false));
     }
     // `--monitors N` holds the first N enumerated rather than all of them.
     //
@@ -576,9 +675,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          {cores:.0} logical cores",
         if cold { "COLD (control)" } else { "WARM" },
         monitors.len(),
-        match limit {
-            Some(count) => format!(" (--monitors {count}, the first {count} enumerated)"),
-            None => " (every monitor)".to_string(),
+        match (&pick, limit) {
+            (Some(wanted), Some(count)) => {
+                format!(" (--monitor {wanted}, then the first {count} of those)")
+            }
+            (Some(wanted), None) => format!(" (--monitor {wanted})"),
+            (None, Some(count)) => format!(" (--monitors {count}, the first {count} enumerated)"),
+            (None, None) => " (every monitor)".to_string(),
         },
     );
     println!(
@@ -678,7 +781,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     CursorCaptureSettings::WithoutCursor,
                     DrawBorderSettings::WithoutBorder,
                     SecondaryWindowSettings::Default,
-                    MinimumUpdateIntervalSettings::Default,
+                    match min_interval {
+                        Some(millis) => {
+                            MinimumUpdateIntervalSettings::Custom(Duration::from_millis(millis))
+                        }
+                        None => MinimumUpdateIntervalSettings::Default,
+                    },
                     DirtyRegionSettings::Default,
                     ColorFormat::Rgba8,
                     WarmFlags {
@@ -754,14 +862,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ---------------------------------------------------------------------
 
     let mut retained_bytes = 0usize;
+    let mut frames_in_window = 0usize;
+    let mut gaps_in_window: Vec<Duration> = Vec::new();
     if !cold {
         println!("      sessions, at the end of the cost window:");
         for slot in &slots {
             let at = slot.arrival_times();
-            let in_window = at
+            let in_window_times: Vec<Instant> = at
                 .iter()
                 .filter(|t| **t >= held_window_started && **t <= held_window_ended)
-                .count();
+                .copied()
+                .collect();
+            let in_window = in_window_times.len();
             let failure = slot
                 .failure
                 .lock()
@@ -785,6 +897,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // live + staging: the GPU copy and the CPU-readable one.
                     let bytes = w as usize * h as usize * 4;
                     retained_bytes += bytes * 2;
+                    frames_in_window += in_window;
+                    gaps_in_window.extend(in_window_times.windows(2).map(|pair| pair[1] - pair[0]));
                     let age = at
                         .last()
                         .map(|t| ms(held_window_ended.duration_since(*t)))
@@ -812,6 +926,92 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
              — half VRAM (the live texture), half CPU-readable (the staging one)",
             mib(retained_bytes),
             slots.len(),
+        );
+
+        // ------------------------------------------------------------------
+        // The throttle's own positive control.
+        //
+        // `--cold` exists because a warm run that retained nothing reports fast
+        // zeroes that read as a result. A throttled run has the same failure and
+        // it is worse, because the wrong answer is the CHEAP one: if WGC ignores
+        // `MinimumUpdateIntervalSettings::Custom`, frames keep arriving at the
+        // untuned rate, the cost is the untuned cost, and nothing in the output
+        // would have said so. That is `I-11`'s shape exactly, and `UT-F-41` is
+        // this project's record of an instrument reporting the opposite of its
+        // own data.
+        //
+        // So the setting is not trusted, it is CHECKED, against the gaps the
+        // frames actually arrived with.
+        // ------------------------------------------------------------------
+
+        println!(
+            "      frames in the window: {frames_in_window} across {} session(s)",
+            slots.len(),
+        );
+        let observed_fps = frames_in_window as f64 / held.seconds;
+        println!("      observed rate: {observed_fps:.1} fps across the held session(s)");
+        // The judgement itself lives in `uptake_capture::throttle` and is
+        // drilled there, because CI runs `cargo test --all-features`, which
+        // builds examples without running their tests. A refusal written here
+        // would be a refusal nobody tests, which is `I-301` exactly.
+        if let Some(requested) = min_interval {
+            let asked = Duration::from_millis(requested);
+            let mut sorted = gaps_in_window.clone();
+            sorted.sort_unstable();
+            let shortest = sorted.first().copied().unwrap_or_default();
+            let median = sorted.get(sorted.len() / 2).copied().unwrap_or_default();
+            println!(
+                "      throttle asked {requested} ms; shortest {:.0} ms, median {:.0} ms",
+                ms(shortest),
+                ms(median),
+            );
+            match throttle::verdict(asked, &gaps_in_window) {
+                ThrottleVerdict::Unverifiable { gaps } => {
+                    println!("      THROTTLE UNVERIFIED: {gaps} gap(s), too few to judge it.");
+                    println!("      A static desktop makes almost no frames. Play video.");
+                }
+                ThrottleVerdict::NotHonoured => {
+                    println!("      THROTTLE NOT HONOURED, THIS RUN IS VOID: a frame arrived");
+                    println!("      inside the floor that was asked for. WGC ignored the");
+                    println!("      setting, so the cost above is the untuned cost. Discard.");
+                }
+                ThrottleVerdict::NotBinding => {
+                    println!("      THROTTLE NOT BINDING: the CONTENT set the rate, not the");
+                    println!("      throttle. The floor held but nothing reached it, so this");
+                    println!("      run measures how fast the screen changed. To make it bind,");
+                    println!("      ask for an interval LONGER than the median gap above.");
+                }
+                ThrottleVerdict::HonouredAndBinding => {
+                    println!("      throttle honoured AND binding: it set the rate above.");
+                }
+            }
+        } else {
+            println!("      throttle: none (MinimumUpdateIntervalSettings::Default), the");
+            println!("      setting wgc.rs captures with. This is the untuned point.");
+        }
+        // Did the thing being captured keep changing for the whole window? A
+        // run whose content stopped halfway is two experiments averaged, and
+        // every other line of the report still reads clean: the frames that DID
+        // arrive were spaced correctly, so the verdict above says honoured and
+        // binding. Observed on this instrument's first session, caught by the
+        // operator remembering he had paused a video. That is not a check.
+        let longest_silence = gaps_in_window.iter().copied().max().unwrap_or_default();
+        if !throttle::conditions_held(longest_silence, window) {
+            println!("      CONDITIONS CHANGED MID-RUN, THIS RUN IS VOID: the longest single");
+            println!(
+                "      silence was {:.1} s of a {:.0} s window. Whatever was being captured",
+                ms(longest_silence) / 1000.0,
+                window.as_secs_f64(),
+            );
+            println!("      stopped changing partway through, so the two halves are not the");
+            println!("      same experiment and the cost above is an average of both.");
+        }
+        println!("      ONE RUN CANNOT SPLIT fixed holding cost from per-frame cost. Record");
+        println!("      the `ours` delta together with the rate above; see the header.");
+        println!("      Instrument resolution: one GetProcessTimes tick is ~15.6 ms, so this",);
+        println!(
+            "      window resolves no finer than {:.3} pp. Differences under that are noise.",
+            15.625 / (held.seconds * 1000.0) * 100.0,
         );
         println!();
     }
