@@ -475,15 +475,22 @@ describe('armedTypeForKey', () => {
 
   it('arms Filter on F, in either case', () => {
     expect(armedTypeForKey(key({ key: 'f' }))).toBe('filter');
+    // Roadmap 1.24. The review of that change deleted the `case 'u'` arm
+    // outright and all 75 tests stayed green -- the entire user-facing entry
+    // point of the feature, and the one line nothing could catch.
+    expect(armedTypeForKey(key({ key: 'u' }))).toBe('upscale');
+    expect(armedTypeForKey(key({ key: 'U' }))).toBe('upscale');
     expect(armedTypeForKey(key({ key: 'F' }))).toBe('filter');
   });
 
-  it('keeps the two armable types distinct', () => {
+  it('keeps the armable types distinct from each other', () => {
     // The switch returned one value for every key it matched until Filter
     // arrived, so a fallthrough between the arms would have been invisible.
-    expect(armedTypeForKey(key({ key: 'f' }))).not.toBe(
-      armedTypeForKey(key({ key: 's' })),
-    );
+    // ALL THREE PAIRWISE since 1.24, not just the first two: comparing one
+    // pair cannot see a third arm falling through into either of them.
+    const armed = ['s', 'f', 'u'].map((k) => armedTypeForKey(key({ key: k })));
+    expect(new Set(armed).size).toBe(armed.length);
+    expect(armed.every((a) => a !== null)).toBe(true);
   });
 
   it('arms nothing under Ctrl, Alt or Meta', () => {

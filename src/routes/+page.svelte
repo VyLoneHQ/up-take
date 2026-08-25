@@ -215,6 +215,20 @@ function onKeydown(event: KeyboardEvent) {
 }
 
 onMount(() => {
+  // Report the scale we actually laid out in, once, so `dev_harness::log_scale`
+  // can print it beside every monitor's Rust-side factor. `I-299`: the area
+  // menu is sized from a PER-MONITOR scale while every rect here is converted
+  // with this ONE value, and nobody has ever seen the two together.
+  //
+  // Failure is swallowed: the endpoint is registered in debug builds only, so
+  // in release this rejects and that is the expected outcome rather than an
+  // error worth logging. `debug_assertions` is a Rust concept and does not
+  // reach TypeScript, which is the same stated limit `reportFreezeLatency`
+  // carries.
+  void invoke('overlay_report_scale', { dpr: window.devicePixelRatio }).catch(
+    () => {},
+  );
+
   const unlistenState = listen<StatePayload>('overlay://state', (event) => {
     overlayState = event.payload.state;
     monitors = event.payload.monitors;
@@ -744,11 +758,17 @@ onMount(() => {
 
 /* An area's captured pixels, filling the area exactly.
 
-   Two callers now. A Screenshot area's pin (ADR-0014 §6) is captured *at* the
-   area's rectangle. A zoomed Default area's (§3.4) is captured at a smaller
-   rectangle inside it, and `fill` is what performs the magnification: the
-   stretch from source to area *is* the zoom, done by the compositor on the GPU
-   rather than by resampling any pixels on the Rust side.
+   Three callers now. A Screenshot area's pin (ADR-0014 §6) is captured *at* the
+   area's rectangle. A zoomed Default area's (§3.4) and an Upscale area's
+   (roadmap 1.24) are captured at a smaller rectangle inside it, and `fill` is
+   what performs the magnification: the stretch from source to area *is* the
+   zoom, done by the compositor on the GPU rather than by resampling any pixels
+   on the Rust side.
+
+   This said "Two callers now" until 2026-08-22. An Upscale area is neither a
+   Screenshot pin nor a zoomed Default, and it renders through this element; the
+   two magnified cases differ only in where the zoom came from, which is why
+   nothing else here had to change.
 
    `fill` rather than `contain` for both. The two rectangles always share an
    aspect ratio (the source is each extent divided by the same factor), so
@@ -847,7 +867,17 @@ onMount(() => {
   align-items: center;
   gap: 6px;
   padding: 0 10px;
-  font: 13px/1 system-ui, sans-serif;
+  /* `line-height: 1.4`, not the `1` this carried until 2026-08-25. At `1` the
+     line box is exactly the font size, so a 13px glyph's ascender and descender
+     both overflow it -- and `.label` below sets `overflow: hidden` to get its
+     ellipsis, which then clips the overflow it can see. The visible result is
+     the tail of every `p`, `y` and `g` shaved off: "Copy", "Always on top" and
+     "Type: Screenshot" all lose their descenders. Found on the rig 2026-08-25.
+
+     The row's own height is unaffected -- it is absolutely positioned from the
+     rect Rust sent, and the flex box centres this line inside it -- so raising
+     the line box costs no layout and moves no hit target. */
+  font: 13px/1.4 system-ui, sans-serif;
   color: rgba(235, 240, 250, 0.95);
   pointer-events: none;
 }

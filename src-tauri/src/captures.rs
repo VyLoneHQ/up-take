@@ -116,6 +116,161 @@ impl CaptureStore {
             .filter(|pinned| pinned.version == version)
             .map(|pinned| pinned.png.as_slice())
     }
+
+    /// Whether `id`'s stored capture is still exactly `version`.
+    ///
+    /// **False for both ways a version stops being the one on screen**, which is
+    /// the distinction `I-61` turns on and the one a magnify generation cannot
+    /// draw: the entry was *forgotten* (a dismissal, or a scroll back to natural
+    /// size), or it was *replaced* by a newer capture, since [`insert`] is keyed
+    /// on the id alone.
+    ///
+    /// [`insert`]: CaptureStore::insert
+    fn holds(&self, id: AreaId, version: u64) -> bool {
+        self.pinned
+            .get(&id.get())
+            .is_some_and(|pinned| pinned.version == version)
+    }
+}
+
+/// Proof that the pixels a pin would name are still the ones the store holds.
+///
+/// # Why announcing a pin takes a value and not a checked condition
+///
+/// `I-61` was `overlay::emit_pin` announcing a capture that [`forget`] had
+/// already dropped, leaving the frontend holding a URL that resolves to nothing.
+/// The first fix was a re-check immediately before the emit, and an independent
+/// review made two points about that shape which this replaces.
+///
+/// **It could not be drilled.** Deleting the re-check left the entire suite
+/// green, so nothing could tell a reviewer the guard had gone. `emit_pin` takes
+/// one of these instead of an id and a version, and [`still_holds`] is the only
+/// thing that can make one, so deleting the question stops the program
+/// compiling. That is the only form of this that survives a refactor.
+///
+/// **It reached one of the two call sites.** `emit_pin`'s other caller,
+/// `output::capture_into_area`, consulted nothing at all: the re-check
+/// enumerated the entry points of the *magnify path* rather than the callers of
+/// `emit_pin`, which are not the same set. Making the proof an argument closes
+/// that by construction, and closes it for a call site nobody has written yet.
+///
+/// **It deliberately carries no lifetime and promises nothing about the
+/// future.** The store can be emptied between this being made and the emit that
+/// consumes it. That race is narrower than the one it replaces and it is real;
+/// it is recorded as a backlog row rather than implied away by the type.
+///
+/// **Single-use, and neither `Copy` nor `Clone` on purpose.**
+/// [`crate::overlay::emit_pin`] takes it by value, so one answer from
+/// [`still_holds`] backs exactly one announcement. A shared reference would let
+/// a single question answer for every later emit, including emits after the
+/// pixels had gone -- which is the defect this type exists for, with one more
+/// step in front of it.
+///
+/// ⚠️ **That paragraph used to end "adding either derive re-opens that, so
+/// neither is here", and an independent review measured what that sentence was
+/// worth: nothing.** It drilled the revert three ways -- restoring `&FreshPin`
+/// at both call sites, adding `#[derive(Clone)]`, and cloning to announce twice
+/// -- and all 296 tests stayed green each time. The `use of moved value` error
+/// the commit message cited is a property of today's source, not a control on
+/// it: it catches an accident and not an edit. **That is the same shape as the
+/// finding this type was built to answer** -- a guard nothing can drill -- which
+/// is how it got past its author twice.
+///
+/// [`SingleUse`] is the answer to half of it. It implements neither trait, so
+/// `#[derive(Clone)]` or `#[derive(Copy)]` here is now a **compile error** with
+/// the field named in it, rather than a comment asking to be obeyed.
+///
+/// **It blocks the DERIVE spelling and nothing else, and this paragraph said
+/// otherwise until 2026-08-21.** A hand-written impl of either trait for this
+/// type compiles, lets one proof back two announcements, and leaves the whole
+/// suite green -- drilled by an independent review, which is the third time
+/// this property has been asserted at one spelling and left open at another.
+/// `no_hand_written_escape_from_the_single_use_property` below catches SOME of
+/// that, and **an earlier revision of this paragraph claimed it closed the
+/// class. A second independent review falsified that in seven drills, and the
+/// honest description is here instead.**
+///
+/// What it reaches: a hand-written `Clone` impl for this type, in any `.rs`
+/// file directly under `src-tauri/src`, outside a test module, spelled with
+/// the bare trait name and the bare type name.
+///
+/// **The spellings below are described rather than written out, and that is
+/// not fussiness.** Writing one of them here put it in the file the sweep
+/// reads, and the guard went red against its own documentation on the first
+/// run after this paragraph was added. A control that its own description
+/// trips is the same class as a control its own description defeats.
+///
+/// What it does NOT reach, each constructed and run GREEN by that review:
+///
+/// - the trait named by a path (`std::clone::Clone`) instead of bare.
+/// - `#[derive(Clone, Copy)]` on [`SingleUse`] itself, after which the derive
+///   on this type compiles. **rustc SUGGESTS this**: the `E0277` carries
+///   `help: consider annotating 'SingleUse' with '#[derive(Clone)]'`, so the
+///   compiler's own advice disables the control, in the file the control lives
+///   in, with nothing red.
+/// - the type named through `super::` from a nested module of this file.
+/// - a type alias, then the impl written against the alias.
+/// - the impl in a SUBDIRECTORY of `src-tauri/src`. The scan is one
+///   `read_dir`, which is not recursive, and the orphan rule does not care.
+///
+/// And the property is defeatable with no `Clone` and no `Copy` at all: an
+/// inherent `fn again(&self) -> Self` here, or a second announcer beside
+/// `emit_pin` with a different name, each give one proof two announcements
+/// with the suite green.
+///
+/// **So the control is a text sweep and the property is a semantic one, which
+/// is the wrong tool rather than a tool with gaps.** What would actually hold
+/// it is holding the property at the ANNOUNCEMENT site instead of on this
+/// type. That is `I-83` and it is not done here; the text sweep is kept only
+/// because it catches the one spelling that has actually been written twice.
+///
+/// The other half -- that `emit_pin` takes this by value and not by reference
+/// -- has no type-level expression in Rust either, and is held by
+/// `the_pin_proof_is_taken_by_value` in the tests below.
+pub(crate) struct FreshPin {
+    id: AreaId,
+    version: u64,
+    /// Present to make the absence of `Clone` and `Copy` mechanical. Never read.
+    _single_use: SingleUse,
+}
+
+/// A field type with no `Clone` and no `Copy`, so `FreshPin` cannot gain either
+/// by derive.
+///
+/// Zero-sized, so it costs nothing at runtime. The alternative the reviewer
+/// named is a `trybuild`/`compile_fail` harness, which is a dev-dependency on a
+/// public GPL-3.0 binary for one assertion and has no existing home in this
+/// repository; a `compile_fail` doctest cannot reach `pub(crate)` items, so that
+/// route is closed too. This needs neither.
+struct SingleUse;
+
+impl FreshPin {
+    pub(crate) const fn id(&self) -> AreaId {
+        self.id
+    }
+
+    pub(crate) const fn version(&self) -> u64 {
+        self.version
+    }
+}
+
+/// Proof that `id` still holds `version`, or `None` when it does not.
+///
+/// **Asks the store rather than the magnify generation, and that is a fix
+/// rather than a tidier spelling.** `Magnify::is_current` goes false for two
+/// events that want opposite answers: a *cancel*, where the pixels are gone and
+/// the pin must be withheld, and a *supersede* by the next scroll notch, where
+/// the pixels are still there and withholding the pin would leave the store
+/// holding a capture the view was never told about. The store knows which
+/// happened. The generation cannot.
+pub(crate) fn still_holds(app: &AppHandle, id: AreaId, version: u64) -> Option<FreshPin> {
+    let store = app.state::<Mutex<CaptureStore>>();
+    let guard = store.lock().unwrap_or_else(PoisonError::into_inner);
+    guard.holds(id, version).then_some(FreshPin {
+        id,
+        version,
+        _single_use: SingleUse,
+    })
 }
 
 /// The URL a pinned capture is served at, for the frontend to request.
@@ -281,6 +436,118 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn the_pin_proof_is_taken_by_value() {
+        // The half of `FreshPin`'s single-use property that Rust cannot express
+        // in the type system, and the half an independent review drilled green:
+        // restoring `&FreshPin` at both call sites left all 296 tests passing,
+        // because every one of them tested the property HOLDING rather than
+        // anything NOTICING it go.
+        //
+        // A reference re-opens the defect the type exists for. One call to
+        // `still_holds` would answer for every later announcement, including
+        // announcements made after `forget` had dropped the pixels -- `I-61`
+        // with one more step in front of it.
+        //
+        // Read from the source because there is nowhere else to read it from:
+        // the signature is the whole property, and `trybuild` is a
+        // dev-dependency on a public binary for one assertion.
+        let source = include_str!("overlay.rs");
+        let Some(line) = source
+            .lines()
+            .find(|line| line.trim_start().starts_with("pub(crate) fn emit_pin("))
+        else {
+            panic!(
+                "no `pub(crate) fn emit_pin(` in overlay.rs -- renamed, or its \
+                 visibility changed? This test cannot answer for a function it \
+                 cannot find, and an unfound signature must not read as a pass."
+            )
+        };
+        assert!(
+            line.contains("pin: crate::captures::FreshPin"),
+            "`emit_pin` must take the freshness proof BY VALUE, so one proof backs \
+             one announcement. Found: {line}"
+        );
+        assert!(
+            !line.contains("&crate::captures::FreshPin"),
+            "`emit_pin` takes the freshness proof by reference, which lets a single \
+             call to `still_holds` answer for any number of later emits. Found: {line}"
+        );
+    }
+
+    #[test]
+    fn no_hand_written_escape_from_the_single_use_property() {
+        // `SingleUse` makes `#[derive(Clone)]` and `#[derive(Copy)]` compile
+        // errors on `FreshPin`. It does NOT reach a hand-written impl, and the
+        // doc comment on the type claimed it did until an independent review
+        // drilled the gap: four lines of `impl Clone`, a `.clone()` before the
+        // emit, and one freshness proof backs two announcements with the whole
+        // suite green and nothing red anywhere.
+        //
+        // That is the same shape as the finding this type was built to answer,
+        // for the third time: the property was tested at the spelling its
+        // author had in mind and left open at the one he did not.
+        //
+        // **Scanned over the `.rs` files directly under `src-tauri/src`, which
+        // is more than this file and LESS than the crate.** `FreshPin` is
+        // `pub(crate)`, so the orphan rule lets the impl live in any module of
+        // `src-tauri` -- including a subdirectory, which `read_dir` does not
+        // descend into. An earlier revision of this comment and of `56cae0e`'s
+        // commit message both said "the whole crate"; a second independent
+        // review built the subdirectory case and watched this pass over it.
+        //
+        // See the type's own doc for the full list of what this does not
+        // reach, and for why a text sweep is the wrong tool for a semantic
+        // property. `I-83` carries the real fix.
+        //
+        // The needles are assembled at run time on purpose. Written out whole
+        // they would appear in this file and match themselves, and a source
+        // control defeated by the text describing it reads green forever. Test
+        // modules are cut for the same reason: the drill that proves this test
+        // works has to be able to live in one without tripping it, and an impl
+        // behind `#[cfg(test)]` cannot reach a release binary anyway.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut scanned = 0_usize;
+        let mut saw_the_type = false;
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|e| e != "rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).unwrap();
+            let production = source
+                .split_once("mod tests {")
+                .map_or(source.as_str(), |(before, _)| before)
+                // A same-crate impl may spell the type by any path it likes, so
+                // compare on the bare name rather than on one of them.
+                .replace("crate::captures::", "")
+                .replace("captures::", "");
+            scanned += 1;
+            saw_the_type |= production.contains("struct FreshPin");
+            for trait_name in ["Clone", "Copy"] {
+                let needle = format!("impl {trait_name} for FreshPin");
+                assert!(
+                    !production.contains(&needle),
+                    "{}: hand-written `{trait_name}` impl for `FreshPin`.                      `SingleUse` blocks only the derive spelling, so this                      re-opens the defect the type exists for: one call to                      `still_holds` backing more than one announcement,                      including announcements made after `forget` dropped the                      pixels.",
+                    path.display()
+                );
+            }
+        }
+        // Both halves of the positive control. A sweep that reads nothing, or
+        // that reads files but never meets the type, is indistinguishable from
+        // a sweep that found no violation -- which is exactly the green that
+        // could not have been earned.
+        assert!(
+            scanned >= 2,
+            "scanned {scanned} file(s) under {} -- the sweep found no crate to              read, so its silence means nothing.",
+            dir.display()
+        );
+        assert!(
+            saw_the_type,
+            "swept {scanned} file(s) and never saw `struct FreshPin`. Renamed,              moved out of this crate, or cut away with a test module -- either              way this test just passed over a type it never read, and an              unfound type must not read as a pass."
+        );
+    }
+
     /// A 1×1 bitmap, standing in for the raw pixels a real pin carries. Only the
     /// clipboard path reads them, and nothing here decodes one.
     fn pixels() -> RgbaBitmap {
@@ -300,6 +567,63 @@ mod tests {
                     .unwrap()
             })
             .collect()
+    }
+
+    /// The three answers `CaptureStore::holds` has to give, which is the guard
+    /// behind every pin announcement since `I-61`.
+    ///
+    /// **This is the seam the first version of the fix did not have.** That one
+    /// asked `Magnify::is_current` inside `magnify_once`, which needs an
+    /// `AppHandle` and a real capture, so deleting the guard left the whole
+    /// suite green and the author had to say so in the test's own doc. The
+    /// question now lives on the store, where it can be asked directly, and the
+    /// answer is carried to `emit_pin` as a value that only `still_holds` can
+    /// make, so deleting the guard no longer compiles.
+    #[test]
+    fn a_pin_is_fresh_only_while_the_store_still_holds_that_exact_version() {
+        let mut store = CaptureStore::default();
+        let areas = ids(2);
+        let version = store.insert(areas[0], pixels(), vec![1, 2, 3]);
+
+        // Present: the ordinary case, and the one a supersede must not break.
+        assert!(store.holds(areas[0], version));
+
+        // Forgotten. This is `I-61` itself: `captures::forget` ran between the
+        // insert and the announcement, so the URL would resolve to nothing.
+        store.remove(areas[0]);
+        assert!(!store.holds(areas[0], version));
+
+        // Replaced by a newer capture. `insert` is keyed on the id alone, so the
+        // older version is no longer the one on screen and its worker must not
+        // announce it over the newer one.
+        let first = store.insert(areas[1], pixels(), vec![4]);
+        let second = store.insert(areas[1], pixels(), vec![5]);
+        assert!(!store.holds(areas[1], first));
+        assert!(store.holds(areas[1], second));
+    }
+
+    #[test]
+    fn freshness_is_per_area_and_not_a_global_version_counter() {
+        // The versions come from one counter shared across areas, so a naive
+        // `holds` that compared only the number would answer for the wrong area.
+        let mut store = CaptureStore::default();
+        let areas = ids(2);
+        let first = store.insert(areas[0], pixels(), vec![1]);
+        let second = store.insert(areas[1], pixels(), vec![2]);
+        assert_ne!(
+            first, second,
+            "the counter is shared, so this is a real risk"
+        );
+        assert!(!store.holds(areas[0], second));
+        assert!(!store.holds(areas[1], first));
+    }
+
+    #[test]
+    fn an_area_with_no_capture_at_all_is_never_fresh() {
+        let mut store = CaptureStore::default();
+        let areas = ids(2);
+        let version = store.insert(areas[0], pixels(), vec![1]);
+        assert!(!store.holds(areas[1], version));
     }
 
     #[test]

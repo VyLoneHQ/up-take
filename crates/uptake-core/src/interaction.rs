@@ -866,14 +866,64 @@ pub fn settle_resize(bounds: Rect, resize: Resize, monitors: &[Rect]) -> Rect {
     contain(snap_resize(bounds, resize, monitors), monitors)
 }
 
-/// Height of one area-menu row, physical pixels.
+/// Height of one area-menu row, **logical** pixels.
 pub const MENU_ITEM_HEIGHT: u32 = 28;
 
-/// Width of the area menu, physical pixels.
-pub const MENU_WIDTH: u32 = 176;
+/// Width of the area menu, **logical** pixels.
+///
+/// Widened from 176 on 2026-08-25. 176 left roughly 18 px of slack under
+/// `Type: Screenshot` at 100%, and the slack was computed from an *estimate* of
+/// the label's rendered width rather than a measurement -- nothing in this
+/// repository can measure a rendered string, so the honest response to an
+/// estimate that tight is headroom, not a tighter estimate.
+pub const MENU_WIDTH: u32 = 200;
 
-/// Padding above and below the area menu's rows.
+/// Padding above and below the area menu's rows, **logical** pixels.
 pub const MENU_PADDING: u32 = 5;
+
+/// Turns a logical menu metric into physical pixels on a monitor at `scale`.
+///
+/// # Why these three constants are logical and every rectangle is physical
+///
+/// The menu is hit-tested in Rust against physical rectangles and *drawn* by the
+/// WebView, which divides every rect it is given by its own `devicePixelRatio`
+/// (`overlay-state.ts`, ADR-0011). The text inside those rows is sized in CSS
+/// pixels and nothing scales it. So a menu whose width is a physical constant
+/// **shrinks in CSS pixels as the monitor's scale rises while its text does
+/// not**, and above 100% the labels run out of room.
+///
+/// Measured on the rig 2026-08-25, primary monitor 2560x1440 at **125%**:
+/// `MENU_WIDTH` of 176 physical px arrived as 140.8 CSS px, leaving 88.8 px of
+/// label track after the padding, tick, gaps and arrow -- and `Type: Screenshot`
+/// rendered as `Type: Screens...`. The row height fell the same way, from 28 px
+/// to 22.4 px.
+///
+/// Scaling here rather than in CSS is what keeps the picture and the hit test
+/// the same rectangle, which is the property the menu's own module docs call
+/// load-bearing: a row can never be drawn anywhere other than where a click on
+/// it is detected.
+///
+/// # The guard on `scale`
+///
+/// A non-finite or below-1.0 scale returns the logical value unchanged rather
+/// than collapsing the menu toward zero. A monitor that reports nonsense should
+/// cost the user a menu that is the wrong size, not a menu with no rows in it.
+#[must_use]
+pub fn scale_metric(logical: u32, scale: f64) -> u32 {
+    if !scale.is_finite() || scale <= 1.0 {
+        return logical;
+    }
+    let scaled = f64::from(logical) * scale;
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "positive, and bounded by MENU_WIDTH * a monitor scale factor"
+    )]
+    let rounded = scaled
+        .round()
+        .clamp(f64::from(logical), f64::from(u32::MAX)) as u32;
+    rounded
+}
 
 /// Where an area menu opened at `anchor` should sit so that it stays on the
 /// monitor holding the cursor.
@@ -888,9 +938,11 @@ pub const MENU_PADDING: u32 = 5;
 /// That is F-13's rule: overlay chrome positioned against the desktop as a whole
 /// can land in a dead zone between monitors, where the cursor cannot reach it.
 #[must_use]
-pub fn menu_bounds(anchor: Point, items: u32, monitor: Rect) -> Rect {
-    let height = items * MENU_ITEM_HEIGHT + 2 * MENU_PADDING;
-    let (width_i, height_i) = (i64::from(MENU_WIDTH), i64::from(height));
+pub fn menu_bounds(anchor: Point, items: u32, monitor: Rect, scale: f64) -> Rect {
+    let width = scale_metric(MENU_WIDTH, scale);
+    let height =
+        items * scale_metric(MENU_ITEM_HEIGHT, scale) + 2 * scale_metric(MENU_PADDING, scale);
+    let (width_i, height_i) = (i64::from(width), i64::from(height));
     let (ax, ay) = (i64::from(anchor.x), i64::from(anchor.y));
 
     let x = if ax + width_i > monitor.right() {
@@ -914,7 +966,7 @@ pub fn menu_bounds(anchor: Point, items: u32, monitor: Rect) -> Rect {
         i64::from(monitor.origin.y),
         (monitor.bottom() - height_i).max(i64::from(monitor.origin.y)),
     );
-    Rect::new(clamp_to_i32(x), clamp_to_i32(y), MENU_WIDTH, height)
+    Rect::new(clamp_to_i32(x), clamp_to_i32(y), width, height)
 }
 
 /// Where the child list of an area-menu row should sit (roadmap 1.28).
@@ -937,18 +989,20 @@ pub fn menu_bounds(anchor: Point, items: u32, monitor: Rect) -> Rect {
 /// site: a child list placed against the desktop opens off-screen on a
 /// right-hand monitor.
 #[must_use]
-pub fn submenu_bounds(parent_row: Rect, items: u32, monitor: Rect) -> Rect {
-    let height = items * MENU_ITEM_HEIGHT + 2 * MENU_PADDING;
-    let (width_i, height_i) = (i64::from(MENU_WIDTH), i64::from(height));
+pub fn submenu_bounds(parent_row: Rect, items: u32, monitor: Rect, scale: f64) -> Rect {
+    let width = scale_metric(MENU_WIDTH, scale);
+    let padding = scale_metric(MENU_PADDING, scale);
+    let height = items * scale_metric(MENU_ITEM_HEIGHT, scale) + 2 * padding;
+    let (width_i, height_i) = (i64::from(width), i64::from(height));
 
     let x = if parent_row.right() + width_i > monitor.right() {
         i64::from(parent_row.origin.x) - width_i
     } else {
         parent_row.right()
     };
-    // The parent row sits `MENU_PADDING` below its own list's top edge, so the
+    // The parent row sits one padding below its own list's top edge, so the
     // child list starts that much higher for its first row to line up with it.
-    let y = i64::from(parent_row.origin.y) - i64::from(MENU_PADDING);
+    let y = i64::from(parent_row.origin.y) - i64::from(padding);
 
     // A list taller or wider than the monitor cannot be fully placed; clamping
     // after the flip keeps its top-left on screen, as [`menu_bounds`] does.
@@ -960,21 +1014,22 @@ pub fn submenu_bounds(parent_row: Rect, items: u32, monitor: Rect) -> Rect {
         i64::from(monitor.origin.y),
         (monitor.bottom() - height_i).max(i64::from(monitor.origin.y)),
     );
-    Rect::new(clamp_to_i32(x), clamp_to_i32(y), MENU_WIDTH, height)
+    Rect::new(clamp_to_i32(x), clamp_to_i32(y), width, height)
 }
 
 /// The rectangle of the `index`-th row of a menu occupying `menu`.
 #[must_use]
-pub fn menu_item_bounds(menu: Rect, index: u32) -> Rect {
+pub fn menu_item_bounds(menu: Rect, index: u32, scale: f64) -> Rect {
+    let item_height = scale_metric(MENU_ITEM_HEIGHT, scale);
     Rect::new(
         menu.origin.x,
         clamp_to_i32(
             i64::from(menu.origin.y)
-                + i64::from(MENU_PADDING)
-                + i64::from(index * MENU_ITEM_HEIGHT),
+                + i64::from(scale_metric(MENU_PADDING, scale))
+                + i64::from(index * item_height),
         ),
         menu.size.width,
-        MENU_ITEM_HEIGHT,
+        item_height,
     )
 }
 
@@ -1470,7 +1525,7 @@ mod tests {
     #[test]
     fn a_menu_with_room_opens_down_and_right_from_the_anchor() {
         let monitor = Rect::new(0, 0, 1920, 1080);
-        let menu = menu_bounds(Point::new(400, 300), 4, monitor);
+        let menu = menu_bounds(Point::new(400, 300), 4, monitor, 1.0);
         assert_eq!(menu.origin, Point::new(400, 300));
         assert_eq!(menu.size.width, MENU_WIDTH);
         assert_eq!(menu.size.height, 4 * MENU_ITEM_HEIGHT + 2 * MENU_PADDING);
@@ -1479,7 +1534,7 @@ mod tests {
     #[test]
     fn a_menu_near_an_edge_flips_instead_of_spilling_off_the_monitor() {
         let monitor = Rect::new(0, 0, 1920, 1080);
-        let menu = menu_bounds(Point::new(1900, 1070), 4, monitor);
+        let menu = menu_bounds(Point::new(1900, 1070), 4, monitor, 1.0);
         assert!(menu.right() <= monitor.right());
         assert!(menu.bottom() <= monitor.bottom());
         assert!(menu.origin.x >= monitor.origin.x);
@@ -1491,7 +1546,7 @@ mod tests {
         // The portrait monitor left of the primary on the dev rig. A menu that
         // clamped to zero here would jump to another screen entirely.
         let monitor = Rect::new(-1080, -267, 1080, 1920);
-        let menu = menu_bounds(Point::new(-1000, -200), 4, monitor);
+        let menu = menu_bounds(Point::new(-1000, -200), 4, monitor, 1.0);
         assert!(menu.origin.x >= monitor.origin.x);
         assert!(menu.origin.y >= monitor.origin.y);
         assert!(menu.right() <= monitor.right());
@@ -1499,11 +1554,11 @@ mod tests {
 
     #[test]
     fn menu_rows_tile_the_menu_top_to_bottom_without_gaps() {
-        let menu = menu_bounds(Point::new(0, 0), 4, Rect::new(0, 0, 1920, 1080));
-        let mut previous = menu_item_bounds(menu, 0);
+        let menu = menu_bounds(Point::new(0, 0), 4, Rect::new(0, 0, 1920, 1080), 1.0);
+        let mut previous = menu_item_bounds(menu, 0, 1.0);
         assert_eq!(previous.origin.y, menu.origin.y + MENU_PADDING as i32);
         for index in 1..4 {
-            let row = menu_item_bounds(menu, index);
+            let row = menu_item_bounds(menu, index, 1.0);
             assert_eq!(row.origin.y as i64, previous.bottom());
             assert_eq!(row.size.width, menu.size.width);
             previous = row;
@@ -1514,15 +1569,15 @@ mod tests {
     #[test]
     fn a_child_list_with_room_opens_flush_to_the_right_of_its_parent_row() {
         let monitor = Rect::new(0, 0, 1920, 1080);
-        let menu = menu_bounds(Point::new(400, 300), 8, monitor);
-        let parent = menu_item_bounds(menu, 2);
-        let child = submenu_bounds(parent, 3, monitor);
+        let menu = menu_bounds(Point::new(400, 300), 8, monitor, 1.0);
+        let parent = menu_item_bounds(menu, 2, 1.0);
+        let child = submenu_bounds(parent, 3, monitor, 1.0);
         // Flush, not merely near: any gap is a strip belonging to neither list
         // that every pointer crossing from parent to child passes through.
         assert_eq!(i64::from(child.origin.x), parent.right());
         assert_eq!(child.size.height, 3 * MENU_ITEM_HEIGHT + 2 * MENU_PADDING);
         // The first child row lines up with the parent row it opened from.
-        assert_eq!(menu_item_bounds(child, 0).origin.y, parent.origin.y);
+        assert_eq!(menu_item_bounds(child, 0, 1.0).origin.y, parent.origin.y);
     }
 
     #[test]
@@ -1530,9 +1585,9 @@ mod tests {
         let monitor = Rect::new(0, 0, 1920, 1080);
         // A menu opened close enough to the right edge that the parent list
         // fits and a second list beside it does not.
-        let menu = menu_bounds(Point::new(1800, 300), 8, monitor);
-        let parent = menu_item_bounds(menu, 2);
-        let child = submenu_bounds(parent, 3, monitor);
+        let menu = menu_bounds(Point::new(1800, 300), 8, monitor, 1.0);
+        let parent = menu_item_bounds(menu, 2, 1.0);
+        let child = submenu_bounds(parent, 3, monitor, 1.0);
         assert!(child.right() <= monitor.right());
         assert!(child.origin.x >= monitor.origin.x);
         // Flush on the other side, for the same reason as above.
@@ -1545,9 +1600,9 @@ mod tests {
         // row the pointer travels from, so moving the list away from it is the
         // wrong answer even when it fits.
         let monitor = Rect::new(0, 0, 1920, 1080);
-        let menu = menu_bounds(Point::new(400, 1000), 3, monitor);
-        let parent = menu_item_bounds(menu, 2);
-        let child = submenu_bounds(parent, 6, monitor);
+        let menu = menu_bounds(Point::new(400, 1000), 3, monitor, 1.0);
+        let parent = menu_item_bounds(menu, 2, 1.0);
+        let child = submenu_bounds(parent, 6, monitor, 1.0);
         assert!(child.bottom() <= monitor.bottom());
         assert!(child.origin.y >= monitor.origin.y);
         // Still beside the parent row rather than above or below it.
@@ -1574,13 +1629,103 @@ mod tests {
         // child list clamped against the virtual desktop instead of against
         // this monitor would open on a different screen from its parent.
         let monitor = Rect::new(-1080, -267, 1080, 1920);
-        let menu = menu_bounds(Point::new(-1000, -200), 8, monitor);
-        let parent = menu_item_bounds(menu, 2);
-        let child = submenu_bounds(parent, 3, monitor);
+        let menu = menu_bounds(Point::new(-1000, -200), 8, monitor, 1.0);
+        let parent = menu_item_bounds(menu, 2, 1.0);
+        let child = submenu_bounds(parent, 3, monitor, 1.0);
         assert!(child.origin.x >= monitor.origin.x);
         assert!(child.origin.y >= monitor.origin.y);
         assert!(child.right() <= monitor.right());
         assert!(child.bottom() <= monitor.bottom());
+    }
+
+    /// The rig defect of 2026-08-25: at 125% the menu kept its physical size, so
+    /// its CSS size shrank while the 13px labels did not, and
+    /// `Type: Screenshot` rendered as `Type: Screens...`.
+    ///
+    /// The property is that a menu's size in **CSS** pixels -- physical divided
+    /// by the monitor's scale, which is exactly what `overlay-state.ts` does --
+    /// is the same on every monitor. Asserted that way round rather than as
+    /// "220 at 1.25" so it states the invariant instead of restating the
+    /// arithmetic of the function under test.
+    #[test]
+    fn the_menu_is_the_same_size_in_css_pixels_at_every_scale() {
+        let monitor = Rect::new(0, 0, 4000, 3000);
+        for scale in [1.0_f64, 1.25, 1.5, 1.75, 2.0] {
+            let menu = menu_bounds(Point::new(400, 300), 6, monitor, scale);
+            let css_width = f64::from(menu.size.width) / scale;
+            let css_height = f64::from(menu.size.height) / scale;
+            assert!(
+                (css_width - f64::from(MENU_WIDTH)).abs() <= 1.0,
+                "width at {scale}x: {css_width} css px, want {MENU_WIDTH}"
+            );
+            let want_height = f64::from(6 * MENU_ITEM_HEIGHT + 2 * MENU_PADDING);
+            assert!(
+                (css_height - want_height).abs() <= 2.0,
+                "height at {scale}x: {css_height} css px, want {want_height}"
+            );
+        }
+    }
+
+    /// Rows must still tile the panel exactly at a fractional scale. Rounding
+    /// each metric independently is where a scaled layout grows a one-pixel seam
+    /// between rows -- a gap the pointer can rest in, which reads as the menu
+    /// losing the hover for no reason.
+    #[test]
+    fn scaled_rows_tile_without_a_seam_or_an_overlap() {
+        let monitor = Rect::new(0, 0, 4000, 3000);
+        for scale in [1.0_f64, 1.25, 1.5, 1.75, 2.0] {
+            let menu = menu_bounds(Point::new(400, 300), 6, monitor, scale);
+            let mut previous = menu_item_bounds(menu, 0, scale);
+            assert!(
+                previous.origin.y >= menu.origin.y,
+                "first row inside at {scale}x"
+            );
+            for index in 1..6 {
+                let row = menu_item_bounds(menu, index, scale);
+                assert_eq!(
+                    i64::from(row.origin.y),
+                    previous.bottom(),
+                    "seam at {scale}x row {index}"
+                );
+                assert_eq!(row.size.width, menu.size.width, "row width at {scale}x");
+                previous = row;
+            }
+            assert!(
+                previous.bottom() <= menu.bottom(),
+                "last row overflows the panel at {scale}x"
+            );
+            // **The cross-check, and the reason the loop above is not enough.**
+            // Every value in it comes from `menu_item_bounds`, so a row height
+            // that is uniformly wrong stays contiguous and slips through --
+            // measured, by mutating that function's height and watching this
+            // test stay green (2026-08-25). This ties the rows back to
+            // `menu_bounds`, which is a different function, so the two now have
+            // to agree about what a row is.
+            assert_eq!(
+                previous.bottom(),
+                menu.bottom() - i64::from(scale_metric(MENU_PADDING, scale)),
+                "rows do not fill the panel at {scale}x"
+            );
+        }
+    }
+
+    /// The guard, driven rather than reasoned about (`UT-F-75`): a control whose
+    /// refusal arm never executes is a check that cannot go red. A monitor
+    /// reporting nonsense must cost the user a wrongly-sized menu, never a menu
+    /// with no rows in it.
+    #[test]
+    fn a_nonsense_scale_falls_back_to_the_logical_metric() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -2.0, 0.5] {
+            assert_eq!(
+                scale_metric(MENU_WIDTH, bad),
+                MENU_WIDTH,
+                "scale {bad} must not shrink the menu"
+            );
+            assert_eq!(scale_metric(MENU_ITEM_HEIGHT, bad), MENU_ITEM_HEIGHT);
+        }
+        // And a real scale does something, so the test above cannot pass by the
+        // function having been reduced to the identity.
+        assert!(scale_metric(MENU_WIDTH, 1.25) > MENU_WIDTH);
     }
 
     prop_compose! {

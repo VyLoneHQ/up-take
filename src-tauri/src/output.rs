@@ -586,8 +586,32 @@ pub(crate) fn capture_into_area(app: &AppHandle, id: AreaId, bounds: Rect) {
                 let mut guard = store.lock().unwrap_or_else(PoisonError::into_inner);
                 guard.insert(id, bitmap.clone(), png.clone())
             };
-            if let Err(error) = crate::overlay::emit_pin(&app, id, version) {
-                eprintln!("output: pinned the capture but could not announce it: {error}");
+            // **This site consulted nothing until 2026-08-17, and it is the
+            // second member of `I-61`'s class** -- found by the independent
+            // review of the first fix, which had guarded the magnify path and
+            // enumerated the entry points of that path rather than the callers
+            // of `emit_pin`. Dismissing an area inside the 100-300 ms this
+            // capture takes runs `captures::forget`, and this worker then
+            // announced a pin for it. Now it asks, and the type makes asking
+            // unavoidable.
+            //
+            // ⚠️ **This closes the ANNOUNCEMENT and not the leak underneath
+            // it.** If the dismissal lands before the `insert` above rather than
+            // after it, the entry is re-created for an area that is gone and
+            // nothing will ever `remove` it again. Gating the insert as well
+            // needs the area store consulted here, which is a wider change with
+            // its own lock-order question; it is a backlog row, not a silent
+            // omission. `cancel_magnification`'s doc claimed this whole leak
+            // closed and has been corrected below.
+            match crate::captures::still_holds(&app, id, version) {
+                Some(fresh) => {
+                    if let Err(error) = crate::overlay::emit_pin(&app, fresh) {
+                        eprintln!("output: pinned the capture but could not announce it: {error}");
+                    }
+                }
+                None => eprintln!(
+                    "output: the capture for area {id:?} was dropped before it could be announced"
+                ),
             }
             // Recorded before the `?`s below, so a failure *inside* publishing is
             // not reported as "publish 0 ms".
@@ -753,14 +777,21 @@ fn magnify_once(app: &AppHandle, id: AreaId, source: Rect, generation: u64) {
     let started = Instant::now();
     let mut split = Split::default();
     let outcome = frozen_or_live(source, &mut split).and_then(|(bitmap, png)| {
-        // **The freshness check and the publish are one critical section, and
-        // an independent review is why.** Checking and then locking
+        // **The freshness check and the STORE WRITE are one critical section,
+        // and an independent review is why.** Checking and then locking
         // `CaptureStore` separately leaves a window in which
         // `clear_magnification` can run to completion (bump the generation,
         // forget the pixels, emit the unpin), after which this worker inserts
         // and re-pins, producing an area at 1x, with no badge, rendering a
         // magnified still and no way back short of scrolling in and out.
         // `clear_magnification` takes the same two locks in the same order.
+        //
+        // ⚠️ **It does NOT cover the announcement, and this comment said
+        // "the publish" until 2026-08-17, which read as though it did.** The
+        // section ends at `drop(state)`; the pin is announced below it, under a
+        // separate question asked of the store. That gap is `I-61`. Corrected
+        // after an independent review pointed out that a reader hits this
+        // comment first and it contradicts the fix three lines below it.
         let state = magnify();
         if !state.is_current(id, generation) {
             return Ok(());
@@ -771,7 +802,41 @@ fn magnify_once(app: &AppHandle, id: AreaId, source: Rect, generation: u64) {
             guard.insert(id, bitmap, png)
         };
         drop(state);
-        crate::overlay::emit_pin(app, id, version)
+        // **Asked again, after the lock is released and before the pin is
+        // announced.** `I-61`, found by the independent review of `#55` under
+        // attack A14. The section above is correct about what it covers and
+        // stops one line short of the emit: release it, and
+        // `clear_magnification` can still bump the generation, forget these
+        // pixels and emit the unpin, after which this worker would announce a
+        // pin for a version that no longer exists.
+        //
+        // **The question is asked of the STORE, not of the generation, and the
+        // difference is a defect the first version of this fix shipped.** It
+        // re-checked `Magnify::is_current`, which goes false for two events that
+        // want opposite answers: a cancel, where the pixels are gone, and a
+        // supersede by the next scroll notch, where they are still there. It
+        // withheld the pin in both, so a superseded-then-failed capture left the
+        // store holding pixels the view had never been told about, and `Copy`
+        // exported a still the area was not displaying. Found by the independent
+        // review of that fix; `CaptureStore::holds` answers the question the
+        // backlog row actually asks.
+        //
+        // **A re-check rather than a wider critical section**, which is the
+        // constraint rather than the cheaper option: `emit_pin` crosses the IPC
+        // boundary and this runs on the magnify worker thread, so holding
+        // `MAGNIFY` across it would hold a lock across a call this module does
+        // not control. `still_holds` takes the store's own lock and releases it
+        // before the emit.
+        //
+        // ⚠️ **It narrows the window and does not close it.** A forget landing
+        // between `still_holds` and the emit still announces a stale pin.
+        // Closing that needs the pin event to carry something the frontend can
+        // reject, which is a different change; it has a backlog row rather than
+        // living only in this comment.
+        let Some(fresh) = crate::captures::still_holds(app, id, version) else {
+            return Ok(());
+        };
+        crate::overlay::emit_pin(app, fresh)
     });
     report("magnify", started, &split, outcome);
 }
@@ -823,10 +888,21 @@ pub(crate) fn clear_magnification(app: &AppHandle, id: AreaId) {
 /// Split from [`clear_magnification`] for the caller that has no frontend to
 /// tell: `overlay::dismiss_area`, where the area itself is going away. That
 /// path called `captures::forget` alone, and an independent review found what
-/// it left open. Dismissing an area mid-capture let the worker `insert` for an
-/// id nothing would ever `remove` again, so the bitmap and the PNG stayed
-/// resident for the process lifetime. That is the growing map M-20's soak
-/// exists to catch, reachable by closing an area within ~300 ms of scrolling it.
+/// it left open. Dismissing an area mid-capture let **a magnify** worker
+/// `insert` for an id nothing would ever `remove` again, so the bitmap and the
+/// PNG stayed resident for the process lifetime. That is the growing map M-20's
+/// soak exists to catch, reachable by closing an area within ~300 ms of
+/// scrolling it.
+///
+/// ⚠️ **This said "the worker", unqualified, until 2026-08-17, and it claimed
+/// more than it delivers.** `state.cancel(id)` stops a worker that consults
+/// `MAGNIFY`, which is the magnify path alone. `capture_into_area`'s worker,
+/// the one that runs when an area is first created, consults nothing here, so a
+/// dismissal landing before its `insert` still leaves an entry nothing will
+/// remove. The narrower twin of this sentence in `overlay::dismiss_area` was
+/// right the whole time and says "any **magnify** capture still in flight", so
+/// the pair disagreed and the broader half was the wrong one. Found by the
+/// independent review of the `I-61` fix; the residual leak has a backlog row.
 pub(crate) fn cancel_magnification(app: &AppHandle, id: AreaId) {
     // `MAGNIFY` before `CaptureStore`, the order `magnify_once` takes them in.
     let mut state = magnify();
@@ -1456,6 +1532,34 @@ mod tests {
         assert!(state.is_current(b, for_b), "B's is not");
         assert!(!state.pending.contains_key(&a));
         assert!(state.pending.contains_key(&b), "B stays queued");
+    }
+
+    /// The property the pin guard USED to rest on, kept because the shape it
+    /// argues against is the one an earlier version of this fix shipped.
+    ///
+    /// `Magnify::is_current` goes false for a cancel **and** for a supersede,
+    /// and the two want opposite answers: after a cancel the pixels are gone and
+    /// the pin must be withheld, after a supersede they are still there. A guard
+    /// built on this predicate cannot tell them apart, which is why the guard is
+    /// built on `CaptureStore::holds` instead. See `captures::still_holds`.
+    #[test]
+    fn one_generation_predicate_cannot_tell_a_cancel_from_a_supersede() {
+        let mut state = Magnify::new();
+        let a = area(1);
+
+        let cancelled = state.issue(a, Rect::new(0, 0, 10, 10));
+        state.take_one();
+        assert!(state.is_current(a, cancelled), "the insert is allowed");
+        state.cancel(a);
+        assert!(!state.is_current(a, cancelled), "cancelled");
+
+        let superseded = state.issue(a, Rect::new(0, 0, 10, 10));
+        state.take_one();
+        state.issue(a, Rect::new(1, 1, 8, 8));
+        assert!(!state.is_current(a, superseded), "superseded");
+
+        // Identical answers, opposite situations. Nothing downstream of this
+        // predicate can distinguish them, which is the whole finding.
     }
 
     /// A worker takes requests until there are none, and a taken request is not
