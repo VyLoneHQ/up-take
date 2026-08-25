@@ -113,6 +113,15 @@ const MIN_CONTINUOUS_FPS: f64 = 2.0;
 ///
 /// Half, so that a run delivering most of what it asked for is continuous and
 /// one delivering a fraction of it is not.
+///
+/// **The value is pinned from both sides by tests**, which it was not when it
+/// was first written: `PR #67` round 3 mutated it from 0.5 to 1.0, doubling the
+/// floor for every throttled run, and the whole suite stayed green including
+/// the tests added that round to exercise this path. The suite then permitted
+/// anything in roughly `(0.075, 1.005)`, a 13x range, while this comment
+/// presented "half" as a deliberate choice. `a_fraction_much_larger_than_half`
+/// and `a_fraction_much_smaller_than_half` now bracket it to about
+/// `(0.36, 0.72]`. A green suite is not evidence for a constant nothing tests.
 const CONTINUOUS_FRACTION_OF_ASKED: f64 = 0.5;
 
 /// Whether the captured content behaved the same way for the whole cost window.
@@ -554,6 +563,35 @@ mod tests {
             Duration::from_millis(8_250),
             2,
             Some(Duration::ZERO)
+        ));
+    }
+
+    #[test]
+    fn a_fraction_much_larger_than_half_would_miss_this_freeze() {
+        // 600 ms throttle allows 1.667 fps. This run managed 1.2 fps across its
+        // active 40 s, which is most of what it asked for, so the 20 s freeze is
+        // real and must be refused. At a fraction of 1.0 the floor would be
+        // 1.667, this run would read as "not continuous", and the freeze would
+        // be waved through. Fails if the fraction rises above ~0.72.
+        assert!(!conditions_held(
+            Duration::from_secs(20),
+            Duration::from_secs(60),
+            48,
+            Some(Duration::from_millis(600))
+        ));
+    }
+
+    #[test]
+    fn a_fraction_much_smaller_than_half_would_refuse_this_static_run() {
+        // Same throttle and same silence, but only 0.6 fps across the active
+        // portion: barely a third of what the interval allows, so nothing
+        // demonstrates the content was continuous and the run is static rather
+        // than interrupted. Fails if the fraction drops below ~0.36.
+        assert!(conditions_held(
+            Duration::from_secs(20),
+            Duration::from_secs(60),
+            24,
+            Some(Duration::from_millis(600))
         ));
     }
 
