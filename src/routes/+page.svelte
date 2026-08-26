@@ -489,6 +489,35 @@ onMount(() => {
           ×
         </div>
       {/if}
+      <!-- The grab bar and the outside resize handles (roadmap 1.17(b2),
+           ADR-0028). Both are positioned from rectangles Rust hit-tests, never
+           from a layout computed here, for the reason `.close` gives, except
+           that getting the bar wrong fails *silently*: a bar drawn where it
+           cannot be grabbed is an area that just refuses to move.
+
+           `area.bar` is null when neither placement fits on a screen, which is
+           a real state rather than an error, so the guard is on the rectangle
+           and not only on `showBar`. `area.handles` is empty for any area at or
+           above `CHROME_INSIDE_SPAN`, because a large area resizes from the
+           bands on its own border, so this loop draws nothing in the common
+           case. -->
+      {#if area.showBar && area.bar}
+        <div
+          class="grab-bar"
+          style="transform: translate3d({area.bar.x}px, {area.bar.y}px, 0); width: {area
+            .bar.width}px; height: {area.bar.height}px"
+        >
+          <span class="grab-bar-label">{area.label}</span>
+        </div>
+      {/if}
+      {#if area.showBar}
+        {#each area.handles as handle, index (index)}
+          <div
+            class="outside-handle"
+            style="transform: translate3d({handle.x}px, {handle.y}px, 0); width: {handle.width}px; height: {handle.height}px"
+          ></div>
+        {/each}
+      {/if}
     {/each}
   {/if}
 
@@ -820,6 +849,73 @@ onMount(() => {
   font: 600 12px/1 system-ui, sans-serif;
   pointer-events: none;
   user-select: none;
+}
+
+/* The grab bar (ADR-0028 D1/D3): the move target for an area whose body is not
+   one. Positioned from Rust's rectangle for the same reason `.close` is.
+
+   `overflow: hidden` on a bar that is exactly as wide as its area is doing real
+   work rather than tidying: the bar inherits the area's width, an area may be
+   10 px across, and a label wider than its bar would otherwise paint over the
+   user's screen beside an area it does not belong to.
+
+   Deliberately NOT a click target in CSS. `pointer-events: none` is on every
+   piece of chrome in this file because the overlay is click-through in every
+   visible state (ADR-0016) and the global hook owns input; a `pointer-events`
+   value here would change nothing and would suggest the DOM was consulted. */
+.grab-bar {
+  left: 0;
+  top: 0;
+  position: absolute;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 3px;
+  background: rgba(120, 180, 255, 0.85);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+  user-select: none;
+}
+
+/* The type label. `1` line-height with the flex centring above rather than a
+   line-height that has to match the bar's height: `UT-F-77`'s menu defect was a
+   `font: 13px/1` against a fixed-height row cropping every descender, and this
+   is the same shape of element. The bar's height arrives from Rust in PHYSICAL
+   pixels divided by one `devicePixelRatio` (ADR-0011), so it is not a constant
+   this file may reason about. */
+.grab-bar-label {
+  font: 600 11px/1 system-ui, sans-serif;
+  color: rgba(12, 24, 40, 0.95);
+  white-space: nowrap;
+  padding: 0 4px;
+}
+
+/* The outside resize handles (ADR-0028 D4), on the four edge midpoints of an
+   area below `CHROME_INSIDE_SPAN`. Drawn rather than left invisible: an inside
+   resize band coincides with the area's own border, so it needs no mark of its
+   own, while these float in the space beside the area and would otherwise be
+   rectangles that resize it for reasons nothing on screen explains.
+
+   Smaller than the rectangle Rust hit-tests, and that is the one place in this
+   file where drawn and grabbable differ on purpose. The hit target is the full
+   18 px square; four solid 18 px blocks around a 20 px area would be more
+   chrome than area. The inset is inward on every side, so the drawn mark is
+   always strictly inside its own target, so a cursor on the mark is always on the
+   handle, which is the direction that must not fail. */
+.outside-handle {
+  left: 0;
+  top: 0;
+  position: absolute;
+  box-sizing: border-box;
+  border-radius: 2px;
+  background: rgba(120, 180, 255, 0.9);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+  transform-origin: center;
+  border: 5px solid transparent;
+  background-clip: content-box;
 }
 
 /* The close control. Positioned from the rectangle Rust hit-tests — never from

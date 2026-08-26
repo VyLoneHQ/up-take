@@ -8,3 +8,7 @@ cc 837c62b26f4cbd946fe912b8ef42a66183396ab865b287a1e40ae1af7586578b # shrinks to
 cc 4c337000a25791b8cc4ba5b394b98a7ce541158c23c266e3804e81acc8355715 # shrinks to bounds = Rect { origin: Point { x: 0, y: 1250 }, size: Size { width: 24, height: 191 } }, resize = West, dx = -1058, dy = 0
 cc 4bfe9d59bfb967dc7e4c7324763da6a65795c6c3681f54773004f193db596b7f # shrinks to bounds = Rect { origin: Point { x: 1407, y: -1083 }, size: Size { width: 1, height: 1 } }, resize = SouthEast, dx = 2579, dy = 0
 cc 48f39c4e2c95d6c2241c26c9caa8b4dd779c3d7af8978d17d7e1fc9b97528c74 # shrinks to bounds = Rect { origin: Point { x: 0, y: 1441 }, size: Size { width: 1, height: 1 } }, resize = South, dx = 0, dy = 0
+cc 479bc9090218db01510e6c82ce20815ba3c4232281e78ba1f13015502fc913d4 # shrinks to bounds = Rect { origin: Point { x: 0, y: 35 }, size: Size { width: 10, height: 10 } }
+cc 82ee0fadd923baea3a4290513c9422d1e8e244b834653a47d7db93354e53fe27 # shrinks to bounds = Rect { origin: Point { x: 100, y: 100 }, size: Size { width: 10, height: 30 } }, (dx, dy) = (-1, 6)
+cc 54b9f72e67a075fc4e472e30b289722553d8269cb53cd6a92fe4e49bec7d053a # shrinks to bounds = Rect { origin: Point { x: 100, y: 100 }, size: Size { width: 77, height: 10 } }, (dx, dy) = (0, -19)
+cc 074b2870dde212adf84071bf654ec7d29e081e9b8965954cebf18c541cc2fd3f # shrinks to bounds = Rect { origin: Point { x: 100, y: 100 }, size: Size { width: 50, height: 50 } }, fx = 0.0, fy = 0.0, edge = 0

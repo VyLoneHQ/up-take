@@ -502,7 +502,12 @@ impl CursorShape {
     const fn for_handle(handle: Handle) -> Self {
         match handle {
             Handle::Close => Self::Hand,
-            Handle::Body => Self::Move,
+            // The bar moves the area, so it shows the move cursor. ADR-0028 D3's
+            // struck second reason was that a *button* on the bar would widen
+            // ADR-0025's cursor scope; nothing here widens it. `LIVING_CURSORS`
+            // already claims three slots and this puts an existing shape into
+            // them, which is what that ADR's amendment says a bar may do.
+            Handle::Body | Handle::Bar => Self::Move,
             Handle::Resize(resize) => match resize {
                 Resize::North | Resize::South => Self::SizeNS,
                 Resize::East | Resize::West => Self::SizeWE,
@@ -2564,7 +2569,11 @@ fn living_lbutton_down(point: Point) -> bool {
             resize,
             start: bounds,
         },
-        Handle::Body => Gesture::Move { id, start: bounds },
+        // A bar grab and a body grab are the same gesture, and the point of
+        // the bar is that the second is unavailable to a pass-through area
+        // (ADR-0028 D3). Written out rather than folded into an `|` arm so
+        // this reads as a decision instead of as an accident.
+        Handle::Body | Handle::Bar => Gesture::Move { id, start: bounds },
     });
     DRAGGING.store(true, Ordering::SeqCst);
     LEFT_PENDING.store(true, Ordering::SeqCst);
@@ -2741,7 +2750,7 @@ fn classify_press(point: Point) -> Gesture {
                     resize,
                     start: bounds,
                 },
-                Handle::Body => Gesture::Move { id, start: bounds },
+                Handle::Body | Handle::Bar => Gesture::Move { id, start: bounds },
             };
         }
     }

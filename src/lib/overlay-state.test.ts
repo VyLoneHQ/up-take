@@ -142,6 +142,11 @@ describe('areaFramesCss', () => {
       layer: 'auto',
       kind: 'default',
       zoom: 1,
+      // 200x150, so it is above `CHROME_INSIDE_SPAN` on both axes: bands
+      // inside, and therefore no outside handles. Rust decides this; the
+      // fixture records what Rust sends for an area of this size.
+      bar: [100, 82, 200, 18],
+      handles: [],
     },
     {
       id: 9,
@@ -150,6 +155,8 @@ describe('areaFramesCss', () => {
       layer: 'front',
       kind: 'filter',
       zoom: 1,
+      bar: [-1000, -218, 300, 18],
+      handles: [],
     },
   ];
 

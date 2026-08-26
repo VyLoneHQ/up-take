@@ -77,6 +77,26 @@ const RESIZE_BAND: u32 = 8;
 /// How large the close control is, before adapting to size.
 const CLOSE_SPAN: u32 = 18;
 
+/// How thick the grab bar is. [ADR-0028](../../../Projects/UP-TAKE/DECISIONS/ADR-0028-grabbable-chrome-for-a-pass-through-area.md)
+/// D1.
+///
+/// The same 18 px as [`CLOSE_SPAN`], and that is a decision rather than a
+/// coincidence: both are outside chrome aimed at by the same pointer at the same
+/// distance from the same edge, so a bar thinner than the close control would be
+/// the harder target of the two while being the one meant to be *easier* to hit
+/// than a hairline border. They are separate constants because a later change to
+/// one must not silently move the other.
+const BAR_SPAN: u32 = 18;
+
+/// How large an outside resize handle is. [ADR-0028](../../../Projects/UP-TAKE/DECISIONS/ADR-0028-grabbable-chrome-for-a-pass-through-area.md)
+/// D4.
+///
+/// Square, and the same span as the close control for the same reason
+/// [`BAR_SPAN`] is. On an area narrower than this the handle overhangs the edge
+/// it belongs to, which is intended: it is *outside* chrome, and an area 10 px
+/// across cannot host a target big enough to aim at.
+const OUTSIDE_HANDLE_SPAN: u32 = 18;
+
 /// Which part of an area a point falls on.
 ///
 /// Order of precedence is decided in [`handle_at`], not here.
@@ -89,6 +109,29 @@ pub enum Handle {
     Resize(Resize),
     /// Anywhere else inside: drag to move the whole area.
     Body,
+    /// The grab bar outside the area's top (or bottom) edge: drag to move the
+    /// whole area, exactly as [`Handle::Body`] does.
+    ///
+    /// # Why a second move grab rather than widening `Body`
+    ///
+    /// `Body` is *the area's own rectangle*, and a pass-through area's rectangle
+    /// is precisely what it gives away
+    /// ([ADR-0024](../../../Projects/UP-TAKE/DECISIONS/ADR-0024-direct-manipulation-in-living.md)
+    /// §2). Every rule that distinguishes chrome from body is written as
+    /// "is it `Body`?", which covers [`is_chrome_at`] here,
+    /// `AreaStore::grab_test` in `area`, and the region list they must agree
+    /// with. So a bar reported as
+    /// `Body` would be filtered out for the one kind of area it exists to
+    /// rescue. As a distinct variant it is chrome by construction, and every one
+    /// of those rules admits it without being edited.
+    ///
+    /// It is a separate variant rather than `Resize`-like data on `Body` for the
+    /// same reason: the callers that turn a handle into a gesture and into a
+    /// cursor shape are exhaustive matches, so this variant makes them fail to
+    /// compile until each has said what a bar grab means. Roadmap 1.27's record
+    /// of *two call sites that must move together or neither does* is why that
+    /// is worth a variant.
+    Bar,
 }
 
 /// Which edge or corner a resize is anchored to. The *other* side stays put.
@@ -153,6 +196,163 @@ fn resize_band(bounds: Rect) -> Option<i64> {
     ))
 }
 
+/// The span of an area's outside resize handles, or `None` when it has none.
+///
+/// The mirror image of [`resize_band`], and deliberately its exact complement:
+/// an area has inside bands or outside handles, never both and never neither.
+/// Extracted for the same reason: [`chrome_rects`], [`handle_at`] and
+/// [`grab_bar`] all have to agree about which of the two an area is, and three
+/// copies of `chrome_is_outside` is how they would stop agreeing.
+fn outside_handle_span(bounds: Rect) -> Option<u32> {
+    chrome_is_outside(bounds).then_some(OUTSIDE_HANDLE_SPAN)
+}
+
+/// The monitor an area's outside chrome is placed against: the one holding its
+/// top-right pixel.
+///
+/// Factored out of [`close_control`] when [`grab_bar`] needed the same answer.
+/// Two chrome surfaces disagreeing about which screen an area is *on* would put
+/// them on different monitors, and `index_at` rather than a local `find` because
+/// this repository already keeps one containment rule for exactly this reason
+/// (`I-30`, `I-31`).
+fn chrome_home(bounds: Rect, monitors: &[Rect]) -> Option<Rect> {
+    let home_pixel = Point::new(clamp_to_i32(bounds.right() - 1), bounds.origin.y);
+    crate::geometry::index_at(monitors.iter().copied(), home_pixel).map(|index| monitors[index])
+}
+
+/// The first candidate that lands on a screen, the area's own monitor first,
+/// then the desktop.
+///
+/// Two passes, in that order, because a candidate that fits on a *neighbouring*
+/// monitor reads as the chrome having wandered off when the area merely sits
+/// near an internal seam. [`close_control`]'s doc carries the full argument;
+/// this is that loop, shared rather than copied.
+fn first_fitting(candidates: &[Rect], home: Option<Rect>, monitors: &[Rect]) -> Option<Rect> {
+    for require_home in [true, false] {
+        for &candidate in candidates {
+            let fits = if require_home {
+                home.is_some_and(|h| h.intersection(candidate) == Some(candidate))
+            } else {
+                is_on_desktop(candidate, monitors)
+            };
+            if fits {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// The grab bar: a move target for an area whose body is not one
+/// ([ADR-0028](../../../Projects/UP-TAKE/DECISIONS/ADR-0028-grabbable-chrome-for-a-pass-through-area.md)
+/// D1 and D3).
+///
+/// Outside the area, running its full width, above the top edge where there is
+/// room and below the bottom edge where there is not. `None` means neither
+/// placement lands on a screen.
+///
+/// # Why `None` is a legitimate answer here and is not for the close control
+///
+/// [`close_control`] falls back to a shrunken control *inside* the area, because
+/// an area that cannot be dismissed is permanent for the session. An area that
+/// cannot be moved is not permanent. It can still be dismissed, and in
+/// `Placement` its body moves it like any other. So the bar has no last resort:
+/// where it does not fit, the area behaves exactly as it does today, which is a
+/// gap rather than a trap.
+///
+/// # Why it is flush against the edge rather than nudged one pixel in
+///
+/// `close_control` overlaps the area's corner by a pixel so the cursor never
+/// crosses a seam belonging to neither, and that is a **corner** problem: the
+/// diagonal route from the area to the control passes outside both. A bar runs
+/// the whole edge, so the row directly below it *is* the area, and there is no
+/// seam to cover. Being flush also keeps the drawn rectangle and the hit-tested
+/// one identical, where a nudged bar would have to be trimmed for
+/// [`chrome_rects`] and drawn untrimmed, which is the F-13 split in miniature.
+///
+/// # Why it clears the outside handles
+///
+/// D4's north handle wants the same edge. On a small area the bar therefore sits
+/// one handle-span further out, so the two are contiguous rather than
+/// overlapping and neither has to win a precedence argument against the other.
+#[must_use]
+pub fn grab_bar(bounds: Rect, monitors: &[Rect]) -> Option<Rect> {
+    let clearance = i64::from(outside_handle_span(bounds).unwrap_or(0));
+    let span = i64::from(BAR_SPAN);
+    let candidates = [
+        Rect::new(
+            bounds.origin.x,
+            clamp_to_i32(i64::from(bounds.origin.y) - span - clearance),
+            bounds.size.width,
+            BAR_SPAN,
+        ),
+        Rect::new(
+            bounds.origin.x,
+            clamp_to_i32(bounds.bottom() + clearance),
+            bounds.size.width,
+            BAR_SPAN,
+        ),
+    ];
+    first_fitting(&candidates, chrome_home(bounds, monitors), monitors)
+}
+
+/// The four outside resize handles of a small area, each with the resize it
+/// performs. [ADR-0028](../../../Projects/UP-TAKE/DECISIONS/ADR-0028-grabbable-chrome-for-a-pass-through-area.md)
+/// D4. `None` for an area large enough to carry inside bands.
+///
+/// # Edge midpoints, not corners
+///
+/// The close control already occupies a corner, and *which* corner changes as
+/// the area moves between monitors. Corner handles would therefore need a
+/// precedence rule whose answer moves with the area. Midpoints never collide
+/// with it by construction, so there is no rule to get wrong. The cost is
+/// stated in the ADR and is real: **no diagonal resize below
+/// [`CHROME_INSIDE_SPAN`]**. Two edge drags do the same job, and on an area
+/// 10 px across a diagonal handle would be larger than the thing it resizes.
+///
+/// Not fitted to a monitor, unlike [`close_control`] and [`grab_bar`]. A handle
+/// past the edge of the desktop is a target the cursor cannot reach, which
+/// costs a resize the user can still perform by dismiss-and-redraw; a *close
+/// control* past that edge would make the area permanent. The two failures are
+/// not the same size and do not deserve the same machinery.
+fn outside_handles(bounds: Rect) -> Option<[(Resize, Rect); 4]> {
+    let span = i64::from(outside_handle_span(bounds)?);
+    let half = span / 2;
+    let centre_x = i64::from(bounds.origin.x) + i64::from(bounds.size.width) / 2;
+    let centre_y = i64::from(bounds.origin.y) + i64::from(bounds.size.height) / 2;
+    let side = clamp_to_u32(span);
+    let at = |x: i64, y: i64| Rect::new(clamp_to_i32(x), clamp_to_i32(y), side, side);
+    Some([
+        (
+            Resize::North,
+            at(centre_x - half, i64::from(bounds.origin.y) - span),
+        ),
+        (Resize::South, at(centre_x - half, bounds.bottom())),
+        (
+            Resize::West,
+            at(i64::from(bounds.origin.x) - span, centre_y - half),
+        ),
+        (Resize::East, at(bounds.right(), centre_y - half)),
+    ])
+}
+
+/// The rectangles of [`outside_handles`], without the resize each performs:
+/// the drawable view, empty for an area large enough to carry inside bands.
+///
+/// The host emits these so the frontend draws exactly what the hook hit-tests.
+/// An outside handle has **no visible referent of its own**, unlike an inside
+/// band, which coincides with the area's drawn border: it floats in the space
+/// beside the area, so a handle that is hit-tested and not drawn is a rectangle
+/// that resizes an area for reasons nothing on screen explains.
+#[must_use]
+pub fn outside_resize_handles(bounds: Rect) -> Vec<Rect> {
+    outside_handles(bounds)
+        .into_iter()
+        .flatten()
+        .map(|(_, rect)| rect)
+        .collect()
+}
+
 /// Every rectangle of an area's **chrome** — the parts that are not its body.
 ///
 /// # What this is for
@@ -177,14 +377,20 @@ fn resize_band(bounds: Rect) -> Option<i64> {
 /// which costs a redundant `contains` test and buys not having to special-case
 /// eight rects instead of four.
 ///
-/// A small area's chrome is its close control alone: it has no resize band to
-/// grab (`handle_at` returns `Body` everywhere inside it), which is the gap task
-/// 1.17(b2)'s outside handles close.
+/// A small area's chrome used to be its close control alone, because it has no
+/// resize band to grab, and **task 1.17(b2) closes that gap here**: below
+/// [`CHROME_INSIDE_SPAN`] the four bands are replaced by [`outside_handles`],
+/// which sit outside the area instead of being carved out of it.
+///
+/// Every area also contributes its [`grab_bar`] when one fits, which is what
+/// makes a pass-through area movable in `Living` (ADR-0028 D1/D3).
 #[must_use]
 pub fn chrome_rects(bounds: Rect, monitors: &[Rect]) -> Vec<Rect> {
-    let mut rects = Vec::with_capacity(5);
+    let mut rects = Vec::with_capacity(6);
     rects.push(close_control(bounds, monitors));
+    rects.extend(grab_bar(bounds, monitors));
     let Some(band) = resize_band(bounds) else {
+        rects.extend(outside_resize_handles(bounds));
         return rects;
     };
     let span = clamp_to_u32(band);
@@ -218,7 +424,7 @@ pub fn chrome_rects(bounds: Rect, monitors: &[Rect]) -> Vec<Rect> {
 pub fn is_chrome_at(bounds: Rect, point: Point, monitors: &[Rect]) -> bool {
     matches!(
         handle_at(bounds, point, monitors),
-        Some(Handle::Close | Handle::Resize(_))
+        Some(Handle::Close | Handle::Resize(_) | Handle::Bar)
     )
 }
 
@@ -267,38 +473,40 @@ pub fn close_control(bounds: Rect, monitors: &[Rect]) -> Rect {
     let span = i64::from(CLOSE_SPAN);
     // Each corner is nudged one pixel *into* the area, so the control's near
     // corner overlaps the area's rather than merely touching it — see the note
-    // on the gap above.
+    // on the gap above. [`grab_bar`] deliberately does **not** do this; its doc
+    // says why a bar needs no nudge where a corner control does.
     let top = i64::from(bounds.origin.y) - span + 1;
     let bottom = bounds.bottom() - 1;
     let right = bounds.right() - 1;
     let left = i64::from(bounds.origin.x) - span + 1;
     let candidates = [
-        (right, top),    // top-right (preferred)
-        (left, top),     // top-left
-        (right, bottom), // bottom-right
-        (left, bottom),  // bottom-left
+        Rect::new(
+            clamp_to_i32(right),
+            clamp_to_i32(top),
+            CLOSE_SPAN,
+            CLOSE_SPAN,
+        ),
+        Rect::new(
+            clamp_to_i32(left),
+            clamp_to_i32(top),
+            CLOSE_SPAN,
+            CLOSE_SPAN,
+        ),
+        Rect::new(
+            clamp_to_i32(right),
+            clamp_to_i32(bottom),
+            CLOSE_SPAN,
+            CLOSE_SPAN,
+        ),
+        Rect::new(
+            clamp_to_i32(left),
+            clamp_to_i32(bottom),
+            CLOSE_SPAN,
+            CLOSE_SPAN,
+        ),
     ];
-    // The monitor holding the area's own top-right pixel; guaranteed inside the
-    // area for any non-empty one. `index_at` rather than its own `find`, so this
-    // is not a sixth copy of the containment rule (`I-30`). The quality-bars
-    // argument does not bite inside this crate, but `index_at`'s own doc calls it
-    // *the* answer to "which of these rectangles is this point on", and a
-    // sentence like that has to be true here too or it is decoration.
-    let home_pixel = Point::new(clamp_to_i32(right), bounds.origin.y);
-    let home = crate::geometry::index_at(monitors.iter().copied(), home_pixel)
-        .map(|index| monitors[index]);
-    for require_home in [true, false] {
-        for (x, y) in candidates {
-            let candidate = Rect::new(clamp_to_i32(x), clamp_to_i32(y), CLOSE_SPAN, CLOSE_SPAN);
-            let fits = if require_home {
-                home.is_some_and(|h| h.intersection(candidate) == Some(candidate))
-            } else {
-                is_on_desktop(candidate, monitors)
-            };
-            if fits {
-                return candidate;
-            }
-        }
+    if let Some(fitted) = first_fitting(&candidates, chrome_home(bounds, monitors), monitors) {
+        return fitted;
     }
     let inside = CLOSE_SPAN
         .min(bounds.size.width)
@@ -331,16 +539,39 @@ pub fn handle_at(bounds: Rect, point: Point, monitors: &[Rect]) -> Option<Handle
         return Some(Handle::Close);
     }
     if !bounds.contains(point) {
+        // The rest of the outside chrome, and it is reached **only** here, after
+        // the bounds check has failed.
+        //
+        // ⚠️ **That ordering is a BELT on top of the braces, and an earlier
+        // revision of this comment claimed it was what keeps the area's own
+        // pixels safe. It is not, and the drill said so:** moving these two
+        // tests above the bounds check leaves every property green, because
+        // `grab_bar` and `outside_handles` are placed FLUSH and so contain no
+        // point inside `bounds` to begin with. Flushness is the guarantee; this
+        // order is what stops a later nudge, the one `close_control` needs and
+        // these deliberately do not, from turning into a silent regression.
+        // Nudge the bar and reorder these two together and
+        // `the_grab_bar_never_takes_a_pixel_of_the_area_itself` fails, which is
+        // the case that matters: on a large area the first row is the north
+        // resize band, so moving would quietly replace resizing along the whole
+        // top edge.
+        if let Some(handles) = outside_handles(bounds) {
+            for (resize, rect) in handles {
+                if rect.contains(point) {
+                    return Some(Handle::Resize(resize));
+                }
+            }
+        }
+        if grab_bar(bounds, monitors).is_some_and(|bar| bar.contains(point)) {
+            return Some(Handle::Bar);
+        }
         return None;
     }
-    // A small area is all body. Resize bands carved out of the inside would
+    // A small area's *inside* is all body. Resize bands carved out of it would
     // leave nothing to drag, and at a few pixels across there is no room to aim
-    // at one edge rather than another anyway. Outside resize handles are task
-    // 1.17(b2)'s (deferred from 1.6, then from 1.7); until then a small area
-    // moves and dismisses but does not resize, which is a gap rather than a dead
-    // end — dismiss and redraw is one gesture each. Note the consequence for a
-    // *pass-through* small area under ADR-0024 §2: its chrome is the close
-    // control alone, so it can be dismissed but not resized in LIVING.
+    // at one edge rather than another anyway, so its resize handles sit
+    // outside, and the branch above has already answered for them. This is task
+    // 1.17(b2) discharging the deferral made in 1.6 and repeated in 1.7.
     let Some(band) = resize_band(bounds) else {
         return Some(Handle::Body);
     };
@@ -1739,6 +1970,40 @@ mod tests {
         }
     }
 
+    prop_compose! {
+        /// An area **on the rig**, sized across the [`CHROME_INSIDE_SPAN`]
+        /// boundary in both directions.
+        ///
+        /// [`any_area`] is deliberately not reused here and the difference is
+        /// what makes these properties able to fail. It ranges over
+        /// ±3000 px, mostly off every monitor, so `close_control` and
+        /// `grab_bar` fall through to placements that barely exercise the
+        /// fitting logic, and sizes `MIN_AREA_SPAN..1000`, which is
+        /// overwhelmingly *large*, so `outside_handles` is `None` for almost
+        /// every case it generates. A property about small-area chrome drawn
+        /// from that strategy is a property about an empty set.
+        fn any_chromed_area()(
+            x in 100i32..2000,
+            y in 100i32..1100,
+            width in MIN_AREA_SPAN..120,
+            height in MIN_AREA_SPAN..120,
+        ) -> Rect {
+            Rect::new(x, y, width, height)
+        }
+    }
+
+    /// A point offset from an area's top-left corner, reaching every chrome
+    /// surface an area can have.
+    ///
+    /// The bar sits at most `BAR_SPAN + OUTSIDE_HANDLE_SPAN` (36 px) beyond an
+    /// edge, so ±60 covers every outside rectangle with room to spare while
+    /// keeping the sampling **dense enough to land on an 18 px target**. A
+    /// uniform draw over the desktop does not: it left `the_chrome_rect_list_and_the_hit_test_agree_exactly`
+    /// green while `chrome_rects` had been stripped of all four outside handles.
+    fn chrome_neighbourhood() -> impl Strategy<Value = (i32, i32)> {
+        (-60i32..180, -60i32..180)
+    }
+
     fn any_resize() -> impl Strategy<Value = Resize> {
         prop::sample::select(ALL_RESIZES.as_slice())
     }
@@ -1865,6 +2130,146 @@ mod tests {
             let monitors = rig();
             let bounds = Rect::new(x, y, width, height);
             prop_assert_eq!(settle_move(bounds, &monitors), bounds);
+        }
+
+        #[test]
+        fn the_chrome_rect_list_and_the_hit_test_agree_exactly(
+            bounds in any_chromed_area(),
+            (dx, dy) in chrome_neighbourhood(),
+        ) {
+            // ADR-0028 D4's *"implementation constraint that is not optional"*,
+            // as a property rather than as examples: a point is inside one of
+            // `chrome_rects` **iff** `handle_at` answers with a chrome handle
+            // there.
+            //
+            // This repository already had `hit_testing_and_the_region_list_agree`
+            // in `area`, and it is NOT this: it compares `interactive_regions`
+            // with `hit_test`, both of which branch on `is_interactive` and take
+            // the *same* side of the branch, so an error shared by both is
+            // invisible to it. This compares the rect list against the predicate
+            // directly, which is where D4 says the drift would be: six
+            // rectangles now come from three separate placement rules, and
+            // `I-30`/`I-31` are what a containment rule with a second
+            // implementation costs here.
+            let monitors = rig();
+            let point = Point::new(
+                bounds.origin.x.saturating_add(dx),
+                bounds.origin.y.saturating_add(dy),
+            );
+            prop_assert_eq!(
+                crate::geometry::point_in_any(&chrome_rects(bounds, &monitors), point),
+                is_chrome_at(bounds, point, &monitors),
+                "bounds {:?} point {:?}",
+                bounds,
+                point
+            );
+        }
+
+        #[test]
+        fn every_chrome_rectangle_is_grabbable_at_its_own_centre(
+            bounds in any_chromed_area(),
+        ) {
+            // The other direction of the same constraint, and the one uniform
+            // point sampling cannot reach: a rectangle **listed** as chrome must
+            // actually answer as chrome. Sampling points and hoping one lands on
+            // an 18 px handle is not a test, it is a lottery. Measured, not
+            // assumed: dropping `outside_handles` from `chrome_rects` left the
+            // sampled property GREEN.
+            //
+            // Reading each rect's own centre makes the coverage exact rather
+            // than probabilistic. Every rect in the list gets exactly one point
+            // that must agree, so a rect that is listed and not hit-tested fails
+            // here on the first case that produces it.
+            let monitors = rig();
+            for rect in chrome_rects(bounds, &monitors) {
+                let centre = Point::new(
+                    clamp_to_i32(i64::from(rect.origin.x) + i64::from(rect.size.width) / 2),
+                    clamp_to_i32(i64::from(rect.origin.y) + i64::from(rect.size.height) / 2),
+                );
+                prop_assert!(
+                    is_chrome_at(bounds, centre, &monitors),
+                    "{:?} is listed as chrome of {:?} and its centre {:?} grabs {:?}",
+                    rect,
+                    bounds,
+                    centre,
+                    handle_at(bounds, centre, &monitors)
+                );
+            }
+        }
+
+        #[test]
+        fn the_grab_bar_never_takes_a_pixel_of_the_area_itself(
+            bounds in any_chromed_area(),
+            fx in 0.0f64..1.0,
+            fy in 0.0f64..1.0,
+            edge in 0usize..4,
+        ) {
+            // The precedence `handle_at` encodes, as a property. A bar drawn
+            // flush against the top edge is one pixel away from the north resize
+            // band, and testing it before the bounds check would hand it that
+            // whole row: every large area would silently move instead of
+            // resizing along its entire top edge.
+            //
+            // Written over the area's interior rather than over the bar, because
+            // the defect is *inside* the area and a test that only ever looked
+            // at the bar could not see it.
+            //
+            // ⚠️ **The interior is sampled with one coordinate PINNED to an
+            // edge, and a version that scaled both by a float could not fail.**
+            // The bar overlaps at most the area's first or last row, so the
+            // defect lives on exactly two of the `height` rows; drawing `fy`
+            // uniformly puts a case there with probability `1/height`, and the
+            // mutation that nudges the bar inward *and* tests it before the
+            // bounds check ran GREEN through 256 such cases. Pinning one
+            // coordinate to an edge makes the boundary the common case instead
+            // of the rare one.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let along = |span: u32, f: f64| (f64::from(span - 1) * f) as i32;
+            let (dx, dy) = match edge {
+                0 => (along(bounds.size.width, fx), 0),
+                1 => (
+                    along(bounds.size.width, fx),
+                    clamp_to_i32(i64::from(bounds.size.height) - 1),
+                ),
+                2 => (0, along(bounds.size.height, fy)),
+                _ => (
+                    clamp_to_i32(i64::from(bounds.size.width) - 1),
+                    along(bounds.size.height, fy),
+                ),
+            };
+            let point = Point::new(bounds.origin.x + dx, bounds.origin.y + dy);
+            let monitors = rig();
+            prop_assert!(bounds.contains(point));
+            prop_assert_ne!(
+                handle_at(bounds, point, &monitors),
+                Some(Handle::Bar),
+                "the bar answered for a point inside the area: {:?} in {:?}",
+                point,
+                bounds
+            );
+        }
+
+        #[test]
+        fn the_grab_bar_and_the_outside_handles_never_overlap(
+            bounds in any_chromed_area(),
+        ) {
+            // D1 and D4 both want the top edge. They are kept apart by the bar
+            // clearing a handle-span, and this is that clearance stated as the
+            // property it exists to buy, rather than as the arithmetic, which
+            // is what it would restate.
+            let monitors = rig();
+            let Some(bar) = grab_bar(bounds, &monitors) else { return Ok(()) };
+            let Some(handles) = outside_handles(bounds) else { return Ok(()) };
+            for (resize, rect) in handles {
+                prop_assert_eq!(
+                    bar.intersection(rect),
+                    None,
+                    "the bar {:?} overlaps the {:?} handle {:?}",
+                    bar,
+                    resize,
+                    rect
+                );
+            }
         }
 
         #[test]

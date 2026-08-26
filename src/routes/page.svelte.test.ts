@@ -338,7 +338,6 @@ describe('the overlay renders what Rust tells it and nothing more', () => {
 });
 
 describe('an area renders the badges its state earns and no others', () => {
-  /** One area on the wire, at natural zoom, with the fields tests vary. */
   /**
    * One area on the wire, with `zoom` DERIVED FROM `kind` the way Rust derives
    * it (UP-TAKE `I-309`).
@@ -367,6 +366,11 @@ describe('an area renders the badges its state earns and no others', () => {
       // value only has to be magnified, and inventing a bigger one would imply
       // this file knows a factor Rust no longer defines.
       zoom: bornMagnified(kind) ? 2 : 1,
+      // 400x300, so above `CHROME_INSIDE_SPAN` on both axes: a grab bar flush
+      // above the top edge, and NO outside handles, because an area this size
+      // resizes from the bands drawn on its own border (ADR-0028 D1/D4).
+      bar: [100, 82, 400, 18],
+      handles: [],
       ...overrides,
     };
   }
@@ -565,5 +569,216 @@ describe('an area renders the badges its state earns and no others', () => {
 
     await emit('overlay://pin', { id: 1, url: null });
     expect(container.querySelectorAll('img.pin')).toHaveLength(0);
+  });
+});
+
+/**
+ * Roadmap 1.17(b2)'s frontend half, which is the half
+ * [ADR-0028](../../Projects/UP-TAKE/DECISIONS/ADR-0028-grabbable-chrome-for-a-pass-through-area.md)
+ * names as the risk in as many words: *"the bar is a **frontend** surface ...
+ * either `I-23` gets a harness first, or this build's frontend half is verified
+ * on the rig by hand"*. `I-23` landed, so these are that harness being used for
+ * the thing it was asked for.
+ *
+ * `UT-F-55` is the worked example the ADR cites -- a change whose Rust half was
+ * correct with seven unit tests and four confirmed mutations, and whose Svelte
+ * half printed *frozen* over three live screens. Every test below was drilled by
+ * mutating the template and confirmed to go red.
+ */
+describe('an area outside chrome appears with its hover and not otherwise', () => {
+  /**
+   * This block's own area fixture. `zoom` is derived from `kind` for the same
+   * reason the fixture above derives it (`I-309`), and it is spelled out here
+   * rather than left at a literal because a **second** fixture in the same file
+   * quietly hardcoding the one field `I-309` removed is `UT-F-76`'s shape: five
+   * enumerations of one class, each written by its author, each coming back
+   * short.
+   *
+   * It changes nothing today, because every area this block builds is
+   * `default` or `filter` and both are born natural. That is exactly why it
+   * would have survived unnoticed until the first test here passed
+   * `kind: 'upscale'`.
+   */
+  function area(overrides: Record<string, unknown> = {}) {
+    const kind = (overrides.kind as AreaKind) ?? 'default';
+    return {
+      id: 1,
+      rect: [100, 100, 400, 300],
+      close: [492, 92, 18, 18],
+      layer: 'auto',
+      kind,
+      zoom: bornMagnified(kind) ? 2 : 1,
+      bar: [100, 82, 400, 18],
+      handles: [],
+      ...overrides,
+    };
+  }
+
+  /** A 20x20 area: below `CHROME_INSIDE_SPAN`, so Rust sends four handles. */
+  function smallArea(overrides: Record<string, unknown> = {}) {
+    return area({
+      rect: [300, 300, 20, 20],
+      close: [319, 283, 18, 18],
+      // Clearing the north handle, which is what stops the two overlapping.
+      bar: [300, 264, 20, 18],
+      handles: [
+        [301, 282, 18, 18],
+        [301, 320, 18, 18],
+        [282, 301, 18, 18],
+        [320, 301, 18, 18],
+      ],
+      ...overrides,
+    });
+  }
+
+  /** Tells the component the pointer is on this area. */
+  async function hover(id: number | null, chromeOnly = false) {
+    await emit('overlay://hover', { id, chromeOnly });
+  }
+
+  test('no bar is drawn until the pointer is on the area', async () => {
+    // The whole of D2: hidden until hovered. A bar that drew unconditionally
+    // would be a permanent 18 px strip above every area on the user's screen,
+    // which is the objection D1 records against putting it inside.
+    const { container } = await mount();
+    await emit('overlay://state', state({ state: 'living' }));
+    await emit('overlay://areas', { areas: [area()] });
+    expect(container.querySelectorAll('.grab-bar')).toHaveLength(0);
+
+    await hover(1);
+    expect(container.querySelectorAll('.grab-bar')).toHaveLength(1);
+  });
+
+  test('the bar is placed at the rectangle Rust sent, not at one computed here', async () => {
+    // The silent failure `AreaView.bar` warns about. A bar laid out on this side
+    // would still be *visible*, so nothing looks broken; the area would simply
+    // refuse to move, because the hook hit-tests Rust's rectangle and the user
+    // is aiming at this one.
+    const { container } = await mount();
+    await emit('overlay://state', state({ state: 'living' }));
+    await emit('overlay://areas', { areas: [area()] });
+    await hover(1);
+
+    const bar = container.querySelector('.grab-bar') as HTMLElement;
+    // dpr is 1 and the origin is [0, 0] in `state()`, so CSS px equal physical.
+    expect(bar.style.transform).toBe('translate3d(100px, 82px, 0)');
+    expect(bar.style.width).toBe('400px');
+    expect(bar.style.height).toBe('18px');
+  });
+
+  test('the bar follows Rust when it has flipped below the area', async () => {
+    // 🔴 **THE TEST ABOVE COULD NOT FAIL WITHOUT THIS ONE, and the drill is what
+    // said so.** Rewriting the template to lay the bar out here --
+    // `translate3d(area.rect.x, area.rect.y - 18)` -- left it GREEN, because
+    // that fixture's area sits well inside the monitor, so Rust's answer and the
+    // naive recomputation are the same rectangle. A test whose fixture cannot
+    // distinguish the two hypotheses is not testing between them.
+    //
+    // D1's flip is what separates them: an area at the top of a monitor has no
+    // room above, so its bar goes BELOW. A frontend that assumed *above* would
+    // draw the bar over the area's own content and 18 px away from the rectangle
+    // the hook tests -- visible, wrong, and silent.
+    const { container } = await mount();
+    await emit('overlay://state', state({ state: 'living' }));
+    await emit('overlay://areas', {
+      areas: [area({ rect: [100, 0, 400, 300], bar: [100, 300, 400, 18] })],
+    });
+    await hover(1);
+
+    const bar = container.querySelector('.grab-bar') as HTMLElement;
+    expect(bar.style.transform).toBe('translate3d(100px, 300px, 0)');
+  });
+
+  test('the bar says what type the area is', async () => {
+    // D3: a label and nothing clickable. The words are 1.18's to settle; that
+    // the bar carries the AREA'S type rather than a fixed string is not.
+    const { container } = await mount();
+    await emit('overlay://state', state({ state: 'living' }));
+    await emit('overlay://areas', { areas: [area({ id: 1, kind: 'filter' })] });
+    await hover(1);
+
+    expect(container.querySelector('.grab-bar-label')?.textContent).toBe(
+      'Filter',
+    );
+  });
+
+  test('an area whose bar fits nowhere draws no bar and is otherwise unharmed', async () => {
+    // `bar: null` is a real state -- neither placement lands on a screen -- and
+    // it must degrade to the pre-1.17(b2) behaviour rather than to a blank
+    // rectangle at NaN, which would be chrome that hides what is under it while
+    // being ungrabbable.
+    const { container } = await mount();
+    await emit('overlay://state', state({ state: 'living' }));
+    await emit('overlay://areas', { areas: [area({ bar: null })] });
+    await hover(1);
+
+    expect(container.querySelectorAll('.grab-bar')).toHaveLength(0);
+    expect(container.querySelectorAll('.area')).toHaveLength(1);
+    expect(container.querySelectorAll('.close')).toHaveLength(1);
+  });
+
+  test('a large area draws no outside handles, a small one draws four', async () => {
+    // D4's threshold, from the frontend's side. An empty `handles` list means
+    // *this area resizes from the bands on its own border*, not *this area
+    // cannot be resized*, so drawing four blocks around every large area would
+    // be chrome asserting something false.
+    const { container } = await mount();
+    await emit('overlay://state', state({ state: 'living' }));
+    await emit('overlay://areas', { areas: [area()] });
+    await hover(1);
+    expect(container.querySelectorAll('.outside-handle')).toHaveLength(0);
+
+    await emit('overlay://areas', { areas: [smallArea()] });
+    await hover(1);
+    expect(container.querySelectorAll('.outside-handle')).toHaveLength(4);
+  });
+
+  test('the outside handles are placed where Rust put them', async () => {
+    const { container } = await mount();
+    await emit('overlay://state', state({ state: 'living' }));
+    await emit('overlay://areas', { areas: [smallArea()] });
+    await hover(1);
+
+    const placed = [...container.querySelectorAll('.outside-handle')].map(
+      (node) => (node as HTMLElement).style.transform,
+    );
+    expect(placed).toEqual([
+      'translate3d(301px, 282px, 0)',
+      'translate3d(301px, 320px, 0)',
+      'translate3d(282px, 301px, 0)',
+      'translate3d(320px, 301px, 0)',
+    ]);
+  });
+
+  test('the whole outside surface leaves together when the hover does', async () => {
+    // One surface as far as the user is concerned. A hover-out that removed the
+    // bar and left four handles floating beside an area would read as chrome
+    // failing to draw, which is why `showBar` is deliberately the same condition
+    // as `showClose` rather than a second rule.
+    const { container } = await mount();
+    await emit('overlay://state', state({ state: 'living' }));
+    await emit('overlay://areas', { areas: [smallArea()] });
+    await hover(1);
+    expect(container.querySelectorAll('.grab-bar')).toHaveLength(1);
+    expect(container.querySelectorAll('.outside-handle')).toHaveLength(4);
+
+    await hover(null);
+    expect(container.querySelectorAll('.grab-bar')).toHaveLength(0);
+    expect(container.querySelectorAll('.outside-handle')).toHaveLength(0);
+    expect(container.querySelectorAll('.close')).toHaveLength(0);
+  });
+
+  test('a pass-through area the cursor is merely inside still gets its bar', async () => {
+    // `chromeOnly` withholds the grab HIGHLIGHT, because a press on a
+    // pass-through body goes to the app underneath. It must not withhold the
+    // bar: the bar is the one surface on such an area that a press DOES act on,
+    // so hiding it there would hide the feature exactly where it is needed.
+    const { container } = await mount();
+    await emit('overlay://state', state({ state: 'living' }));
+    await emit('overlay://areas', { areas: [area({ kind: 'filter' })] });
+    await hover(1, true);
+
+    expect(container.querySelectorAll('.grab-bar')).toHaveLength(1);
+    expect(container.querySelectorAll('.area.hovered')).toHaveLength(0);
   });
 });
