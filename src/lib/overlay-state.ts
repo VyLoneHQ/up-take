@@ -133,6 +133,29 @@ export interface AreaView {
    * discoverable.
    */
   zoom: number;
+  /**
+   * The grab bar's rectangle, or `null` when neither placement fits on a
+   * screen. Roadmap 1.17(b2), ADR-0028 D1.
+   *
+   * Laid out by Rust for the same reason {@link AreaView.close} is, and the
+   * consequence of getting it wrong is worse rather than equal: the hook
+   * hit-tests this exact rectangle, so a bar drawn from a second calculation
+   * here would be a bar the user can see and cannot grab. That failure is
+   * silent: the area simply refuses to move.
+   *
+   * `null` is a real state, not an error. The area then behaves as it did
+   * before 1.17(b2): dismissable, resizable, and movable only from its body.
+   */
+  bar: PhysRect | null;
+  /**
+   * The outside resize handles: four below `CHROME_INSIDE_SPAN`, and **empty
+   * above it**, where the bands are part of the area's own drawn border
+   * (ADR-0028 D4).
+   *
+   * Empty is the common case and means *this area resizes from its edges*, not
+   * *this area cannot be resized*.
+   */
+  handles: PhysRect[];
 }
 
 /** The payload of the `overlay://areas` event: every area, bottom-first. */
@@ -292,10 +315,55 @@ export interface AreaFrame {
    * every highlighted area shows its control, and a pass-through area the cursor
    * is inside shows the control alone. */
   showClose: boolean;
+  /** The grab bar ready to draw, or `null` when this area has none. */
+  bar: CssRect | null;
+  /** The outside resize handles ready to draw; empty for a large area. */
+  handles: CssRect[];
+  /** Draw this area's grab bar and outside handles. The same rule as
+   * {@link AreaFrame.showClose}. The whole of an area's outside chrome appears
+   * and disappears together, so a hover cannot leave half of it on screen. */
+  showBar: boolean;
+  /** What the grab bar says: this area's type, in words (ADR-0028 D3). */
+  label: string;
   /** This area is the source of a live move or resize: draw it as where the
    * area is coming *from*, not as a second area. */
   source: boolean;
 }
+
+/**
+ * What the grab bar calls each area type (ADR-0028 D3).
+ *
+ * # Why a `Record` and not a `switch`
+ *
+ * `Record<AreaKind, string>` is exhaustive at COMPILE time: an eighth member of
+ * {@link AreaKind} fails to typecheck here rather than silently drawing a blank
+ * bar. That matters more than usual in this repository: `UT-F-76` is the record
+ * of five separate enumerations of one type set each coming back short, and
+ * `I-62` is `AreaType::ALL` being hand-maintained with every test that would
+ * catch a short list reading the short list.
+ *
+ * This adds no new enumeration of the type vocabulary. {@link AreaKind} is
+ * already pinned against Rust's `type_name` by `area-kinds.test.ts`, so the keys
+ * here are checked against the Rust source by a test that already exists, and
+ * only the *words* are new.
+ *
+ * # The words are placeholders and 1.18 owns them
+ *
+ * ADR-0028 leaves *"what the type label says"* deliberately open and assigns it
+ * to roadmap 1.18, because the same words have to teach the model in the
+ * tutorial. These match `conversion_label`'s spelling in `placement.rs` for the
+ * four types that have behaviour, so the bar and the area menu do not call the
+ * same type two different things today.
+ */
+export const KIND_LABELS: Record<AreaKind, string> = {
+  default: 'Default',
+  screenshot: 'Screenshot',
+  record: 'Record',
+  ocr: 'OCR',
+  upscale: 'Upscale',
+  analysis: 'Analysis',
+  filter: 'Filter',
+};
 
 /** One drawable row. */
 export interface MenuItemFrame {
@@ -344,6 +412,16 @@ export function areaFramesCss(
   );
   if (rects.length !== areas.length || closes.length !== areas.length)
     return [];
+  // The bar is nullable and the handle list has no fixed length, so neither can
+  // ride along in a same-length array the way `rect` and `close` do. Converted
+  // per area instead, which keeps the null a null rather than turning it into a
+  // fabricated rectangle: `physRectsToCss` also returns `[]` for an unusable
+  // `dpr`, and a bar drawn at `NaN` is exactly the "visible and ungrabbable"
+  // state `AreaView.bar` warns about.
+  const barOf = (area: AreaView): CssRect | null =>
+    area.bar === null
+      ? null
+      : (physRectsToCss([area.bar], origin, dpr)[0] ?? null);
   return areas.map((area, index) => ({
     id: area.id,
     // Checked above, so these are present; the non-null assertions keep the
@@ -364,6 +442,14 @@ export function areaFramesCss(
     // lit with a permanent close control over the user's content.
     hovered: area.id === hoveredId && area.id !== draggedId && !hoverChromeOnly,
     showClose: area.id === hoveredId && area.id !== draggedId,
+    bar: barOf(area),
+    handles: physRectsToCss(area.handles, origin, dpr),
+    // Deliberately the same condition as `showClose` rather than a second rule.
+    // The bar, the handles and the close control are one surface as far as the
+    // user is concerned (all of an area's outside chrome), and a hover that
+    // revealed two of the three would read as chrome failing to draw.
+    showBar: area.id === hoveredId && area.id !== draggedId,
+    label: KIND_LABELS[area.kind],
     source: area.id === draggedId,
   }));
 }

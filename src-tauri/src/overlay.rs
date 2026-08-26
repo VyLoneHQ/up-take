@@ -752,6 +752,29 @@ struct AreaPayload {
     /// scrolled has no cue that scrolling back is what returns the area to the
     /// live screen. Same argument as the `frozen` badge.
     zoom: f32,
+    /// The grab bar's rectangle, physical px, or `null` when neither placement
+    /// fits on a screen. Roadmap 1.17(b2), [ADR-0028](../../../Projects/UP-TAKE/DECISIONS/ADR-0028-grabbable-chrome-for-a-pass-through-area.md)
+    /// D1.
+    ///
+    /// Laid out here for the same reason `close` is, and the reason is not
+    /// symmetry: **the hook hit-tests this exact rectangle**. A bar drawn from a
+    /// second layout calculation on the frontend would eventually be drawn
+    /// somewhere it cannot be grabbed, and unlike a misplaced close control it
+    /// would fail *silently*: the area would simply refuse to move, which reads
+    /// as the feature not working rather than as chrome being in the wrong
+    /// place.
+    ///
+    /// `null` is a real state and not an error: an area whose bar fits neither
+    /// above nor below behaves exactly as it did before this task.
+    bar: Option<(i32, i32, u32, u32)>,
+    /// The outside resize handles, physical px. Four of them below
+    /// [`interaction::CHROME_INSIDE_SPAN`], and **empty above it**, where the
+    /// resize bands are drawn as part of the area's own border instead
+    /// (ADR-0028 D4).
+    ///
+    /// Empty is therefore the common case and means *this area resizes from its
+    /// edges*, not *this area cannot be resized*.
+    handles: Vec<(i32, i32, u32, u32)>,
 }
 
 /// The area set sent to the frontend.
@@ -785,7 +808,9 @@ pub(crate) const fn as_tuple(rect: Rect) -> (i32, i32, u32, u32) {
 pub(crate) fn emit_areas(app: &AppHandle) -> Result<(), String> {
     // Fetched once, before the store lock: the close control's position depends
     // on the monitors, because on a small area it sits *outside* the area and
-    // has to pick a corner that is actually on a screen.
+    // has to pick a corner that is actually on a screen. The grab bar has the
+    // same dependence for the same reason (it picks above or below), while the
+    // outside handles deliberately do not (see `outside_resize_handles`).
     let monitors = monitor_rects();
     let store = app.state::<Mutex<AreaStore>>();
     let areas = lock(&store)
@@ -797,6 +822,11 @@ pub(crate) fn emit_areas(app: &AppHandle) -> Result<(), String> {
             layer: layer_name(area.layer),
             kind: type_name(area.kind),
             zoom: area.zoom.factor(),
+            bar: interaction::grab_bar(area.bounds, &monitors).map(as_tuple),
+            handles: interaction::outside_resize_handles(area.bounds)
+                .into_iter()
+                .map(as_tuple)
+                .collect(),
         })
         .collect();
     app.emit(AREAS_EVENT, AreasPayload { areas })
@@ -1883,11 +1913,15 @@ mod tests {
             layer: "auto",
             kind: "default",
             zoom: 1.0,
+            bar: Some((0, -18, 10, 18)),
+            handles: vec![(0, 0, 18, 18)],
         };
         assert_keys(
             "AreaPayload",
             &area,
-            &["id", "rect", "close", "layer", "kind", "zoom"],
+            &[
+                "id", "rect", "close", "layer", "kind", "zoom", "bar", "handles",
+            ],
         );
         assert_keys(
             "AreasPayload",

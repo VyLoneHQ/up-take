@@ -2305,20 +2305,49 @@ mod tests {
     }
 
     #[test]
-    fn a_small_pass_through_area_offers_its_close_control_and_nothing_else() {
-        // Below `CHROME_INSIDE_SPAN` an area has no resize band at all
-        // (`handle_at` answers `Body` everywhere inside it), so its chrome is the
-        // close control alone. That is the gap task 1.17(b2)'s outside handles
-        // close, recorded here so shrinking it is a deliberate change.
+    fn a_small_pass_through_area_offers_close_bar_and_four_outside_handles() {
+        // ⚠️ **This test asserted the OPPOSITE until task 1.17(b2)**, under the
+        // name `a_small_pass_through_area_offers_its_close_control_and_nothing_else`,
+        // and its own comment named this change as what would overturn it:
+        // *"that is the gap task 1.17(b2)'s outside handles close, recorded here
+        // so shrinking it is a deliberate change."* This is that change, so the
+        // assertion is inverted deliberately rather than relaxed to fit.
+        //
+        // Below `CHROME_INSIDE_SPAN` an area still has no resize band *inside*
+        // it. It now has four handles outside it (ADR-0028 D4) and a grab bar
+        // beyond them (D1), so a small Filter area resizes and MOVES in Living
+        // where before it could only be dismissed.
         let mut store = AreaStore::new();
         let small = rect(0, 0, 20, 20);
         store.create(AreaType::Filter, small).unwrap();
 
         let regions = store.interactive_regions(&screens());
-        assert_eq!(regions, vec![interaction::close_control(small, &screens())]);
+        assert_eq!(
+            regions.len(),
+            6,
+            "close control, grab bar, four outside handles: {regions:?}"
+        );
+        assert!(regions.contains(&interaction::close_control(small, &screens())));
+        assert_eq!(
+            interaction::grab_bar(small, &screens()),
+            Some(Rect::new(0, -36, 20, 18)),
+            "the bar clears the north handle rather than overlapping it"
+        );
         assert!(
             store.hit_test(Point::new(10, 10), &screens()).is_none(),
-            "its interior is body, so it passes through"
+            "its interior is still body, so it still passes through"
+        );
+        // The two gestures the row exists to add, asserted as gestures rather
+        // than as rectangles.
+        assert_eq!(
+            interaction::handle_at(small, Point::new(10, -30), &screens()),
+            Some(interaction::Handle::Bar),
+            "a press on the bar moves it"
+        );
+        assert_eq!(
+            interaction::handle_at(small, Point::new(-10, 10), &screens()),
+            Some(interaction::Handle::Resize(interaction::Resize::West)),
+            "a press on the west handle resizes it"
         );
     }
 
