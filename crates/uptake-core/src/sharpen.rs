@@ -58,7 +58,7 @@
 //! `examples/sharpen_cost.rs`, release build, this workstation, 2026-08-26.
 //! Nine runs per size; both columns are medians, from **two separate runs of
 //! the instrument** rather than one, because a single run of anything on this
-//! machine is what `UT-F-39` and `ADR-0025` both warn about:
+//! machine is what `F-39` and `ADR-0025` both warn about:
 //!
 //! ```text
 //!                            run 1     run 2

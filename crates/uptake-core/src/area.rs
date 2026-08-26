@@ -314,7 +314,8 @@ impl AreaType {
     /// the way it already answers [`default_visual`] and [`supports_zoom`].
     ///
     /// [`default_visual`]: Self::default_visual
-    /// [ADR-0031]: https://github.com/VyLoneHQ/up-take
+    /// [ADR-0031]: the private planning repo's
+    /// `DECISIONS/ADR-0031-upscale-is-enhancement-not-magnification.md`
     #[must_use]
     pub const fn default_zoom(self) -> Zoom {
         match self {
@@ -351,7 +352,8 @@ impl AreaType {
     /// Exhaustive rather than `matches!`, so an eighth [`AreaType`] answers
     /// here instead of defaulting to "does not sharpen".
     ///
-    /// [ADR-0031]: https://github.com/VyLoneHQ/up-take
+    /// [ADR-0031]: the private planning repo's
+    /// `DECISIONS/ADR-0031-upscale-is-enhancement-not-magnification.md`
     #[must_use]
     pub const fn sharpens(self) -> bool {
         match self {

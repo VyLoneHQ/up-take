@@ -39,7 +39,8 @@
 //! footnote 3 wants a run to state its conditions, and these are the
 //! conditions.
 //!
-//! [ADR-0031]: https://github.com/VyLoneHQ/up-take
+//! [ADR-0031]: the private planning repo's
+//! `DECISIONS/ADR-0031-upscale-is-enhancement-not-magnification.md`
 
 use std::time::Instant;
 
