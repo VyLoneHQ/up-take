@@ -57,6 +57,16 @@
  * against a structure this file is not allowed to know about (architecture §1:
  * Rust owns the state, this side renders it).
  *
+ * # What this does NOT cover, counted rather than left to be assumed
+ *
+ * `+page.svelte` has **14** `{#if}` blocks and these **12** tests reach about
+ * half of them. Untouched: the armed badge, the drag preview's `!area.source`
+ * guard, the flash animation, `area.showClose`, the selection frame, and the
+ * menu including its child list. **The harness is the deliverable here, not
+ * coverage**, and nothing in this pull request claims otherwise, but a reader
+ * arriving later should not read *"there are component tests now"* as *"the
+ * template is guarded"*. Raised by the independent review of this pull request.
+ *
  * ⚠️ **The event NAMES are duplicated here and nothing checks them against
  * Rust.** A rename on the Rust side leaves these tests green and testing
  * nothing, because a handler that is never registered is never called and the
@@ -250,28 +260,53 @@ describe('an area renders the badges its state earns and no others', () => {
   });
 
   /**
-   * ✅ **`I-289` asserted at the place it was visible, now that roadmap 1.29
-   * has dissolved it.**
+   * 🔴 **THE `I-289` TEST THAT WAS HERE IS DELETED, AND THE REASON IS THE ONE
+   * THING THIS FILE MOST NEEDED TO GET RIGHT.**
    *
-   * That row is open because the badge tests `zoom` with no test on `kind`, so
-   * an `Upscale` area born at 2x showed a permanent `2x` badge advertising a
-   * scroll gesture `zoom_by` refuses in both directions. ADR-0031 makes
-   * `Upscale` natural, so the badge cannot render.
+   * It read:
    *
-   * ⚠️ **This test asserts the CONSEQUENCE, not the fix, and that is
-   * deliberate.** It fails if `AreaType::default_zoom` ever hands `Upscale` a
-   * factor again without someone also deciding what the badge should say,
-   * which is the decision `I-289` actually wanted taken. It does not assert a
-   * `kind` guard, because there is no guard: a control with no case to cover
-   * cannot go red, which is `UT-F-75`.
+   * ```ts
+   * test('an upscale area shows no zoom badge, because it does not magnify', ...)
+   *   await emit('overlay://areas', { areas: [area({ kind: 'upscale' })] });
+   *   expect(container.querySelectorAll('.zoom-badge')).toHaveLength(0);
+   * ```
+   *
+   * …with a doc comment claiming `I-289` was dissolved because *"ADR-0031 makes
+   * `Upscale` natural, so the badge cannot render"*, and that the test would
+   * fail if `default_zoom` ever handed `Upscale` a factor again.
+   *
+   * **Every part of that was false on this branch.** `AreaType::default_zoom`
+   * returns `Zoom::UPSCALE` for `Upscale` right now (`area.rs:297` at this
+   * PR's base), whose factor is `2.0`, and `overlay.rs:799` puts it straight on
+   * the wire. ADR-0031's change ships on a **separate, unmerged branch**. So
+   * `I-289`'s actual defect, a permanent `2×` badge on every `Upscale` area
+   * advertising a gesture `zoom_by` refuses in both directions, **is live in
+   * the code this PR is based on.**
+   *
+   * The test could not see it. {@link area} defaults `zoom: 1` and **nothing in
+   * it derives `zoom` from `kind`**; that relationship lives only in the real
+   * `AreaType::default_zoom`, which a mock payload never consults. So the test
+   * asserted *"a payload with `zoom: 1` shows no badge"*: trivially true,
+   * already covered by `an area at natural size shows no zoom badge` two tests
+   * above, and unable to fail for the payload Rust actually sends. Passing
+   * `zoom: 2`, the real value, makes it fail.
+   *
+   * **A green that could not have been earned, on the one row this file cited
+   * as closed.** Found by the independent review of this pull request; the
+   * author had written the test for a world that exists on a different branch.
+   *
+   * ⚠️ **The test is owed and is NOT recreated here**, because on this base the
+   * honest version of it would assert the defect rather than the fix. It
+   * belongs with ADR-0031's change, where it is true. Recorded as `I-309` so it
+   * is a tracked row rather than something a session has to remember.
+   * `OS-F46` is this workspace's measurement of what happens to the second
+   * kind.
+   *
+   * **The general lesson, which outlives `I-289`:** a mock payload can assert
+   * only what the mock encodes. Every relationship this file wants to rely on
+   * between two fields of an `AreaView` is a relationship Rust owns and this
+   * file has to be told. `I-308` is the same gap for the event names.
    */
-  test('an upscale area shows no zoom badge, because it does not magnify', async () => {
-    const { container } = await mount();
-    await emit('overlay://state', state());
-    await emit('overlay://areas', { areas: [area({ kind: 'upscale' })] });
-    expect(container.querySelectorAll('.area')).toHaveLength(1);
-    expect(container.querySelectorAll('.zoom-badge')).toHaveLength(0);
-  });
 
   test('a filter area is marked as one, so the tint rule can reach it', async () => {
     const { container } = await mount();

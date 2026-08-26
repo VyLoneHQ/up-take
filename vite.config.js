@@ -52,10 +52,16 @@ export default defineConfig(async () => ({
   // has no `mount`. This is Svelte's own documented workaround for running
   // component tests in a SvelteKit project.
   //
-  // **Guarded on `VITEST` rather than applied unconditionally**, which is the
-  // part worth keeping: the same field would otherwise force the browser
-  // condition on `vite build`, and this app is built by `tauri build` through
-  // exactly that path. A test-only need must not change what ships.
+  // **Guarded on `VITEST` rather than applied unconditionally.** A test-only
+  // need must not change how the shipped bundle resolves its modules, and
+  // `tauri build` goes through this same `vite build` path.
+  //
+  // ⚠️ **The guard is a PRECAUTION, not a repair, and the difference is
+  // measured rather than assumed.** `VITEST=1 pnpm build` was run on
+  // 2026-08-26 and **succeeded**: forcing the browser condition does not break
+  // the build today. So this line prevents a *change* in resolution semantics,
+  // not a failure anybody has seen. An earlier revision of this comment implied
+  // the latter, which would have been a claim no run supported.
   //
   // ⚠️ **The DOM environment is NOT set here, on purpose.** It is a
   // `// @vitest-environment jsdom` docblock in the one file that needs it, so
