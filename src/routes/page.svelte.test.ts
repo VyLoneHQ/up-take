@@ -37,7 +37,7 @@
  *
  * ```text
  *   src/lib alone   97 tests   751 ms wall   environment    1 ms
- *   whole suite    110 tests   3.6 s wall    environment 1.21 s
+ *   whole suite    109 tests   3.6 s wall    environment 1.21 s
  * ```
  *
  * The `environment` column is the one the split was for: the pure helper tests
@@ -59,13 +59,20 @@
  *
  * # What this does NOT cover, counted rather than left to be assumed
  *
- * `+page.svelte` has **14** `{#if}` blocks and these **12** tests reach about
+ * `+page.svelte` has **13** `{#if}` blocks and these **12** tests reach about
  * half of them. Untouched: the armed badge, the drag preview's `!area.source`
  * guard, the flash animation, `area.showClose`, the selection frame, and the
  * menu including its child list. **The harness is the deliverable here, not
  * coverage**, and nothing in this pull request claims otherwise, but a reader
  * arriving later should not read *"there are component tests now"* as *"the
  * template is guarded"*. Raised by the independent review of this pull request.
+ *
+ * ⚠️ **This said 14 until round 2 of that review, and how it was wrong is
+ * worth more than the number.** It came from `grep -c '{#if'`, which counts a
+ * **doc comment at line 443 quoting `{#if !area.source}` in prose** as a
+ * fourteenth template block. Counting closing `{/if}` tags gives 13, and 13 is
+ * right. A count meant to stop a reader over-trusting this file's coverage was
+ * itself produced by a measurement that did not check what it was matching.
  *
  * ⚠️ **The event NAMES are duplicated here and nothing checks them against
  * Rust.** A rename on the Rust side leaves these tests green and testing
