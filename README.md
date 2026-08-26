@@ -33,18 +33,27 @@ Four of seven area types are built.
   <!-- source: ROADMAP.md task 1.23 (merged 2026-08-12, PR #53, a59181a). The move limitation is
        that row's own "ships degraded and knowingly" note; the fix is task 1.17(b2), which is
        blocked on ADR-0028. Do not drop this sentence before b2 lands. -->
-- **An upscale area.** Shows the piece of screen under it magnified, so something small is easier
-  to read without moving closer. Two things it is not. It does not invent detail: the pixels are
-  the ones already on your screen, stretched by the graphics card. And it is a still rather than a
-  live view, re-taken when you move or resize the area, so pointing it at a playing video shows you
-  a frame and not the video.
-  <!-- source: ROADMAP.md task 1.24; ADR-0030 (upscale v1 is GPU resampling, no model, passive).
-       Both negative sentences are ADR-0030's own scope and must not be softened away: the image
-       enhancer over live video is the TARGET, is a Phase 2 row (2.12), and claiming it here is
-       the P-6 failure this file has already had five of. The 2x factor is deliberately not
-       quoted, because ROADMAP 1.24 leaves it for a hardware sitting to settle. -->
-  <!-- NOT YET DRIVEN ON HARDWARE at the time of writing. If a rig pass finds that the passive
-       re-take reads as broken rather than as a still, this bullet is what has to change. -->
+- **An upscale area.** Sharpens the piece of screen under it, in place. It covers the same region
+  at the same size and does not magnify: what changes is how clean it looks. Three things it is
+  not. It does not invent detail, and it cannot: the pixels under it are already the final ones
+  your screen is showing. What it can undo is the softening a player or a browser introduced when
+  it stretched a smaller image up, which is the case it is for, so it does most on a low-resolution
+  video and very little on ordinary desktop text. It does not smooth motion; that is a separate
+  thing and is not built. And it is a still rather than a live view, re-taken when you move or
+  resize the area, so pointing it at a playing video sharpens one frame and not the video.
+  <!-- source: ROADMAP.md task 1.29; ADR-0031 (upscale is enhancement, not magnification;
+       accepted 2026-08-25 on the founder's verdict, option B's shape with option A's v1 scope).
+       This bullet said "shows the piece of screen under it magnified" until 2026-08-26 and that
+       was ROADMAP 1.24 / ADR-0030, which ADR-0031 supersedes in its product definition.
+       All three negative sentences are ADR-0031's own scope and must not be softened away:
+       frame generation and the live loop are ROADMAP 1.30 and a later row, the model-based
+       enhancer is 2.12, and claiming any of them here is the P-6 failure this file has already
+       had five of. The sharpening strength is deliberately not quoted, because the constant is
+       left for a hardware sitting to settle. -->
+  <!-- NOT YET DRIVEN ON HARDWARE at the time of writing, and this is the type where that matters
+       most: ADR-0031 question 3 makes the founder's eye at the rig the ONLY v1 gate on whether
+       the sharpening looks right, because there is no number to hold it to. If a rig pass finds
+       it reads as over-sharpened, or as doing nothing, this bullet is what has to change. -->
 
 Around those:
 

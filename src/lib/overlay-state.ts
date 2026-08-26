@@ -181,10 +181,12 @@ export interface PinPayload {
    * had to say so.
    *
    * The second case said "a magnified `Default`" until 2026-08-22, when roadmap
-   * 1.24 made it under-describe its own set: every `Upscale` area is magnified
-   * by construction, so `Upscale` to `Screenshot` and `Upscale` to `Filter` --
-   * both offered in the menu -- reach it too. `set_kind`'s condition is
-   * `was_magnified && !supports_zoom(new)`, which never named a type.
+   * 1.24 made it under-describe its own set. It is wider again under roadmap
+   * 1.29, and for a different reason: an `Upscale` area is no longer magnified,
+   * it holds a **sharpened** still, and converting away from it drops that.
+   * `set_kind`'s condition names no type at all now -- it compares the capture
+   * the area WANTS against the one it HAS (`Area::retake`), so a type is
+   * covered by answering that question rather than by being listed here.
    */
   url: string | null;
 }
@@ -654,8 +656,10 @@ export function armedTypeForKey(
       return 'screenshot';
     case 'f':
       return 'filter';
-    // Roadmap 1.24. `U` for Upscale; the area is born magnified on the Rust
-    // side, so this arms it and nothing here knows the factor.
+    // Roadmap 1.24. `U` for Upscale; roadmap 1.29 made it sharpen in place
+    // rather than magnify (ADR-0031). This arms it and nothing here knows
+    // either -- the enhancement is entirely Rust-side, which is why the change
+    // reached no frontend behaviour.
     case 'u':
       return 'upscale';
     default:
