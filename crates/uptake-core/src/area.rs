@@ -153,12 +153,23 @@ impl AreaType {
         match self {
             // `Record` is named as live in §3.2's own prose and is the only
             // member left. **`Upscale` was here until 2026-08-21 and moved by
-            // ADR-0030**, which scopes v1 Upscale to GPU resampling with no
-            // model: the pixels come from the path 1.25 built, re-taken on the
-            // events a zoomed area is re-taken on, so it costs no continuous
-            // capture and is passive like everything else that is not
-            // inherently live. §3.2 carries the correction; the target is
-            // an image ENHANCER over live video, and that is a later row.
+            // ADR-0030**; ADR-0031 supersedes that record's product definition
+            // and **keeps it passive in v1 anyway**, so the arm is unchanged
+            // and the reason for it is not.
+            //
+            // ADR-0030's reason was that the pixels are a re-taken still and a
+            // still costs no continuous capture. ADR-0031's is a **sequencing
+            // decision the founder took**: the sharpening pass and the live
+            // loop have different costs and different risk, so shipping them
+            // together makes the cheap useful half wait on the expensive one.
+            // Roadmap **1.30** is the row that moves this arm, and it is gated
+            // on a rig judgement no counter can make -- whether roughly 18 fps
+            // over 24-30 fps video looks continuous rather than juddery.
+            //
+            // ⚠️ **So a passive sharpen over playing video shows a sharpened
+            // STILL**, which ADR-0031 names in as many words as the defect the
+            // founder should look for at the rig. It is a known limit of v1,
+            // not an oversight.
             Self::Record => Visual::Live,
             // Screenshot is the "pinned still capture" §3.2 lists as passive;
             // OCR and Analysis run over a captured frame and then display a
@@ -248,10 +259,19 @@ impl AreaType {
     /// written about the Default area alone (*"scrolling over a Default area
     /// scales its contents"*), and §3.1 names zoom as the thing that makes
     /// Default more than an empty rectangle. Every other type already owns what
-    /// its own region means: a Screenshot holds a pinned still, an Upscale is
-    /// magnification by definition, and an OCR area shows a result rather than
-    /// pixels. Giving them all a second, conflicting magnifier is a decision
-    /// nothing has taken, so this answers `false` and leaves it takeable.
+    /// its own region means: a Screenshot holds a pinned still, an Upscale
+    /// sharpens its own region in place, and an OCR area shows a result rather
+    /// than pixels. Giving them all a second, conflicting magnifier is a
+    /// decision nothing has taken, so this answers `false` and leaves it
+    /// takeable.
+    ///
+    /// ⚠️ **`Upscale`'s reason here changed with roadmap 1.29 and the answer did
+    /// not.** This said *"an Upscale is magnification by definition"*, which was
+    /// 1.24's product and which ADR-0031 reverses on the founder's verdict:
+    /// *"MUST NOT zoom"*. Refusing the gesture used to hold the area at its
+    /// factor; now it is what enforces the reversal. ADR-0031 notes that the
+    /// refusal stops being a trap in the process: there is no magnification
+    /// left to scroll back from.
     ///
     /// Written as an explicit match rather than `matches!` so an eighth
     /// [`AreaType`] has to answer here, the way [`default_visual`] and
@@ -274,33 +294,76 @@ impl AreaType {
 
     /// The magnification an area of this type is CREATED with.
     ///
-    /// `Upscale` is the only type born magnified, and that is the whole of what
-    /// roadmap 1.24 adds: [`AreaType::supports_zoom`]'s own doc already says
-    /// *"an Upscale is magnification by definition"*, so it does not get the
-    /// scroll gesture and does not need one. It arrives at its factor and stays
-    /// there.
+    /// ⚠️ **Every type answers [`Zoom::NATURAL`] as of roadmap 1.29, and this
+    /// function is kept rather than deleted.** Roadmap 1.24 made `Upscale` the
+    /// one type born magnified; [ADR-0031] reverses that on the founder's own
+    /// verdict, *"an area type that sharpens the image ... and MUST NOT
+    /// zoom"*, and `Zoom::UPSCALE` is deleted with it. What `Upscale` does
+    /// instead is [`AreaType::sharpens`].
     ///
-    /// **Why this exists rather than a literal at the create site.** A literal
-    /// there is invisible to `set_kind`, and a conversion INTO `Upscale` would
-    /// then produce an area of the magnifying type at natural size -- a
-    /// rectangle showing the live screen, indistinguishable from `Default`,
-    /// which is the exact failure `convert_area`'s capture branch was added to
-    /// fix for `Screenshot`.
+    /// **Why it survives with one answer.** The same reason
+    /// [`after_create`](Self::after_create) is one arm for seven types: the
+    /// *return type* is what keeps a second answer cheap, not the shape of the
+    /// match. A literal at the create site is invisible to `set_kind`, so a
+    /// type born magnified in the future would silently arrive at natural size
+    /// through a conversion: the failure `convert_area`'s capture branch was
+    /// added to fix for `Screenshot`, and the one this function was extracted
+    /// to prevent.
     ///
     /// Exhaustive rather than a `_` arm, so an eighth [`AreaType`] answers here
     /// the way it already answers [`default_visual`] and [`supports_zoom`].
     ///
     /// [`default_visual`]: Self::default_visual
+    /// [ADR-0031]: the private planning repo's
+    /// `DECISIONS/ADR-0031-upscale-is-enhancement-not-magnification.md`
     #[must_use]
     pub const fn default_zoom(self) -> Zoom {
         match self {
-            Self::Upscale => Zoom::UPSCALE,
+            Self::Default
+            | Self::Screenshot
+            | Self::Record
+            | Self::Ocr
+            | Self::Upscale
+            | Self::Analysis
+            | Self::Filter => Zoom::NATURAL,
+        }
+    }
+
+    /// Whether an area of this type has its pixels re-taken and **sharpened in
+    /// place**: roadmap 1.29, [ADR-0031]'s v1.
+    ///
+    /// `Upscale` only, and that is the whole of what the type now is. The area
+    /// covers the same region of screen at the same size; what changes is
+    /// fidelity. See [`crate::sharpen`] for what the pass does and, more
+    /// importantly, for what it does not claim to do.
+    ///
+    /// # Why this is a property of the TYPE and not of the zoom
+    ///
+    /// It is what the zoom used to stand in for, and the substitution is the
+    /// reason `Upscale` needed a reversal rather than a fix. Under 1.24 the
+    /// question *"does this area hold a re-taken still of its own region?"* was
+    /// answered by `!zoom.is_natural()`, which is true of a magnified `Default`
+    /// for a completely different reason. With the magnification gone, that
+    /// predicate answers `false` for `Upscale`, and an `Upscale` area with no
+    /// still is a rectangle showing the live screen, indistinguishable from
+    /// `Default`. [`Area::retake`] is where the two reasons are put back
+    /// together, and it exists so no caller has to know there are two.
+    ///
+    /// Exhaustive rather than `matches!`, so an eighth [`AreaType`] answers
+    /// here instead of defaulting to "does not sharpen".
+    ///
+    /// [ADR-0031]: the private planning repo's
+    /// `DECISIONS/ADR-0031-upscale-is-enhancement-not-magnification.md`
+    #[must_use]
+    pub const fn sharpens(self) -> bool {
+        match self {
+            Self::Upscale => true,
             Self::Default
             | Self::Screenshot
             | Self::Record
             | Self::Ocr
             | Self::Analysis
-            | Self::Filter => Zoom::NATURAL,
+            | Self::Filter => false,
         }
     }
 }
@@ -415,21 +478,18 @@ pub enum Layer {
 pub struct Zoom(u8);
 
 impl Zoom {
-    /// Natural size. §3.4's floor.
+    /// Natural size. §3.4's floor, and the value every area of every type
+    /// starts at.
     ///
-    /// **Said "and the value every area starts at" until 2026-08-21.** Roadmap
-    /// 1.24 gave `Upscale` a non-natural [`AreaType::default_zoom`], so the
-    /// starting value is now per type and this is merely the common one.
+    /// **This sentence has now been true, false, and true again, and the round
+    /// trip is worth one line so the next reader does not "fix" it back.** It
+    /// said *"and the value every area starts at"* until 2026-08-21, when
+    /// roadmap 1.24 gave `Upscale` a non-natural [`AreaType::default_zoom`] and
+    /// it was narrowed to *"merely the common one"*. Roadmap 1.29 deletes that
+    /// magnification (ADR-0031), so it is the universal one again. But
+    /// [`AreaType::default_zoom`] is still per type and still where the answer
+    /// comes from, which is the part that was right both times.
     pub const NATURAL: Self = Self(0);
-
-    /// The factor an `Upscale` area is created at: 2x, i.e. four [`Zoom::STEP`]s.
-    ///
-    /// A round number chosen for being legible rather than measured, and it is
-    /// the one thing in roadmap 1.24 a hardware sitting is expected to change.
-    /// It is a constant so that changing it is one edit and cannot disagree
-    /// with itself; nothing in a unit test can have an opinion about whether 2x
-    /// is the right amount of bigger.
-    pub const UPSCALE: Self = Self(4);
 
     /// What one scroll notch adds to the factor.
     pub const STEP: f32 = 0.25;
@@ -572,20 +632,43 @@ pub struct Area {
     /// unless the user has said otherwise.
     pub layer: Layer,
     /// How far its contents are magnified (§3.4). Whatever
-    /// [`AreaType::default_zoom`] the creating type chose: [`Zoom::NATURAL`] for
-    /// six of the seven, [`Zoom::UPSCALE`] for [`AreaType::Upscale`].
+    /// [`AreaType::default_zoom`] the creating type chose, which since roadmap
+    /// 1.29 is [`Zoom::NATURAL`] for all seven.
     ///
-    /// **Said "[`Zoom::NATURAL`] on every area of every type, including the
-    /// types [`AreaType::supports_zoom`] refuses" until 2026-08-21**, which
+    /// **This doc has been through 1.24 and back and is left showing both
+    /// legs.** It said "[`Zoom::NATURAL`] on every area of every type, including
+    /// the types [`AreaType::supports_zoom`] refuses" until 2026-08-21, which
     /// roadmap 1.24 made false of exactly the type that clause named to make its
-    /// point. The point it was making survives and is the reason the field and
-    /// the predicate stay separate: the field is what the area *is*, the
-    /// predicate is what the **gesture** is allowed to change, and `Upscale` is
-    /// now the worked example rather than a hypothetical -- born at 2x and
-    /// refusing the scroll that would move it. A type that gains the gesture
-    /// later gains it by answering the predicate, with no migration of the
-    /// model.
+    /// point; roadmap 1.29 makes it true again by deleting that magnification
+    /// (ADR-0031). The point it was making survives both reversals and is the
+    /// reason the field and the predicate stay separate: the field is what the
+    /// area *is*, the predicate is what the **gesture** is allowed to change.
+    /// `Upscale` was the worked example between 1.24 and 1.29 (born at 2x and
+    /// refusing the scroll that would move it) and is a hypothetical again. A
+    /// type that gains the gesture later gains it by answering the predicate,
+    /// with no migration of the model.
     pub zoom: Zoom,
+}
+
+/// The capture an area's own contents are made of: which rectangle of screen to
+/// grab, and whether to sharpen what comes back.
+///
+/// Returned by [`Area::retake`]. It is a struct rather than a bare [`Rect`]
+/// because "which pixels" and "what to do with them" are two answers, and every
+/// caller that asks the first question also has to carry the second one to
+/// `output::magnify_into_area`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Retake {
+    /// The rectangle to capture, in physical pixels, virtual-desktop space.
+    ///
+    /// For a magnified area this is [`Zoom::source_rect`]'s output: a
+    /// rectangle *inside* the area, which the frontend stretches to fill it.
+    /// For a sharpening area it is the area's own bounds, 1:1, because
+    /// [`AreaType::sharpens`] changes fidelity and not geometry.
+    pub source: Rect,
+    /// Whether to run [`crate::sharpen::rcas`] over the captured pixels before
+    /// they are encoded.
+    pub sharpen: bool,
 }
 
 impl Area {
@@ -599,6 +682,52 @@ impl Area {
     #[must_use]
     pub fn is_live(self) -> bool {
         self.visual == Visual::Live
+    }
+
+    /// The capture this area's contents are, or `None` when it has none and
+    /// shows the live screen underneath.
+    ///
+    /// # Why this is one function and not a condition at each call site
+    ///
+    /// **There are two unrelated reasons an area holds a re-taken still, and
+    /// three call sites that must agree about them.** A magnified `Default`
+    /// holds one because it is showing a smaller rectangle stretched; an
+    /// `Upscale` holds one because it is showing its own rectangle sharpened.
+    /// The three callers (the scroll gesture, the move-or-resize refresh, and
+    /// the conversion in `overlay::convert_area`) do not care which reason
+    /// applies, and every one of them asked `!zoom.is_natural()` before roadmap
+    /// 1.29 because that was the only reason there was.
+    ///
+    /// **Left as three conditions, 1.29 would have been a silent regression at
+    /// two of them.** `Upscale` is at [`Zoom::NATURAL`] now, so `refresh` and
+    /// `convert` would have stopped taking its capture, and an `Upscale` area
+    /// with no capture is a rectangle showing the live screen: the failure
+    /// mode `convert_area`'s own comment calls *"indistinguishable from
+    /// `Default`, and the menu row says Upscale"*. `captures_on_create`'s doc
+    /// makes the same argument for the same reason: **derive it, do not restate
+    /// it.**
+    ///
+    /// The order of the two arms is not arbitrary. A type that both sharpened
+    /// and zoomed would want its bounds sharpened rather than a sub-rectangle
+    /// magnified, because the sharpening is the type's identity and the zoom is
+    /// a gesture applied to it. But no such type exists, `supports_zoom` and
+    /// `sharpens` are disjoint today, and this comment is here so that adding
+    /// one is a decision rather than an accident of ordering.
+    #[must_use]
+    pub fn retake(self) -> Option<Retake> {
+        if self.kind.sharpens() {
+            return Some(Retake {
+                source: self.bounds,
+                sharpen: true,
+            });
+        }
+        if self.zoom.is_natural() {
+            return None;
+        }
+        Some(Retake {
+            source: self.zoom.source_rect(self.bounds),
+            sharpen: false,
+        })
     }
 }
 
@@ -738,10 +867,12 @@ impl AreaStore {
             visual: kind.default_visual(),
             input: kind.default_input(),
             layer: Layer::default(),
-            // Per type since 1.24, not a constant: `Upscale` is born magnified
-            // because it IS a magnifier, and an Upscale area at natural size is
-            // a rectangle showing the live screen, indistinguishable from a
-            // `Default` one.
+            // Per type rather than a constant, and it answers `NATURAL` for
+            // all seven again since roadmap 1.29 deleted `Upscale`'s
+            // magnification (ADR-0031). Kept as a call for the reason
+            // `default_zoom`'s own doc gives: a literal here is invisible to
+            // `set_kind`, so a type born magnified in future would silently
+            // arrive natural through a conversion.
             zoom: kind.default_zoom(),
         };
         let index = self.top_of_tier(area.layer);
@@ -863,10 +994,13 @@ impl AreaStore {
     ///
     ///   **This said "resets" until 2026-08-21 and the body said otherwise
     ///   eight lines below**, in nine lines of inline comment explaining the
-    ///   difference. `default_zoom` rather than [`Zoom::NATURAL`] is what lets a
-    ///   conversion *into* `Upscale` arrive magnified; the two readings agree
-    ///   for the six types whose default is natural, which is why the wrong word
-    ///   survived roadmap 1.27.
+    ///   difference. `default_zoom` rather than [`Zoom::NATURAL`] is what would
+    ///   let a conversion *into* a born-magnified type arrive magnified. ⚠️ **No
+    ///   such type exists as of roadmap 1.29**. `Upscale` was the one and
+    ///   ADR-0031 removed it, so the two readings agree for all seven again
+    ///   and the distinction is once more a guard rather than a behaviour. It
+    ///   is stated because that is precisely the condition under which the
+    ///   wrong word survived roadmap 1.27.
     /// - **[`Visual`] and [`Input`] are re-taken from the new type's defaults.**
     ///   §3.2 calls all three properties orthogonal and says a type supplies a
     ///   *starting* value rather than a constraint, so carrying the old values
@@ -887,67 +1021,67 @@ impl AreaStore {
                 changed: false,
             });
         }
-        // Read before the write, and both halves matter. A magnified area holds
-        // a still it can no longer scroll out of; a Screenshot's pin *was* its
-        // content, and the type replacing it has content of its own.
-        let was_magnified = !area.zoom.is_natural();
+        // Read before the write, and both halves matter. An area holding a
+        // re-taken still holds one it can no longer get rid of; a Screenshot's
+        // pin *was* its content, and the type replacing it has content of its
+        // own.
+        let was = area.retake();
         let was_pinned_capture = area.kind == AreaType::Screenshot;
         area.kind = kind;
         area.visual = kind.default_visual();
         area.input = kind.default_input();
         // THE NEW TYPE'S DEFAULT, not `NATURAL`, and the difference only shows
-        // on a type that is born magnified. Converting to `Upscale` used to
-        // land at natural size -- the magnifying type, not magnifying -- which
-        // is the same shape as a converted `Screenshot` holding no pin, the
-        // defect `convert_area`'s capture branch exists to fix.
+        // on a type that is born magnified. ⚠️ **There is none as of roadmap
+        // 1.29**, so today this is exactly `NATURAL` for every type and the
+        // call is a guard rather than a behaviour -- see the doc above.
         //
-        // Unchanged for every type whose `default_zoom` is `NATURAL`, which is
-        // all six others, so this is a generalisation and not a behaviour
-        // change anywhere it did not need to be one.
+        // Left as the call rather than reverted to the literal 1.24 replaced.
+        // The failure it prevents is the one this line was written for and is
+        // not hypothetical: converting to `Upscale` used to land at natural
+        // size -- the magnifying type, not magnifying -- which is the same
+        // shape as a converted `Screenshot` holding no pin, the defect
+        // `convert_area`'s capture branch exists to fix. A future type born
+        // magnified reintroduces it the moment this becomes a literal again.
         if !kind.supports_zoom() {
             area.zoom = kind.default_zoom();
         }
-        // **`was_magnified && supports_zoom` IS REACHABLE, as of roadmap 1.24.**
-        // It said "unreachable today, because only `Default` zooms and `Default`
-        // to `Default` returned above" until 2026-08-21, and 1.24 falsified it
-        // in the same change that wrote it: `Upscale` is born non-natural, so
-        // `Upscale` to `Default` arrives here with `was_magnified` true and the
-        // new type supporting the gesture. It is the ordinary menu conversion
-        // 1.27 made offerable, not a corner.
+        // **The pixels are wrong for the new type exactly when the capture it
+        // WANTS is not the capture it HAS**, which is what comparing the two
+        // [`Area::retake`] answers says and nothing more. Roadmap 1.29
+        // replaced a hand-written conjunction here, and the replacement is not
+        // a tidy-up: the old form asked `was_magnified && !kind.supports_zoom()`
+        // and `Upscale` is no longer magnified, so `Upscale` to `Default` would
+        // have returned `false` and left a `Default` area rendering a sharpened
+        // still of the screen at 1:1, with nothing on the way back. Scrolling
+        // does not clear it -- the area is already at natural size, so
+        // `zoom_area` never reaches `clear_magnification` -- which is the
+        // stranded state roadmap 1.27 exists to prevent, arriving through the
+        // one path it did not have to consider.
         //
-        // **The behaviour on that pair is DECIDED, not inherited: the converted
-        // `Default` KEEPS the 2x.** Three reasons, and the third is why the
-        // pixels are kept with it.
+        // **`was.is_some()` is a guard against noise, not a correctness
+        // condition.** With no pixels there is nothing to discard, and
+        // `clear_magnification` would emit an unpin for a pin that was never
+        // announced. Taking the first capture in that case is `convert_area`'s
+        // job and not this one's.
         //
-        // - `Default` supports the gesture, so 2x is a state the user could have
-        //   reached by scrolling. It strands nothing.
-        // - `Zoom::UPSCALE` is four steps against a `MAX_STEP` of 28, and §3.4's
-        //   floor makes scrolling out always a way back. Four notches undo it.
-        //   Recoverability is the property the floor exists for, and it holds
-        //   here without a special case.
-        // - The pin stays VALID, which is why `discard_capture` is false below
-        //   rather than by omission: `refresh_magnification` reads the area's
-        //   own zoom and bounds, and the conversion changes neither, so the
-        //   pixels already on screen were taken at the factor and over the
-        //   sub-rectangle the area still has. Resetting to natural would have to
-        //   discard them and re-take, which is more machinery for a view the
-        //   user did not ask to lose.
+        // **The decision from roadmap 1.24 survives this rewrite unchanged, and
+        // it survives it derived rather than special-cased.** That decision was:
+        // a magnified area converting to a type that also zooms KEEPS its
+        // magnification and its pixels, because the factor is a state the user
+        // could have scrolled to and §3.4's floor is the way back. Under the
+        // comparison, both sides answer with the same source rectangle and the
+        // same sharpen flag, so they are equal and nothing is discarded --
+        // which is that decision, without a conjunction that has to be
+        // maintained beside it.
         //
-        // The conjunction is still written as one so that widening
-        // `supports_zoom` to a further type cannot silently start throwing away
-        // a magnification the new type would have kept.
-        //
-        // **`discard_capture` stays right for a conversion INTO `Upscale`, and
-        // it is worth saying why rather than leaving it to be re-derived.**
-        // From a magnified `Default` the old pixels were taken at the OLD
-        // factor over the OLD sub-rectangle, so they are wrong for the new type
-        // and `was_magnified` is true -- discard, correct. From a natural
-        // `Default` there are no pixels to discard and the caller has to TAKE
-        // the first ones; that is `convert_area`'s job and not this one's,
-        // which is why this returns `false` there rather than inventing a
-        // third state.
+        // ⚠️ **That pair is unreachable again as of 1.29, and it was reachable
+        // for exactly the four days 1.24 was in.** Only `Default` supports the
+        // gesture and `Default` to `Default` returns above, so nothing else can
+        // arrive here magnified. Left working rather than removed: a second
+        // zooming type makes it reachable again, and the comparison is already
+        // right for it.
         Some(Conversion {
-            discard_capture: (was_magnified && !kind.supports_zoom()) || was_pinned_capture,
+            discard_capture: (was.is_some() && was != area.retake()) || was_pinned_capture,
             changed: true,
         })
     }
@@ -1746,63 +1880,103 @@ mod tests {
     }
 
     #[test]
-    fn only_upscale_is_born_magnified() {
+    fn no_type_is_born_magnified() {
         // The set pinned WHOLE, the way `live_is_opt_in_...` pins the live set,
-        // so an eighth type has to answer here rather than defaulting to
-        // natural and silently being a rectangle that shows the live screen.
+        // so an eighth type has to answer here rather than inheriting whatever
+        // the last one did.
+        //
+        // **This test asserted the opposite for four days.** It was
+        // `only_upscale_is_born_magnified` and it was right about 1.24; roadmap
+        // 1.29 deletes that magnification on the founder's verdict (ADR-0031),
+        // so the whole set is natural again. Kept as a whole-set assertion
+        // rather than deleted, because a type born magnified is a real future
+        // and this is where it has to declare itself.
         for kind in ALL_TYPES {
-            let expected = matches!(kind, AreaType::Upscale);
-            assert_eq!(
-                !kind.default_zoom().is_natural(),
-                expected,
-                "{kind:?} default_zoom"
+            assert!(
+                kind.default_zoom().is_natural(),
+                "{kind:?} default_zoom is magnified; ADR-0031 says no type is"
             );
         }
     }
 
     #[test]
-    fn an_upscale_area_exists_at_its_factor_the_moment_it_is_created() {
-        // Roadmap 1.24's whole visible claim. `create` reads `default_zoom`, so
-        // this fails the moment someone puts `Zoom::NATURAL` back at that site
-        // -- which is what it looked like before 1.24 and is a one-word revert.
+    fn only_upscale_sharpens() {
+        // The set pinned WHOLE, for the reason above and one more: `sharpens`
+        // is what `Area::retake` keys on, so a type that answers true here
+        // starts holding a re-taken still of its own bounds. That is a real
+        // capture per area and it must not be acquired by an arm falling
+        // through.
+        for kind in ALL_TYPES {
+            assert_eq!(
+                kind.sharpens(),
+                matches!(kind, AreaType::Upscale),
+                "{kind:?} sharpens"
+            );
+        }
+    }
+
+    #[test]
+    fn an_upscale_area_is_born_natural_and_sharpening() {
+        // Roadmap 1.29's whole visible claim, and the two halves fail
+        // differently. Without the first the founder's `MUST NOT zoom` is
+        // violated; without the second the area holds no capture at all, shows
+        // the live screen at 1:1, and is indistinguishable from `Default` --
+        // which is the failure mode that made this a reversal rather than a
+        // deletion.
         let mut store = AreaStore::new();
         let id = store
             .create(AreaType::Upscale, rect(0, 0, 100, 100))
             .unwrap();
         let area = store.get(id).unwrap();
-        assert_eq!(area.zoom, Zoom::UPSCALE);
         assert!(
-            !area.zoom.is_natural(),
-            "an Upscale area must not be natural"
+            area.zoom.is_natural(),
+            "an Upscale area must not be magnified"
+        );
+        assert_eq!(
+            area.retake(),
+            Some(Retake {
+                source: rect(0, 0, 100, 100),
+                sharpen: true,
+            }),
+            "and must still ask for a capture of its own bounds, to sharpen"
         );
 
         // The negative half, so the assertion above cannot be satisfied by a
-        // create that magnifies everything.
+        // create that sharpens everything.
         let other = store
             .create(AreaType::Default, rect(200, 0, 100, 100))
             .unwrap();
-        assert!(store.get(other).unwrap().zoom.is_natural());
+        assert_eq!(store.get(other).unwrap().retake(), None);
     }
 
     #[test]
-    fn converting_into_upscale_arrives_magnified_rather_than_natural() {
-        // `set_kind` reset the zoom to NATURAL unconditionally before 1.24,
-        // which produced the magnifying type at natural size: a rectangle
-        // showing the live screen, indistinguishable from Default, under a menu
-        // row that says "Upscale". Same shape as a converted Screenshot holding
-        // no pin, which is a defect this codebase has already shipped once.
+    fn converting_into_upscale_arrives_natural_and_asks_to_be_sharpened() {
+        // The mirror of `an_upscale_area_is_born_natural_and_sharpening` on the
+        // other route into the type. `set_kind` and `create` are two ways to
+        // acquire a kind and they have disagreed before -- 1.24's own defect
+        // was `set_kind` resetting the zoom where `create` did not.
         let mut store = AreaStore::new();
         let id = store
             .create(AreaType::Default, rect(0, 0, 100, 100))
             .unwrap();
-        assert!(store.get(id).unwrap().zoom.is_natural());
+        assert_eq!(store.get(id).unwrap().retake(), None);
 
         let conversion = store.set_kind(id, AreaType::Upscale).unwrap();
         assert!(conversion.changed);
-        assert_eq!(store.get(id).unwrap().zoom, Zoom::UPSCALE);
+        let area = store.get(id).unwrap();
+        assert!(area.zoom.is_natural(), "MUST NOT zoom (ADR-0031)");
+        assert_eq!(
+            area.retake(),
+            Some(Retake {
+                source: rect(0, 0, 100, 100),
+                sharpen: true,
+            })
+        );
 
         // From a MAGNIFIED Default the old pixels were taken at another factor
-        // over another rectangle, so the host is told to drop them.
+        // over another rectangle, so the host is told to drop them. The retake
+        // it wants now is a 1:1 sharpen of the whole area, which is a different
+        // rectangle as well as a different treatment.
         let mut store = AreaStore::new();
         let id = store
             .create(AreaType::Default, rect(0, 0, 100, 100))
@@ -1814,15 +1988,22 @@ mod tests {
             "a magnified Default converted to Upscale keeps pixels taken at the \
              wrong factor unless the host is told to drop them"
         );
-        assert_eq!(store.get(id).unwrap().zoom, Zoom::UPSCALE);
+        assert!(store.get(id).unwrap().zoom.is_natural());
     }
 
     #[test]
-    fn an_upscale_area_cannot_be_scrolled_off_its_factor() {
-        // `supports_zoom` is false for Upscale and its doc says why: "an Upscale
-        // is magnification by definition". So the scroll gesture must not move
-        // it -- otherwise the factor is a starting point rather than the type's
-        // identity, and an Upscale area at natural size is Default again.
+    fn an_upscale_area_still_refuses_the_zoom_gesture() {
+        // `supports_zoom` is false for Upscale and 1.29 does not change that --
+        // it changes what the refusal MEANS. Under 1.24 the doc's reason was
+        // "an Upscale is magnification by definition", and refusing kept the
+        // area at its factor. Now there is no factor to hold: refusing is what
+        // enforces the founder's `MUST NOT zoom`, and a gesture that moved it
+        // would put back the magnification ADR-0031 removed.
+        //
+        // ⚠️ This is also why `supports_zoom` staying false stopped being a
+        // trap. ADR-0031 says so in as many words: scrolling still does
+        // nothing, "but now that is consistent rather than a trap, because
+        // there is no magnification to scroll back from".
         let mut store = AreaStore::new();
         let id = store
             .create(AreaType::Upscale, rect(0, 0, 100, 100))
@@ -1831,29 +2012,45 @@ mod tests {
             store.zoom_by(id, 4).is_none(),
             "Upscale must refuse a zoom gesture"
         );
-        assert_eq!(store.get(id).unwrap().zoom, Zoom::UPSCALE);
+        assert!(store.get(id).unwrap().zoom.is_natural());
         assert!(
             store.zoom_by(id, -99).is_none(),
             "and must refuse it downward too"
         );
-        assert_eq!(store.get(id).unwrap().zoom, Zoom::UPSCALE);
+        assert!(store.get(id).unwrap().zoom.is_natural());
     }
 
     #[test]
-    fn upscale_shows_a_smaller_rectangle_of_screen_than_itself() {
-        // What "upscaled" means geometrically, asserted rather than assumed: the
-        // area is a window onto LESS screen, stretched to fill. If this ever
-        // returns the bounds unchanged the area renders the live screen at 1:1
-        // and the feature is a no-op that still passes every test above.
-        let bounds = Rect::new(0, 0, 400, 300);
-        let source = Zoom::UPSCALE.source_rect(bounds);
-        assert!(
-            source.size.width < bounds.size.width && source.size.height < bounds.size.height,
-            "UPSCALE must select a smaller rectangle than the area, got {source:?}"
-        );
-        assert!(
-            source.size.width > 0 && source.size.height > 0,
-            "and a capturable one"
+    fn an_upscale_area_retakes_its_own_bounds_at_one_to_one() {
+        // What "upscale" means geometrically AFTER ADR-0031, asserted rather
+        // than assumed -- and it is the exact negation of what the same
+        // assertion said before it. The old test demanded a source rectangle
+        // SMALLER than the area, because magnification is a window onto less
+        // screen stretched to fill. The founder's verdict was that this is the
+        // wrong product: "the area covers the same region of screen at the same
+        // size, and what changes is fidelity".
+        //
+        // So the source must be the bounds EXACTLY. Anything smaller is
+        // magnification returning by the back door; anything larger cannot be
+        // rendered into the area without shrinking it, which is the same defect
+        // mirrored.
+        let bounds = Rect::new(40, 25, 400, 300);
+        let area = Area {
+            id: AreaId(1),
+            kind: AreaType::Upscale,
+            bounds,
+            visual: AreaType::Upscale.default_visual(),
+            input: AreaType::Upscale.default_input(),
+            layer: Layer::Auto,
+            zoom: AreaType::Upscale.default_zoom(),
+        };
+        assert_eq!(
+            area.retake(),
+            Some(Retake {
+                source: bounds,
+                sharpen: true,
+            }),
+            "an Upscale area changes fidelity, not geometry"
         );
     }
 
@@ -1899,41 +2096,92 @@ mod tests {
     }
 
     #[test]
-    fn upscale_to_default_keeps_the_magnification_and_can_scroll_out_of_it() {
-        // The pair the matrix above cannot assert on, and the one roadmap 1.24
-        // made reachable: `Upscale` is born at 2x, `Default` supports the
-        // gesture, so `was_magnified && supports_zoom` is live for the first
-        // time. `set_kind`'s own comment records the decision this asserts --
-        // the converted area KEEPS the factor, because it is a state the user
-        // could have scrolled to and can scroll back out of.
+    fn upscale_to_default_drops_the_sharpened_still() {
+        // 🔴 **THE DEFECT ROADMAP 1.29 WOULD HAVE SHIPPED, and it is the reason
+        // `discard_capture` was rewritten rather than left alone.**
+        //
+        // The old condition was `was_magnified && !kind.supports_zoom()`. An
+        // `Upscale` area is no longer magnified, so `was_magnified` is false and
+        // the whole conjunction is false: converting one to `Default` would have
+        // answered "keep the pixels", and the `Default` area would go on
+        // rendering a SHARPENED still of the screen at 1:1, forever.
+        //
+        // Nothing clears it. The area is already at natural size, so a scroll
+        // that reaches `zoom_area` never takes the `clear_magnification` branch;
+        // `refresh_magnification` re-takes only what `retake` asks for, and a
+        // natural `Default` asks for nothing. That is exactly the stranded state
+        // roadmap 1.27 exists to prevent, reached by the one route 1.27 could
+        // not have considered.
+        //
+        // This test is the falsifier: restore the old conjunction and it fails.
         let mut store = AreaStore::new();
         let id = store
             .create(AreaType::Upscale, rect(0, 0, 100, 100))
             .unwrap();
-        assert_eq!(store.get(id).unwrap().zoom, Zoom::UPSCALE);
+        assert!(store.get(id).unwrap().retake().is_some());
 
         let conversion = store.set_kind(id, AreaType::Default).unwrap();
         assert!(conversion.changed);
-        assert_eq!(
-            store.get(id).unwrap().zoom,
-            Zoom::UPSCALE,
-            "the magnification is kept: Default supports the gesture, so this is \
-             not a stranded state"
-        );
         assert!(
-            !conversion.discard_capture,
-            "and the pixels are kept with it -- the factor and the source \
-             rectangle are unchanged, so what is already on screen is still right"
+            conversion.discard_capture,
+            "a Default area cannot mean a sharpened still, and has no gesture \
+             that would clear one"
         );
-
-        // Recoverable, which is the whole reason keeping it is safe. Four
-        // notches is what `Zoom::UPSCALE` costs, and §3.4's floor does the rest.
         assert_eq!(
-            store.zoom_by(id, -4),
-            Some(Zoom::NATURAL),
-            "a Default area must be able to scroll out of an inherited factor"
+            store.get(id).unwrap().retake(),
+            None,
+            "and it asks for no replacement -- a natural Default shows the live \
+             screen underneath"
         );
-        assert!(store.get(id).unwrap().zoom.is_natural());
+    }
+
+    #[test]
+    fn a_conversion_that_changes_neither_the_source_nor_the_treatment_keeps_its_pixels() {
+        // The decision roadmap 1.24 recorded, asserted through the comparison
+        // that replaced its conjunction: pixels are dropped when the capture the
+        // area WANTS differs from the one it HAS, and kept when it does not.
+        //
+        // ⚠️ **The pair 1.24 made reachable is unreachable again** -- only
+        // `Default` supports the gesture and `Default` to `Default` returns
+        // early -- so this drives `Area::retake` directly rather than pretending
+        // a store can produce it. Testing it through `set_kind` would need a
+        // second zooming type, which is precisely the future this is left
+        // working for.
+        let bounds = rect(0, 0, 100, 100);
+        let magnified = Area {
+            id: AreaId(1),
+            kind: AreaType::Default,
+            bounds,
+            visual: Visual::Passive,
+            input: Input::Interactive,
+            layer: Layer::Auto,
+            zoom: Zoom::NATURAL.stepped(4),
+        };
+        // A hypothetical second zooming type inherits the factor, so both sides
+        // answer with the same rectangle and the same treatment: equal, so
+        // nothing is discarded.
+        assert_eq!(
+            magnified.retake(),
+            Area {
+                kind: AreaType::Default,
+                ..magnified
+            }
+            .retake(),
+            "same factor, same bounds, same treatment -- the pixels on screen \
+             are still the right ones"
+        );
+        // And the negative half, so the equality above cannot be satisfied by a
+        // `retake` that ignores its inputs.
+        assert_ne!(
+            magnified.retake(),
+            Area {
+                kind: AreaType::Upscale,
+                ..magnified
+            }
+            .retake(),
+            "a sharpening type wants a different rectangle AND a different \
+             treatment"
+        );
     }
 
     #[test]

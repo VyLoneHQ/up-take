@@ -875,7 +875,12 @@ pub(crate) fn interactive_area_at(app: &AppHandle, point: Point) -> Option<AreaS
 /// forever, which is a live area in all but name and precisely the cost §3.2
 /// says a passive area does not pay.
 pub(crate) fn zoom_area(app: &AppHandle, id: AreaId, notches: i32) -> bool {
-    let (zoom, bounds) = {
+    // **The area AFTER the zoom moved, not the zoom on its own.** Roadmap 1.29
+    // made *"what capture does this area hold?"* a question about the type as
+    // well as the factor, and `Area::retake` is where both are answered
+    // together -- so this reads the area back rather than reconstructing the
+    // question from a field.
+    let retake = {
         let store = app.state::<Mutex<AreaStore>>();
         let mut guard = lock(&store);
         let before = guard.get(id).map(|area| area.zoom);
@@ -888,15 +893,19 @@ pub(crate) fn zoom_area(app: &AppHandle, id: AreaId, notches: i32) -> bool {
         if after == before {
             return false;
         }
-        let Some(bounds) = guard.get(id).map(|area| area.bounds) else {
+        let Some(area) = guard.get(id) else {
             return false;
         };
-        (after, bounds)
+        area.retake()
     };
-    if zoom.is_natural() {
-        crate::output::clear_magnification(app, id);
-    } else {
-        crate::output::magnify_into_area(app, id, zoom.source_rect(bounds));
+    // Here `retake` and the old `!zoom.is_natural()` are equivalent, because
+    // only `Default` reaches this function and `Default` never sharpens. It is
+    // derived anyway: the site where the two STOPPED being equivalent
+    // (`refresh_magnification`) is the one that would have failed silently, and
+    // a rule with two implementations is how that happens.
+    match retake {
+        None => crate::output::clear_magnification(app, id),
+        Some(retake) => crate::output::magnify_into_area(app, id, retake),
     }
     // The badge is on the area payload, so the area set has to go out again for
     // the new factor to be visible.
@@ -906,28 +915,43 @@ pub(crate) fn zoom_area(app: &AppHandle, id: AreaId, notches: i32) -> bool {
     true
 }
 
-/// Re-takes the magnified capture an area is already showing, because what it
-/// is a magnification *of* has moved.
+/// Re-takes the capture an area is already showing, because what it is a
+/// picture *of* has moved.
 ///
-/// A zoomed area holds a still of the screen inside its own bounds. Move or
-/// resize it and that still is now a picture of somewhere else, with no cue
-/// that it is stale: the area goes on displaying the old content, pin-sharp,
-/// wherever the user drops it. Called at the end of a move or a resize rather
-/// than during one: a capture per mouse-move event is the F-33 budget many
-/// times over, and the intermediate frames are not what the user is looking at.
+/// An area holding a re-taken still holds a still of the screen inside its own
+/// bounds. Move or resize it and that still is now a picture of somewhere else,
+/// with no cue that it is stale: the area goes on displaying the old content,
+/// pin-sharp, wherever the user drops it. Called at the end of a move or a
+/// resize rather than during one: a capture per mouse-move event is the F-33
+/// budget many times over, and the intermediate frames are not what the user is
+/// looking at.
 ///
-/// A no-op for an area at natural size, which has no capture to refresh.
+/// A no-op for an area that holds no capture, which since roadmap 1.29 is
+/// **not** the same set as "an area at natural size".
+///
+/// # 🔴 The line this function turns on, and why it is `Area::retake`
+///
+/// This asked `!area.zoom.is_natural()` until 1.29, and that predicate is now
+/// **false for `Upscale`**, the type whose entire content is a re-taken still.
+/// Left as it was, an `Upscale` area moved or resized by the user would keep
+/// rendering a sharpened photograph of where it used to be, and a converted one
+/// would never take its first capture at all: `convert_area` reaches this
+/// function for exactly that, and its own comment promises the call *"is
+/// correct for every type without knowing which ones are magnified"*. That
+/// promise is only kept because the question moved into
+/// [`uptake_core::area::Area::retake`] with it.
+///
+/// The name is now narrower than the function, the way `clear_magnification`'s
+/// already is. Recorded rather than renamed: a rename reaches three modules and
+/// this branch is a behaviour change, not a naming one.
 pub(crate) fn refresh_magnification(app: &AppHandle, id: AreaId) {
     let target = {
         let store = app.state::<Mutex<AreaStore>>();
         let guard = lock(&store);
-        guard
-            .get(id)
-            .filter(|area| !area.zoom.is_natural())
-            .map(|area| area.zoom.source_rect(area.bounds))
+        guard.get(id).and_then(|area| area.retake())
     };
-    if let Some(source) = target {
-        crate::output::magnify_into_area(app, id, source);
+    if let Some(retake) = target {
+        crate::output::magnify_into_area(app, id, retake);
     }
 }
 
@@ -1691,11 +1715,13 @@ fn armable_type(name: &str) -> Option<AreaType> {
         // key `F`). It is passive and pass-through by model default, so the
         // area draws a tint and the user keeps working underneath it.
         "filter" => Some(AreaType::Filter),
-        // Upscale is the third (roadmap 1.24, key `U`). It is born magnified --
-        // `AreaType::default_zoom` -- so the drag produces a window onto a
-        // smaller rectangle of screen, stretched to fill it. Passive in v1 by
-        // ADR-0030: the pixels are re-taken on move and resize, not at
-        // framerate, and there is no model.
+        // Upscale is the third (roadmap 1.24, key `U`). ⚠️ **It is NOT born
+        // magnified, and it was between 1.24 and 1.29.** ADR-0031 reverses that
+        // on the founder's verdict: the drag produces an area covering the same
+        // region of screen at the same size, whose pixels are re-taken and
+        // sharpened in place (`AreaType::sharpens`). Passive still, now by
+        // ADR-0031's sequencing rather than ADR-0030's cost argument -- the live
+        // loop is roadmap 1.30 and is gated on a rig judgement.
         "upscale" => Some(AreaType::Upscale),
         _ => None,
     }

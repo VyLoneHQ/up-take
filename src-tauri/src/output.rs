@@ -33,7 +33,7 @@ use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
 
 use tauri::{AppHandle, Manager};
-use uptake_core::area::AreaId;
+use uptake_core::area::{AreaId, Retake};
 use uptake_core::bitmap::RgbaBitmap;
 use uptake_core::geometry::{Point, Rect};
 
@@ -389,6 +389,18 @@ struct Split {
     capture_ms: u128,
     /// PNG encode.
     encode_ms: u128,
+    /// The contrast-adaptive sharpening pass (roadmap 1.29), which runs only
+    /// for an area whose type asks for it.
+    ///
+    /// **Zero means it did not run, not that it was free.** Every other area
+    /// type leaves this at zero because `Retake::sharpen` is false, so a reader
+    /// scanning a log can tell an `Upscale` line from the rest by this field
+    /// alone. ADR-0031 closes with *"nothing here is measured ... the claim
+    /// that CAS is cheap is from its published description rather than from
+    /// this machine"*; this is the field that answers it, and the only reason
+    /// the answer will exist is that it prints unconditionally rather than on a
+    /// threshold (`UT-F-60`).
+    sharpen_ms: u128,
     /// Whatever the action does with the bytes: the DIB conversion plus the
     /// clipboard bracket for Copy, the file write for Save.
     publish_ms: u128,
@@ -465,23 +477,35 @@ impl std::fmt::Display for Source {
     }
 }
 
-/// Captures `bounds` and encodes it as PNG, returning both the raw bitmap
-/// (needed for the DIB clipboard format, which is not decoded back out of the
-/// PNG) and the encoded bytes, and recording each stage's cost in `split`.
-fn capture(bounds: Rect, split: &mut Split) -> Result<(RgbaBitmap, Vec<u8>), String> {
+/// Captures `bounds`, recording the grab's cost and the rectangle it actually
+/// took in `split`.
+///
+/// Split out from [`capture`] by roadmap 1.29, which needs the pixels **before
+/// they are encoded** so [`frozen_or_live`] can run the sharpening pass over
+/// them. Every caller that wants the PNG as well goes on calling `capture`, so
+/// there is still exactly one encode site per path.
+fn capture_bitmap(bounds: Rect, split: &mut Split) -> Result<RgbaBitmap, String> {
     let grab = Instant::now();
     let captured = uptake_capture::capture_region(bounds).map_err(|error| error.to_string())?;
     split.capture_ms = grab.elapsed().as_millis();
-    let encode = Instant::now();
-    let png = encode_png(&captured.bitmap)?;
-    split.encode_ms = encode.elapsed().as_millis();
     // What the capture crate reports it took, never what was asked for: it clamps
     // to the virtual desktop, and the log would otherwise name a rectangle that
     // was not captured. `freeze::capture_still` records the same distinction for
     // the same reason.
     split.bounds = Some(captured.rect);
+    Ok(captured.bitmap)
+}
+
+/// Captures `bounds` and encodes it as PNG, returning both the raw bitmap
+/// (needed for the DIB clipboard format, which is not decoded back out of the
+/// PNG) and the encoded bytes, and recording each stage's cost in `split`.
+fn capture(bounds: Rect, split: &mut Split) -> Result<(RgbaBitmap, Vec<u8>), String> {
+    let bitmap = capture_bitmap(bounds, split)?;
+    let encode = Instant::now();
+    let png = encode_png(&bitmap)?;
+    split.encode_ms = encode.elapsed().as_millis();
     split.encoded_bytes = png.len();
-    Ok((captured.bitmap, png))
+    Ok((bitmap, png))
 }
 
 /// Task 1.9c's fast path: crop the frame held since mouse-down, or capture.
@@ -648,7 +672,7 @@ struct Magnify {
     /// and a capture is 100-300 ms, so a queue would serve nine magnifications
     /// the user has already scrolled past. Overwriting one area's entry drops
     /// its intermediate steps and keeps every *other* area's request intact.
-    pending: BTreeMap<AreaId, (Rect, u64)>,
+    pending: BTreeMap<AreaId, (Retake, u64)>,
     /// The newest generation issued for each area, which is what a finished
     /// capture compares itself against.
     ///
@@ -681,11 +705,11 @@ impl Magnify {
     }
 
     /// Stamps a new request for `id`, superseding whatever that area had.
-    fn issue(&mut self, id: AreaId, source: Rect) -> u64 {
+    fn issue(&mut self, id: AreaId, retake: Retake) -> u64 {
         self.next_generation = self.next_generation.wrapping_add(1);
         let generation = self.next_generation;
         self.current.insert(id, generation);
-        self.pending.insert(id, (source, generation));
+        self.pending.insert(id, (retake, generation));
         generation
     }
 
@@ -702,10 +726,10 @@ impl Magnify {
         self.current.get(&id) == Some(&generation)
     }
 
-    fn take_one(&mut self) -> Option<(AreaId, Rect, u64)> {
-        let (&id, &(source, generation)) = self.pending.iter().next()?;
+    fn take_one(&mut self) -> Option<(AreaId, Retake, u64)> {
+        let (&id, &(retake, generation)) = self.pending.iter().next()?;
         self.pending.remove(&id);
-        Some((id, source, generation))
+        Some((id, retake, generation))
     }
 }
 
@@ -713,12 +737,30 @@ fn magnify() -> std::sync::MutexGuard<'static, Magnify> {
     MAGNIFY.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Captures `source` and pins it as `id`'s contents, magnifying the area (§3.4).
+/// Captures `retake.source` and pins it as `id`'s contents: the still an area
+/// renders instead of the live screen underneath.
 ///
-/// `source` is `Zoom::source_rect`'s output: a rectangle *inside* the area,
-/// which the frontend then stretches to fill it. The magnification is entirely
-/// in the ratio between the two rectangles, so this function does no scaling of
-/// its own. The resampling belongs to the compositor, which does it on the GPU.
+/// # Two reasons an area holds one, and this function serves both
+///
+/// **Magnification (§3.4).** `retake.source` is `Zoom::source_rect`'s output: a
+/// rectangle *inside* the area, which the frontend then stretches to fill it.
+/// The magnification is entirely in the ratio between the two rectangles, so
+/// this function does no scaling of its own. The resampling belongs to the
+/// compositor, which does it on the GPU.
+///
+/// **Sharpening (roadmap 1.29, ADR-0031).** `retake.sharpen` is set, the source
+/// is the area's own bounds 1:1, and the pixels go through
+/// [`uptake_core::sharpen::rcas`] before they are encoded. Nothing about the
+/// geometry changes (that is the founder's `MUST NOT zoom`), so the frontend
+/// draws it exactly as it draws a 1× pin and needs to know nothing about it.
+///
+/// The two are mutually exclusive today and [`Retake`] is where that is
+/// decided, not here. This function takes whichever it is given.
+///
+/// **The name is narrower than the function as of 1.29** and is left alone for
+/// the reason [`clear_magnification`]'s doc gives about its own: a rename
+/// reaches three modules and would widen a diff whose subject is a behaviour
+/// change.
 ///
 /// # Why this is not [`capture_into_area`]
 ///
@@ -741,10 +783,10 @@ fn magnify() -> std::sync::MutexGuard<'static, Magnify> {
 /// Returns immediately. The only caller is the mouse hook, and a capture is far
 /// past `LowLevelHooksTimeout`, the F-33 failure class, and the same reason
 /// [`capture_into_area`] spawns.
-pub(crate) fn magnify_into_area(app: &AppHandle, id: AreaId, source: Rect) {
+pub(crate) fn magnify_into_area(app: &AppHandle, id: AreaId, retake: Retake) {
     {
         let mut state = magnify();
-        state.issue(id, source);
+        state.issue(id, retake);
         // Lost the race to an already-running worker, which will take the
         // request above rather than the one it was spawned for.
         if state.working {
@@ -756,7 +798,7 @@ pub(crate) fn magnify_into_area(app: &AppHandle, id: AreaId, source: Rect) {
     std::thread::spawn(move || {
         loop {
             let taken = magnify().take_one();
-            let Some((id, source, generation)) = taken else {
+            let Some((id, retake, generation)) = taken else {
                 let mut state = magnify();
                 // **Re-checked under the same lock that clears `working`.** A
                 // request arriving between `take_one` and here would otherwise
@@ -768,15 +810,15 @@ pub(crate) fn magnify_into_area(app: &AppHandle, id: AreaId, source: Rect) {
                 }
                 continue;
             };
-            magnify_once(&app, id, source, generation);
+            magnify_once(&app, id, retake, generation);
         }
     });
 }
 
-fn magnify_once(app: &AppHandle, id: AreaId, source: Rect, generation: u64) {
+fn magnify_once(app: &AppHandle, id: AreaId, retake: Retake, generation: u64) {
     let started = Instant::now();
     let mut split = Split::default();
-    let outcome = frozen_or_live(source, &mut split).and_then(|(bitmap, png)| {
+    let outcome = frozen_or_live(retake, &mut split).and_then(|(bitmap, png)| {
         // **The freshness check and the STORE WRITE are one critical section,
         // and an independent review is why.** Checking and then locking
         // `CaptureStore` separately leaves a window in which
@@ -841,21 +883,52 @@ fn magnify_once(app: &AppHandle, id: AreaId, source: Rect, generation: u64) {
     report("magnify", started, &split, outcome);
 }
 
-/// The frozen still if there is one, a live capture otherwise.
+/// The frozen still if there is one, a live capture otherwise, sharpened when
+/// the area asked for it.
 ///
 /// [`capture_or_crop`]'s first and last branches with the pre-capture left out
 /// of the middle. See [`magnify_into_area`] for why that branch is wrong here.
-fn frozen_or_live(source: Rect, split: &mut Split) -> Result<(RgbaBitmap, Vec<u8>), String> {
-    if let Some(bitmap) = crate::freeze::crop(source) {
-        split.source = Source::Frozen;
-        let encode = Instant::now();
-        let png = encode_png(&bitmap)?;
-        split.encode_ms = encode.elapsed().as_millis();
-        split.bounds = Some(source);
-        split.encoded_bytes = png.len();
-        return Ok((bitmap, png));
+///
+/// # Why the sharpening pass is here and not in either branch
+///
+/// **Both routes to the pixels have to sharpen, and the encode has to happen
+/// after.** A frozen screen is exactly the case where a user would sit and look
+/// at an `Upscale` area, so a pass that ran only on the live branch would be
+/// absent precisely when it is being examined. Putting it at the join is what
+/// makes "which route ran" and "was it sharpened" independent. The two
+/// branches already differ in enough ways (`Source`, the pre-capture, the
+/// straddle fallback) that a third divergence is one too many.
+///
+/// The consequence is that the frozen branch cannot encode inside itself any
+/// more, and its `encode_ms` and `encoded_bytes` are filled in below with the
+/// live branch's. That is the fix rather than the cost: the two were already
+/// two implementations of one step.
+fn frozen_or_live(retake: Retake, split: &mut Split) -> Result<(RgbaBitmap, Vec<u8>), String> {
+    let mut bitmap = match crate::freeze::crop(retake.source) {
+        Some(frozen) => {
+            split.source = Source::Frozen;
+            split.bounds = Some(retake.source);
+            frozen
+        }
+        None => capture_bitmap(retake.source, split)?,
+    };
+    if retake.sharpen {
+        let sharpening = Instant::now();
+        uptake_core::sharpen::rcas(&mut bitmap, uptake_core::sharpen::DEFAULT_SHARPNESS);
+        // **Reported on the line rather than assumed cheap.** ADR-0031's own
+        // closing warning is that *"nothing here is measured ... the claim that
+        // CAS is cheap is from its published description rather than from this
+        // machine"*, and `UT-F-79` is this project's record of pricing a
+        // subsystem without reading it. This is the field that answers it, and
+        // it is zero on every area that does not sharpen, so a `sharpen` column
+        // of 0 also says the pass did not run.
+        split.sharpen_ms = sharpening.elapsed().as_millis();
     }
-    capture(source, split)
+    let encode = Instant::now();
+    let png = encode_png(&bitmap)?;
+    split.encode_ms = encode.elapsed().as_millis();
+    split.encoded_bytes = png.len();
+    Ok((bitmap, png))
 }
 
 /// Drops an area's pinned pixels and tells the frontend they are gone.
@@ -970,8 +1043,13 @@ fn stage_line(split: &Split) -> String {
         None => String::new(),
     };
     format!(
-        "{where_from}capture {} ms, encode {} ms, publish {} ms, {} bytes ({})",
-        split.capture_ms, split.encode_ms, split.publish_ms, split.encoded_bytes, split.source
+        "{where_from}capture {} ms, sharpen {} ms, encode {} ms, publish {} ms, {} bytes ({})",
+        split.capture_ms,
+        split.sharpen_ms,
+        split.encode_ms,
+        split.publish_ms,
+        split.encoded_bytes,
+        split.source
     )
 }
 
@@ -1493,8 +1571,8 @@ mod tests {
     fn one_areas_scroll_does_not_supersede_another_areas_capture() {
         let mut state = Magnify::new();
         let (a, b) = (area(1), area(2));
-        let for_a = state.issue(a, Rect::new(0, 0, 10, 10));
-        let for_b = state.issue(b, Rect::new(50, 50, 10, 10));
+        let for_a = state.issue(a, magnifying(Rect::new(0, 0, 10, 10)));
+        let for_b = state.issue(b, magnifying(Rect::new(50, 50, 10, 10)));
         assert!(
             state.is_current(a, for_a),
             "B's scroll must not invalidate A's in-flight capture"
@@ -1509,8 +1587,8 @@ mod tests {
     fn a_newer_scroll_supersedes_the_same_areas_older_one() {
         let mut state = Magnify::new();
         let a = area(1);
-        let first = state.issue(a, Rect::new(0, 0, 10, 10));
-        let second = state.issue(a, Rect::new(2, 2, 6, 6));
+        let first = state.issue(a, magnifying(Rect::new(0, 0, 10, 10)));
+        let second = state.issue(a, magnifying(Rect::new(2, 2, 6, 6)));
         assert!(!state.is_current(a, first));
         assert!(state.is_current(a, second));
         // And only the newest is queued: the slot is per area, not a queue.
@@ -1525,8 +1603,8 @@ mod tests {
     fn cancelling_one_area_leaves_every_other_areas_work_alone() {
         let mut state = Magnify::new();
         let (a, b) = (area(1), area(2));
-        let for_a = state.issue(a, Rect::new(0, 0, 10, 10));
-        let for_b = state.issue(b, Rect::new(50, 50, 10, 10));
+        let for_a = state.issue(a, magnifying(Rect::new(0, 0, 10, 10)));
+        let for_b = state.issue(b, magnifying(Rect::new(50, 50, 10, 10)));
         state.cancel(a);
         assert!(!state.is_current(a, for_a), "A's own work is invalidated");
         assert!(state.is_current(b, for_b), "B's is not");
@@ -1547,15 +1625,15 @@ mod tests {
         let mut state = Magnify::new();
         let a = area(1);
 
-        let cancelled = state.issue(a, Rect::new(0, 0, 10, 10));
+        let cancelled = state.issue(a, magnifying(Rect::new(0, 0, 10, 10)));
         state.take_one();
         assert!(state.is_current(a, cancelled), "the insert is allowed");
         state.cancel(a);
         assert!(!state.is_current(a, cancelled), "cancelled");
 
-        let superseded = state.issue(a, Rect::new(0, 0, 10, 10));
+        let superseded = state.issue(a, magnifying(Rect::new(0, 0, 10, 10)));
         state.take_one();
-        state.issue(a, Rect::new(1, 1, 8, 8));
+        state.issue(a, magnifying(Rect::new(1, 1, 8, 8)));
         assert!(!state.is_current(a, superseded), "superseded");
 
         // Identical answers, opposite situations. Nothing downstream of this
@@ -1569,13 +1647,53 @@ mod tests {
     fn taking_a_request_removes_it() {
         let mut state = Magnify::new();
         let a = area(1);
-        let generation = state.issue(a, Rect::new(3, 4, 10, 10));
+        let generation = state.issue(a, magnifying(Rect::new(3, 4, 10, 10)));
         let taken = state.take_one().unwrap();
-        assert_eq!(taken, (a, Rect::new(3, 4, 10, 10), generation));
+        assert_eq!(taken, (a, magnifying(Rect::new(3, 4, 10, 10)), generation));
         assert!(state.take_one().is_none());
         // Still current: taking it out of the queue is not cancelling it. The
         // worker checks `is_current` again after its capture.
         assert!(state.is_current(a, generation));
+    }
+
+    /// A magnifying retake of `source`: the shape every test above was
+    /// written against, before roadmap 1.29 gave a request a second field.
+    const fn magnifying(source: Rect) -> Retake {
+        Retake {
+            source,
+            sharpen: false,
+        }
+    }
+
+    /// **The queue must carry the sharpen flag, not just the rectangle.**
+    /// `Retake` is threaded through `issue`, `pending` and `take_one`, and the
+    /// one thing that thread exists for is the flag: drop it anywhere along the
+    /// way and every `Upscale` area silently gets an unsharpened 1:1 capture of
+    /// its own bounds, which renders as the live screen and is exactly the
+    /// "indistinguishable from `Default`" failure the type keeps returning to.
+    /// It compiles, it pins, it looks right, and the feature is gone.
+    #[test]
+    fn a_request_keeps_its_sharpen_flag_through_the_queue() {
+        let mut state = Magnify::new();
+        let (sharpening, magnifying_area) = (area(1), area(2));
+        let asked = Retake {
+            source: Rect::new(0, 0, 10, 10),
+            sharpen: true,
+        };
+        state.issue(sharpening, asked);
+        state.issue(magnifying_area, magnifying(Rect::new(50, 50, 10, 10)));
+        // `take_one` reads `pending` in id order, so the sharpening area is
+        // first. Both are asserted, because a `take_one` that hard-coded either
+        // answer would pass a test that only looked at one.
+        let (first, first_retake, _) = state.take_one().unwrap();
+        assert_eq!(first, sharpening);
+        assert_eq!(first_retake, asked, "the sharpen flag survived the queue");
+        let (second, second_retake, _) = state.take_one().unwrap();
+        assert_eq!(second, magnifying_area);
+        assert!(
+            !second_retake.sharpen,
+            "and a magnifying request must not acquire one"
+        );
     }
 
     /// Ids come from `AreaStore` and there is deliberately no constructor, so
@@ -2304,6 +2422,7 @@ mod tests {
         // the founder's next rig evening.
         let split = Split {
             capture_ms: 254,
+            sharpen_ms: 12,
             encode_ms: 38,
             publish_ms: 79,
             bounds: Some(Rect::new(0, 0, 2560, 1440)),
@@ -2316,6 +2435,11 @@ mod tests {
         assert!(line.contains("86113 bytes"), "no byte length: {line}");
         assert!(line.contains("capture 254 ms"), "{line}");
         assert!(line.contains("live capture"), "{line}");
+        // Roadmap 1.29's stage. **The only number that will ever exist for the
+        // cost of the sharpening pass is the one this line prints**, and
+        // ADR-0031 shipped with that cost explicitly unmeasured, so a line that
+        // dropped the field would leave the record where the ADR left it.
+        assert!(line.contains("sharpen 12 ms"), "no sharpen stage: {line}");
     }
 
     #[test]

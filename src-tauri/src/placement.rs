@@ -2843,10 +2843,18 @@ fn finish_gesture(release: Point) {
 ///
 /// **Two types take pixels here, by two different routes.** `Screenshot` takes
 /// a pin through [`captures_on_create`], which ADR-0018 settled for the one type
-/// it decided; `Upscale` takes its first magnified capture through
-/// [`overlay::refresh_magnification`], because roadmap 1.24 gives it a
-/// non-natural [`AreaType::default_zoom`] and an area born at 2x showing the
-/// live screen at 1:1 is the magnifying type not magnifying.
+/// it decided; `Upscale` takes its first capture through
+/// [`overlay::refresh_magnification`], because [`uptake_core::area::Area::retake`]
+/// answers `Some` for it: 1:1 over its own bounds, to be sharpened.
+///
+/// ⚠️ **The REASON for the second route changed under roadmap 1.29 and the
+/// route did not, which is the whole reason `retake` exists.** It used to be
+/// that 1.24 gave `Upscale` a non-natural `default_zoom`, so the area needed a
+/// magnified capture. ADR-0031 deletes that magnification, and had
+/// `refresh_magnification` still asked `!zoom.is_natural()` this call would
+/// have silently stopped taking anything, leaving an `Upscale` area showing
+/// the live screen at 1:1, which is the same "the type not doing its type" bug
+/// this comment used to describe in the other direction.
 ///
 /// **Said "Only `Screenshot` captures on create [...] and the rest have no
 /// gesture yet" until 2026-08-21**, and roadmap 1.24 falsified both halves in
