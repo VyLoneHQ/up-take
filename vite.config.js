@@ -43,4 +43,25 @@ export default defineConfig(async () => ({
   test: {
     include: ['src/**/*.{test,spec}.{js,ts}'],
   },
+
+  // **Resolve Svelte's BROWSER build under vitest, and only under vitest**
+  // (UP-TAKE `I-23`). Without this every component test dies on
+  // `lifecycle_function_unavailable: mount(...) is not available on the
+  // server`: the SvelteKit plugin leaves the SSR export conditions in place, so
+  // `import Page from './+page.svelte'` reaches `svelte/index-server.js`, which
+  // has no `mount`. This is Svelte's own documented workaround for running
+  // component tests in a SvelteKit project.
+  //
+  // **Guarded on `VITEST` rather than applied unconditionally**, which is the
+  // part worth keeping: the same field would otherwise force the browser
+  // condition on `vite build`, and this app is built by `tauri build` through
+  // exactly that path. A test-only need must not change what ships.
+  //
+  // ⚠️ **The DOM environment is NOT set here, on purpose.** It is a
+  // `// @vitest-environment jsdom` docblock in the one file that needs it, so
+  // the DOM-free suite over `src/lib/**` keeps running in node at the speed
+  // `I-23` names as worth protecting. Setting `environment: 'jsdom'` here would
+  // make every pure helper test pay for a DOM it never touches.
+  // @ts-expect-error process is a nodejs global
+  resolve: process.env.VITEST ? { conditions: ['browser'] } : undefined,
 }));
