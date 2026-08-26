@@ -87,6 +87,8 @@
 import { render } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
+import type { AreaKind } from '$lib/overlay-state';
+import areaRs from '../../crates/uptake-core/src/area.rs?raw';
 
 /** Every handler the component registered, by event name. */
 const handlers = new Map<string, (event: { payload: unknown }) => void>();
@@ -173,6 +175,105 @@ beforeEach(() => {
   });
 });
 
+/**
+ * Whether Rust's `AreaType::default_zoom` gives this kind a MAGNIFIED zoom.
+ *
+ * # Why this exists (UP-TAKE `I-309`)
+ *
+ * The `I-289` test that used to live in this file asserted *"an upscale area
+ * shows no zoom badge"* by passing `{ kind: 'upscale' }` to a fixture that
+ * defaults `zoom: 1`. **Nothing in the fixture derived `zoom` from `kind`**, so
+ * it asserted *"a payload with `zoom: 1` shows no badge"*: trivially true,
+ * already covered two tests above, and unable to fail for the payload Rust
+ * actually sends. It was deleted rather than left green, and `I-309`'s durable
+ * half is the sentence this function answers:
+ *
+ * > A mock payload can assert only what the mock encodes. Every relationship
+ * > this file wants to rely on between two fields of an `AreaView` is a
+ * > relationship **Rust owns** and this file has to be told.
+ *
+ * So it is told, by reading the relationship out of Rust rather than by
+ * restating it. Same technique as `area-kinds.test.ts` and
+ * `built-type-count.test.ts`, and the same reason: a hand-copied answer is a
+ * second source that drifts silently.
+ *
+ * # It answers *magnified or not*, not *how far*
+ *
+ * `Zoom::UPSCALE` was **deleted** by roadmap 1.29 (ADR-0031), so every arm reads
+ * `Zoom::NATURAL` today and there is no factor in the source to read. A scraper
+ * that tried to compute one would be parsing a constant that does not exist,
+ * which is more machinery for less truth. *Born magnified* is the whole of what
+ * the badge condition (`area.zoom > 1`) turns on.
+ *
+ * # Why `source` is a parameter
+ *
+ * So the scraper itself can be put under test. Reading only the real `area.rs`
+ * would leave it with **no positive case**: every arm there says
+ * `Zoom::NATURAL`, so nothing could tell a working scraper from one hardwired
+ * to `false`, and a sweep asserting `false` for all seven kinds passes either
+ * way. That is `UT-F-83` in miniature -- an assertion whose fixture cannot
+ * distinguish the two hypotheses -- and it is caught here rather than shipped
+ * because this file's own history is what the row is about.
+ *
+ * # It throws rather than answering when it cannot find the arm
+ *
+ * An unfound match must not read as *natural*. That is the direction that fails
+ * silently: the defect this guards is a type quietly gaining a magnified
+ * default, and a scraper that answered `false` for a renamed function would
+ * report exactly that as fine. `built-type-count.test.ts` carries the same rule
+ * in its own words.
+ */
+function bornMagnified(kind: AreaKind, source: string = areaRs): boolean {
+  const start = source.indexOf('pub const fn default_zoom(');
+  if (start === -1) {
+    throw new Error(
+      'could not find `pub const fn default_zoom(` in area.rs: has it been ' +
+        'renamed or moved? An unfound function must not read as "natural".',
+    );
+  }
+  const end = source.indexOf('\n    }\n', start);
+  if (end === -1) throw new Error('could not find the end of `default_zoom`');
+
+  // Comment lines are dropped before parsing: a doc comment inside the match may
+  // quote an arm, and `payload-keys.test.ts` shipped that exact false positive.
+  const body = source
+    .slice(start, end)
+    .split('\n')
+    .filter((line) => !line.trimStart().startsWith('//'))
+    .join('\n');
+
+  // One arm: its `|`-separated variants on the left, its value on the right.
+  // Written as one regex over the whole match rather than as a hand-rolled
+  // splitter, because the arms ARE `|`-grouped today (all seven variants share a
+  // single `=> Zoom::NATURAL`) and a per-line reading would find no variant on
+  // the line that carries the value.
+  const arms = body.matchAll(/((?:\s*\|?\s*Self::\w+)+)\s*=>\s*([^,\n]+)/g);
+  for (const [, left, value] of arms) {
+    const variants = (left ?? '').match(/Self::(\w+)/g) ?? [];
+    for (const variant of variants) {
+      if (variant.slice('Self::'.length).toLowerCase() === kind) {
+        return (value ?? '').trim() !== 'Zoom::NATURAL';
+      }
+    }
+  }
+  throw new Error(
+    `no \`default_zoom\` arm found for area kind "${kind}". The match has been ` +
+      'reshaped and this scraper can no longer read it; fix the scraper rather ' +
+      'than deleting the test it serves.',
+  );
+}
+
+/** Every area kind on the wire, in `AreaKind`'s own order. */
+const KINDS = [
+  'default',
+  'screenshot',
+  'record',
+  'ocr',
+  'upscale',
+  'analysis',
+  'filter',
+] as const satisfies readonly AreaKind[];
+
 describe('the overlay renders what Rust tells it and nothing more', () => {
   test('a hidden overlay draws no monitor frames at all', async () => {
     const { container } = await mount();
@@ -238,14 +339,34 @@ describe('the overlay renders what Rust tells it and nothing more', () => {
 
 describe('an area renders the badges its state earns and no others', () => {
   /** One area on the wire, at natural zoom, with the fields tests vary. */
+  /**
+   * One area on the wire, with `zoom` DERIVED FROM `kind` the way Rust derives
+   * it (UP-TAKE `I-309`).
+   *
+   * The literal `zoom: 1` this replaced is what made the deleted `I-289` test
+   * unable to fail: it fixed the very field the assertion turned on, so
+   * `{ kind: 'upscale' }` changed nothing about the payload and the test could
+   * not tell a magnified Upscale area from a natural one. `zoom` is now read
+   * from {@link bornMagnified}, so a kind that gains a magnified default in
+   * Rust arrives here magnified too.
+   *
+   * An explicit `zoom` in `overrides` still wins, and that is deliberate rather
+   * than an oversight: `a magnified area reports its factor` needs to send a
+   * factor no type is born with, and it is asserting the BADGE, not the
+   * kind-to-zoom relationship.
+   */
   function area(overrides: Record<string, unknown> = {}) {
+    const kind = (overrides.kind as AreaKind) ?? 'default';
     return {
       id: 1,
       rect: [100, 100, 400, 300],
       close: [492, 92, 18, 18],
       layer: 'auto',
-      kind: 'default',
-      zoom: 1,
+      kind,
+      // 2 rather than some larger number because the badge turns on `> 1`; the
+      // value only has to be magnified, and inventing a bigger one would imply
+      // this file knows a factor Rust no longer defines.
+      zoom: bornMagnified(kind) ? 2 : 1,
       ...overrides,
     };
   }
@@ -314,6 +435,86 @@ describe('an area renders the badges its state earns and no others', () => {
    * between two fields of an `AreaView` is a relationship Rust owns and this
    * file has to be told. `I-308` is the same gap for the event names.
    */
+
+  test('an upscale area shows no zoom badge, because Rust does not magnify it', async () => {
+    // 🟢 **`I-309` DISCHARGED: the test the tombstone above says is owed.**
+    //
+    // The difference from the deleted version is one line in {@link area} and it
+    // is the whole difference: `zoom` is no longer a literal, it is read out of
+    // `AreaType::default_zoom`. So this asserts the thing it names -- *an
+    // Upscale area, at the zoom Rust gives it, shows no badge* -- rather than
+    // *a payload with `zoom: 1` shows no badge*, which was true of every
+    // payload and is why the old one could not fail.
+    //
+    // **Confirmed able to go red before being trusted**: pointing
+    // `default_zoom`'s `Upscale` arm at a magnified `Zoom` makes `bornMagnified`
+    // answer true, the fixture sends a magnified area, the badge renders, and
+    // this fails. That is `I-289`'s actual defect -- a permanent `2×` badge
+    // advertising a scroll gesture `zoom_by` refuses in both directions -- and
+    // it is now guarded on the frontend rather than only in Rust.
+    const { container } = await mount();
+    await emit('overlay://state', state());
+    await emit('overlay://areas', { areas: [area({ kind: 'upscale' })] });
+
+    expect(container.querySelectorAll('.area')).toHaveLength(1);
+    expect(container.querySelectorAll('.zoom-badge')).toHaveLength(0);
+  });
+
+  test('no area type is born magnified, which is what the badge rule assumes', () => {
+    // Rust's own `every_type_is_born_natural` asserts this about the same
+    // function; this asserts that THIS FILE'S READING of it agrees. On its own
+    // it is a weak test, and the two below are what make it worth having --
+    // see the note on `source` in `bornMagnified`.
+    for (const kind of KINDS) {
+      expect(bornMagnified(kind), `${kind} is born magnified`).toBe(false);
+    }
+  });
+
+  test('the scraper can actually SEE a magnified arm, not just report false', () => {
+    // 🔴 **THE POSITIVE CONTROL, and without it everything above is unearned.**
+    // The sweep asserts `false` for all seven kinds, so a `bornMagnified`
+    // hardwired to `return false` passes it, passes the Upscale badge test, and
+    // guards nothing -- while reading as two green tests about magnification.
+    //
+    // The real `area.rs` cannot supply this case: every arm there says
+    // `Zoom::NATURAL`, which is the fix working, so the only way to feed the
+    // scraper a magnified arm is to hand it one.
+    const magnified = [
+      '    pub const fn default_zoom(self) -> Zoom {',
+      '        match self {',
+      '            Self::Default',
+      '            | Self::Screenshot => Zoom::NATURAL,',
+      '            Self::Upscale => Zoom::NATURAL.zoomed_in(4),',
+      '        }',
+      '    }',
+      '',
+    ].join('\n');
+
+    expect(bornMagnified('upscale', magnified)).toBe(true);
+    expect(bornMagnified('default', magnified)).toBe(false);
+  });
+
+  test('a renamed or reshaped default_zoom throws instead of answering "natural"', () => {
+    // The direction that fails SILENTLY. The defect being guarded is a type
+    // quietly gaining a magnified default; a scraper that answered `false` for
+    // a function it could not find would report exactly that as fine, and every
+    // test above would stay green through a rename.
+    expect(() => bornMagnified('upscale', 'fn something_else() {}\n')).toThrow(
+      /default_zoom/,
+    );
+    // Found, but with no arm for this kind: also a throw, not a `false`.
+    const partial = [
+      '    pub const fn default_zoom(self) -> Zoom {',
+      '        match self {',
+      '            Self::Default => Zoom::NATURAL,',
+      '        }',
+      '    }',
+      '',
+    ].join('\n');
+    expect(() => bornMagnified('upscale', partial)).toThrow(
+      /no `default_zoom` arm/,
+    );
+  });
 
   test('a filter area is marked as one, so the tint rule can reach it', async () => {
     const { container } = await mount();
