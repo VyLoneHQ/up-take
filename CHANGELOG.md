@@ -28,12 +28,15 @@ Until then it is written by hand.
 - Four area types, chosen from the area's own right-click menu. A plain pinned region; a screenshot
   area that captures what is under it and keeps the still, which Copy and Save export; a filter
   area that tints what is underneath and lets clicks pass through to it; and an upscale area that
-  shows the piece of screen under it magnified, as a still rather than a live view.
+  sharpens the piece of screen under it in place, without magnifying it, as a still rather than a
+  live view.
 - Freeze the screen while placing an area, with `Ctrl+Space`.
 - The overlay is excluded from screen capture, so other recording tools do not see it.
 
 <!-- source: STATUS.md Phase 1 (1A merged, 1B partial, 1D partial); ROADMAP.md tasks 1.1 to 1.9f,
-     plus 1.23 (Filter), 1.24 (Upscale), 1.27 (area types chosen from the area's own menu) and
+     plus 1.23 (Filter), 1.24 and 1.29 (Upscale; 1.29 and ADR-0031 are what make the entry say
+     "sharpens" rather than "magnified", reversing 1.24 on the founder's verdict), 1.27 (area
+     types chosen from the area's own menu) and
      1.28 (those types in a submenu), which the "Four area types" entry above derives from and
      which sit outside the 1.1-1.9f range this line used to name on its own. `P-6` asks for the
      source of the claim rather than of the page, and that range stopped covering the entry when

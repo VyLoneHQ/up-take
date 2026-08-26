@@ -875,7 +875,12 @@ pub(crate) fn interactive_area_at(app: &AppHandle, point: Point) -> Option<AreaS
 /// forever, which is a live area in all but name and precisely the cost §3.2
 /// says a passive area does not pay.
 pub(crate) fn zoom_area(app: &AppHandle, id: AreaId, notches: i32) -> bool {
-    let (zoom, bounds) = {
+    // **The area AFTER the zoom moved, not the zoom on its own.** Roadmap 1.29
+    // made *"what capture does this area hold?"* a question about the type as
+    // well as the factor, and `Area::retake` is where both are answered
+    // together -- so this reads the area back rather than reconstructing the
+    // question from a field.
+    let retake = {
         let store = app.state::<Mutex<AreaStore>>();
         let mut guard = lock(&store);
         let before = guard.get(id).map(|area| area.zoom);
@@ -888,15 +893,19 @@ pub(crate) fn zoom_area(app: &AppHandle, id: AreaId, notches: i32) -> bool {
         if after == before {
             return false;
         }
-        let Some(bounds) = guard.get(id).map(|area| area.bounds) else {
+        let Some(area) = guard.get(id) else {
             return false;
         };
-        (after, bounds)
+        area.retake()
     };
-    if zoom.is_natural() {
-        crate::output::clear_magnification(app, id);
-    } else {
-        crate::output::magnify_into_area(app, id, zoom.source_rect(bounds));
+    // Here `retake` and the old `!zoom.is_natural()` are equivalent, because
+    // only `Default` reaches this function and `Default` never sharpens. It is
+    // derived anyway: the site where the two STOPPED being equivalent
+    // (`refresh_magnification`) is the one that would have failed silently, and
+    // a rule with two implementations is how that happens.
+    match retake {
+        None => crate::output::clear_magnification(app, id),
+        Some(retake) => crate::output::magnify_into_area(app, id, retake),
     }
     // The badge is on the area payload, so the area set has to go out again for
     // the new factor to be visible.
@@ -906,28 +915,43 @@ pub(crate) fn zoom_area(app: &AppHandle, id: AreaId, notches: i32) -> bool {
     true
 }
 
-/// Re-takes the magnified capture an area is already showing, because what it
-/// is a magnification *of* has moved.
+/// Re-takes the capture an area is already showing, because what it is a
+/// picture *of* has moved.
 ///
-/// A zoomed area holds a still of the screen inside its own bounds. Move or
-/// resize it and that still is now a picture of somewhere else, with no cue
-/// that it is stale: the area goes on displaying the old content, pin-sharp,
-/// wherever the user drops it. Called at the end of a move or a resize rather
-/// than during one: a capture per mouse-move event is the F-33 budget many
-/// times over, and the intermediate frames are not what the user is looking at.
+/// An area holding a re-taken still holds a still of the screen inside its own
+/// bounds. Move or resize it and that still is now a picture of somewhere else,
+/// with no cue that it is stale: the area goes on displaying the old content,
+/// pin-sharp, wherever the user drops it. Called at the end of a move or a
+/// resize rather than during one: a capture per mouse-move event is the F-33
+/// budget many times over, and the intermediate frames are not what the user is
+/// looking at.
 ///
-/// A no-op for an area at natural size, which has no capture to refresh.
+/// A no-op for an area that holds no capture, which since roadmap 1.29 is
+/// **not** the same set as "an area at natural size".
+///
+/// # 🔴 The line this function turns on, and why it is `Area::retake`
+///
+/// This asked `!area.zoom.is_natural()` until 1.29, and that predicate is now
+/// **false for `Upscale`**, the type whose entire content is a re-taken still.
+/// Left as it was, an `Upscale` area moved or resized by the user would keep
+/// rendering a sharpened photograph of where it used to be, and a converted one
+/// would never take its first capture at all: `convert_area` reaches this
+/// function for exactly that, and its own comment promises the call *"is
+/// correct for every type without knowing which ones are magnified"*. That
+/// promise is only kept because the question moved into
+/// [`uptake_core::area::Area::retake`] with it.
+///
+/// The name is now narrower than the function, the way `clear_magnification`'s
+/// already is. Recorded rather than renamed: a rename reaches three modules and
+/// this branch is a behaviour change, not a naming one.
 pub(crate) fn refresh_magnification(app: &AppHandle, id: AreaId) {
     let target = {
         let store = app.state::<Mutex<AreaStore>>();
         let guard = lock(&store);
-        guard
-            .get(id)
-            .filter(|area| !area.zoom.is_natural())
-            .map(|area| area.zoom.source_rect(area.bounds))
+        guard.get(id).and_then(|area| area.retake())
     };
-    if let Some(source) = target {
-        crate::output::magnify_into_area(app, id, source);
+    if let Some(retake) = target {
+        crate::output::magnify_into_area(app, id, retake);
     }
 }
 
@@ -1351,15 +1375,30 @@ pub(crate) fn monitor_rects() -> Vec<Rect> {
 /// monitor at all — which happens in the dead zones between mismatched monitors,
 /// where any answer is a guess and the desktop is at least never `None`.
 pub(crate) fn monitor_bounds_at(app: &AppHandle, point: Point) -> Rect {
+    monitor_metrics_at(app, point).0
+}
+
+/// [`monitor_bounds_at`] plus the monitor's scale factor, for chrome that has to
+/// be sized as well as positioned.
+///
+/// The area menu needs both and resolving them separately would walk the monitor
+/// cache twice on a path that ticks (`pump_menu`). The scale falls back to `1.0`
+/// wherever the bounds fall back to the virtual desktop: in a dead zone there is
+/// no monitor to ask, and a menu at the wrong size is a better failure than one
+/// sized from a guess that could be any of four values.
+pub(crate) fn monitor_metrics_at(app: &AppHandle, point: Point) -> (Rect, f64) {
     let fallback = Rect::new(point.x, point.y, 1, 1);
     let Ok(window) = overlay_window(app) else {
-        return fallback;
+        return (fallback, 1.0);
     };
     let monitors = monitors(&window).unwrap_or_default();
     if let Some(monitor) = uptake_core::geometry::monitor_at(&monitors, point) {
-        return monitor.bounds;
+        return (monitor.bounds, monitor.scale_factor);
     }
-    virtual_desktop_bounds(monitors.iter().map(|m| m.bounds)).unwrap_or(fallback)
+    (
+        virtual_desktop_bounds(monitors.iter().map(|m| m.bounds)).unwrap_or(fallback),
+        1.0,
+    )
 }
 
 /// Creates an area of `kind` at the given physical bounds, returning its id and
@@ -1605,6 +1644,32 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// Deliberately does no validation beyond existing: the value is one this
 /// process minted moments earlier, and a nonsense one can only distort a debug
 /// statistic. Rejecting it would be more code guarding less.
+/// IPC surface, **debug builds only**: the frontend reports the
+/// `devicePixelRatio` it actually laid out in, so both sides of the scale
+/// boundary can be printed together.
+///
+/// See [`crate::dev_harness::log_scale`] for why. In short: `I-299` and the
+/// independent review of `PR #65`. Rust cannot ask for this value -- ADR-0011
+/// makes the WebView its sole authority and was written after tao's cached
+/// per-window scale disagreed with it -- so the WebView has to volunteer it.
+///
+/// **This is a diagnostic, not a channel the menu may start reading.** Wiring
+/// menu geometry to a value cached here would reintroduce exactly the staleness
+/// ADR-0011 forbids; making that legitimate is an amendment to that ADR, not a
+/// use of this endpoint.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub fn overlay_report_scale(app: AppHandle, dpr: f64) {
+    let pairs: Vec<(Rect, f64)> = overlay_window(&app)
+        .ok()
+        .and_then(|window| monitors(&window).ok())
+        .unwrap_or_default()
+        .iter()
+        .map(|monitor| (monitor.bounds, monitor.scale_factor))
+        .collect();
+    crate::dev_harness::log_scale(dpr, &pairs);
+}
+
 #[tauri::command]
 pub fn overlay_report_latency(probe: u64) {
     placement::record_latency(probe);
@@ -1650,11 +1715,13 @@ fn armable_type(name: &str) -> Option<AreaType> {
         // key `F`). It is passive and pass-through by model default, so the
         // area draws a tint and the user keeps working underneath it.
         "filter" => Some(AreaType::Filter),
-        // Upscale is the third (roadmap 1.24, key `U`). It is born magnified --
-        // `AreaType::default_zoom` -- so the drag produces a window onto a
-        // smaller rectangle of screen, stretched to fill it. Passive in v1 by
-        // ADR-0030: the pixels are re-taken on move and resize, not at
-        // framerate, and there is no model.
+        // Upscale is the third (roadmap 1.24, key `U`). ⚠️ **It is NOT born
+        // magnified, and it was between 1.24 and 1.29.** ADR-0031 reverses that
+        // on the founder's verdict: the drag produces an area covering the same
+        // region of screen at the same size, whose pixels are re-taken and
+        // sharpened in place (`AreaType::sharpens`). Passive still, now by
+        // ADR-0031's sequencing rather than ADR-0030's cost argument -- the live
+        // loop is roadmap 1.30 and is gated on a rig judgement.
         "upscale" => Some(AreaType::Upscale),
         _ => None,
     }
@@ -1751,6 +1818,121 @@ pub fn overlay_request_state(app: AppHandle) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::payload_keys::{assert_keys, assert_payload_coverage};
+
+    /// Every payload this module emits, and the keys the frontend indexes it
+    /// with (`I-67`).
+    ///
+    /// **Read as a wire contract, not as a list of Rust fields.** A `rename` or
+    /// a `rename_all` is invisible to anything reading the struct definition and
+    /// is the only thing that decides these strings, which is `UT-F-72`: the
+    /// single `rename_all` in `src-tauri` could be deleted with every gate in
+    /// the repository staying green. ⚠️ **Past tense on purpose. `#56` covered
+    /// that one struct with a test, so deleting it goes red today** (measured
+    /// 2026-08-22). The eleven payload types with no rename are the class that
+    /// is still open, and this table is that class's cover.
+    ///
+    /// **Nothing in this module has a rename, and that is the fact being
+    /// pinned.** [`STATE_PAYLOAD_KEYS`] includes `freeze_probe`, snake_case,
+    /// because `+page.svelte` reads `event.payload.freeze_probe`. Adding a
+    /// `rename_all` here to match `HoverPayload` would look like tidying,
+    /// compile, and pass clippy -- and then **this table goes red**, which is
+    /// the entire point of the table existing.
+    ///
+    /// ⚠️ **That last clause read "and break the freeze latency probe silently"
+    /// until 2026-08-22, written into the doc comment of the constant that ends
+    /// the silence.** Drilled at that date: adding `rename_all` to
+    /// `StatePayload` fails `every_payload_this_module_emits_keeps_the_keys_the_
+    /// frontend_reads`. The paragraph directly above this one was corrected in
+    /// commit `8440d5c` and this one, four lines below it, was not -- the same
+    /// neighbouring-instance miss that commit was itself fixing, and the sibling
+    /// file warns the reader about by name. Found by the round-3 review.
+    ///
+    /// `state_payload_keys` in the old text was also not the identifier; it is
+    /// `STATE_PAYLOAD_KEYS`, declared below.
+    const STATE_PAYLOAD_KEYS: &[&str] = &[
+        "state",
+        "origin",
+        "monitors",
+        "armed",
+        "frozen",
+        "stills",
+        "freeze_probe",
+    ];
+
+    #[test]
+    fn every_payload_this_module_emits_keeps_the_keys_the_frontend_reads() {
+        assert_keys(
+            "StatePayload",
+            &StatePayload {
+                state: "placement",
+                origin: (0, 0),
+                monitors: Vec::new(),
+                armed: None,
+                frozen: false,
+                stills: Vec::new(),
+                freeze_probe: None,
+            },
+            STATE_PAYLOAD_KEYS,
+        );
+        let area = AreaPayload {
+            id: 1,
+            rect: (0, 0, 10, 10),
+            close: (0, 0, 18, 18),
+            layer: "auto",
+            kind: "default",
+            zoom: 1.0,
+        };
+        assert_keys(
+            "AreaPayload",
+            &area,
+            &["id", "rect", "close", "layer", "kind", "zoom"],
+        );
+        assert_keys(
+            "AreasPayload",
+            &AreasPayload { areas: vec![area] },
+            &["areas"],
+        );
+        assert_keys(
+            "ActiveMonitorPayload",
+            &ActiveMonitorPayload { index: Some(0) },
+            &["index"],
+        );
+        assert_keys(
+            "FlashPayload",
+            &FlashPayload { id: 1, nonce: 7 },
+            &["id", "nonce"],
+        );
+        assert_keys(
+            "PinPayload",
+            &PinPayload { id: 1, url: None },
+            &["id", "url"],
+        );
+    }
+
+    #[test]
+    fn no_payload_in_this_module_escapes_the_key_table() {
+        // The completeness half, and the half a hand-maintained table cannot
+        // supply for itself. A new `Serialize` struct here reaches the frontend
+        // through a route `area-kinds.test.ts` says in its own doc it cannot
+        // see, so the only thing that can notice one is a control that reads
+        // this file. See `payload_keys` for why a regex is defensible as a
+        // control when `I-67`'s constraint warns against one as a check.
+        assert_payload_coverage(
+            "overlay.rs",
+            include_str!("overlay.rs"),
+            &[
+                "StatePayload",
+                "AreaPayload",
+                "AreasPayload",
+                "ActiveMonitorPayload",
+                "FlashPayload",
+                "PinPayload",
+            ],
+            &[],
+        );
+    }
 
     /// The termination property of the sync ↔ window-event cycle. Everything
     /// else in this module needs a real window; this one decision does not, and

@@ -215,6 +215,20 @@ function onKeydown(event: KeyboardEvent) {
 }
 
 onMount(() => {
+  // Report the scale we actually laid out in, once, so `dev_harness::log_scale`
+  // can print it beside every monitor's Rust-side factor. `I-299`: the area
+  // menu is sized from a PER-MONITOR scale while every rect here is converted
+  // with this ONE value, and nobody has ever seen the two together.
+  //
+  // Failure is swallowed: the endpoint is registered in debug builds only, so
+  // in release this rejects and that is the expected outcome rather than an
+  // error worth logging. `debug_assertions` is a Rust concept and does not
+  // reach TypeScript, which is the same stated limit `reportFreezeLatency`
+  // carries.
+  void invoke('overlay_report_scale', { dpr: window.devicePixelRatio }).catch(
+    () => {},
+  );
+
   const unlistenState = listen<StatePayload>('overlay://state', (event) => {
     overlayState = event.payload.state;
     monitors = event.payload.monitors;
@@ -412,7 +426,24 @@ onMount(() => {
                and a "1×" badge would be chrome asserting a fact the user can
                already see. It is what makes scrolling back discoverable, which
                matters more here than for the frozen badge, because a magnified still
-               of a static desktop is indistinguishable from the desktop. -->
+               of a static desktop is indistinguishable from the desktop.
+
+               ✅ **`I-289` is DISSOLVED here rather than fixed, and the
+               difference is why this condition is unchanged.** That row is open
+               because this test is on `zoom` with none on `kind`, so an
+               `Upscale` area, born at 2× under roadmap 1.24, showed a
+               permanent `2x` badge advertising a scroll gesture `zoom_by`
+               refuses in both directions. Roadmap 1.29 makes `Upscale` natural
+               (ADR-0031), so `area.zoom > 1` is false for it, the badge never
+               renders, and the `kind` guard the row asked for is not needed.
+               The row said so itself: *"do not fix this directly"*.
+
+               ⚠️ **The latent shape survives**: this still reports a factor and
+               says nothing about whether the gesture that changes it is
+               offered. A future type born magnified and refusing the scroll
+               brings `I-289` straight back. It is not guarded here because the
+               guard would have no case to cover today, and a control that
+               cannot go red is this repository's `UT-F-75`. -->
           {#if area.zoom > 1}
             <span class="zoom-badge">{formatZoom(area.zoom)}</span>
           {/if}
@@ -744,22 +775,25 @@ onMount(() => {
 
 /* An area's captured pixels, filling the area exactly.
 
-   Three callers now. A Screenshot area's pin (ADR-0014 §6) is captured *at* the
-   area's rectangle. A zoomed Default area's (§3.4) and an Upscale area's
-   (roadmap 1.24) are captured at a smaller rectangle inside it, and `fill` is
-   what performs the magnification: the stretch from source to area *is* the
-   zoom, done by the compositor on the GPU rather than by resampling any pixels
-   on the Rust side.
+   Three callers, and as of roadmap 1.29 they fall into two groups rather than
+   three. Captured *at* the area's rectangle, so `fill` is a 1:1 draw and does
+   no scaling: a Screenshot area's pin (ADR-0014 §6), and an Upscale area's
+   sharpened still (ADR-0031). Captured at a SMALLER rectangle inside it, so
+   `fill` performs the magnification on the GPU rather than by resampling any
+   pixels on the Rust side: a zoomed Default area (§3.4).
 
-   This said "Two callers now" until 2026-08-22. An Upscale area is neither a
-   Screenshot pin nor a zoomed Default, and it renders through this element; the
-   two magnified cases differ only in where the zoom came from, which is why
-   nothing else here had to change.
+   This said "Three callers now" with Upscale in the magnified group until
+   roadmap 1.29, which is what the founder reversed: an Upscale area covers the
+   same region of screen at the same size and what changes is fidelity. **The
+   element and this rule are unchanged by that** -- the enhancement happens in
+   Rust before the bytes are encoded, so the frontend draws a sharpened pin
+   exactly as it draws any other one and knows nothing about it. That is the
+   whole reason 1.29 touched almost no frontend code.
 
-   `fill` rather than `contain` for both. The two rectangles always share an
-   aspect ratio (the source is each extent divided by the same factor), so
-   `contain` would never letterbox on purpose, only on a rounding difference,
-   which it would hide instead of showing. */
+   `fill` rather than `contain` for all three. The two rectangles always share
+   an aspect ratio (the source is each extent divided by the same factor, and by
+   1 in the unscaled cases), so `contain` would never letterbox on purpose, only
+   on a rounding difference, which it would hide instead of showing. */
 .pin {
   position: absolute;
   inset: 0;
@@ -853,7 +887,17 @@ onMount(() => {
   align-items: center;
   gap: 6px;
   padding: 0 10px;
-  font: 13px/1 system-ui, sans-serif;
+  /* `line-height: 1.4`, not the `1` this carried until 2026-08-25. At `1` the
+     line box is exactly the font size, so a 13px glyph's ascender and descender
+     both overflow it -- and `.label` below sets `overflow: hidden` to get its
+     ellipsis, which then clips the overflow it can see. The visible result is
+     the tail of every `p`, `y` and `g` shaved off: "Copy", "Always on top" and
+     "Type: Screenshot" all lose their descenders. Found on the rig 2026-08-25.
+
+     The row's own height is unaffected -- it is absolutely positioned from the
+     rect Rust sent, and the flex box centres this line inside it -- so raising
+     the line box costs no layout and moves no hit target. */
+  font: 13px/1.4 system-ui, sans-serif;
   color: rgba(235, 240, 250, 0.95);
   pointer-events: none;
 }
