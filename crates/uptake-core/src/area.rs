@@ -1187,6 +1187,43 @@ impl AreaStore {
         })
     }
 
+    /// The area a `Win+Shift`+left-drag grabs: task 1.17(c)'s chord.
+    ///
+    /// # Why this is a fourth question rather than a flag on `grab_test`
+    ///
+    /// [`AreaStore::grab_test`] answers *what does a plain press grab*, and its
+    /// answer over a pass-through body is `None`. That is ADR-0024 section 2 and it
+    /// must not become conditional, because it is the promise that the app
+    /// underneath keeps receiving its clicks. The chord does not weaken the
+    /// promise; it adds a **second, deliberate** gesture that reaches the body
+    /// while the plain press still passes through. Folding it in as a boolean
+    /// parameter would put live modifier state inside the one function the hover
+    /// poll and the frontend both consume, where a flag read on the wrong tick
+    /// means a pass-through area quietly starts eating ordinary clicks.
+    ///
+    /// # It resolves the topmost area and then asks, rather than searching for a
+    /// pass-through one
+    ///
+    /// `iter_top_down().find(|a| !a.is_interactive())` would look right and would
+    /// be wrong: with an interactive area sitting over a Filter, a chord press
+    /// inside the overlap would skip the area the user is pointing at and move the
+    /// one behind it. **The chord is a shortcut past pass-through, not past
+    /// z-order.** So this takes the topmost area containing the point and answers
+    /// only if *that* area is the pass-through one.
+    ///
+    /// # Bounds, not chrome
+    ///
+    /// The chord exists for the body, and chrome is already grabbable without it
+    /// ([`AreaStore::grab_test`]), which is why the host tries that first and
+    /// falls back to this. Testing chrome here as well would give the chord a
+    /// second way to answer for a surface that already answers, and the two would
+    /// disagree the first time chrome geometry changed.
+    #[must_use]
+    pub fn chord_move_test(&self, point: Point) -> Option<&Area> {
+        self.hit_test_any(point)
+            .filter(|area| !area.is_interactive())
+    }
+
     /// The topmost area containing `point`, **whatever its [`Input`]** — the
     /// area a Placement gesture grabs.
     ///
@@ -1678,6 +1715,87 @@ mod tests {
         assert!(
             store.grab_test(Point::new(50, 50), &screens()).is_none(),
             "the body of a pass-through area grabs nothing"
+        );
+    }
+
+    #[test]
+    fn the_chord_grabs_a_pass_through_body_and_refuses_an_interactive_one() {
+        // Task 1.17(c), ADR-0024 section 3. Both directions, because a version that
+        // answered for every area and a version that answered for none would each
+        // satisfy a one-sided test, and the second direction is the load-bearing
+        // one: the chord is a shortcut past pass-through, not a second way to grab
+        // something the plain press already grabs.
+        let mut store = AreaStore::new();
+        let tint = store
+            .create(AreaType::Filter, rect(0, 0, 100, 100))
+            .unwrap();
+        let body = Point::new(50, 50);
+
+        assert!(
+            store.grab_test(body, &screens()).is_none(),
+            "vacuous unless the plain press still passes this body through",
+        );
+        assert_eq!(
+            store.chord_move_test(body).map(|area| area.id),
+            Some(tint),
+            "the chord's whole purpose is the body a plain press refuses",
+        );
+
+        let plain = store
+            .create(AreaType::Default, rect(200, 200, 100, 100))
+            .unwrap();
+        assert!(
+            store.chord_move_test(Point::new(250, 250)).is_none(),
+            "an interactive body grabs without the chord, so the chord must not              also answer for it -- two routes to one gesture is how they drift",
+        );
+        let _ = plain;
+
+        assert!(
+            store.chord_move_test(Point::new(500, 500)).is_none(),
+            "empty desktop belongs to the desktop, chord or no chord",
+        );
+    }
+
+    #[test]
+    fn the_chord_does_not_reach_under_an_interactive_area() {
+        // The defect the obvious implementation has. Searching top-down for the
+        // first *pass-through* area -- rather than taking the topmost area and
+        // then asking whether it is pass-through -- looks equivalent and is not:
+        // with a Default area sitting over a Filter, a chord press inside the
+        // overlap would skip the area the user is pointing at and move the one
+        // behind it. **Drilled by mutation rather than asserted** (`I-314`):
+        // replacing the body of `chord_move_test` with
+        // `iter_top_down().find(|a| !a.is_interactive() && a.bounds.contains(point))`
+        // -- the faithful form of the mistake, containment kept -- turns THIS test
+        // red and leaves all 167 others in the crate green. Dropping the
+        // pass-through filter instead turns this one and its sibling red, and
+        // nothing else.
+        let mut store = AreaStore::new();
+        let tint = store
+            .create(AreaType::Filter, rect(0, 0, 200, 200))
+            .unwrap();
+        let over = store
+            .create(AreaType::Default, rect(50, 50, 100, 100))
+            .unwrap();
+        let overlap = Point::new(100, 100);
+
+        assert_eq!(
+            store.hit_test_any(overlap).map(|area| area.id),
+            Some(over),
+            "vacuous unless the interactive area is genuinely on top here",
+        );
+        assert!(
+            store.chord_move_test(overlap).is_none(),
+            "the chord skips pass-through, not z-order",
+        );
+
+        // ...and the same Filter is still reachable where nothing covers it, so
+        // this is a statement about the overlap rather than about the area.
+        assert_eq!(
+            store
+                .chord_move_test(Point::new(20, 20))
+                .map(|area| area.id),
+            Some(tint),
         );
     }
 

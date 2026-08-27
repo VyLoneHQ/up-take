@@ -1136,10 +1136,14 @@ pub(crate) fn area_handle_at(
 /// because two copies of "what takes input" drifting apart is how a click gets
 /// swallowed by an area that would not have handled it.
 ///
-/// **A pass-through area still cannot be *moved* in `Living`.** Its chrome is the
-/// resize band and the close control; `Handle::Body` is the move grab, and that is
-/// precisely what passes through. Moving arrives with 1.17(c)'s `Win+Shift` drag
-/// or 1.17(b2)'s control bar, whichever lands first.
+/// **A pass-through area is not moved through *this* function**, and both of the
+/// routes that do move one have since landed. Its chrome here is the resize band
+/// and the close control; `Handle::Body` is the move grab, and the body is
+/// precisely what passes through. 1.17(b2) added the hover-revealed bar, which
+/// arrives here as [`Handle::Bar`] like any other chrome; 1.17(c) added the
+/// `Win+Shift` chord, which does **not** come through here at all. See
+/// [`chord_movable_area_at`], which the caller tries only after this one has
+/// declined.
 pub(crate) fn interactive_area_handle_at(
     app: &AppHandle,
     point: Point,
@@ -1150,6 +1154,44 @@ pub(crate) fn interactive_area_handle_at(
     guard
         .grab_test(point, &monitors)
         .map(|(area, handle)| (area.id, area.bounds, handle))
+}
+
+/// The area a `Win+Shift`+left-drag grabs in `Living`, and the handle it grabs by.
+///
+/// The fallback to [`interactive_area_handle_at`], and the caller tries that one
+/// **first**. Chrome grabs without the chord, so a chord press that lands on a
+/// resize band still resizes and one on the close control still closes: the chord
+/// adds the body, it does not reinterpret the chrome. ADR-0028 keeps both routes
+/// on purpose, the bar being the visible route and the chord the fast one, so
+/// neither is allowed to shadow the other.
+///
+/// # The handle is `Body`, and that is a decision rather than a shortcut
+///
+/// The chord grants exactly one thing: a body grab on an area whose body would
+/// otherwise pass the click through. [`Handle::Body`] already *means* that grab,
+/// and `living_lbutton_down` already turns it into a move. A third `Handle`
+/// variant would have to be threaded through the cursor-shape mapping and the
+/// hover chrome, and would then describe the same gesture a second time. The
+/// three-way hand-maintained mapping the review of 1.17(b) had to derive is the
+/// record of what that costs. ADR-0024 section 3 calls the chord a way to move an
+/// area "from anywhere in its body", which is a claim about which *surface*
+/// answers, not about which gesture runs.
+///
+/// # No `monitor_rects()`
+///
+/// Unlike every other resolver here this one needs no monitor list, because
+/// [`AreaStore::chord_move_test`] tests bounds containment and never chrome. That
+/// is worth stating because it looks like an omission: it is the reason this is
+/// cheap enough to sit on the press path behind a modifier check.
+pub(crate) fn chord_movable_area_at(
+    app: &AppHandle,
+    point: Point,
+) -> Option<(AreaId, Rect, interaction::Handle)> {
+    let store = app.state::<Mutex<AreaStore>>();
+    let guard = lock(&store);
+    guard
+        .chord_move_test(point)
+        .map(|area| (area.id, area.bounds, interaction::Handle::Body))
 }
 
 /// What the pointer is doing in `Living`: what it would grab, and what it is over.
