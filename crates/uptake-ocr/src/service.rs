@@ -583,7 +583,9 @@ mod tests {
         // The private path, which the public one cannot reach without consuming
         // the `Service` and taking the receiver with it.
         service.signal_stop();
-        drop(release.send(()));
+        // `let _ =` rather than `drop(..)`: `SendError<()>` is `Copy`, so dropping
+        // it does nothing and clippy says so.
+        let _ = release.send(());
 
         let deadline = Instant::now() + PATIENCE;
         let mut abandoned = Vec::new();
