@@ -668,3 +668,75 @@ fn one_id_gets_one_outcome_even_when_it_is_submitted_twice() {
         "one id must yield one outcome, got {abandoned}: {seen:?}",
     );
 }
+
+#[test]
+fn two_submissions_under_one_id_both_report_when_the_first_has_started() {
+    // **Round 6's finding, pinned so the contract cannot drift back.** The
+    // previous round wrote "ONE outcome per id, everywhere" onto `RequestId` and
+    // the reviewer disproved it by running the code: coalescing searches the
+    // QUEUE only, so once a request has reached the engine a second submission
+    // under the same id queues behind it, and both complete and both report.
+    //
+    // This is case 2 in `RequestId`'s docs and it is the module's headline use
+    // case, a resize drag -- not a corner. The test exists to make the honest
+    // behaviour falsifiable, because the false claim was the kind a caller can
+    // build on: something that frees per-id state on first outcome would break
+    // here, and nothing would have told it why.
+    let (started, starts) = mpsc::channel();
+    let (release, releases) = mpsc::channel();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let releases = Arc::new(Mutex::new(releases));
+
+    let service = Service::spawn({
+        let calls = Arc::clone(&calls);
+        move || {
+            Ok(GatedEngine {
+                started,
+                release: releases,
+                calls,
+            })
+        }
+    })
+    .unwrap();
+
+    // First reaches the engine and blocks there, so it can no longer be coalesced.
+    service.submit(RequestId::new(1), frame(10)).unwrap();
+    assert_eq!(starts.recv_timeout(PATIENCE).unwrap(), 10);
+    // Second under the same id: queues rather than replacing, precisely because
+    // the first is no longer in the queue to replace.
+    service.submit(RequestId::new(1), frame(20)).unwrap();
+
+    let _ = release.send(());
+    assert_eq!(
+        starts.recv_timeout(PATIENCE).unwrap(),
+        20,
+        "the second submission must run rather than being absorbed",
+    );
+    let _ = release.send(());
+
+    let mut done = Vec::new();
+    let deadline = Instant::now() + PATIENCE;
+    while done.len() < 2 {
+        for outcome in service.results() {
+            if let Outcome::Done { id, result } = outcome {
+                assert_eq!(id, RequestId::new(1));
+                done.push(result.map(|r| r.text()).unwrap_or_default());
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "expected two outcomes for one id, saw {}: {done:?}",
+            done.len(),
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(
+        done,
+        vec!["width 10".to_owned(), "width 20".to_owned()],
+        "both submissions must report, in order, and neither may be absorbed",
+    );
+
+    if let Some(handle) = service.shutdown() {
+        drop(handle.join());
+    }
+}

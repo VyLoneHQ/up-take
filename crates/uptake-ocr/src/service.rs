@@ -24,30 +24,41 @@ use crate::engine::{Engine, EngineError, Recognition};
 /// an unbounded queue, which is a decision a caller is allowed to make and
 /// should make knowingly.
 ///
-/// # The contract: ONE outcome per id, not one per accepted `submit`
+/// # How many outcomes an id produces, in all three cases
 ///
-/// **Stated here because it was never stated anywhere, and round 5 of `PR #73`'s
-/// review found the two halves of this module answering it differently.**
+/// ⛔ **This section previously read "ONE outcome per id, not one per accepted
+/// `submit` ... the rule is now one, everywhere", and that was FALSE.** Round 6
+/// of `PR #73`'s review disproved it by running the code rather than reading it:
+/// submit id 1, let it reach the engine, submit id 1 again so the second queues
+/// behind the first, let both finish normally, and the caller receives **two
+/// `Done` for one id**. That is the module's own headline use case -- a resize
+/// drag -- not a corner. There is no such invariant, and writing one onto a
+/// public type is worse than leaving it unstated, because a caller can build on
+/// it.
 ///
-/// Coalescing has always collapsed to one: a queued frame replaced by a newer
-/// one for the same id produces **no** outcome of its own, and the replacement
-/// answers for both. The in-flight path briefly did the opposite -- a request
-/// in flight plus a second queued under the same id produced **two**
-/// `Abandoned` for one id when the engine panicked, reproduced by the reviewer
-/// as `[Abandoned{1}, Abandoned{1}, Stopped(Panicked)]`. So the same caller
-/// action, re-submitting one area, yielded zero or two signals depending purely
-/// on whether the first submission had been picked off the queue yet.
+/// **What is actually true, case by case:**
 ///
-/// The rule is now one, everywhere: `close` reports an in-flight id only when
-/// the queue does not already carry it.
+/// 1. **Superseded while still queued** -- the newer frame replaces the older
+///    one in place, and the older produces **no outcome of its own**. This is the
+///    only case where a submission is silently absorbed, and it is deliberate:
+///    it is what stops a resize drag costing one recognition per frame.
+/// 2. **Superseded after it has started** -- impossible. Coalescing searches the
+///    queue only, and [`Engine::recognise`] cannot be interrupted, so the second
+///    submission queues and **both run and both report**. Two outcomes, one id.
+/// 3. **The worker stops** -- `close` reports each abandoned request once, and
+///    will not report one id twice even when it is both in flight and queued.
+///    That narrow guarantee is what round 5's fix actually bought, and it is all
+///    it bought.
 ///
-/// ⚠️ **This is the consistent default, not a decided answer.** "One per id" is
-/// what the older half already did and is therefore the change that breaks
-/// nothing; "one per accepted `submit`" is defensible too, and would mean
-/// coalescing announcing every superseded frame -- dozens during a resize drag,
-/// which is noise the caller did not ask for. Choosing between them is a product
-/// call about what a host wants to hear, and it is recorded as a backlog row
-/// rather than settled here by whoever happened to be fixing the defect.
+/// So outcomes track **accepted submissions, minus those absorbed by case 1** --
+/// and no caller may assume an id is answered at most once.
+///
+/// ⚠️ **Whether case 1 SHOULD stay silent is undecided and is a product call.**
+/// Announcing every superseded frame would mean dozens of outcomes during a
+/// resize drag, which is noise a host did not ask for; absorbing them means a
+/// caller cannot count outcomes against submissions. There is no host yet, so
+/// there is nothing to decide it against. Recorded as a backlog row rather than
+/// settled by whoever happened to be holding the file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RequestId(u64);
 
@@ -537,9 +548,12 @@ fn close(
         Err(_) => Vec::new(),
     };
     // The in-flight request first, because it was accepted first -- but **only if
-    // the queue does not already carry its id.** See the contract note on
-    // [`RequestId`]: one outcome per id, which is the rule coalescing has always
-    // followed and which round 5 caught this function breaking.
+    // the queue does not already carry its id**, so one stop cannot report one id
+    // twice. ⚠️ **That is the whole of the guarantee and it is narrower than an
+    // earlier version of this comment claimed.** It says nothing about the normal
+    // path, where two submissions under one id can both complete and both report;
+    // see case 2 on [`RequestId`]. Round 6 of `PR #73`'s review found the wider
+    // claim and disproved it by running it.
     if let Some(id) = in_flight
         && !abandoned.iter().any(|request| request.id == id)
     {
