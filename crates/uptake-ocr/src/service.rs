@@ -500,3 +500,156 @@ fn take_next(shared: &Arc<Shared>) -> Option<Request> {
         state = waited;
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    //! In-crate tests, for the two things the integration suite cannot reach.
+    //!
+    //! # Why this module exists at all, and why that is a correction
+    //!
+    //! `246e03e`'s commit message said the `signal_stop` path *"needed a
+    //! test-only API to reach"* and that widening the public surface for a test
+    //! was not worth it. **The first half was wrong.** Round 3 of `PR #73`'s
+    //! independent review demonstrated it by writing the test: a private
+    //! `#[cfg(test)]` module inside this file reaches `signal_stop` directly,
+    //! which is ordinary Rust and widens nothing. The crate simply had no such
+    //! module, and its absence was mistaken for an obstacle.
+    //!
+    //! The honest shape of the original problem was narrower than stated: the
+    //! *public* API cannot observe it, because `shutdown` and `Drop` consume the
+    //! `Service` while `results` borrows one. That remains true and is recorded
+    //! on [`Outcome::Abandoned`]. It was never a reason the code could not be
+    //! tested from inside.
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    use uptake_core::bitmap::RgbaBitmap;
+    use uptake_core::geometry::Size;
+
+    use super::{Engine, EngineError, Outcome, Recognition, RequestId, Service, StopReason};
+
+    const PATIENCE: Duration = Duration::from_secs(10);
+
+    fn frame() -> RgbaBitmap {
+        RgbaBitmap::from_pixels(Size::new(4, 4), vec![0u8; 4 * 4 * 4]).unwrap()
+    }
+
+    /// Blocks in `recognise` until released, so a request can be left queued.
+    struct Gated {
+        started: std::sync::mpsc::Sender<()>,
+        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+        calls: std::sync::Arc<AtomicUsize>,
+    }
+
+    impl Engine for Gated {
+        fn recognise(&mut self, _frame: &RgbaBitmap) -> Result<Recognition, EngineError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.started.send(()).unwrap();
+            self.release.lock().unwrap().recv().unwrap();
+            Ok(Recognition::default())
+        }
+    }
+
+    #[test]
+    fn signal_stop_reports_the_work_it_abandons_rather_than_discarding_it() {
+        // Round 3's finding (d). `signal_stop` used to clear the queue outright,
+        // making it the one place `Outcome::Abandoned`'s promise was broken in
+        // CODE rather than merely unreachable. Reverting that fix leaves the
+        // whole integration suite green, which is why this test is here and why
+        // it is here rather than there: `signal_stop` is private, and reaching it
+        // needs no public API at all.
+        let (started, starts) = std::sync::mpsc::channel();
+        let (release, releases) = std::sync::mpsc::channel();
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let service = Service::spawn({
+            let calls = std::sync::Arc::clone(&calls);
+            move || {
+                Ok(Gated {
+                    started,
+                    release: std::sync::Mutex::new(releases),
+                    calls,
+                })
+            }
+        })
+        .unwrap();
+
+        // One request occupies the worker; a second is accepted and never starts.
+        service.submit(RequestId::new(1), frame()).unwrap();
+        starts.recv_timeout(PATIENCE).unwrap();
+        service.submit(RequestId::new(2), frame()).unwrap();
+
+        // The private path, which the public one cannot reach without consuming
+        // the `Service` and taking the receiver with it.
+        service.signal_stop();
+        drop(release.send(()));
+
+        let deadline = Instant::now() + PATIENCE;
+        let mut abandoned = Vec::new();
+        while service.is_running() {
+            assert!(Instant::now() < deadline, "the worker never stopped");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        for outcome in service.results() {
+            if let Outcome::Abandoned { id } = outcome {
+                abandoned.push(id);
+            }
+        }
+        assert_eq!(
+            abandoned,
+            vec![RequestId::new(2)],
+            "an accepted request the worker never reached must be reported",
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "and reporting it must not mean RUNNING it -- that is the delay a stop exists to avoid",
+        );
+    }
+
+    /// An engine whose first answer is fatal, so the worker exits with work queued.
+    struct FatalOnce;
+
+    impl Engine for FatalOnce {
+        fn recognise(&mut self, _frame: &RgbaBitmap) -> Result<Recognition, EngineError> {
+            Err(EngineError::Unavailable("the model went away".to_owned()))
+        }
+    }
+
+    #[test]
+    fn the_worker_is_never_reported_dead_before_it_has_said_why() {
+        // Round 3's finding (c). `Exit::drop` stores STOPPED *after* `close`, and
+        // its comment calls that ordering load-bearing: the other order is a
+        // window where the service reports itself dead and its explanation has
+        // not been sent. Nothing enforced it -- reversing the two statements left
+        // all eight tests green, because every other test polls through a
+        // ten-second retry loop and none looks at the instant the flag flips.
+        //
+        // **The window is widened deliberately rather than raced for.** A large
+        // queue means `close` has thousands of `Abandoned` sends to make before
+        // it can send `Stopped`, so a STOPPED-first implementation leaves a gap
+        // wide enough to observe rather than one that needs luck. Under the
+        // correct order the assertion cannot fail at all: `close` has fully
+        // returned before the flag moves.
+        let service = Service::spawn(|| Ok(FatalOnce)).unwrap();
+        for raw in 0..4096 {
+            drop(service.submit(RequestId::new(raw), frame()));
+        }
+
+        let deadline = Instant::now() + PATIENCE;
+        while service.is_running() {
+            assert!(Instant::now() < deadline, "the worker never stopped");
+        }
+        // The instant it says it is dead, its explanation must already be here.
+        let outcomes: Vec<_> = service.results().collect();
+        assert!(
+            outcomes
+                .iter()
+                .any(|outcome| matches!(outcome, Outcome::Stopped(StopReason::Fatal(_)))),
+            "is_running() went false before Stopped was sent: {} outcome(s) drained, \
+             none of them the explanation",
+            outcomes.len(),
+        );
+    }
+}
