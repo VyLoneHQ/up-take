@@ -589,3 +589,82 @@ fn a_panicking_engine_ends_the_worker_instead_of_leaving_a_zombie() {
         "the in-flight request was never answered: {answered:?}",
     );
 }
+
+#[test]
+fn one_id_gets_one_outcome_even_when_it_is_submitted_twice() {
+    // **Round 5's finding, reproduced as a test.** `submit`'s coalescing only
+    // searches the QUEUE, so a caller can legitimately hold two live submissions
+    // under one id: one in flight, one queued behind it. When the engine then
+    // panicked, `Exit::drop` reported the in-flight one and `close` reported the
+    // queued one, and the caller saw `Abandoned` twice for a single id.
+    //
+    // The reviewer's exact reproduction was
+    // `[Abandoned{1}, Abandoned{1}, Stopped(Panicked)]`.
+    //
+    // The rule is one outcome per id, which is what coalescing already did, so
+    // this pins the half that disagreed rather than inventing a new promise.
+    let (started, starts) = mpsc::channel();
+    let (release, releases) = mpsc::channel();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let releases = Arc::new(Mutex::new(releases));
+
+    struct Exploding {
+        started: Sender<u32>,
+        release: Arc<Mutex<Receiver<()>>>,
+        calls: Arc<AtomicUsize>,
+    }
+    impl Engine for Exploding {
+        fn recognise(&mut self, frame: &RgbaBitmap) -> Result<Recognition, EngineError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.started.send(frame.width()).unwrap();
+            self.release.lock().unwrap().recv().unwrap();
+            #[allow(clippy::panic)]
+            {
+                panic!("simulated engine panic while a resubmission is queued");
+            }
+        }
+    }
+
+    let service = Service::spawn(move || {
+        Ok(Exploding {
+            started,
+            release: releases,
+            calls,
+        })
+    })
+    .unwrap();
+
+    // First submission reaches the engine and blocks there.
+    service.submit(RequestId::new(1), frame(10)).unwrap();
+    assert_eq!(starts.recv_timeout(PATIENCE).unwrap(), 10);
+    // Second under the SAME id. Coalescing cannot see the in-flight one, so this
+    // genuinely queues rather than replacing anything -- which is the setup, and
+    // asserting it here stops the test passing because the queue stayed empty.
+    service.submit(RequestId::new(1), frame(20)).unwrap();
+
+    let _ = release.send(());
+
+    let mut seen = Vec::new();
+    let deadline = Instant::now() + PATIENCE;
+    while !seen
+        .iter()
+        .any(|outcome| matches!(outcome, Outcome::Stopped(_)))
+    {
+        seen.extend(service.results());
+        assert!(
+            Instant::now() < deadline,
+            "the worker never stopped: {seen:?}"
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+    seen.extend(service.results());
+
+    let abandoned = seen
+        .iter()
+        .filter(|outcome| matches!(outcome, Outcome::Abandoned { id } if *id == RequestId::new(1)))
+        .count();
+    assert_eq!(
+        abandoned, 1,
+        "one id must yield one outcome, got {abandoned}: {seen:?}",
+    );
+}

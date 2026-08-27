@@ -23,6 +23,31 @@ use crate::engine::{Engine, EngineError, Recognition};
 /// answer is thrown away. Using a fresh id per request instead turns this into
 /// an unbounded queue, which is a decision a caller is allowed to make and
 /// should make knowingly.
+///
+/// # The contract: ONE outcome per id, not one per accepted `submit`
+///
+/// **Stated here because it was never stated anywhere, and round 5 of `PR #73`'s
+/// review found the two halves of this module answering it differently.**
+///
+/// Coalescing has always collapsed to one: a queued frame replaced by a newer
+/// one for the same id produces **no** outcome of its own, and the replacement
+/// answers for both. The in-flight path briefly did the opposite -- a request
+/// in flight plus a second queued under the same id produced **two**
+/// `Abandoned` for one id when the engine panicked, reproduced by the reviewer
+/// as `[Abandoned{1}, Abandoned{1}, Stopped(Panicked)]`. So the same caller
+/// action, re-submitting one area, yielded zero or two signals depending purely
+/// on whether the first submission had been picked off the queue yet.
+///
+/// The rule is now one, everywhere: `close` reports an in-flight id only when
+/// the queue does not already carry it.
+///
+/// ⚠️ **This is the consistent default, not a decided answer.** "One per id" is
+/// what the older half already did and is therefore the change that breaks
+/// nothing; "one per accepted `submit`" is defensible too, and would mean
+/// coalescing announcing every superseded frame -- dozens during a resize drag,
+/// which is noise the caller did not ask for. Choosing between them is a product
+/// call about what a host wants to hear, and it is recorded as a backlog row
+/// rather than settled here by whoever happened to be fixing the defect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RequestId(u64);
 
@@ -394,12 +419,7 @@ struct Exit<'a> {
 impl Drop for Exit<'_> {
     fn drop(&mut self) {
         let reason = self.reason.take().unwrap_or(StopReason::Panicked);
-        // First, because it was accepted first and because it is the one the
-        // queue drain below cannot account for.
-        if let Some(id) = self.in_flight.take() {
-            drop(self.sender.send(Outcome::Abandoned { id }));
-        }
-        close(self.shared, self.sender, reason);
+        close(self.shared, self.sender, reason, self.in_flight.take());
         // Stored **after** `close`, so a caller that sees `is_running() == false`
         // can already drain every outcome the shutdown produced. The other order
         // is a window where the service reports itself dead and its explanation
@@ -501,7 +521,12 @@ where
 /// argued**: with the flag set under the lock but the queue left undrained, the
 /// regression test still lost **81 of 81** accepted requests. The flag closes the
 /// door; the drain answers whoever was already through it.
-fn close(shared: &Arc<Shared>, sender: &Sender<Outcome>, reason: StopReason) {
+fn close(
+    shared: &Arc<Shared>,
+    sender: &Sender<Outcome>,
+    reason: StopReason,
+    in_flight: Option<RequestId>,
+) {
     let abandoned = match shared.state.lock() {
         Ok(mut state) => {
             state.stopping = true;
@@ -511,6 +536,15 @@ fn close(shared: &Arc<Shared>, sender: &Sender<Outcome>, reason: StopReason) {
         // nothing safe to drain and nothing truthful to say about what was in it.
         Err(_) => Vec::new(),
     };
+    // The in-flight request first, because it was accepted first -- but **only if
+    // the queue does not already carry its id.** See the contract note on
+    // [`RequestId`]: one outcome per id, which is the rule coalescing has always
+    // followed and which round 5 caught this function breaking.
+    if let Some(id) = in_flight
+        && !abandoned.iter().any(|request| request.id == id)
+    {
+        drop(sender.send(Outcome::Abandoned { id }));
+    }
     for request in abandoned {
         drop(sender.send(Outcome::Abandoned { id: request.id }));
     }
