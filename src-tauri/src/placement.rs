@@ -124,7 +124,7 @@ use uptake_core::interaction::{self, Handle, Resize};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, VK_LBUTTON, VK_MENU, VK_RBUTTON,
+    GetAsyncKeyState, VK_LBUTTON, VK_LWIN, VK_MENU, VK_RBUTTON, VK_RWIN, VK_SHIFT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CopyIcon, GA_ROOT, GW_HWNDPREV, GetAncestor, GetWindow, HCURSOR, HHOOK,
@@ -2538,7 +2538,25 @@ fn living_lbutton_down(point: Point) -> bool {
     // `false` rather than falling through to `Gesture::Create`, because empty
     // overlay in `Living` is the user's desktop and creating there would steal
     // a click from it. Creating areas stays a `Placement` gesture.
-    let Some((id, bounds, handle)) = overlay::interactive_area_handle_at(app, point) else {
+    // **Task 1.17(c): the `Win+Shift` chord, and it is tried SECOND.** The chord
+    // gives a press a pass-through area's *body*, the one surface
+    // `interactive_area_handle_at` is required to refuse (ADR-0024 section 2).
+    // Chrome grabs without it, so asking the chord first would reinterpret a chord
+    // press on a resize band as a move and take a gesture the user already had.
+    // ADR-0028 keeps the bar and the chord as two routes on purpose, the visible
+    // one and the fast one, so neither may shadow the other.
+    //
+    // The modifier read is behind `or_else` rather than in front of the whole
+    // block, so the ordinary press (no chord, cursor over an interactive area)
+    // pays nothing for a feature it is not using. This runs inside the
+    // `WH_MOUSE_LL` callback, where time spent is time Windows counts against
+    // `LowLevelHooksTimeout`.
+    let grabbed = overlay::interactive_area_handle_at(app, point).or_else(|| {
+        move_chord_held()
+            .then(|| overlay::chord_movable_area_at(app, point))
+            .flatten()
+    });
+    let Some((id, bounds, handle)) = grabbed else {
         return false;
     };
     // **The drag anchor, and it is not optional.** `gesture_rect` computes every
@@ -2573,6 +2591,13 @@ fn living_lbutton_down(point: Point) -> bool {
         // the bar is that the second is unavailable to a pass-through area
         // (ADR-0028 D3). Written out rather than folded into an `|` arm so
         // this reads as a decision instead of as an accident.
+        //
+        // **Three producers reach this arm, not two.** `Handle::Body` arrives
+        // either from an interactive area's body or from 1.17(c)'s chord over a
+        // pass-through one, and both mean the same thing: move this area from
+        // where the pointer is. The chord is resolved in `chord_movable_area_at`
+        // precisely so that it can say `Body` and stop being a special case by
+        // the time it gets here.
         Handle::Body | Handle::Bar => Gesture::Move { id, start: bounds },
     });
     DRAGGING.store(true, Ordering::SeqCst);
@@ -3090,6 +3115,60 @@ fn gesture_rect(gesture: Gesture, pointer: Point) -> Option<(i32, i32, u32, u32)
 /// gesture.
 fn snapping_suppressed() -> bool {
     vk_is_down(i32::from(VK_MENU))
+}
+
+/// Whether the user is holding the `Win+Shift` chord that task 1.17(c) gives a
+/// pass-through area's body to (ADR-0024 section 3).
+///
+/// Either `Win` key: a user whose hand falls on the right one is not asking for
+/// different behaviour, and `VK_LWIN`/`VK_RWIN` are separate virtual keys with no
+/// combined code the way `VK_SHIFT` has one.
+///
+/// # Latched at button-down, unlike [`snapping_suppressed`]
+///
+/// This is read once, while the press is being classified, and never again for the
+/// rest of the drag. That is the opposite of the `Alt` snap suppressor directly
+/// above, and the difference is deliberate rather than an inconsistency. `Alt`
+/// changes *how* a move already under way resolves, so reading it live lets a user
+/// change their mind mid-drag. This decides *whether the gesture exists at all*,
+/// and re-reading it would abandon the move the instant a finger slipped off
+/// `Shift`, leaving the area wherever it had got to. A gesture a key release can
+/// cancel halfway is worse than one that commits at the press.
+///
+/// # Why swallowing this chord is not a system-wide claim on it
+///
+/// The hook returns `true` for a press it takes, which stops that click reaching
+/// anything else, an OS binding on the same chord included. That is only
+/// acceptable because the question is asked **after** the point has resolved to a
+/// pass-through area's body: the claim is the few hundred square pixels of an area
+/// the user put there, not `Win+Shift`+click everywhere. Windows does bind the
+/// chord over the taskbar, where it opens a new elevated instance, and the taskbar
+/// is not somewhere an area body resolves unless the user has deliberately placed
+/// one over it.
+///
+/// # `Shift` is also what keeps the Start menu shut
+///
+/// `Win` alone opens Start on key-*up*, and this gesture necessarily ends with the
+/// user releasing `Win`. Windows suppresses that when another key was pressed
+/// during the hold, and `Shift` is such a key, so the chord does not need to do
+/// anything about it. **Worth a rig check rather than a promise**: it is behaviour
+/// of the shell, which is not this codebase's to guarantee.
+///
+/// # The cursor does not change, and that is the ADR's position rather than a gap
+///
+/// An ordinary move shows `IDC_SIZEALL`, because `grab_test` reported `Body` and
+/// `pump_hover` read it. Over a pass-through body `grab_test` still reports
+/// nothing, so a chord drag runs under whatever cursor was already showing, and a
+/// live gesture freezes the hover rather than re-resolving it. Making the two match
+/// would mean reading this chord inside the 221 Hz poll, on the hot path, to give
+/// feedback ADR-0028 explicitly declines to promise: *the chord is invisible, which
+/// is why task 1.18 exists at all.* The bar is the affordance; this is the shortcut
+/// for someone who already knows it is there. **Left as a rig question rather than
+/// settled from a desk**: if it reads as broken with a hand on the mouse, that is a
+/// finding, and the fix is a poll change whose cost has to be measured.
+fn move_chord_held() -> bool {
+    vk_is_down(i32::from(VK_SHIFT))
+        && (vk_is_down(i32::from(VK_LWIN)) || vk_is_down(i32::from(VK_RWIN)))
 }
 
 /// Whether a virtual key is physically down right now, independent of the
