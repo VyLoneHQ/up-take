@@ -1158,6 +1158,12 @@ pub(crate) fn interactive_area_handle_at(
 
 /// The area a `Win+Shift`+left-drag grabs in `Living`, and the handle it grabs by.
 ///
+/// **The PRESS path only.** The hover path resolves the same question inside
+/// [`living_pointer_at`], under the lock it already holds; see
+/// [`LivingPointer::chord`] for why a second resolver here was wrong. The two
+/// still agree because both ask [`AreaStore::chord_move_test`], which is the one
+/// place the rule lives.
+///
 /// The fallback to [`interactive_area_handle_at`], and the caller tries that one
 /// **first**. Chrome grabs without the chord, so a chord press that lands on a
 /// resize band still resizes and one on the close control still closes: the chord
@@ -1201,9 +1207,27 @@ pub(crate) fn chord_movable_area_at(
 /// They are two different questions ([`AreaStore::grab_test`] and
 /// [`AreaStore::hover_test`]) and the poll asks them on the same tick, so asking
 /// them separately took the store lock twice and read `monitor_rects` twice on
-/// the 221 Hz path this module keeps deliberately short. Worse, two locks are two
+/// the poll path this module keeps deliberately short. Worse, two locks are two
 /// snapshots: an area created or dismissed between them could be reported hovered
 /// on a tick that said nothing was grabbed. One lock, one answer, no window.
+///
+/// ⛔ **This paragraph said "the 221 Hz path" and that rate was wrong for this
+/// function.** `poll_loop` paces at 4 ms only while `DRAGGING`; this is called
+/// solely from `pump_hover`, gated on `!menu_open && !gesture_live`, so it runs
+/// **before** any gesture exists, at the 16 ms rate, about **60 Hz**.
+/// `precapture.rs` already states the correct doctrine -- *"the poll ticks at
+/// 60 Hz idle and 221 Hz mid-gesture"* -- so this was an outlier rather than an
+/// ambiguity. Corrected 2026-08-27 by round 2 of `PR #74`'s review, **which found
+/// it two lines above a field that same pull request had just added, in a commit
+/// whose message claimed the false-rate claims were "both gone".**
+///
+/// ⚠️ **THAT ENUMERATION WAS SHORT AND THIS ONE MAY BE TOO.** `grep -rn "221 Hz"`
+/// over `src-tauri/` and `crates/` returns ten sites. This change corrects the
+/// one the review named and audits none of the others; `placement.rs:2021`
+/// ("every hover transition, at 221 Hz") looks like the same error and is
+/// **deliberately left alone rather than swept**, because a sweep by the author
+/// who just got the count wrong is `UT-F-76`'s exact shape. Tracked as a backlog
+/// row instead.
 pub(crate) struct LivingPointer {
     /// The area a press would act on, and where. `None` means the click belongs
     /// to whatever is behind the overlay.
@@ -1220,10 +1244,30 @@ pub(crate) struct LivingPointer {
     /// Sending the id alone lit every large Filter area permanently, caught by the
     /// independent review of `#56` before it reached anyone.
     pub chrome_only: bool,
+    /// What the `Win+Shift` chord would grab here, if it is being held.
+    ///
+    /// Resolved **inside this call, under the same lock**, rather than by a
+    /// second resolver at the call site. The review of `PR #74` found all three
+    /// reasons that matters, and none of them is style:
+    ///
+    /// 1. A separate resolver took **a second `AreaStore` lock on the same tick**,
+    ///    which is the exact cost this struct's own header says it exists to
+    ///    avoid, and reintroduces the two-snapshot window it names.
+    /// 2. The call site's guards did not reach it. `grabbed` is forced `None`
+    ///    while a Living menu is open, so a fallback keyed on `grabbed.is_none()`
+    ///    fired *because* of the menu guard rather than being stopped by it.
+    /// 3. One resolution means one answer. Two meant the cursor could promise a
+    ///    grab the press path would not perform.
+    pub chord: Option<(AreaId, Rect, interaction::Handle)>,
 }
 
 /// Resolves [`LivingPointer`] for `point`.
-pub(crate) fn living_pointer_at(app: &AppHandle, point: Point) -> LivingPointer {
+///
+/// `chord_held` is passed in rather than read here because the modifier is
+/// `placement.rs`'s to know about; this module answers questions about areas.
+/// It is only consulted when nothing was grabbable, so the chord costs a lookup
+/// exactly when it could change the answer.
+pub(crate) fn living_pointer_at(app: &AppHandle, point: Point, chord_held: bool) -> LivingPointer {
     let monitors = monitor_rects();
     let store = app.state::<Mutex<AreaStore>>();
     let guard = lock(&store);
@@ -1232,12 +1276,20 @@ pub(crate) fn living_pointer_at(app: &AppHandle, point: Point) -> LivingPointer 
             grabbed: Some((area.id, area.bounds, handle)),
             hovered: Some(area.id),
             chrome_only: false,
+            chord: None,
         };
     }
+    // Same lock, same snapshot. `Handle::Body` because that is the grab the chord
+    // grants and `living_lbutton_down` already turns it into a move.
+    let chord = chord_held
+        .then(|| guard.chord_move_test(point))
+        .flatten()
+        .map(|area| (area.id, area.bounds, interaction::Handle::Body));
     LivingPointer {
         grabbed: None,
         hovered: guard.hover_test(point, &monitors).map(|area| area.id),
         chrome_only: true,
+        chord,
     }
 }
 

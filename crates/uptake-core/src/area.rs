@@ -1757,6 +1757,44 @@ mod tests {
     }
 
     #[test]
+    fn the_chord_answers_only_where_a_plain_press_does_not() {
+        // The invariant the HOVER path now depends on, after the review of
+        // `PR #74` moved chord resolution inside `living_pointer_at`.
+        //
+        // That resolver asks `grab_test` first and `chord_move_test` only when
+        // `grab_test` declined, so the two must never both answer for one point:
+        // if they did, the cursor would be chosen by whichever the host consulted
+        // first and the press path could disagree with it. Asserted over every
+        // area type rather than one, because the property is about `is_interactive`
+        // and a type added later is exactly what would break it silently.
+        //
+        // **This is a test about the RULE, not about the poll.** The host-side
+        // resolver needs a `Tauri` `AppHandle` and a real window, so nothing here
+        // exercises `living_pointer_at`, the menu guard, or the cursor. That gap
+        // is real and is stated rather than papered over: what one lock and one
+        // snapshot buy is verified by reading, and the rig is what confirms the
+        // cursor.
+        for kind in [
+            AreaType::Default,
+            AreaType::Screenshot,
+            AreaType::Filter,
+            AreaType::Upscale,
+        ] {
+            let mut store = AreaStore::new();
+            let bounds = rect(0, 0, 200, 200);
+            store.create(kind, bounds).unwrap();
+            let body = Point::new(100, 100);
+
+            let grabs = store.grab_test(body, &screens()).is_some();
+            let chords = store.chord_move_test(body).is_some();
+            assert!(
+                grabs != chords,
+                "{kind:?}: exactly one of grab_test and chord_move_test must \n                 answer for a body, got grab={grabs} chord={chords}",
+            );
+        }
+    }
+
+    #[test]
     fn the_chord_does_not_reach_under_an_interactive_area() {
         // The defect the obvious implementation has. Searching top-down for the
         // first *pass-through* area -- rather than taking the topmost area and
