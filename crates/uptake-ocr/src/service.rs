@@ -63,6 +63,23 @@ pub enum Outcome {
     /// [`Service::submit`]'s documentation promises will not happen. Delivered
     /// before the [`Outcome::Stopped`] that follows it, so a caller draining in
     /// order learns what it lost before it learns why.
+    ///
+    /// # ⚠️ Reachable on the worker's own stops, and NOT on a caller's
+    ///
+    /// This is sent whenever the worker ends by itself: the engine fails to
+    /// build, an error is fatal, or it panics. It is also *sent* on
+    /// [`Service::shutdown`] and on `Drop`, because `close` is the single drain
+    /// point, but **nobody can hear it there**: both consume the `Service`, and
+    /// [`Service::results`] needs one to borrow, so the receiver is going away in
+    /// the same breath. The send fails and is discarded.
+    ///
+    /// **Stated rather than quietly true.** Round 2 of `PR #73`'s review found
+    /// `signal_stop` clearing the queue with no report at all, which broke this
+    /// promise in code as well as in reach. The clearing is gone and there is now
+    /// one drain point that always reports; what is left is a limit of the API
+    /// shape, not an inconsistency in it. Making a caller-initiated stop
+    /// observable would mean `shutdown` handing back the drained outcomes, which
+    /// is a signature change and belongs to whoever first needs it.
     Abandoned {
         /// The request that will go unanswered.
         id: RequestId,
@@ -87,6 +104,16 @@ pub enum StopReason {
     Fatal(EngineError),
     /// [`Service::shutdown`] was called, or the service was dropped.
     Requested,
+    /// The engine **panicked**, so the worker is gone and no further request can
+    /// be served.
+    ///
+    /// [`Engine::recognise`] and the closure that builds the engine are
+    /// caller-supplied, and 1.11 puts an FFI binding behind them. A panic there
+    /// used to leave the service reporting itself healthy while silently
+    /// swallowing every later request; it now ends the worker like any other
+    /// exit, and says which one it was. The panic message itself goes to stderr
+    /// through the standard hook, which this module does not intercept.
+    Panicked,
 }
 
 /// What went wrong submitting.
@@ -195,8 +222,15 @@ impl Service {
             .name("uptake-ocr".to_owned())
             .spawn(move || {
                 worker_running.store(RUNNING, Ordering::SeqCst);
-                run(&worker_shared, &sender, make_engine);
-                worker_running.store(STOPPED, Ordering::SeqCst);
+                // **Everything that closes the service lives in this guard, and
+                // that is what makes a panic survivable.** See `Exit`.
+                let mut exit = Exit {
+                    shared: &worker_shared,
+                    sender: &sender,
+                    running: &worker_running,
+                    reason: None,
+                };
+                run(&worker_shared, &sender, make_engine, &mut exit);
             })
             .map_err(|_| ServiceError::NotRunning)?;
 
@@ -292,10 +326,18 @@ impl Service {
     fn signal_stop(&self) {
         if let Ok(mut state) = self.shared.state.lock() {
             state.stopping = true;
-            // Queued-but-unstarted work is dropped rather than drained. Its
-            // answers have nowhere to go once the receiver is gone, and running
-            // them would be exactly the delay `shutdown` exists to avoid.
-            state.queued.clear();
+            // **The queue is deliberately NOT cleared here, and it used to be.**
+            // That made this the second place queued work was discarded, and the
+            // only one that discarded it without a word -- which contradicted
+            // [`Outcome::Abandoned`]'s own stated purpose, as round 2 of
+            // `PR #73`'s review pointed out. `close` is now the single drain
+            // point: the worker wakes, `take_next` sees `stopping` and returns
+            // `None` before touching the queue, and `close` reports every entry.
+            //
+            // **Nothing is run that was not already running.** The concern the
+            // old comment named -- that draining would cost the delay `shutdown`
+            // exists to avoid -- was about *recognising* those frames, and
+            // nothing here recognises them. They are reported and dropped.
         }
         self.shared.wake.notify_all();
     }
@@ -313,8 +355,46 @@ impl Drop for Service {
     }
 }
 
+/// Closes the service on **every** way out of the worker, including a panic.
+///
+/// # The hole this fills, found by round 2 of `PR #73`'s independent review
+///
+/// The worker used to store `STOPPED` and call `close` as ordinary statements
+/// after `run` returned. Neither runs when `run` **unwinds**, and unwinding is
+/// not hypothetical here: [`Engine::recognise`] and the `make_engine` closure are
+/// **caller-supplied code**, and 1.11 puts an ONNX/PP-OCRv4 FFI binding behind
+/// exactly that trait. A panic there produced the worst state this module can be
+/// in, and the reviewer reproduced it: [`Service::is_running`] answered **`true`
+/// forever**, `submit` accepted **40 further requests**, and **zero** outcomes
+/// were ever delivered. That is the same silent-swallow the previous round fixed,
+/// reached by a door the fix did not cover.
+///
+/// A `Drop` guard is used rather than `catch_unwind` because it needs no
+/// `UnwindSafe` bound on caller-supplied types, it cannot be forgotten at a new
+/// `return`, and it keeps one exit path instead of two. `run` records **why** it
+/// is leaving; the guard decides what to do about it. A `reason` still `None`
+/// when this drops means nobody recorded one, which can only be a panic.
+struct Exit<'a> {
+    shared: &'a Arc<Shared>,
+    sender: &'a Sender<Outcome>,
+    running: &'a AtomicU64,
+    reason: Option<StopReason>,
+}
+
+impl Drop for Exit<'_> {
+    fn drop(&mut self) {
+        let reason = self.reason.take().unwrap_or(StopReason::Panicked);
+        close(self.shared, self.sender, reason);
+        // Stored **after** `close`, so a caller that sees `is_running() == false`
+        // can already drain every outcome the shutdown produced. The other order
+        // is a window where the service reports itself dead and its explanation
+        // has not been sent yet.
+        self.running.store(STOPPED, Ordering::SeqCst);
+    }
+}
+
 /// The worker body. Builds the engine, then serves until told to stop.
-fn run<E, F>(shared: &Arc<Shared>, sender: &Sender<Outcome>, make_engine: F)
+fn run<E, F>(shared: &Arc<Shared>, sender: &Sender<Outcome>, make_engine: F, exit: &mut Exit<'_>)
 where
     E: Engine,
     F: FnOnce() -> Result<E, EngineError>,
@@ -327,14 +407,14 @@ where
             // report to. It is the only reasonable action, so it is taken
             // explicitly instead of through an `unwrap` the workspace lints deny
             // anyway.
-            close(shared, sender, StopReason::EngineUnavailable(error));
+            exit.reason = Some(StopReason::EngineUnavailable(error));
             return;
         }
     };
 
     loop {
         let Some(request) = take_next(shared) else {
-            close(shared, sender, StopReason::Requested);
+            exit.reason = Some(StopReason::Requested);
             return;
         };
         let result = engine.recognise(&request.frame);
@@ -348,7 +428,7 @@ where
             result,
         }));
         if let Some(error) = fatal {
-            close(shared, sender, StopReason::Fatal(error));
+            exit.reason = Some(StopReason::Fatal(error));
             return;
         }
     }

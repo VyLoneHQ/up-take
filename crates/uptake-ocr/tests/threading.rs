@@ -501,3 +501,56 @@ fn a_request_the_worker_never_reaches_is_reported_rather_than_lost() {
         "vacuous: no submit was accepted at all, so nothing was at risk",
     );
 }
+
+#[test]
+fn a_panicking_engine_ends_the_worker_instead_of_leaving_a_zombie() {
+    // **Round 2 of PR #73's review found this, and it is the previous round's
+    // defect reached through a door that fix did not cover.**
+    //
+    // `Engine::recognise` and the closure that builds the engine are
+    // CALLER-SUPPLIED, and 1.11 puts an ONNX/PP-OCRv4 FFI binding behind them.
+    // A panic there unwound straight out of the spawn closure, so neither the
+    // STOPPED store nor `close` ran. The reviewer measured the result:
+    // `is_running()` answered TRUE FOREVER, `submit` accepted 40 more requests,
+    // and zero outcomes were ever delivered.
+    //
+    // Three assertions, because the failure had three faces and a fix could
+    // plausibly mend one and leave the others.
+    struct Exploding;
+    impl Engine for Exploding {
+        fn recognise(&mut self, _frame: &RgbaBitmap) -> Result<Recognition, EngineError> {
+            #[allow(clippy::panic)]
+            {
+                panic!("simulated engine panic, e.g. an ONNX FFI bug");
+            }
+        }
+    }
+
+    let service = Service::spawn(|| Ok(Exploding)).unwrap();
+    service.submit(RequestId::new(1), frame(8)).unwrap();
+
+    // (1) The worker must stop reporting itself alive.
+    let deadline = Instant::now() + PATIENCE;
+    while service.is_running() {
+        assert!(
+            Instant::now() < deadline,
+            "is_running() still true after the engine panicked -- the zombie is back",
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+
+    // (2) It must SAY it stopped, and say why, rather than going quiet.
+    let outcome = wait_for(&service, |outcome| matches!(outcome, Outcome::Stopped(_)));
+    assert_eq!(
+        outcome,
+        Outcome::Stopped(StopReason::Panicked),
+        "a panic must be reported as a panic, not silence and not another reason",
+    );
+
+    // (3) And it must refuse further work rather than swallowing it. This is the
+    // assertion that actually failed before the fix: submit kept answering Ok.
+    assert!(
+        service.submit(RequestId::new(2), frame(8)).is_err(),
+        "submitting after an engine panic must be refused, not silently queued",
+    );
+}
