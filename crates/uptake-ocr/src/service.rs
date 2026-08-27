@@ -53,11 +53,26 @@ pub enum Outcome {
         /// What the engine made of it.
         result: Result<Recognition, EngineError>,
     },
+    /// A request was accepted and will never be answered, because the worker
+    /// stopped before reaching it.
+    ///
+    /// **This variant exists because the alternative is silence.** A `submit`
+    /// that returned `Ok` has told its caller the work is in hand; if the worker
+    /// then dies, dropping that request without a word leaves the caller waiting
+    /// for a result that is not coming, which is precisely what
+    /// [`Service::submit`]'s documentation promises will not happen. Delivered
+    /// before the [`Outcome::Stopped`] that follows it, so a caller draining in
+    /// order learns what it lost before it learns why.
+    Abandoned {
+        /// The request that will go unanswered.
+        id: RequestId,
+    },
     /// The worker has stopped and will answer nothing further.
     ///
-    /// Delivered **once**, and its absence is not a promise of health: a
-    /// receiver that has been dropped cannot be told anything. Callers that need
-    /// to know the worker is alive should ask [`Service::is_running`].
+    /// Delivered **once**, and after any [`Outcome::Abandoned`] it caused. Its
+    /// absence is not a promise of health: a receiver that has been dropped
+    /// cannot be told anything. Callers that need to know the worker is alive
+    /// should ask [`Service::is_running`].
     Stopped(StopReason),
 }
 
@@ -263,7 +278,14 @@ impl Service {
     /// not a leak: the thread holds an `Arc` to the shared state and nothing
     /// else, so it releases everything when it returns.
     pub fn shutdown(mut self) -> Option<JoinHandle<()>> {
-        self.signal_stop();
+        // **Deliberately does not call `signal_stop` itself.** `Service`
+        // implements `Drop` and `self` is consumed here, so the destructor runs
+        // at the end of this scope and signals exactly once, before the caller
+        // receives the handle, which is what makes joining it safe. An earlier
+        // version called `signal_stop` here as well and therefore ran it twice on
+        // every clean shutdown. Harmless while it stays idempotent, and the
+        // independent review of `PR #73` was right that the doc comments read as
+        // though only one of the two paths fires. Now only one does.
         self.worker.take()
     }
 
@@ -300,19 +322,19 @@ where
     let mut engine = match make_engine() {
         Ok(engine) => engine,
         Err(error) => {
-            // Ignoring the send result is correct rather than lazy: a dropped
+            // Ignoring a send result is correct rather than lazy: a dropped
             // receiver means nobody is listening, and there is no other party to
             // report to. It is the only reasonable action, so it is taken
             // explicitly instead of through an `unwrap` the workspace lints deny
             // anyway.
-            drop(sender.send(Outcome::Stopped(StopReason::EngineUnavailable(error))));
+            close(shared, sender, StopReason::EngineUnavailable(error));
             return;
         }
     };
 
     loop {
         let Some(request) = take_next(shared) else {
-            drop(sender.send(Outcome::Stopped(StopReason::Requested)));
+            close(shared, sender, StopReason::Requested);
             return;
         };
         let result = engine.recognise(&request.frame);
@@ -326,10 +348,56 @@ where
             result,
         }));
         if let Some(error) = fatal {
-            drop(sender.send(Outcome::Stopped(StopReason::Fatal(error))));
+            close(shared, sender, StopReason::Fatal(error));
             return;
         }
     }
+}
+
+/// Shuts the door **under the lock**, then reports everything left behind.
+///
+/// # The race this exists to close, found by the independent review of `PR #73`
+///
+/// [`Service::submit`]'s own documentation promises that submitting to a dead
+/// worker is *"reported rather than silently queued forever, because a caller
+/// that cannot tell the difference will wait for a result that is never
+/// coming."* Before this function existed, that promise held only for the
+/// **caller-driven** stops, `shutdown` and `Drop`, which go through
+/// `signal_stop`. The worker's own exits, an engine that fails to build and a
+/// fatal inference error, set nothing at all: the `running` atomic flips to
+/// `STOPPED` only *after* `run` has returned, in the spawn closure, so between
+/// the worker deciding to die and that store landing, `submit` saw
+/// `stopping == false`, pushed, and answered `Ok`.
+///
+/// **Measured, not theorised.** The reviewer raced a failing `make_engine`
+/// against a tight submit loop: **54 submits returned `Ok(())` and not one of
+/// them ever produced an outcome**, because the thread that would have drained
+/// them had already gone. Thread-creation latency alone was enough, with no
+/// tuning needed to reproduce it.
+///
+/// Two halves, and both are needed. Setting `stopping` **under the same lock
+/// `submit` takes** serialises the two: whoever reaches the lock first wins, and
+/// a `submit` arriving afterwards is refused. Draining the queue and reporting
+/// each entry as [`Outcome::Abandoned`] covers the other order, where a `submit`
+/// won the race and pushed, so that request is answered rather than dropped in
+/// silence. **Neither half alone is enough, and that is measured rather than
+/// argued**: with the flag set under the lock but the queue left undrained, the
+/// regression test still lost **81 of 81** accepted requests. The flag closes the
+/// door; the drain answers whoever was already through it.
+fn close(shared: &Arc<Shared>, sender: &Sender<Outcome>, reason: StopReason) {
+    let abandoned = match shared.state.lock() {
+        Ok(mut state) => {
+            state.stopping = true;
+            std::mem::take(&mut state.queued)
+        }
+        // A poisoned lock means the queue's contents cannot be trusted. There is
+        // nothing safe to drain and nothing truthful to say about what was in it.
+        Err(_) => Vec::new(),
+    };
+    for request in abandoned {
+        drop(sender.send(Outcome::Abandoned { id: request.id }));
+    }
+    drop(sender.send(Outcome::Stopped(reason)));
 }
 
 /// Blocks until there is work or a stop. `None` means stop.

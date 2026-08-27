@@ -415,3 +415,89 @@ fn a_fatal_engine_error_stops_the_worker_and_a_recoverable_one_does_not() {
         "both frames should have reached the engine",
     );
 }
+
+#[test]
+fn a_request_the_worker_never_reaches_is_reported_rather_than_lost() {
+    // **The defect the independent review of PR #73 found, made permanent.**
+    //
+    // `Service::submit` promises an accepted request is either answered or
+    // refused, never silently dropped. That held only for the caller-driven
+    // stops. On the worker's OWN exits -- a failing `make_engine`, a fatal
+    // inference error -- nothing set `stopping`, and the `running` atomic
+    // flipped to STOPPED only after `run` had already returned. In that window
+    // `submit` answered `Ok` into a queue nobody would ever drain.
+    //
+    // The reviewer measured it rather than arguing it: 54 submits returned
+    // `Ok(())` against an engine that could never answer anything, and not one
+    // produced an outcome. Thread-creation latency alone opened the window.
+    //
+    // The invariant asserted here is the one the docs actually promise, and it
+    // is deliberately stronger than "the flag gets set": EVERY id whose submit
+    // returned `Ok` must eventually appear in an outcome. A fix that only set
+    // `stopping` under the lock still loses the request that won the race, and
+    // would pass a weaker test.
+    let service = Service::spawn(|| {
+        Err::<GatedEngine, _>(EngineError::Unavailable("no model on disk".to_owned()))
+    })
+    .unwrap();
+
+    // Submit hard from the instant spawn returns, which is where the window is.
+    let mut accepted = Vec::new();
+    for raw in 0..200 {
+        let id = RequestId::new(raw);
+        if service.submit(id, frame(4)).is_ok() {
+            accepted.push(id);
+        }
+    }
+
+    // Collect until the worker says it has stopped, then once more: `Stopped` is
+    // sent last, so anything abandoned is already in the channel behind it.
+    let mut answered = Vec::new();
+    let deadline = Instant::now() + PATIENCE;
+    let mut saw_stop = false;
+    while !saw_stop {
+        for outcome in service.results() {
+            match outcome {
+                Outcome::Done { id, .. } | Outcome::Abandoned { id } => answered.push(id),
+                Outcome::Stopped(_) => saw_stop = true,
+                // `Outcome` is `#[non_exhaustive]`, so a wildcard is required
+                // from outside the crate. A future variant lands here and is
+                // NOT counted as an answer, which is the conservative direction:
+                // it would make this test fail rather than pass, and a new way
+                // to answer a request deserves a deliberate line here.
+                _ => {}
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the worker never reported that it had stopped",
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+    for outcome in service.results() {
+        match outcome {
+            Outcome::Done { id, .. } | Outcome::Abandoned { id } => answered.push(id),
+            Outcome::Stopped(_) => {}
+            _ => {}
+        }
+    }
+
+    let lost: Vec<_> = accepted
+        .iter()
+        .filter(|id| !answered.contains(id))
+        .collect();
+    assert!(
+        lost.is_empty(),
+        "{} of {} accepted requests were never answered: {lost:?}",
+        lost.len(),
+        accepted.len(),
+    );
+
+    // And the negative half. If `submit` had simply started refusing everything
+    // the assertion above would be vacuous, so this fails the test when nothing
+    // was ever accepted -- the case where the window closed before it opened.
+    assert!(
+        !accepted.is_empty(),
+        "vacuous: no submit was accepted at all, so nothing was at risk",
+    );
+}
