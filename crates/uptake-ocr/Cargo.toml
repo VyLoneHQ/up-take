@@ -1,0 +1,31 @@
+# uptake-ocr -- the OCR subsystem: a background inference thread and the seam
+# an engine plugs into.
+#
+# Platform-independent by design (architecture.md section 2), which is why it is
+# a crate rather than a module inside src-tauri: it is testable without a window,
+# and keeping the Windows surface confined to uptake-capture and src-tauri is
+# what makes the stated macOS/Linux ambition survivable rather than aspirational.
+#
+# NO ONNX RUNTIME DEPENDENCY HERE YET, and that is deliberate rather than
+# unfinished. Roadmap 1.10 is three things -- `ort` integration, model loading,
+# and the background inference thread -- and only the third can be built before
+# the ONNX acquisition question is decided. See the `engine` module for what the
+# seam is and why the decision is deferred rather than defaulted.
+
+[package]
+name = "uptake-ocr"
+description = "The OCR background inference thread, and the engine seam a recogniser plugs into. No platform APIs."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+uptake-core = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true
