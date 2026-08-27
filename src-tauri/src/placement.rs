@@ -3158,8 +3158,15 @@ fn snapping_suppressed() -> bool {
 /// "the 221 Hz poll" and that rate is wrong for this state.** `poll_loop` paces
 /// at 4 ms only while `DRAGGING`, and everything here runs *before* any gesture
 /// exists, so the real rate is the 16 ms one, about 60 Hz. Both figures were
-/// asserted rather than traced. The cost is small either way; the point is that
-/// it is now the measured shape rather than a flattering one.
+/// asserted rather than traced.
+///
+/// **What it costs is NOT stated here, and that is the correction.** An earlier
+/// version closed with *"the cost is small either way"*, which round 2 of the
+/// review called out as a fifth confident cost claim with no number behind it,
+/// in the one file whose record for exactly that is four falsified claims in a
+/// day. Two `GetAsyncKeyState` calls per tick is what the code does; whether
+/// that is small is a rig measurement nobody has taken, and
+/// `quality-bars.md` has no row for it.
 ///
 /// # Latched at button-down, unlike [`snapping_suppressed`]
 ///

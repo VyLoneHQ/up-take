@@ -1207,9 +1207,27 @@ pub(crate) fn chord_movable_area_at(
 /// They are two different questions ([`AreaStore::grab_test`] and
 /// [`AreaStore::hover_test`]) and the poll asks them on the same tick, so asking
 /// them separately took the store lock twice and read `monitor_rects` twice on
-/// the 221 Hz path this module keeps deliberately short. Worse, two locks are two
+/// the poll path this module keeps deliberately short. Worse, two locks are two
 /// snapshots: an area created or dismissed between them could be reported hovered
 /// on a tick that said nothing was grabbed. One lock, one answer, no window.
+///
+/// ⛔ **This paragraph said "the 221 Hz path" and that rate was wrong for this
+/// function.** `poll_loop` paces at 4 ms only while `DRAGGING`; this is called
+/// solely from `pump_hover`, gated on `!menu_open && !gesture_live`, so it runs
+/// **before** any gesture exists, at the 16 ms rate, about **60 Hz**.
+/// `precapture.rs` already states the correct doctrine -- *"the poll ticks at
+/// 60 Hz idle and 221 Hz mid-gesture"* -- so this was an outlier rather than an
+/// ambiguity. Corrected 2026-08-27 by round 2 of `PR #74`'s review, **which found
+/// it two lines above a field that same pull request had just added, in a commit
+/// whose message claimed the false-rate claims were "both gone".**
+///
+/// ⚠️ **THAT ENUMERATION WAS SHORT AND THIS ONE MAY BE TOO.** `grep -rn "221 Hz"`
+/// over `src-tauri/` and `crates/` returns ten sites. This change corrects the
+/// one the review named and audits none of the others; `placement.rs:2021`
+/// ("every hover transition, at 221 Hz") looks like the same error and is
+/// **deliberately left alone rather than swept**, because a sweep by the author
+/// who just got the count wrong is `UT-F-76`'s exact shape. Tracked as a backlog
+/// row instead.
 pub(crate) struct LivingPointer {
     /// The area a press would act on, and where. `None` means the click belongs
     /// to whatever is behind the overlay.

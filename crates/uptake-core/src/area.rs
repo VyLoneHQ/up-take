@@ -1789,7 +1789,7 @@ mod tests {
             let chords = store.chord_move_test(body).is_some();
             assert!(
                 grabs != chords,
-                "{kind:?}: exactly one of grab_test and chord_move_test must answer                  for a body, got grab={grabs} chord={chords}",
+                "{kind:?}: exactly one of grab_test and chord_move_test must \n                 answer for a body, got grab={grabs} chord={chords}",
             );
         }
     }
