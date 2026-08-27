@@ -3141,10 +3141,27 @@ fn snapping_suppressed() -> bool {
 /// anything else, an OS binding on the same chord included. That is only
 /// acceptable because the question is asked **after** the point has resolved to a
 /// pass-through area's body: the claim is the few hundred square pixels of an area
-/// the user put there, not `Win+Shift`+click everywhere. Windows does bind the
-/// chord over the taskbar, where it opens a new elevated instance, and the taskbar
-/// is not somewhere an area body resolves unless the user has deliberately placed
-/// one over it.
+/// the user put there, not `Win+Shift`+click everywhere.
+///
+/// **Windows binds no click chord on `Win+Shift` at all**, which is checked rather
+/// than assumed and is checked because the first version of this comment asserted
+/// the opposite. Microsoft's own shortcut list binds `Shift`+click on a taskbar
+/// button to *"open another instance"*, `Ctrl`+`Shift`+click to *"open an app as an
+/// administrator"*, and `Win`+`Shift`+**number** to *"start a new instance of the
+/// app pinned to the taskbar in the position indicated by the number"*. There is no
+/// `Win`+`Shift`+click entry. The earlier comment attributed the elevation binding,
+/// which is `Ctrl`'s, to `Win`, and an independent review caught it as a hunch
+/// rather than a finding, which is what it was.
+///
+/// That makes the collision risk *lower* than the earlier text claimed, and the
+/// safety argument deliberately does not rest on it either way: what makes
+/// swallowing acceptable is the narrowness of where it can happen, not the
+/// emptiness of the chord. A future Windows release may bind it, and the
+/// resolution order above is what keeps that from mattering anywhere except over
+/// an area the user placed themselves.
+///
+/// Source: <https://support.microsoft.com/en-us/windows/keyboard-shortcuts-in-windows-dcc61a57-8ff0-cffe-9796-cb9706c75eec>,
+/// read 2026-08-27.
 ///
 /// # `Shift` is also what keeps the Start menu shut
 ///
