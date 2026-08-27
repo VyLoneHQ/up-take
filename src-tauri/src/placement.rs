@@ -1583,8 +1583,11 @@ fn pump_hover(app: &AppHandle, state: &mut PumpState) {
         // while the other is taken.
         let menu_open = lock(&MENU).is_some();
         let gesture_live = lock(&GESTURE).is_some();
-        let pointer = (!menu_open && !gesture_live).then(|| overlay::living_pointer_at(app, point));
-        let grabbed = pointer.as_ref().and_then(|p| p.grabbed);
+        // The chord is read here and passed down, so `overlay` stays a module about
+        // areas. Two `GetAsyncKeyState` calls, on the ticks where the pointer is
+        // resolved at all.
+        let pointer = (!menu_open && !gesture_live)
+            .then(|| overlay::living_pointer_at(app, point, move_chord_held()));
         // Whether the hover is chrome-only travels with it, because the frontend
         // spends one id on two meanings: draw the control, and light the area to
         // show what a press would grab. Only the first is true of a pass-through
@@ -1615,15 +1618,23 @@ fn pump_hover(app: &AppHandle, state: &mut PumpState) {
         // it the only way to discover the chord works is to commit to a drag and
         // see what happens, which is not an affordance.
         //
-        // Ordered so the ordinary tick pays nothing: `grabbed` is consulted
-        // first, and the two `GetAsyncKeyState` calls happen only when nothing
-        // was grabbable anyway. This is the 221 Hz poll and its cost is the
-        // reason `living_pointer_at` takes one lock rather than two.
+        // **It comes from `pointer`, so the menu and gesture guards above cover
+        // it.** An earlier version resolved the chord in a separate `or_else`
+        // keyed on `grabbed.is_none()`, and the review of `PR #74` showed that
+        // inverted the guard it looked like it respected: `grabbed` is forced
+        // `None` while a menu is open, so the chord cursor appeared *because* of
+        // the menu rather than in spite of it -- and a press there closes the
+        // menu instead of moving anything. The cursor promised a grab the press
+        // path would not perform, which is the one thing ADR-0025 says it must
+        // never do.
         set_living_cursor(match *lock(&GESTURE) {
             Some(gesture) => Some(gesture_cursor(gesture)),
-            None => grabbed
-                .map(|(_, _, handle)| CursorShape::for_handle(handle))
-                .or_else(|| chord_cursor(app, point)),
+            None => pointer.as_ref().and_then(|resolved| {
+                resolved
+                    .grabbed
+                    .or(resolved.chord)
+                    .map(|(_, _, handle)| CursorShape::for_handle(handle))
+            }),
         });
         // Compared as one tuple rather than field by field: a hover that changes
         // only in `chrome_only` is a real change (the cursor crossing from an
@@ -3139,6 +3150,17 @@ fn snapping_suppressed() -> bool {
 /// different behaviour, and `VK_LWIN`/`VK_RWIN` are separate virtual keys with no
 /// combined code the way `VK_SHIFT` has one.
 ///
+/// # What it costs, corrected by the review of `PR #74`
+///
+/// Two [`GetAsyncKeyState`] calls per tick on the hover path, and this comment
+/// used to say *"an ordinary tick pays nothing"*, which was backwards: it is read
+/// on every tick the pointer is resolved, which is most of them. **It also cited
+/// "the 221 Hz poll" and that rate is wrong for this state.** `poll_loop` paces
+/// at 4 ms only while `DRAGGING`, and everything here runs *before* any gesture
+/// exists, so the real rate is the 16 ms one, about 60 Hz. Both figures were
+/// asserted rather than traced. The cost is small either way; the point is that
+/// it is now the measured shape rather than a flattering one.
+///
 /// # Latched at button-down, unlike [`snapping_suppressed`]
 ///
 /// This is read once, while the press is being classified, and never again for the
@@ -3210,27 +3232,6 @@ fn snapping_suppressed() -> bool {
 /// ADR-0028 calls the chord invisible and the bar the visible route; that stays
 /// true of the *gesture*, and it was never an argument for withholding feedback
 /// once the user has already reached for it.
-/// The move cursor, when the chord is held over a body only the chord can grab.
-///
-/// Called from `pump_hover` **only when nothing else was grabbable**, so an
-/// ordinary tick never reaches it and never pays for the modifier read. `None`
-/// means "no opinion", which leaves the cursor to whatever the caller decided.
-///
-/// # Why it resolves the area rather than trusting the modifier alone
-///
-/// Showing the move cursor wherever `Win+Shift` happens to be held would claim
-/// the whole desktop for a gesture that works over a few hundred square pixels,
-/// and the cursor is a promise: ADR-0025 calls it *the* affordance. It must not
-/// say "you can move this" over someone's spreadsheet. So the same question
-/// `living_lbutton_down` asks at press time is asked here at hover time, through
-/// the same `chord_movable_area_at`, which is what keeps the two from drifting.
-fn chord_cursor(app: &AppHandle, point: Point) -> Option<CursorShape> {
-    if !move_chord_held() {
-        return None;
-    }
-    overlay::chord_movable_area_at(app, point).map(|(_, _, handle)| CursorShape::for_handle(handle))
-}
-
 fn move_chord_held() -> bool {
     vk_is_down(i32::from(VK_SHIFT))
         && (vk_is_down(i32::from(VK_LWIN)) || vk_is_down(i32::from(VK_RWIN)))
