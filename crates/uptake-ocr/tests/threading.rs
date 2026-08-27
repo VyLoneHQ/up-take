@@ -540,11 +540,28 @@ fn a_panicking_engine_ends_the_worker_instead_of_leaving_a_zombie() {
     }
 
     // (2) It must SAY it stopped, and say why, rather than going quiet.
-    let outcome = wait_for(&service, |outcome| matches!(outcome, Outcome::Stopped(_)));
-    assert_eq!(
-        outcome,
-        Outcome::Stopped(StopReason::Panicked),
-        "a panic must be reported as a panic, not silence and not another reason",
+    //
+    // **Collected rather than filtered.** `wait_for` DISCARDS the outcomes it
+    // steps over, so using it here would consume the `Abandoned` that assertion
+    // (4) is about, and (4) would fail against correct code. The first draft did
+    // exactly that and reported "the in-flight request was never answered: []" --
+    // a red that was the test's fault, not the code's.
+    let mut seen = Vec::new();
+    let deadline = Instant::now() + PATIENCE;
+    while !seen
+        .iter()
+        .any(|outcome| matches!(outcome, Outcome::Stopped(_)))
+    {
+        seen.extend(service.results());
+        assert!(
+            Instant::now() < deadline,
+            "the worker never said it had stopped",
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert!(
+        seen.contains(&Outcome::Stopped(StopReason::Panicked)),
+        "a panic must be reported as a panic, not silence and not another reason: {seen:?}",
     );
 
     // (3) And it must refuse further work rather than swallowing it. This is the
@@ -552,5 +569,23 @@ fn a_panicking_engine_ends_the_worker_instead_of_leaving_a_zombie() {
     assert!(
         service.submit(RequestId::new(2), frame(8)).is_err(),
         "submitting after an engine panic must be refused, not silently queued",
+    );
+
+    // (4) **The request that was IN FLIGHT when the panic hit must be answered
+    // too.** Round 4 of the review found this one: it had already been popped off
+    // the queue, so draining the queue could not reach it, and the `Done` send
+    // sits after `recognise` so the unwind skipped it. The caller got `Ok(())`
+    // and would have waited forever. Neither `Done` nor `Abandoned` arrived.
+    seen.extend(service.results());
+    let answered: Vec<_> = seen
+        .iter()
+        .filter_map(|outcome| match outcome {
+            Outcome::Done { id, .. } | Outcome::Abandoned { id } => Some(*id),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        answered.contains(&RequestId::new(1)),
+        "the in-flight request was never answered: {answered:?}",
     );
 }

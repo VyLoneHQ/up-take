@@ -229,6 +229,7 @@ impl Service {
                     sender: &sender,
                     running: &worker_running,
                     reason: None,
+                    in_flight: None,
                 };
                 run(&worker_shared, &sender, make_engine, &mut exit);
             })
@@ -379,16 +380,48 @@ struct Exit<'a> {
     sender: &'a Sender<Outcome>,
     running: &'a AtomicU64,
     reason: Option<StopReason>,
+    /// The request the engine is working on right now, if any.
+    ///
+    /// **The one request `close` cannot see.** It has already been taken out of
+    /// the queue, so draining the queue does not reach it, and if `recognise`
+    /// panics on it the `Done` send is skipped by the unwind. Round 4 of
+    /// `PR #73`'s review reproduced the result: a caller that got `Ok(())` waits
+    /// for an outcome that never comes, which is the exact failure the previous
+    /// three rounds were each closing somewhere else.
+    in_flight: Option<RequestId>,
 }
 
 impl Drop for Exit<'_> {
     fn drop(&mut self) {
         let reason = self.reason.take().unwrap_or(StopReason::Panicked);
+        // First, because it was accepted first and because it is the one the
+        // queue drain below cannot account for.
+        if let Some(id) = self.in_flight.take() {
+            drop(self.sender.send(Outcome::Abandoned { id }));
+        }
         close(self.shared, self.sender, reason);
         // Stored **after** `close`, so a caller that sees `is_running() == false`
         // can already drain every outcome the shutdown produced. The other order
         // is a window where the service reports itself dead and its explanation
         // has not been sent yet.
+        //
+        // ⚠️ **CORRECT BY CONSTRUCTION AND NOT ENFORCED BY ANY TEST, which is
+        // stated here because a previous attempt claimed otherwise.** Round 3 of
+        // `PR #73`'s review found this ordering had no coverage; the test written
+        // for it queued 4096 requests to "widen the window", and round 4 showed
+        // that test **cannot go red**: it passed 50 out of 50 runs against the
+        // reversed order. The measurement explains why, and it is worth keeping:
+        // `close` completes in **13 microseconds**, while the submit loop that
+        // was supposed to slow it down costs **679 microseconds on the observing
+        // thread itself**. Widening the producer's cost does not widen the
+        // observer's reaction window when they are the same thread.
+        //
+        // The test was **deleted rather than kept green**, because a check that
+        // cannot fail is worse than no check: it reports coverage that does not
+        // exist. `UT-F-75` and `I-314` are this project's record of that class,
+        // and keeping the test would have been a third entry. What is left is a
+        // two-statement ordering a reader can verify by looking at it, and an
+        // honest note that nothing guards it.
         self.running.store(STOPPED, Ordering::SeqCst);
     }
 }
@@ -417,7 +450,11 @@ where
             exit.reason = Some(StopReason::Requested);
             return;
         };
+        // Marked before the call and cleared after, so a panic INSIDE `recognise`
+        // leaves it set and the guard reports it. The window is exactly the call.
+        exit.in_flight = Some(request.id);
         let result = engine.recognise(&request.frame);
+        exit.in_flight = None;
         let fatal = result
             .as_ref()
             .err()
@@ -508,8 +545,9 @@ mod tests {
     //!
     //! # Why this module exists at all, and why that is a correction
     //!
-    //! `246e03e`'s commit message said the `signal_stop` path *"needed a
-    //! test-only API to reach"* and that widening the public surface for a test
+    //! `8786e2c`'s commit message said the `signal_stop` path *"needed a
+    //! test-only API to reach"* (attributed to `246e03e` when this module was
+    //! written, and corrected here after round 4 read both commits) and that widening the public surface for a test
     //! was not worth it. **The first half was wrong.** Round 3 of `PR #73`'s
     //! independent review demonstrated it by writing the test: a private
     //! `#[cfg(test)]` module inside this file reaches `signal_stop` directly,
@@ -528,7 +566,7 @@ mod tests {
     use uptake_core::bitmap::RgbaBitmap;
     use uptake_core::geometry::Size;
 
-    use super::{Engine, EngineError, Outcome, Recognition, RequestId, Service, StopReason};
+    use super::{Engine, EngineError, Outcome, Recognition, RequestId, Service};
 
     const PATIENCE: Duration = Duration::from_secs(10);
 
@@ -554,7 +592,11 @@ mod tests {
 
     #[test]
     fn signal_stop_reports_the_work_it_abandons_rather_than_discarding_it() {
-        // Round 3's finding (d). `signal_stop` used to clear the queue outright,
+        // **Round 2's finding (b)**, not round 3's -- this comment said "Round 3's
+        // finding (d)", which is a different finding and is already correctly
+        // used for the test-only-API claim in this module's own header. Round 4
+        // caught the collision by reading the file rather than the brief.
+        // `signal_stop` used to clear the queue outright,
         // making it the one place `Outcome::Abandoned`'s promise was broken in
         // CODE rather than merely unreachable. Reverting that fix leaves the
         // whole integration suite green, which is why this test is here and why
@@ -607,51 +649,6 @@ mod tests {
             calls.load(Ordering::SeqCst),
             1,
             "and reporting it must not mean RUNNING it -- that is the delay a stop exists to avoid",
-        );
-    }
-
-    /// An engine whose first answer is fatal, so the worker exits with work queued.
-    struct FatalOnce;
-
-    impl Engine for FatalOnce {
-        fn recognise(&mut self, _frame: &RgbaBitmap) -> Result<Recognition, EngineError> {
-            Err(EngineError::Unavailable("the model went away".to_owned()))
-        }
-    }
-
-    #[test]
-    fn the_worker_is_never_reported_dead_before_it_has_said_why() {
-        // Round 3's finding (c). `Exit::drop` stores STOPPED *after* `close`, and
-        // its comment calls that ordering load-bearing: the other order is a
-        // window where the service reports itself dead and its explanation has
-        // not been sent. Nothing enforced it -- reversing the two statements left
-        // all eight tests green, because every other test polls through a
-        // ten-second retry loop and none looks at the instant the flag flips.
-        //
-        // **The window is widened deliberately rather than raced for.** A large
-        // queue means `close` has thousands of `Abandoned` sends to make before
-        // it can send `Stopped`, so a STOPPED-first implementation leaves a gap
-        // wide enough to observe rather than one that needs luck. Under the
-        // correct order the assertion cannot fail at all: `close` has fully
-        // returned before the flag moves.
-        let service = Service::spawn(|| Ok(FatalOnce)).unwrap();
-        for raw in 0..4096 {
-            drop(service.submit(RequestId::new(raw), frame()));
-        }
-
-        let deadline = Instant::now() + PATIENCE;
-        while service.is_running() {
-            assert!(Instant::now() < deadline, "the worker never stopped");
-        }
-        // The instant it says it is dead, its explanation must already be here.
-        let outcomes: Vec<_> = service.results().collect();
-        assert!(
-            outcomes
-                .iter()
-                .any(|outcome| matches!(outcome, Outcome::Stopped(StopReason::Fatal(_)))),
-            "is_running() went false before Stopped was sent: {} outcome(s) drained, \
-             none of them the explanation",
-            outcomes.len(),
         );
     }
 }
