@@ -1606,9 +1606,24 @@ fn pump_hover(app: &AppHandle, state: &mut PumpState) {
         // would leave every text field on the desktop showing one. Three slots are
         // touched and the rest of the table is not; see `LIVING_CURSORS`. See
         // `set_living_cursor` for why the restore is not `SPI_SETCURSORS`.
+        //
+        // **The chord announces itself before the drag starts (rig, 2026-08-27).**
+        // With no gesture live and nothing grabbable under the pointer, holding
+        // `Win+Shift` over a pass-through area's BODY shows the move cursor. The
+        // founder's words: *"the mouse cursor should change the moment the user
+        // presses Win+Shift WHILE the cursor is over an up-take area."* Without
+        // it the only way to discover the chord works is to commit to a drag and
+        // see what happens, which is not an affordance.
+        //
+        // Ordered so the ordinary tick pays nothing: `grabbed` is consulted
+        // first, and the two `GetAsyncKeyState` calls happen only when nothing
+        // was grabbable anyway. This is the 221 Hz poll and its cost is the
+        // reason `living_pointer_at` takes one lock rather than two.
         set_living_cursor(match *lock(&GESTURE) {
             Some(gesture) => Some(gesture_cursor(gesture)),
-            None => grabbed.map(|(_, _, handle)| CursorShape::for_handle(handle)),
+            None => grabbed
+                .map(|(_, _, handle)| CursorShape::for_handle(handle))
+                .or_else(|| chord_cursor(app, point)),
         });
         // Compared as one tuple rather than field by field: a hover that changes
         // only in `chrome_only` is a real change (the cursor crossing from an
@@ -3171,18 +3186,51 @@ fn snapping_suppressed() -> bool {
 /// anything about it. **Worth a rig check rather than a promise**: it is behaviour
 /// of the shell, which is not this codebase's to guarantee.
 ///
-/// # The cursor does not change, and that is the ADR's position rather than a gap
+/// # The cursor, and a claim this comment got WRONG
 ///
-/// An ordinary move shows `IDC_SIZEALL`, because `grab_test` reported `Body` and
-/// `pump_hover` read it. Over a pass-through body `grab_test` still reports
-/// nothing, so a chord drag runs under whatever cursor was already showing, and a
-/// live gesture freezes the hover rather than re-resolving it. Making the two match
-/// would mean reading this chord inside the 221 Hz poll, on the hot path, to give
-/// feedback ADR-0028 explicitly declines to promise: *the chord is invisible, which
-/// is why task 1.18 exists at all.* The bar is the affordance; this is the shortcut
-/// for someone who already knows it is there. **Left as a rig question rather than
-/// settled from a desk**: if it reads as broken with a hand on the mouse, that is a
-/// finding, and the fix is a poll change whose cost has to be measured.
+/// ⛔ **This section said "the cursor does not change during a chord drag" and
+/// that was false.** It reasoned that `grab_test` reports nothing over a
+/// pass-through body, so nothing would set the shape. It missed that
+/// `pump_hover` takes the cursor from `GESTURE` when a gesture is live and only
+/// falls back to `grabbed` when one is not -- and this chord produces
+/// `Gesture::Move`, whose shape is `IDC_SIZEALL`. The hover *highlight* is
+/// frozen mid-gesture (`living_hover`); the *cursor* is not, and the two were
+/// conflated. **Found by the founder at the rig on 2026-08-27, with his hand on
+/// the mouse**, one line after the independent review had caught a different
+/// unprobed claim in this same function. Both were assertions about behaviour
+/// that had never been run.
+///
+/// **What is true**: during a chord drag the cursor is the four-way move shape,
+/// like any other move, and the founder's verdict on it was *"looks good"*.
+///
+/// **What was missing, and is now built**: the shape used to appear only once
+/// the drag had begun. `pump_hover` now shows it the moment `Win+Shift` goes
+/// down over a pass-through body, before any press, which is what makes the
+/// chord discoverable at all rather than something you must already know about.
+/// ADR-0028 calls the chord invisible and the bar the visible route; that stays
+/// true of the *gesture*, and it was never an argument for withholding feedback
+/// once the user has already reached for it.
+/// The move cursor, when the chord is held over a body only the chord can grab.
+///
+/// Called from `pump_hover` **only when nothing else was grabbable**, so an
+/// ordinary tick never reaches it and never pays for the modifier read. `None`
+/// means "no opinion", which leaves the cursor to whatever the caller decided.
+///
+/// # Why it resolves the area rather than trusting the modifier alone
+///
+/// Showing the move cursor wherever `Win+Shift` happens to be held would claim
+/// the whole desktop for a gesture that works over a few hundred square pixels,
+/// and the cursor is a promise: ADR-0025 calls it *the* affordance. It must not
+/// say "you can move this" over someone's spreadsheet. So the same question
+/// `living_lbutton_down` asks at press time is asked here at hover time, through
+/// the same `chord_movable_area_at`, which is what keeps the two from drifting.
+fn chord_cursor(app: &AppHandle, point: Point) -> Option<CursorShape> {
+    if !move_chord_held() {
+        return None;
+    }
+    overlay::chord_movable_area_at(app, point).map(|(_, _, handle)| CursorShape::for_handle(handle))
+}
+
 fn move_chord_held() -> bool {
     vk_is_down(i32::from(VK_SHIFT))
         && (vk_is_down(i32::from(VK_LWIN)) || vk_is_down(i32::from(VK_RWIN)))
