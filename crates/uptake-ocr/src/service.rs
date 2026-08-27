@@ -24,41 +24,42 @@ use crate::engine::{Engine, EngineError, Recognition};
 /// an unbounded queue, which is a decision a caller is allowed to make and
 /// should make knowingly.
 ///
-/// # How many outcomes an id produces, in all three cases
+/// # The contract: ONE outcome per accepted `submit`, with exactly one exception
 ///
-/// ⛔ **This section previously read "ONE outcome per id, not one per accepted
-/// `submit` ... the rule is now one, everywhere", and that was FALSE.** Round 6
-/// of `PR #73`'s review disproved it by running the code rather than reading it:
-/// submit id 1, let it reach the engine, submit id 1 again so the second queues
-/// behind the first, let both finish normally, and the caller receives **two
-/// `Done` for one id**. That is the module's own headline use case -- a resize
-/// drag -- not a corner. There is no such invariant, and writing one onto a
-/// public type is worse than leaving it unstated, because a caller can build on
-/// it.
+/// ⛔ **This section has been wrong twice and the history is kept, because the
+/// two wrong versions are more instructive than the right one.**
 ///
-/// **What is actually true, case by case:**
+/// It first read *"ONE outcome per id ... everywhere"*, which round 6 disproved
+/// by running the code. It was then rewritten as *"outcomes track accepted
+/// submissions minus those absorbed by case 1"*, and **round 7 disproved that one
+/// too**: two accepted submissions, none absorbed, produced a single outcome --
+/// and the one delivered described the wrong submission.
 ///
-/// 1. **Superseded while still queued** -- the newer frame replaces the older
-///    one in place, and the older produces **no outcome of its own**. This is the
-///    only case where a submission is silently absorbed, and it is deliberate:
-///    it is what stops a resize drag costing one recognition per frame.
-/// 2. **Superseded after it has started** -- impossible. Coalescing searches the
-///    queue only, and [`Engine::recognise`] cannot be interrupted, so the second
-///    submission queues and **both run and both report**. Two outcomes, one id.
-/// 3. **The worker stops** -- `close` reports each abandoned request once, and
-///    will not report one id twice even when it is both in flight and queued.
-///    That narrow guarantee is what round 5's fix actually bought, and it is all
-///    it bought.
+/// **The rule, which the code now actually implements:**
 ///
-/// So outcomes track **accepted submissions, minus those absorbed by case 1** --
-/// and no caller may assume an id is answered at most once.
+/// > **Every accepted `submit` produces exactly one [`Outcome`], except a request
+/// > superseded while it is still QUEUED, which is absorbed by its replacement.**
 ///
-/// ⚠️ **Whether case 1 SHOULD stay silent is undecided and is a product call.**
-/// Announcing every superseded frame would mean dozens of outcomes during a
-/// resize drag, which is noise a host did not ask for; absorbing them means a
-/// caller cannot count outcomes against submissions. There is no host yet, so
-/// there is nothing to decide it against. Recorded as a backlog row rather than
-/// settled by whoever happened to be holding the file.
+/// Nothing else absorbs, collapses or dedupes. An id is not a submission and
+/// carries no promise of uniqueness: two submissions under one id are two
+/// submissions, and they produce two outcomes.
+///
+/// **Coalescing is the exception and is deliberate**, because it is what stops a
+/// resize drag costing one recognition per frame. It applies only while a request
+/// is still in the queue: once [`Engine::recognise`] has it, nothing can
+/// supersede it, so a second submission under the same id queues and both run.
+///
+/// ⚠️ **`Outcome` carries no per-submission token**, so where two submissions
+/// share an id the caller cannot tell their outcomes apart. That is a real limit
+/// and it is the thing that made round 7's defect invisible: an outcome about the
+/// wrong submission looks exactly like an outcome about the right one. Giving
+/// submissions their own handle would fix it and is a change to the public API
+/// with no consumer yet to justify it -- tracked rather than done.
+///
+/// ⚠️ **Whether case 1 SHOULD stay silent is still undecided.** Announcing every
+/// superseded frame means dozens of outcomes during a resize drag; absorbing them
+/// means a caller cannot count outcomes against submissions. There is no host yet
+/// to decide it against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RequestId(u64);
 
@@ -547,16 +548,23 @@ fn close(
         // nothing safe to drain and nothing truthful to say about what was in it.
         Err(_) => Vec::new(),
     };
-    // The in-flight request first, because it was accepted first -- but **only if
-    // the queue does not already carry its id**, so one stop cannot report one id
-    // twice. ⚠️ **That is the whole of the guarantee and it is narrower than an
-    // earlier version of this comment claimed.** It says nothing about the normal
-    // path, where two submissions under one id can both complete and both report;
-    // see case 2 on [`RequestId`]. Round 6 of `PR #73`'s review found the wider
-    // claim and disproved it by running it.
-    if let Some(id) = in_flight
-        && !abandoned.iter().any(|request| request.id == id)
-    {
+    // The in-flight request first, because it was accepted first. **Reported
+    // unconditionally, and the dedupe that used to guard this line is GONE.**
+    //
+    // ⛔ Round 5 of `PR #73`'s review reported two `Abandoned` for one id as a
+    // defect, and this function grew a dedupe to collapse them. **Round 7 showed
+    // what that cost, by running it:** with one request in flight and a second
+    // queued under the same id, `abandoned` holds only the queued one, so the
+    // dedupe saw the id already present and SKIPPED the in-flight report. The
+    // single outcome delivered then described **the submission that never
+    // started**, while the one actually running when the engine died got nothing
+    // at all -- and `Outcome` carries no per-submission token, so a caller cannot
+    // tell it was told about the wrong one. That is the silent swallow rounds 1,
+    // 2 and 4 each fixed elsewhere in this file, reintroduced by the fix for a
+    // finding that was not a defect.
+    //
+    // **Two accepted submissions are two outcomes.** That was never a duplicate.
+    if let Some(id) = in_flight {
         drop(sender.send(Outcome::Abandoned { id }));
     }
     for request in abandoned {

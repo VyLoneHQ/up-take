@@ -591,18 +591,24 @@ fn a_panicking_engine_ends_the_worker_instead_of_leaving_a_zombie() {
 }
 
 #[test]
-fn one_id_gets_one_outcome_even_when_it_is_submitted_twice() {
-    // **Round 5's finding, reproduced as a test.** `submit`'s coalescing only
-    // searches the QUEUE, so a caller can legitimately hold two live submissions
-    // under one id: one in flight, one queued behind it. When the engine then
-    // panicked, `Exit::drop` reported the in-flight one and `close` reported the
-    // queued one, and the caller saw `Abandoned` twice for a single id.
+fn an_in_flight_request_is_reported_even_when_its_id_is_also_queued() {
+    // **Round 7's finding, and it REPLACES round 5's test rather than joining
+    // it.** That test asserted exactly one `Abandoned` for an id submitted twice,
+    // and this one asserts two. Both cannot be right, and the older one was
+    // wrong: round 5 reported a "duplicate" that was never a duplicate -- two
+    // accepted submissions producing two outcomes -- and the dedupe written to
+    // satisfy it lost the in-flight request's fate entirely.
     //
-    // The reviewer's exact reproduction was
-    // `[Abandoned{1}, Abandoned{1}, Stopped(Panicked)]`.
+    // What that cost, measured: with one request in flight and a second queued
+    // under the same id, `close`'s drained queue held only the QUEUED one, so the
+    // dedupe skipped the in-flight report. The single outcome delivered described
+    // the submission that never started, while the one actually running when the
+    // engine panicked got nothing. `Outcome` carries no per-submission token, so
+    // a caller could not tell it had been told about the wrong one.
     //
-    // The rule is one outcome per id, which is what coalescing already did, so
-    // this pins the half that disagreed rather than inventing a new promise.
+    // The assertion is therefore about CONTENT as much as count: two outcomes,
+    // and the FIRST of them is the in-flight request, because it was accepted
+    // first and it is the one the old code dropped.
     let (started, starts) = mpsc::channel();
     let (release, releases) = mpsc::channel();
     let calls = Arc::new(AtomicUsize::new(0));
@@ -620,7 +626,7 @@ fn one_id_gets_one_outcome_even_when_it_is_submitted_twice() {
             self.release.lock().unwrap().recv().unwrap();
             #[allow(clippy::panic)]
             {
-                panic!("simulated engine panic while a resubmission is queued");
+                panic!("engine panics while a resubmission is queued behind it");
             }
         }
     }
@@ -634,14 +640,15 @@ fn one_id_gets_one_outcome_even_when_it_is_submitted_twice() {
     })
     .unwrap();
 
-    // First submission reaches the engine and blocks there.
     service.submit(RequestId::new(1), frame(10)).unwrap();
-    assert_eq!(starts.recv_timeout(PATIENCE).unwrap(), 10);
-    // Second under the SAME id. Coalescing cannot see the in-flight one, so this
-    // genuinely queues rather than replacing anything -- which is the setup, and
-    // asserting it here stops the test passing because the queue stayed empty.
+    assert_eq!(
+        starts.recv_timeout(PATIENCE).unwrap(),
+        10,
+        "vacuous unless the first submission actually reached the engine",
+    );
+    // Same id, and it genuinely queues: the first is no longer in the queue to
+    // be replaced, so nothing is absorbed here.
     service.submit(RequestId::new(1), frame(20)).unwrap();
-
     let _ = release.send(());
 
     let mut seen = Vec::new();
@@ -659,13 +666,19 @@ fn one_id_gets_one_outcome_even_when_it_is_submitted_twice() {
     }
     seen.extend(service.results());
 
-    let abandoned = seen
+    let abandoned: Vec<_> = seen
         .iter()
-        .filter(|outcome| matches!(outcome, Outcome::Abandoned { id } if *id == RequestId::new(1)))
-        .count();
+        .filter(|outcome| matches!(outcome, Outcome::Abandoned { .. }))
+        .collect();
     assert_eq!(
-        abandoned, 1,
-        "one id must yield one outcome, got {abandoned}: {seen:?}",
+        abandoned.len(),
+        2,
+        "two accepted submissions must produce two outcomes, got {}: {seen:?}",
+        abandoned.len(),
+    );
+    assert!(
+        matches!(seen.first(), Some(Outcome::Abandoned { id }) if *id == RequestId::new(1)),
+        "the IN-FLIGHT request must be reported, and first: {seen:?}",
     );
 }
 
