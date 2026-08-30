@@ -55,6 +55,23 @@ windows-capture = "2.0"
 windows = "0.62"
 thiserror = "2"
 proptest = "1"
+# ONNX Runtime bindings for the OCR engine (task 1.11).
+#
+# `default-features = false` + `load-dynamic` is ADR-0032, accepted 2026-08-27,
+# and BOTH halves are load-bearing. The default feature set includes
+# `download-binaries`, which fetches a prebuilt ONNX Runtime at BUILD time from
+# a CDN we do not control -- in a repo whose threat model (architecture.md
+# section 4) treats a model file as arbitrary code and whose runtime is the
+# larger surface. With `load-dynamic` the build needs no network and the DLL is
+# a file we placed, checked and shipped deliberately.
+#
+# THE `=` IS NOT A TYPO AND MUST NOT BE "TIDIED" TO A CARET. ADR-0032 decision 4:
+# `ort` has no stable release (`max_stable_version: null`, re-probed 2026-08-30),
+# so the version is pinned EXACTLY and moving it is a deliberate change with its
+# own review, not something `cargo update` does. A bare "2.0.0-rc.13" means
+# ^2.0.0-rc.13 in Cargo, which would accept rc.14 and 2.0.0 alike -- the precise
+# drift the decision exists to prevent.
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["load-dynamic"] }
 
 # ---------------------------------------------------------------------------
 # Lints, applied to every member via `[lints] workspace = true`.

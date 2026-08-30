@@ -12,27 +12,27 @@
 //! That is why this crate exists before any recogniser does, and why the
 //! recogniser arrives behind [`Engine`] rather than as a hard dependency.
 //!
-//! # Why there is no ONNX Runtime here yet
+//! # How ONNX Runtime is obtained, and where the recogniser lives
 //!
-//! Roadmap 1.10 is three things: `ort` integration, model loading, and the
-//! background inference thread. The first two rest on a question this crate is
-//! deliberately not answering: **how ONNX Runtime is obtained.**
+//! **Answered by [ADR-0032](https://github.com/VyLoneHQ/up-take), accepted
+//! 2026-08-27: `ort` with `default-features = false` and `load-dynamic`.** The
+//! runtime is loaded at run time from a path UP-TAKE chooses, never fetched
+//! during a build. The default feature set includes `download-binaries`, a
+//! build-time fetch of a prebuilt runtime from a third-party CDN, and
+//! `architecture.md` section 4 treats a model file as arbitrary code while the
+//! runtime is the larger surface of the two.
 //!
-//! Probed 2026-08-27 rather than recalled. `ort` is at **2.0.0-rc.13 with no
-//! stable release at all** (`max_stable: None` from the crates.io API), it is
-//! `MIT OR Apache-2.0` and so already on `deny.toml`'s allow-list, and its
-//! **default features include `download-binaries`** -- a build-time fetch of
-//! prebuilt ONNX Runtime from a third-party CDN. The alternative is
-//! `load-dynamic`, which loads a shared library at run time from a path the
-//! application chooses.
+//! Re-probed 2026-08-30 rather than carried over from the decision: `ort` is
+//! still at **2.0.0-rc.13 with no stable release** (`max_stable_version: null`),
+//! so the version is pinned **exactly** in the workspace manifest, per that
+//! decision's fourth clause. Nothing in either repository watches crates.io, so
+//! that pin is a dated observation and not a standing truth.
 //!
-//! That choice reaches CI reproducibility, what the installer carries, what
-//! SignPath is asked to sign, and `architecture.md` section 4's supply-chain
-//! posture -- a document whose own model-file row reads *"a poisoned ONNX model
-//! is arbitrary code"*, and the runtime is a larger surface than the model. It
-//! is an ADR, so it is not taken here by default. **A default taken silently is
-//! the same decision made worse**, and this module comment is where a reader
-//! finds out it was deferred on purpose.
+//! [`paddle`] is PP-OCRv4 behind [`Engine`] -- roadmap 1.11. **Five of its six
+//! stages are pure**: the resize, the probability-map post-processing, the
+//! geometry, the crop and CTC decode, and the reading-order sort all take
+//! plain data and are tested in CI with no runtime and no model file present.
+//! Only session management touches `ort`.
 //!
 //! What that costs is nothing structural: [`Engine`] is the seam, and wiring a
 //! real recogniser behind it changes no caller.
@@ -45,3 +45,5 @@ pub mod service;
 
 pub use engine::{Engine, EngineError, Recognition, TextBlock};
 pub use service::{Outcome, RequestId, Service, ServiceError};
+
+pub mod paddle;
