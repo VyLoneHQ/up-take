@@ -37,6 +37,7 @@ rust-version = "1.96"
 uptake-core = { path = "crates/uptake-core" }
 uptake-capture = { path = "crates/uptake-capture" }
 uptake-ocr = { path = "crates/uptake-ocr" }
+uptake-assets = { path = "crates/uptake-assets" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Windows-only members opt in with the features they actually call; the
