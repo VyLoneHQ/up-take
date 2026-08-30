@@ -232,17 +232,51 @@ mod tests {
 
     #[test]
     fn grouping_does_not_chain_down_the_page() {
-        // Three boxes each overlapping the next by more than half, but the first
-        // and third not overlapping at all. Comparing against a line's FIRST
-        // member stops them collapsing into one line, which would put the
-        // bottom-most box before boxes above it.
+        // Three 20px boxes stepping down the page by 8px each. The overlap
+        // ratios, computed against the real formula rather than eyeballed:
+        //
+        //   a-b 0.60   b-c 0.60   a-c 0.20      threshold is 0.50
+        //
+        // So each box shares a line with its NEIGHBOUR but not with the box two
+        // steps away. Comparing a candidate against the line's FIRST member
+        // therefore gives two lines, [a b] and [c]; comparing against its LAST
+        // would chain all three into one and put `c` -- the bottom-most box --
+        // ahead of boxes above it, because it sorts leftmost inside that line.
+        //
+        // The left edges run backwards (a=10, b=5, c=0) precisely so the two
+        // behaviours produce DIFFERENT output: first -> [b a c], last -> [c b a].
+        //
+        // ⚠️ THIS FIXTURE WAS WRONG UNTIL 2026-08-30. Its predecessor stepped by
+        // 12px, giving ratios of 0.40/0.40/0.00 -- NONE of them over the
+        // threshold -- so all three boxes became singleton lines and the test
+        // passed identically whether the code compared against first or last.
+        // An independent review computed the ratios, mutated `first()` to
+        // `last()`, and watched all 13 reading-order tests stay green. The test
+        // whose entire stated purpose was to catch that regression could not.
         let items = vec![
             placed(0.0, 20.0, 10.0, "a"),
-            placed(12.0, 32.0, 5.0, "b"),
-            placed(24.0, 44.0, 0.0, "c"),
+            placed(8.0, 28.0, 5.0, "b"),
+            placed(16.0, 36.0, 0.0, "c"),
         ];
         let ordered = sort_into_reading_order(items);
-        assert_eq!(labels(&ordered), ["a", "b", "c"]);
+        assert_eq!(labels(&ordered), ["b", "a", "c"]);
+    }
+
+    #[test]
+    fn the_chaining_fixture_actually_crosses_the_threshold() {
+        // Guards the test above against silently decaying back into a fixture
+        // that proves nothing. If a later edit moves the boxes or the threshold
+        // so that neighbours stop sharing a line, THIS fails and names the
+        // reason, rather than the other test passing for free.
+        let a = placed(0.0, 20.0, 10.0, "a");
+        let b = placed(8.0, 28.0, 5.0, "b");
+        let c = placed(16.0, 36.0, 0.0, "c");
+        assert!(a.shares_a_line_with(&b), "a and b must share a line");
+        assert!(b.shares_a_line_with(&c), "b and c must share a line");
+        assert!(
+            !a.shares_a_line_with(&c),
+            "a and c must NOT share a line, or the fixture cannot tell              first-member grouping from last-member grouping"
+        );
     }
 
     #[test]

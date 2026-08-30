@@ -97,9 +97,15 @@ impl ProbabilityMap<'_> {
 
 /// Extracts text boxes from a probability map.
 ///
-/// `scale_x` and `scale_y` come from [`super::preprocess::DetectorInput`] and
-/// map resized coordinates home. Returns boxes in **source-frame** coordinates,
+/// `scale_x` and `scale_y` map a coordinate in **this map** to the source frame,
+/// and the caller gets them from [`super::preprocess::scale_to_source`] using the
+/// model's own output dimensions. Returns boxes in **source-frame** coordinates,
 /// clamped to `(source_width, source_height)`.
+///
+/// *(This said the factors "come from `DetectorInput`" until 2026-08-30. That was
+/// false of the only caller, which had always computed them from the output map
+/// -- and `DetectorInput`'s fields were dead. Found by the independent review of
+/// `PR #76`.)*
 ///
 /// Returns an empty vector for an inconsistent map rather than indexing past the
 /// buffer -- see [`ProbabilityMap::is_consistent`].

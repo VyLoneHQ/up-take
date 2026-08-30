@@ -54,10 +54,13 @@ pub struct PaddleConfig {
     pub dictionary: PathBuf,
     /// ONNX Runtime itself.
     ///
-    /// `None` leaves resolution to `ort`, which reads `ORT_DYLIB_PATH` and then
-    /// falls back to the platform's bare library name on the search path. Naming
-    /// it explicitly is what an installed UP-TAKE does, since ADR-0032 makes the
-    /// DLL a file **we** place.
+    /// `None` means "take whatever `ORT_DYLIB_PATH` names", which the host must
+    /// then have set. **`None` does NOT mean unchecked** -- if the variable is
+    /// also unset, [`PaddleEngine::load`] fails with `Unavailable` rather than
+    /// letting `ort` fall back to a bare library name and panic. Naming the path
+    /// explicitly is what an installed UP-TAKE does, since ADR-0032 makes the
+    /// DLL a file **we** place, and it also cross-checks the host's variable
+    /// against this engine's expectation.
     pub runtime_library: Option<PathBuf>,
 }
 
@@ -112,10 +115,16 @@ impl PaddleEngine {
     ///
     /// ⚠️ **`ort`'s `load-dynamic` feature PANICS when the library is missing.**
     /// It resolves the dylib lazily, inside a `OnceLock` initialiser, with
-    /// `.expect("Failed to load ONNX Runtime dylib")` -- read in
-    /// `ort-2.0.0-rc.13/src/lib.rs:224` rather than assumed. So the first call
+    /// `.expect("Failed to load ONNX Runtime dylib")` -- read at
+    /// `ort-2.0.0-rc.13/src/lib.rs:234` rather than assumed. So the first call
     /// that touches the ONNX API unwinds, and no `Result` anywhere in this
     /// crate ever sees it.
+    ///
+    /// *(That citation said `:224` until 2026-08-30 and was wrong by ten lines:
+    /// 224 opens the `match` that picks the path, 234 is the `.expect` that
+    /// panics. The claim was right and the reference was not, and the wrong
+    /// number had already reached four documents before an independent review
+    /// read the vendored source and caught it.)*
     ///
     /// **ADR-0032 decision 3 says a failure to find or load the runtime is "an
     /// ordinary run-time error, surfaced as `EngineError::Unavailable`", and
@@ -128,12 +137,31 @@ impl PaddleEngine {
     ///
     /// The check below closes the common case -- no runtime installed -- by
     /// looking for the file before any ONNX call happens, so it reports
-    /// `Unavailable` exactly as the decision says. **It does not close every
-    /// case:** a present-but-corrupt or wrong-architecture DLL still panics
-    /// inside `ort`, and only `ort` gaining a fallible initialiser fixes that.
+    /// `Unavailable` exactly as the decision says. **It runs on every path,
+    /// including `runtime_library: None`**, which is the one that would
+    /// otherwise reach `ort`'s fallback to a bare library name and panic there.
+    /// *(It was skipped on that path until 2026-08-30 -- found by an independent
+    /// review, which noted this comment claimed the common case was closed while
+    /// the config shape that reproduces it went unchecked.)*
+    ///
+    /// **It does not close every case:** a present-but-corrupt or
+    /// wrong-architecture DLL still panics inside `ort`, and only `ort` gaining
+    /// a fallible initialiser fixes that.
     pub fn load(config: &PaddleConfig, options: PaddleOptions) -> Result<Self, EngineError> {
-        if let Some(runtime) = &config.runtime_library {
-            check_runtime_available(runtime)?;
+        // Unconditional, and that is the point: every way of reaching `ort`
+        // without a resolvable runtime ends in a panic, so every way of reaching
+        // it has to pass through here first.
+        let runtime = resolve_runtime(
+            config.runtime_library.as_deref(),
+            std::env::var_os(DYLIB_PATH_VAR)
+                .map(PathBuf::from)
+                .as_deref(),
+        )?;
+        if !runtime.is_file() {
+            return Err(EngineError::Unavailable(format!(
+                "ONNX Runtime not found at {}",
+                runtime.display()
+            )));
         }
 
         let dictionary_text = std::fs::read_to_string(&config.dictionary).map_err(|error| {
@@ -199,9 +227,11 @@ impl PaddleEngine {
             height: map_height,
         };
         // The map may be a different size from the tensor we sent, so the ratio
-        // home is computed against the map, not against the resize.
-        let scale_x = frame.width() as f32 / map_width.max(1) as f32;
-        let scale_y = frame.height() as f32 / map_height.max(1) as f32;
+        // home is computed against the MAP, not against the resize. One rule,
+        // defined and tested in `preprocess`; this used to be a second copy of
+        // it, and the copy `DetectorInput` carried was the dead one.
+        let (scale_x, scale_y) =
+            preprocess::scale_to_source(frame.width(), frame.height(), map_width, map_height);
 
         Ok(detect::boxes_from_map(
             &map,
@@ -279,27 +309,49 @@ const DYLIB_PATH_VAR: &str = "ORT_DYLIB_PATH";
 /// exists to race with. This function's job is to make that requirement
 /// impossible to miss: it fails with an actionable message rather than letting
 /// `ort` unwind three frames deeper with `Failed to load ONNX Runtime dylib`.
-fn check_runtime_available(runtime: &Path) -> Result<(), EngineError> {
-    if !runtime.is_file() {
-        return Err(EngineError::Unavailable(format!(
-            "ONNX Runtime not found at {}",
-            runtime.display()
-        )));
-    }
-    match std::env::var_os(DYLIB_PATH_VAR) {
-        Some(configured) if Path::new(&configured) == runtime => Ok(()),
-        Some(configured) => Err(EngineError::Unavailable(format!(
+///
+/// # Why it takes the environment as an argument instead of reading it
+///
+/// So it can be **tested**. Reading `var_os` inside would make every arm below
+/// reachable only by mutating the process environment, which needs `unsafe` (see
+/// above) and is order-dependent across parallel tests. Passing the value in
+/// makes the decision a pure function of two `Option`s, and the tests cover all
+/// four combinations.
+///
+/// *(Added 2026-08-30. An independent review inverted this function's central
+/// comparison -- `==` to `!=` -- and all 70 tests still passed, because the only
+/// test touching it failed at the file-exists guard and never reached the match.
+/// The logic was correct and completely unguarded.)*
+fn resolve_runtime(
+    configured: Option<&Path>,
+    from_environment: Option<&Path>,
+) -> Result<PathBuf, EngineError> {
+    match (configured, from_environment) {
+        (Some(wanted), Some(actual)) if wanted == actual => Ok(wanted.to_path_buf()),
+        (Some(wanted), Some(actual)) => Err(EngineError::Unavailable(format!(
             "{DYLIB_PATH_VAR} points at {} but this engine was configured for {}; \
              they must agree, because ONNX Runtime is loaded once per process",
-            Path::new(&configured).display(),
-            runtime.display()
+            actual.display(),
+            wanted.display()
         ))),
-        None => Err(EngineError::Unavailable(format!(
+        (Some(wanted), None) => Err(EngineError::Unavailable(format!(
             "{DYLIB_PATH_VAR} is not set; the host must set it to {} before starting \
              the OCR service, because this crate forbids the unsafe code that \
              setting it here would need",
-            runtime.display()
+            wanted.display()
         ))),
+        // No configured path, but the host set the variable: a complete
+        // instruction, and `ort` will use exactly this file.
+        (None, Some(actual)) => Ok(actual.to_path_buf()),
+        // Neither. `ort` would fall back to a bare "onnxruntime.dll" on the
+        // library search path and panic if it is not there -- the exact outcome
+        // this function exists to convert into a returned error.
+        (None, None) => Err(EngineError::Unavailable(
+            "no ONNX Runtime location is known: ORT_DYLIB_PATH is unset and no \
+             runtime_library was configured. The host must set ORT_DYLIB_PATH at \
+             startup"
+                .to_owned(),
+        )),
     }
 }
 
@@ -386,6 +438,73 @@ fn rect_from_bounds(min_x: f32, min_y: f32, max_x: f32, max_y: f32) -> Rect {
 mod tests {
     use super::*;
 
+    fn path(text: &str) -> PathBuf {
+        PathBuf::from(text)
+    }
+
+    #[test]
+    fn resolve_runtime_accepts_a_configured_path_the_environment_agrees_with() {
+        let wanted = path("C:/runtime/onnxruntime.dll");
+        assert_eq!(
+            resolve_runtime(Some(&wanted), Some(&wanted)).unwrap(),
+            wanted
+        );
+    }
+
+    #[test]
+    fn resolve_runtime_refuses_when_the_environment_names_a_different_file() {
+        // ONNX Runtime loads once per process, so a disagreement means the
+        // engine would run against a library it did not choose. This is the
+        // comparison an independent review inverted on 2026-08-30 with every
+        // test still passing, because nothing reached it.
+        let error = resolve_runtime(
+            Some(&path("C:/ours/onnxruntime.dll")),
+            Some(&path("C:/somewhere-else/onnxruntime.dll")),
+        )
+        .unwrap_err();
+        assert!(error.is_fatal());
+        let message = error.to_string();
+        assert!(message.contains("somewhere-else"), "message: {message}");
+        assert!(message.contains("ours"), "message: {message}");
+    }
+
+    #[test]
+    fn resolve_runtime_refuses_a_configured_path_with_the_variable_unset() {
+        let error = resolve_runtime(Some(&path("C:/ours/onnxruntime.dll")), None).unwrap_err();
+        assert!(error.is_fatal());
+        assert!(
+            error.to_string().contains("ORT_DYLIB_PATH is not set"),
+            "message: {error}"
+        );
+    }
+
+    #[test]
+    fn resolve_runtime_takes_the_environments_path_when_none_is_configured() {
+        let from_environment = path("C:/host/onnxruntime.dll");
+        assert_eq!(
+            resolve_runtime(None, Some(&from_environment)).unwrap(),
+            from_environment
+        );
+    }
+
+    #[test]
+    fn resolve_runtime_refuses_when_neither_names_a_runtime() {
+        // THE REGRESSION THIS TEST EXISTS FOR. Until 2026-08-30 `load` skipped
+        // the check entirely when `runtime_library` was None, so this exact
+        // configuration reached `ort`, hit its fallback to a bare library name,
+        // and PANICKED -- the outcome the check exists to prevent, on the config
+        // shape that reproduces it most directly. Found by an independent
+        // review, which noted the doc comment claimed the case was closed.
+        let error = resolve_runtime(None, None).unwrap_err();
+        assert!(error.is_fatal());
+        let message = error.to_string();
+        assert!(
+            message.contains("no ONNX Runtime location"),
+            "message: {message}"
+        );
+        assert!(message.contains("ORT_DYLIB_PATH"), "message: {message}");
+    }
+
     #[test]
     fn a_missing_runtime_is_reported_as_unavailable_rather_than_panicking() {
         // ADR-0032 decision 3, made executable. Without the pre-check in
@@ -399,18 +518,31 @@ mod tests {
         };
         let error = PaddleEngine::load(&config, PaddleOptions::default()).unwrap_err();
         assert!(error.is_fatal(), "a missing runtime must be fatal");
+
+        // WHICH guard fires depends on ORT_DYLIB_PATH, which this crate cannot
+        // set (unsafe) and this test must not depend on: unset in a normal test
+        // run, so `resolve_runtime` refuses before the file check; set on a
+        // machine with a real runtime, so the file check refuses instead. The
+        // property pinned here holds either way -- `load` RETURNS an
+        // `Unavailable` for a runtime it cannot use, and does not unwind.
+        let message = error.to_string();
         assert!(
-            error.to_string().contains("ONNX Runtime not found"),
-            "unexpected message: {error}"
+            message.contains("ONNX Runtime not found")
+                || message.contains("ORT_DYLIB_PATH is not set")
+                || message.contains("must agree"),
+            "load failed for an unrelated reason: {message}"
         );
     }
 
     #[test]
     fn a_missing_dictionary_is_reported_before_any_model_is_opened() {
-        // No runtime named, so the runtime pre-check does not fire; the
-        // dictionary is read with std::fs and cannot panic. This proves the
-        // ordering: dictionary before sessions, so the cheap failure reports
-        // first and `ort` is never touched.
+        // ⚠️ REWRITTEN 2026-08-30. This used to assert that the dictionary
+        // error came back, on the reasoning that `runtime_library: None` meant
+        // the runtime pre-check did not fire. That was TRUE and was the bug --
+        // `None` is now checked like every other path, so `resolve_runtime`
+        // refuses first when the environment is also unset. What the test pins
+        // now is the property that survives either ordering: `load` returns a
+        // fatal error and never reaches `ort`.
         let config = PaddleConfig {
             detection_model: PathBuf::from("no-such-det.onnx"),
             recognition_model: PathBuf::from("no-such-rec.onnx"),
@@ -419,9 +551,10 @@ mod tests {
         };
         let error = PaddleEngine::load(&config, PaddleOptions::default()).unwrap_err();
         assert!(error.is_fatal());
+        let message = error.to_string();
         assert!(
-            error.to_string().contains("character dictionary"),
-            "unexpected message: {error}"
+            message.contains("character dictionary") || message.contains("ONNX Runtime location"),
+            "load reached neither guard cleanly: {message}"
         );
     }
 

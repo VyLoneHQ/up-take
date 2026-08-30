@@ -150,6 +150,32 @@ impl Quad {
         (horizontal.max(vertical), horizontal.min(vertical))
     }
 
+    /// Whether all four corners are right angles, within a tolerance.
+    ///
+    /// The precondition [`Quad::unclip`] depends on. Tolerance rather than
+    /// equality because the corners arrive from floating-point projections onto
+    /// an orthonormal basis, where a true rectangle lands a few ULPs off square;
+    /// `1e-3` on a normalised dot product is far tighter than any real
+    /// non-rectangle and far looser than that accumulated error.
+    ///
+    /// A degenerate quad with a zero-length edge reports `true`: it has no angle
+    /// to be wrong about, and `unclip` returns it unchanged anyway.
+    #[must_use]
+    pub fn is_rectangular(&self) -> bool {
+        (0..4).all(|index| {
+            let previous = self.corners[(index + 3) % 4];
+            let corner = self.corners[index];
+            let next = self.corners[(index + 1) % 4];
+            let (ax, ay) = (previous.x - corner.x, previous.y - corner.y);
+            let (bx, by) = (next.x - corner.x, next.y - corner.y);
+            let (length_a, length_b) = (ax.hypot(ay), bx.hypot(by));
+            if length_a <= f32::EPSILON || length_b <= f32::EPSILON {
+                return true;
+            }
+            (ax.mul_add(bx, ay * by) / (length_a * length_b)).abs() < 1e-3
+        })
+    }
+
     /// Expands the quad outwards by PP-OCR's unclip rule.
     ///
     /// # The rule
@@ -177,8 +203,33 @@ impl Quad {
     /// producing `NaN` corners: a zero-size region is dropped downstream by the
     /// size filter, and poisoning it with `NaN` first would make that
     /// comparison silently false instead.
+    ///
+    /// # Precondition: the quad must be a rectangle
+    ///
+    /// ⚠️ **The exactness above holds for rectangles and ONLY for rectangles.**
+    /// On a non-rectangular quad the corner offsets come out **non-uniform** --
+    /// measured on a kite, 11.28 to 21.72 against an intended uniform 17.48 --
+    /// and nothing about the result looks wrong. That is the failure this
+    /// module's header warns about for the polygon case it declined to
+    /// implement, reappearing on the path it did.
+    ///
+    /// Every caller inside this crate satisfies it, and structurally rather than
+    /// by convention: the only call site passes the output of [`min_area_rect`],
+    /// which builds its corners from extremes in an orthonormal basis and so
+    /// cannot return anything but a rectangle. But [`Quad::new`] is `pub`, this
+    /// method is `pub`, and the module is reachable from outside the crate, so
+    /// an external caller can violate it. The `debug_assert!` below turns that
+    /// into a test-build failure rather than a plausible wrong answer.
+    ///
+    /// *(Added 2026-08-30 after an independent review verified the exactness
+    /// claim, verified that the current call graph upholds it, and pointed out
+    /// that nothing in the type or the code says so.)*
     #[must_use]
     pub fn unclip(&self, ratio: f32) -> Self {
+        debug_assert!(
+            self.is_rectangular(),
+            "Quad::unclip is exact only for rectangles; this quad has non-right              corners and the offsets it produces will be silently non-uniform"
+        );
         let perimeter = self.perimeter();
         if perimeter <= f32::EPSILON {
             return *self;
@@ -552,6 +603,75 @@ mod tests {
              bounding box {bounding_box_area}, min-area {}",
             quad.area()
         );
+    }
+
+    #[test]
+    fn is_rectangular_accepts_a_rectangle_at_any_rotation() {
+        // A true rectangle projected onto a rotated basis is what min_area_rect
+        // returns; the tolerance exists for exactly this floating-point case.
+        for degrees in [0.0_f32, 7.0, 30.0, 45.0, 89.0] {
+            let (sin, cos) = degrees.to_radians().sin_cos();
+            let corners: Vec<PointF> = [(0.0, 0.0), (30.0, 0.0), (30.0, 9.0), (0.0, 9.0)]
+                .into_iter()
+                .map(|(x, y): (f32, f32)| {
+                    PointF::new(x.mul_add(cos, -(y * sin)), x.mul_add(sin, y * cos))
+                })
+                .collect();
+            let quad = Quad::new([corners[0], corners[1], corners[2], corners[3]]);
+            assert!(
+                quad.is_rectangular(),
+                "rejected a rectangle at {degrees} degrees"
+            );
+        }
+    }
+
+    #[test]
+    fn is_rectangular_rejects_the_kite_that_breaks_unclip() {
+        // The shape whose offsets come out non-uniform. This is the precondition
+        // `unclip`'s debug_assert fires on, and the reason it exists.
+        let kite = Quad::new([
+            PointF::new(20.0, 0.0),
+            PointF::new(40.0, 20.0),
+            PointF::new(20.0, 30.0),
+            PointF::new(0.0, 20.0),
+        ]);
+        assert!(!kite.is_rectangular(), "accepted a kite as a rectangle");
+    }
+
+    #[test]
+    fn min_area_rect_always_returns_something_unclip_may_be_called_on() {
+        // The structural reason the precondition holds in production: the only
+        // caller of unclip passes min_area_rect's output, and min_area_rect
+        // builds corners from extremes in an orthonormal basis. Checked over a
+        // deliberately awkward spread rather than asserted.
+        let clouds: Vec<Vec<PointF>> = vec![
+            vec![
+                PointF::new(0.0, 0.0),
+                PointF::new(10.0, 3.0),
+                PointF::new(4.0, 9.0),
+                PointF::new(7.0, 1.0),
+            ],
+            vec![
+                PointF::new(-5.0, 2.0),
+                PointF::new(12.0, -3.0),
+                PointF::new(6.0, 14.0),
+                PointF::new(0.0, 8.0),
+                PointF::new(3.0, 3.0),
+            ],
+            (0..12)
+                .map(|i| {
+                    let angle = i as f32 * 0.5;
+                    PointF::new(angle.cos() * 20.0, angle.sin() * 6.0)
+                })
+                .collect(),
+        ];
+        for (index, cloud) in clouds.iter().enumerate() {
+            let quad = min_area_rect(cloud).unwrap();
+            assert!(
+                quad.is_rectangular(),
+                "min_area_rect returned a non-rectangle for cloud {index}: {quad:?}"
+            );
+        }
     }
 
     #[test]

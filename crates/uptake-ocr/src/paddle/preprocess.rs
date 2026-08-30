@@ -39,14 +39,19 @@ pub const SIDE_MULTIPLE: u32 = 32;
 /// accuracy for time knowingly.
 pub const DEFAULT_LIMIT_SIDE_LEN: u32 = 960;
 
-/// A frame resized and normalised for the detector, plus how to get back.
+/// A frame resized and normalised for the detector.
 ///
-/// The scale factors are the reason this is a struct and not a bare `Vec`.
-/// Every box the detector produces is in **resized** coordinates, and mapping it
-/// home needs the exact ratio that was used -- which is not the requested ratio,
-/// because both sides were rounded to a multiple of 32 independently. Deriving
-/// it again at the call site would be a second copy of a rounding rule, and the
-/// two would disagree the first time one changed.
+/// ⚠️ **This deliberately carries NO scale factors, and it used to.** It held a
+/// `scale_x`/`scale_y` pair computed as `source / resized`, documented at length
+/// as the way boxes were mapped home. **Nothing in production ever read them**:
+/// the engine computed its own factors from the *model's output* dimensions,
+/// which is the correct source, because the probability map is not required to
+/// be the same size as the tensor that produced it. Two rules for one quantity,
+/// one of them tested and dead, the other used and untested -- found by the
+/// independent review of `PR #76` and removed rather than documented.
+///
+/// The one rule now lives in [`scale_to_source`], which the engine calls and
+/// these tests cover.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DetectorInput {
     /// Normalised pixel data, NCHW with N = 1 and C = 3.
@@ -55,10 +60,44 @@ pub struct DetectorInput {
     pub width: u32,
     /// Height the frame was resized to. A multiple of [`SIDE_MULTIPLE`].
     pub height: u32,
-    /// Multiply a resized x-coordinate by this to get a source x-coordinate.
-    pub scale_x: f32,
-    /// Multiply a resized y-coordinate by this to get a source y-coordinate.
-    pub scale_y: f32,
+}
+
+/// The factors that map a coordinate in the detector's output map back to the
+/// source frame.
+///
+/// **Two factors, not one, and that is the whole reason this function exists.**
+/// The resize snaps each side to a multiple of [`SIDE_MULTIPLE`] independently,
+/// so aspect ratio is not preserved and the x and y ratios genuinely differ: a
+/// 100x40 frame becomes 96x32, giving 100/96 and 40/32. Assuming one ratio puts
+/// every box progressively further from its text down the frame, and
+/// `geometry.rs` calls coordinate maths this project's number one bug source.
+///
+/// Takes the **map's** dimensions rather than the resized tensor's, because the
+/// caller reads them off the model's actual output shape. For PP-OCRv4's
+/// detector the two agree, but nothing enforces that and a model with a
+/// different stride would silently place every box wrong.
+///
+/// A zero map dimension yields a factor of `0.0` rather than an infinity, so a
+/// degenerate output collapses boxes to a point the size filter drops instead of
+/// poisoning them with `NaN`.
+#[must_use]
+pub fn scale_to_source(
+    source_width: u32,
+    source_height: u32,
+    map_width: usize,
+    map_height: usize,
+) -> (f32, f32) {
+    let factor = |source: u32, map: usize| -> f32 {
+        if map == 0 {
+            0.0
+        } else {
+            source as f32 / map as f32
+        }
+    };
+    (
+        factor(source_width, map_width),
+        factor(source_height, map_height),
+    )
 }
 
 impl DetectorInput {
@@ -173,8 +212,8 @@ pub fn detector_input(bitmap: &RgbaBitmap, limit_side_len: u32) -> Option<Detect
     }
     let (width, height) = resized_dimensions(source_width, source_height, limit_side_len);
 
-    let scale_x = f64::from(source_width) as f32 / width as f32;
-    let scale_y = f64::from(source_height) as f32 / height as f32;
+    let (scale_x, scale_y) =
+        scale_to_source(source_width, source_height, width as usize, height as usize);
 
     let plane = width as usize * height as usize;
     let mut tensor = vec![0.0_f32; plane * 3];
@@ -198,8 +237,6 @@ pub fn detector_input(bitmap: &RgbaBitmap, limit_side_len: u32) -> Option<Detect
         tensor,
         width,
         height,
-        scale_x,
-        scale_y,
     })
 }
 
@@ -249,19 +286,51 @@ mod tests {
 
     #[test]
     fn the_two_scale_factors_differ_when_the_rounding_is_uneven() {
-        // This is the property that makes DetectorInput carry two factors. A
-        // 100x40 frame resizes to 96x32, so x and y ratios are NOT equal, and a
-        // caller assuming one ratio would place every box wrong.
+        // The property that makes scale_to_source return a PAIR. A 100x40 frame
+        // resizes to 96x32, so the x and y ratios are NOT equal, and a caller
+        // assuming one ratio would place every box progressively wrong down the
+        // frame.
         let input = detector_input(&solid(100, 40, [0, 0, 0, 255]), 960).unwrap();
         assert_eq!((input.width, input.height), (96, 32));
+
+        let (scale_x, scale_y) = scale_to_source(100, 40, 96, 32);
         assert!(
-            (input.scale_x - input.scale_y).abs() > 0.1,
-            "expected genuinely different factors, got {} and {}",
-            input.scale_x,
-            input.scale_y
+            (scale_x - scale_y).abs() > 0.1,
+            "expected genuinely different factors, got {scale_x} and {scale_y}"
         );
-        assert!((input.scale_x - 100.0 / 96.0).abs() < 1e-5);
-        assert!((input.scale_y - 40.0 / 32.0).abs() < 1e-5);
+        assert!((scale_x - 100.0 / 96.0).abs() < 1e-5);
+        assert!((scale_y - 40.0 / 32.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn scale_to_source_maps_a_map_coordinate_home() {
+        // A 40x40 map of an 80x60 frame: x doubles, y is 1.5x.
+        let (scale_x, scale_y) = scale_to_source(80, 60, 40, 40);
+        assert!((scale_x - 2.0).abs() < 1e-6, "scale_x was {scale_x}");
+        assert!((scale_y - 1.5).abs() < 1e-6, "scale_y was {scale_y}");
+    }
+
+    #[test]
+    fn scale_to_source_survives_a_degenerate_map_without_infinities() {
+        // A model that returned a zero dimension must not poison every box with
+        // an infinity or a NaN -- the size filter's comparisons would then be
+        // silently false rather than rejecting.
+        let (scale_x, scale_y) = scale_to_source(80, 60, 0, 0);
+        assert!(scale_x.is_finite() && scale_y.is_finite());
+        assert!((scale_x - 0.0).abs() < f32::EPSILON);
+        assert!((scale_y - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn scale_to_source_reads_the_map_and_not_the_resize() {
+        // The regression this pair of functions exists to prevent: if the model
+        // emits a map at HALF the input resolution, the factors must double.
+        // Computing from the resized tensor instead would return 1.0 and place
+        // every box at half its true distance from the origin.
+        let (from_half_map, _) = scale_to_source(960, 960, 480, 480);
+        let (from_full_map, _) = scale_to_source(960, 960, 960, 960);
+        assert!((from_half_map - 2.0).abs() < 1e-6, "was {from_half_map}");
+        assert!((from_full_map - 1.0).abs() < 1e-6, "was {from_full_map}");
     }
 
     #[test]
