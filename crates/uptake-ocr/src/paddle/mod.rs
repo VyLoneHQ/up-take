@@ -151,18 +151,13 @@ impl PaddleEngine {
         // Unconditional, and that is the point: every way of reaching `ort`
         // without a resolvable runtime ends in a panic, so every way of reaching
         // it has to pass through here first.
-        let runtime = resolve_runtime(
+        resolve_runtime(
             config.runtime_library.as_deref(),
             std::env::var_os(DYLIB_PATH_VAR)
                 .map(PathBuf::from)
                 .as_deref(),
+            &|path: &Path| path.is_file(),
         )?;
-        if !runtime.is_file() {
-            return Err(EngineError::Unavailable(format!(
-                "ONNX Runtime not found at {}",
-                runtime.display()
-            )));
-        }
 
         let dictionary_text = std::fs::read_to_string(&config.dictionary).map_err(|error| {
             EngineError::Unavailable(format!(
@@ -310,19 +305,63 @@ const DYLIB_PATH_VAR: &str = "ORT_DYLIB_PATH";
 /// impossible to miss: it fails with an actionable message rather than letting
 /// `ort` unwind three frames deeper with `Failed to load ONNX Runtime dylib`.
 ///
-/// # Why it takes the environment as an argument instead of reading it
+/// # Why it takes the environment AND the filesystem as arguments
 ///
-/// So it can be **tested**. Reading `var_os` inside would make every arm below
-/// reachable only by mutating the process environment, which needs `unsafe` (see
-/// above) and is order-dependent across parallel tests. Passing the value in
-/// makes the decision a pure function of two `Option`s, and the tests cover all
-/// four combinations.
+/// So every branch can be **tested**. Reading `var_os` inside would make each
+/// arm reachable only by mutating the process environment, which needs `unsafe`
+/// (see above) and is order-dependent across parallel tests; calling `is_file`
+/// inside would make the existence check reachable only on a machine that
+/// already had a runtime installed at a path the test chose. Both are passed in,
+/// so the whole decision is a pure function of its arguments.
 ///
-/// *(Added 2026-08-30. An independent review inverted this function's central
-/// comparison -- `==` to `!=` -- and all 70 tests still passed, because the only
-/// test touching it failed at the file-exists guard and never reached the match.
-/// The logic was correct and completely unguarded.)*
+/// *(The environment parameter was added 2026-08-30 after an independent review
+/// inverted this function's central comparison -- `==` to `!=` -- and all 70
+/// tests still passed, because the only test touching it failed at the
+/// file-exists guard and never reached the match. The `exists` parameter was
+/// added the same day, by round 2 of the same review: the round-1 fix had moved
+/// the existence check into `load`, where NO test in the suite could drive it,
+/// and the two tests that previously covered it had to be loosened to accept
+/// several messages because the author could no longer force which branch fired.
+/// That was a coverage regression introduced by a fix, which is this project's
+/// most reliable defect shape -- `PR #73` ran seven consecutive rounds of it.)*
+///
+/// # A runtime merely on the library search path is deliberately NOT accepted
+///
+/// `ort` falls back to a bare `onnxruntime.dll` resolved by the OS loader when
+/// `ORT_DYLIB_PATH` is unset, and that fallback can succeed on a machine with a
+/// system-wide install. **This function refuses that case, and the refusal is
+/// the point rather than a side effect.** `ADR-0032` decision 1 chose
+/// `load-dynamic` so the runtime is *"a file we place, check and ship
+/// deliberately"*; a DLL picked up from `PATH` is by definition not that, it is
+/// whatever the machine happened to offer, and loading it is a search-order
+/// hijacking surface on precisely the component `architecture.md` section 4
+/// calls a larger attack surface than the model.
+///
+/// ⚠️ **It is still a behaviour change, and the round-1 commit did not say so.**
+/// A host that worked by having the runtime on the search path, with no
+/// configuration at all, now fails to load with an actionable message instead.
+/// That is intended under `ADR-0032`; it was not disclosed, and an independent
+/// review had to point out that a previously-documented configuration had been
+/// removed silently.
 fn resolve_runtime(
+    configured: Option<&Path>,
+    from_environment: Option<&Path>,
+    exists: &dyn Fn(&Path) -> bool,
+) -> Result<PathBuf, EngineError> {
+    let resolved = resolve_runtime_path(configured, from_environment)?;
+    if exists(&resolved) {
+        Ok(resolved)
+    } else {
+        Err(EngineError::Unavailable(format!(
+            "ONNX Runtime not found at {}",
+            resolved.display()
+        )))
+    }
+}
+
+/// Which path the runtime should be loaded from, before asking whether it is
+/// there. Split out so the two questions fail with distinct messages.
+fn resolve_runtime_path(
     configured: Option<&Path>,
     from_environment: Option<&Path>,
 ) -> Result<PathBuf, EngineError> {
@@ -442,11 +481,22 @@ mod tests {
         PathBuf::from(text)
     }
 
+    /// A filesystem where every path exists. Injected, so the existence check is
+    /// reachable from a test on a machine with no ONNX Runtime installed.
+    fn everything_exists(_: &Path) -> bool {
+        true
+    }
+
+    /// A filesystem where nothing exists.
+    fn nothing_exists(_: &Path) -> bool {
+        false
+    }
+
     #[test]
     fn resolve_runtime_accepts_a_configured_path_the_environment_agrees_with() {
         let wanted = path("C:/runtime/onnxruntime.dll");
         assert_eq!(
-            resolve_runtime(Some(&wanted), Some(&wanted)).unwrap(),
+            resolve_runtime(Some(&wanted), Some(&wanted), &everything_exists).unwrap(),
             wanted
         );
     }
@@ -460,6 +510,7 @@ mod tests {
         let error = resolve_runtime(
             Some(&path("C:/ours/onnxruntime.dll")),
             Some(&path("C:/somewhere-else/onnxruntime.dll")),
+            &everything_exists,
         )
         .unwrap_err();
         assert!(error.is_fatal());
@@ -470,7 +521,12 @@ mod tests {
 
     #[test]
     fn resolve_runtime_refuses_a_configured_path_with_the_variable_unset() {
-        let error = resolve_runtime(Some(&path("C:/ours/onnxruntime.dll")), None).unwrap_err();
+        let error = resolve_runtime(
+            Some(&path("C:/ours/onnxruntime.dll")),
+            None,
+            &everything_exists,
+        )
+        .unwrap_err();
         assert!(error.is_fatal());
         assert!(
             error.to_string().contains("ORT_DYLIB_PATH is not set"),
@@ -482,7 +538,7 @@ mod tests {
     fn resolve_runtime_takes_the_environments_path_when_none_is_configured() {
         let from_environment = path("C:/host/onnxruntime.dll");
         assert_eq!(
-            resolve_runtime(None, Some(&from_environment)).unwrap(),
+            resolve_runtime(None, Some(&from_environment), &everything_exists).unwrap(),
             from_environment
         );
     }
@@ -493,9 +549,8 @@ mod tests {
         // the check entirely when `runtime_library` was None, so this exact
         // configuration reached `ort`, hit its fallback to a bare library name,
         // and PANICKED -- the outcome the check exists to prevent, on the config
-        // shape that reproduces it most directly. Found by an independent
-        // review, which noted the doc comment claimed the case was closed.
-        let error = resolve_runtime(None, None).unwrap_err();
+        // shape that reproduces it most directly.
+        let error = resolve_runtime(None, None, &everything_exists).unwrap_err();
         assert!(error.is_fatal());
         let message = error.to_string();
         assert!(
@@ -503,6 +558,62 @@ mod tests {
             "message: {message}"
         );
         assert!(message.contains("ORT_DYLIB_PATH"), "message: {message}");
+    }
+
+    #[test]
+    fn a_resolved_path_that_is_not_on_disk_is_reported_as_not_found() {
+        // THE CHECK ROUND 2 FOUND UNREACHABLE. The round-1 fix moved this into
+        // `load`, where no test in the suite could drive it: getting there needs
+        // the ambient ORT_DYLIB_PATH to agree with a test-chosen path, and this
+        // crate cannot set an environment variable because it forbids the unsafe
+        // code that would need. Two tests had to be loosened to accept several
+        // messages as a result -- a coverage regression introduced by a fix.
+        // Injecting the predicate is what makes it testable again.
+        let wanted = path("C:/ours/onnxruntime.dll");
+        let error = resolve_runtime(Some(&wanted), Some(&wanted), &nothing_exists).unwrap_err();
+        assert!(error.is_fatal());
+        assert!(
+            error.to_string().contains("ONNX Runtime not found"),
+            "message: {error}"
+        );
+    }
+
+    #[test]
+    fn the_path_is_decided_before_the_disk_is_consulted() {
+        // Ordering, pinned: a disagreement between config and environment is
+        // reported as a disagreement even when NEITHER file exists. Reversing
+        // the two would report "not found" and send the reader looking for a
+        // missing file rather than for a misconfiguration.
+        let error = resolve_runtime(
+            Some(&path("C:/ours/onnxruntime.dll")),
+            Some(&path("C:/theirs/onnxruntime.dll")),
+            &nothing_exists,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("must agree"),
+            "the disk was consulted before the paths were reconciled: {error}"
+        );
+    }
+
+    #[test]
+    fn a_runtime_merely_on_the_library_search_path_is_refused_deliberately() {
+        // ADR-0032 decision 1 chose load-dynamic so the runtime is "a file we
+        // place, check and ship deliberately". A DLL the OS loader happens to
+        // find on PATH is not that, and accepting it would be a search-order
+        // hijacking surface on the component architecture.md section 4 calls a
+        // larger attack surface than the model itself.
+        //
+        // This test exists because the refusal is a BEHAVIOUR CHANGE the round-1
+        // commit made silently: `ort` really does fall back to a bare library
+        // name, and a host relying on that used to work. `everything_exists`
+        // models exactly that machine -- a system-wide runtime present and
+        // loadable -- and the answer is still a refusal.
+        let error = resolve_runtime(None, None, &everything_exists).unwrap_err();
+        assert!(
+            error.is_fatal(),
+            "a search-path runtime must be refused even where one would load"
+        );
     }
 
     #[test]

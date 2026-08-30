@@ -218,12 +218,34 @@ impl Quad {
     /// which builds its corners from extremes in an orthonormal basis and so
     /// cannot return anything but a rectangle. But [`Quad::new`] is `pub`, this
     /// method is `pub`, and the module is reachable from outside the crate, so
-    /// an external caller can violate it. The `debug_assert!` below turns that
-    /// into a test-build failure rather than a plausible wrong answer.
+    /// an external caller can violate it.
+    ///
+    /// ⚠️ **The `debug_assert!` below does NOT protect the shipped binary, and
+    /// this paragraph claimed it did until round 2 of the review.** It said the
+    /// assert *"turns that into a test-build failure rather than a plausible
+    /// wrong answer"* -- for an **external** caller, which is precisely the
+    /// caller least likely to be running a debug build. `debug_assert!` is
+    /// compiled out under `--release`, and UP-TAKE ships a release build
+    /// (`LEGAL-AND-COMMERCE.md` section 5, the SignPath-signed installer). So an
+    /// external caller violating this precondition in a shipped build gets no
+    /// panic, no error, and exactly the plausible wrong answer the old sentence
+    /// promised was prevented.
+    ///
+    /// **What the assert is actually worth:** it catches a violation in this
+    /// crate's own tests and in any debug build, which is where a new internal
+    /// caller would be written and run first. That is real and it is narrow.
+    /// **What would close it properly** is a fallible constructor -- a
+    /// `Quad::rectangle()` returning `Option`, with `unclip` taking that type
+    /// instead -- so the precondition lives in the type rather than in a
+    /// runtime check that ships disabled. Not done here: it changes a public
+    /// API for a caller that does not exist yet, and the honest move is to say
+    /// so rather than to leave a guard overstated. Recorded as `I-335`.
     ///
     /// *(Added 2026-08-30 after an independent review verified the exactness
     /// claim, verified that the current call graph upholds it, and pointed out
-    /// that nothing in the type or the code says so.)*
+    /// that nothing in the type or the code says so. Corrected the same day by
+    /// round 2 of the same review, which read the release-build semantics the
+    /// first version had not.)*
     #[must_use]
     pub fn unclip(&self, ratio: f32) -> Self {
         debug_assert!(
