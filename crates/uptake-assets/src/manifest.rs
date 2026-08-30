@@ -156,10 +156,21 @@ impl Asset {
     /// # A plain file name
     ///
     /// The name is joined to an install directory, so `..`, a separator, or an
-    /// absolute path would write outside it. That is the classic archive-
-    /// extraction escape, and it is worth refusing here even though every name
-    /// in the built-in manifest is a literal this repository controls: the
-    /// manifest is data, and data acquires new sources.
+    /// absolute path would write outside it -- the classic archive-extraction
+    /// escape. On Windows the check also refuses reserved device stems and
+    /// trailing dots and spaces; see [`is_plain_file_name`] for why each.
+    ///
+    /// **There is no built-in manifest today**, so every name this sees will
+    /// arrive from wherever `ADR-0034`'s conversion step eventually writes one.
+    /// That is the argument for checking, not against it.
+    ///
+    /// *(This paragraph claimed the opposite -- that the check was
+    /// belt-and-braces "even though every name in the built-in manifest is a
+    /// literal this repository controls" -- until 2026-08-30. Round 1 of this
+    /// PR's review falsified that, and the fix corrected the identical sentence
+    /// in [`is_plain_file_name`]'s doc **nine lines below while leaving this
+    /// one standing**. Round 2 found the survivor. Third partial sweep in one
+    /// session; see UP-TAKE `I-334`.)*
     ///
     /// # Errors
     ///
