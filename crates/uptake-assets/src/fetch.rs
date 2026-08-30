@@ -78,16 +78,47 @@ pub enum FetchError {
 ///
 /// A transport hands chunks to a sink rather than returning a stream, so the
 /// verification in [`crate::install`] sits **between** the transport and the
-/// disk by construction. If this returned a reader, a caller could read it
-/// straight into a file and skip the verifier, and the crate's one invariant
-/// would depend on everyone remembering not to. It cannot be skipped if there is
-/// nowhere else for the bytes to go.
+/// disk. If this returned a reader, a caller could read it straight into a file
+/// and skip the verifier, and the crate's invariant would depend on everyone
+/// remembering not to.
+///
+/// # What this shape does and does NOT enforce
+///
+/// ⚠️ **This section said the arrangement made verification unskippable
+/// “by construction”. That overclaimed, and the independent review of
+/// `PR #77` drew the line precisely.** Three things were being run together:
+///
+/// | Property | Enforced by the type? |
+/// | --- | --- |
+/// | Bytes reach the disk only through the sink, so they are hashed | **yes** -- there is no other channel |
+/// | The transport stops when the sink refuses | **no** -- documented only |
+/// | Memory stays bounded by the chunk size | **no** -- documented only |
+///
+/// Only the first is structural. An implementation is free to buffer the entire
+/// response and call the sink once at the end: verification still happens and
+/// the invariant still holds, but the early abort below buys nothing and peak
+/// memory is the whole response. An implementation that ignores the sink's
+/// `Err` and keeps feeding chunks is likewise not prevented -- though
+/// [`crate::verify::Verifier`] refuses at `finish` regardless, so the worst
+/// outcome is wasted work rather than an unverified install.
+///
+/// **That residual is a property of every `Fetcher`, and the only reviewer of
+/// it is whoever writes one.** It is stated here rather than left implicit
+/// because a rule an implementor must remember is exactly the class this
+/// project keeps finding unenforced.
 pub trait Fetcher {
     /// Fetches `asset`, handing every chunk to `sink` in arrival order.
     ///
     /// An implementation **must** stop and return the sink's error if `sink`
     /// returns one -- that is how an over-long response is cut off at the byte
-    /// that crosses the line rather than buffered to exhaustion.
+    /// that crosses the line rather than buffered to exhaustion. **Nothing
+    /// checks this**; see the table above. Feeding chunks after a refusal
+    /// cannot produce an unverified install, but it can produce an unbounded
+    /// one.
+    ///
+    /// An implementation **should** call `sink` incrementally as bytes arrive
+    /// rather than once with the whole body. Also unchecked, and also the
+    /// difference between bounded and unbounded memory.
     ///
     /// # Errors
     ///

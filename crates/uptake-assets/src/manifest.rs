@@ -189,19 +189,52 @@ impl Asset {
     }
 }
 
-/// Whether a name is a single path component with no traversal.
+/// Windows device names that are not file names, whatever the extension.
 ///
-/// Rejects an empty name, `.`, `..`, anything containing `/` or `\`, and
-/// anything Windows would read as a drive or UNC prefix. Both separators are
-/// rejected on every platform deliberately: a manifest written on Windows must
-/// not become an escape when the same file is read on Linux.
+/// Opening `CON`, `NUL` or `COM1` on Windows reaches a **device**, not a file in
+/// the directory, and the rule applies whatever the extension -- so `NUL.onnx`
+/// is the null device too. An asset written to one is silently discarded, and
+/// then re-downloaded on every launch, because reading it back never matches
+/// the digest.
+const RESERVED_DEVICE_NAMES: [&str; 22] = [
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+/// Whether a name is a single path component, with no traversal and no Windows
+/// device name hiding inside it.
+///
+/// Rejects an empty name, `.`, `..`, anything containing a path separator or a
+/// colon, a trailing dot or space, and any reserved device stem. Both
+/// separators are rejected on every platform deliberately: a manifest written
+/// on Windows must not become an escape when the same file is read on Linux,
+/// and the device names are rejected everywhere for the same reason in reverse.
+///
+/// *(The device names, the trailing dot and the trailing space were added
+/// 2026-08-30 by the independent review of `PR #77`. The original version
+/// checked traversal only, and argued the check was belt-and-braces because
+/// "every name in the built-in manifest is a literal this repository controls"
+/// -- **which was false, because there is no built-in manifest at all yet.**
+/// The reviewer said so, and the argument would have stayed false for as long
+/// as the manifest's first real source was somewhere other than a Rust
+/// literal.)*
 fn is_plain_file_name(name: &str) -> bool {
-    !name.is_empty()
-        && name != "."
-        && name != ".."
-        && !name.contains('/')
-        && !name.contains('\\')
-        && !name.contains(':')
+    if name.is_empty() || name == "." || name == ".." {
+        return false;
+    }
+    if name.contains('/') || name.contains('\\') || name.contains(':') {
+        return false;
+    }
+    // The Win32 path parser strips a trailing dot or space, so "model.onnx."
+    // and "model.onnx " both open "model.onnx" -- two manifest entries that
+    // look distinct and are not.
+    if name.ends_with('.') || name.ends_with(' ') {
+        return false;
+    }
+    let stem = name.split('.').next().unwrap_or(name);
+    !RESERVED_DEVICE_NAMES
+        .iter()
+        .any(|reserved| stem.eq_ignore_ascii_case(reserved))
 }
 
 /// Everything that must be present before OCR can run.
@@ -223,9 +256,15 @@ impl AssetManifest {
             asset.validate()?;
         }
         for (index, asset) in assets.iter().enumerate() {
+            // Case-INSENSITIVE, because Windows' filesystem is. "Model.onnx"
+            // and "model.onnx" are two manifest entries that install to ONE
+            // file: the second silently overwrites the first, and the first then
+            // fails verification on every subsequent launch and is re-fetched
+            // forever. Comparing case-sensitively let that pair through until
+            // the independent review of `PR #77` pointed it out.
             if assets[..index]
                 .iter()
-                .any(|earlier| earlier.file_name == asset.file_name)
+                .any(|earlier| earlier.file_name.eq_ignore_ascii_case(&asset.file_name))
             {
                 return Err(ManifestError::DuplicateFileName {
                     file_name: asset.file_name.clone(),
@@ -236,9 +275,23 @@ impl AssetManifest {
     }
 
     /// Total bytes across every asset, for a whole-manifest progress figure.
+    ///
+    /// **Saturating, and that is a fix rather than a style choice.** A plain
+    /// `sum()` over `u64` **panics in a debug build and silently WRAPS in a
+    /// release build** once the total exceeds `u64::MAX` -- so a manifest
+    /// carrying two absurd `size_bytes` values would report a *small* total in
+    /// the binary that ships, and every progress fraction computed from it
+    /// would be wrong in the direction that looks finished. Found and
+    /// reproduced by the independent review of `PR #77`.
+    ///
+    /// Saturating is right for this particular figure because it drives a
+    /// progress bar: `u64::MAX` bytes is visibly absurd, a wrapped small number
+    /// is not, and [`crate::fetch::Progress::fraction`] already clamps.
     #[must_use]
     pub fn total_bytes(&self) -> u64 {
-        self.assets.iter().map(|asset| asset.size_bytes).sum()
+        self.assets
+            .iter()
+            .fold(0_u64, |total, asset| total.saturating_add(asset.size_bytes))
     }
 
     /// The assets of one kind.
@@ -428,6 +481,107 @@ mod tests {
         assert_eq!(manifest.of_kind(AssetKind::Runtime).count(), 1);
         assert_eq!(manifest.of_kind(AssetKind::Model).count(), 1);
         assert_eq!(manifest.of_kind(AssetKind::Dictionary).count(), 0);
+    }
+
+    #[test]
+    fn a_windows_device_name_is_refused_whatever_the_extension() {
+        // CON, NUL and friends are DEVICES on Windows, not files, and the rule
+        // survives an extension: "NUL.onnx" is the null device. An asset written
+        // to one is silently discarded and then re-fetched on every launch,
+        // because reading it back never matches the digest.
+        for name in [
+            "CON",
+            "con",
+            "NUL",
+            "nul.onnx",
+            "AUX.dll",
+            "PRN",
+            "COM1",
+            "com9.txt",
+            "LPT1",
+            "LpT9.onnx",
+        ] {
+            let error = asset(name, "https://example.test/m")
+                .validate()
+                .unwrap_err();
+            assert!(
+                matches!(error, ManifestError::UnsafeFileName { .. }),
+                "{name:?} was accepted as a file name"
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_that_merely_starts_with_a_device_name_is_still_fine() {
+        // The check is on the STEM, not a prefix match: "console.onnx" and
+        // "computer.dll" are ordinary names and must not be rejected.
+        for name in [
+            "console.onnx",
+            "computer.dll",
+            "auxiliary.txt",
+            "printer.onnx",
+        ] {
+            assert!(
+                is_plain_file_name(name),
+                "{name:?} was rejected, but only its prefix looks like a device"
+            );
+        }
+    }
+
+    #[test]
+    fn a_trailing_dot_or_space_is_refused() {
+        // Win32 strips both, so "model.onnx." and "model.onnx " open the same
+        // file as "model.onnx" -- entries that look distinct and are not.
+        for name in ["model.onnx.", "model.onnx ", "model.onnx  ", "x."] {
+            assert!(!is_plain_file_name(name), "{name:?} was accepted");
+        }
+    }
+
+    #[test]
+    fn two_names_differing_only_by_case_are_refused_as_duplicates() {
+        // Windows' filesystem is case-insensitive, so these install to ONE file:
+        // the second overwrites the first, and the first then fails verification
+        // on every launch and is re-fetched forever.
+        let error = AssetManifest::new(vec![
+            asset("Model.onnx", "https://example.test/a"),
+            asset("model.onnx", "https://example.test/b"),
+        ])
+        .unwrap_err();
+        assert!(
+            matches!(error, ManifestError::DuplicateFileName { .. }),
+            "got {error}"
+        );
+    }
+
+    #[test]
+    fn total_bytes_saturates_instead_of_overflowing() {
+        // A plain sum() PANICS in debug and silently WRAPS in release, so a
+        // release build would report a small total for an absurd manifest and
+        // every progress fraction from it would look nearly finished. Two
+        // assets at two thirds of u64::MAX each is the smallest reproduction.
+        let huge = u64::MAX / 3 * 2;
+        let mut first = asset("a.onnx", "https://example.test/a");
+        first.size_bytes = huge;
+        let mut second = asset("b.onnx", "https://example.test/b");
+        second.size_bytes = huge;
+
+        let manifest = AssetManifest::new(vec![first, second]).unwrap();
+        assert_eq!(
+            manifest.total_bytes(),
+            u64::MAX,
+            "the total did not saturate"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_total_is_still_exact() {
+        // Saturation must not cost accuracy in the normal range.
+        let mut first = asset("a.onnx", "https://example.test/a");
+        first.size_bytes = 11_000_000;
+        let mut second = asset("b.onnx", "https://example.test/b");
+        second.size_bytes = 4_700_000;
+        let manifest = AssetManifest::new(vec![first, second]).unwrap();
+        assert_eq!(manifest.total_bytes(), 15_700_000);
     }
 
     #[test]
