@@ -6,11 +6,14 @@
 # and keeping the Windows surface confined to uptake-capture and src-tauri is
 # what makes the stated macOS/Linux ambition survivable rather than aspirational.
 #
-# NO ONNX RUNTIME DEPENDENCY HERE YET, and that is deliberate rather than
-# unfinished. Roadmap 1.10 is three things -- `ort` integration, model loading,
-# and the background inference thread -- and only the third can be built before
-# the ONNX acquisition question is decided. See the `engine` module for what the
-# seam is and why the decision is deferred rather than defaulted.
+# ONNX Runtime arrives through `ort`, taken with default-features = false and
+# the `load-dynamic` feature -- ADR-0032, accepted 2026-08-27. The default
+# feature set would fetch a prebuilt runtime from a CDN at BUILD time; this
+# loads one we placed, at run time. The exact version pin lives in the workspace
+# manifest and is deliberate: `ort` has no stable release.
+#
+# (This comment read "NO ONNX RUNTIME DEPENDENCY HERE YET" until 2026-08-30,
+# which was true of roadmap 1.10 and false the moment 1.11 landed.)
 
 [package]
 name = "uptake-ocr"
@@ -26,6 +29,7 @@ publish.workspace = true
 [dependencies]
 uptake-core = { workspace = true }
 thiserror = { workspace = true }
+ort = { workspace = true }
 
 [lints]
 workspace = true
