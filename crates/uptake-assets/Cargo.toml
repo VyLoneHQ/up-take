@@ -1,0 +1,39 @@
+# uptake-assets -- the checksummed acquisition of files UP-TAKE does not ship
+# in its binary: ONNX Runtime, and the PP-OCRv4 models.
+#
+# Platform-independent by design, and for the same reason uptake-ocr is: it is
+# testable without a window, without a network, and without the 25 MB of assets
+# it exists to install. See the `fetch` module for the seam that makes that true.
+#
+# NO HTTP CLIENT DEPENDENCY HERE, and that is deliberate rather than unfinished.
+# A TLS-capable HTTP stack is a large dependency tree and a supply-chain decision
+# of the class ADR-0032 was; this crate defines WHAT MUST BE TRUE of a download
+# (pinned SHA-256, verified before the bytes are usable, refuses on mismatch)
+# behind a `Fetcher` trait, so the transport can be chosen separately without
+# changing a line of the verification it exists to serve.
+#
+# ADR-0032 decision 2 and ADR-0034 both require this discipline; the two records
+# are one piece of work, which is why the runtime and the models are described by
+# one manifest rather than two mechanisms.
+
+[package]
+name = "uptake-assets"
+description = "Checksummed acquisition and atomic installation of the ONNX Runtime and PP-OCRv4 model files. No platform APIs, no HTTP client."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+# SHA-256, and nothing else from it. RustCrypto's `sha2` is the boring choice:
+# MIT OR Apache-2.0 (both already on deny.toml's allow-list), no transitive
+# network or platform surface, and a stable release -- unlike `ort`, this one
+# needs no exact pin, because a patch bump cannot change what SHA-256 is.
+sha2 = "0.11"
+
+[lints]
+workspace = true
