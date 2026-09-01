@@ -248,6 +248,37 @@ fn is_plain_file_name(name: &str) -> bool {
         .any(|reserved| stem.eq_ignore_ascii_case(reserved))
 }
 
+/// Whether two install names would be ONE file on Windows.
+///
+/// # Why `eq_ignore_ascii_case` is not enough
+///
+/// NTFS folds case with its own upcase table, which covers far more than ASCII:
+/// accented Latin, Greek, Cyrillic and more. `eq_ignore_ascii_case` is
+/// ASCII-only *by name*, so a pair differing only outside ASCII -- `MODÈLE.onnx`
+/// and `modèle.onnx`, say -- passes the duplicate check and then installs to one
+/// file. The second overwrites the first; the first fails verification on every
+/// later launch and is re-fetched forever, which reads as a network fault.
+///
+/// UP-TAKE `I-336`, raised by the independent review of `PR #77` and left open
+/// because it was **unreachable while no manifest source existed**. Roadmap
+/// `1.31` created one, so it is reachable now and fixed here rather than left
+/// as a row whose trigger just arrived.
+///
+/// # What this does and does not claim
+///
+/// Rust's `to_lowercase` implements Unicode's full case folding, which is *not*
+/// NTFS's upcase table -- the two agree on the cases that matter here and are
+/// not the same algorithm, and NTFS's table is even version-dependent. So this
+/// is deliberately a **conservative over-approximation**: it refuses some pairs
+/// NTFS would keep distinct, and refusing a legitimate manifest entry costs a
+/// developer one rename at build time, while accepting a colliding pair costs a
+/// user a permanently re-downloading asset. **It is not a promise that every
+/// NTFS collision is caught**, and pretending otherwise is what a comment
+/// claiming "matches Windows" would do.
+fn collides_on_windows(left: &str, right: &str) -> bool {
+    left.to_lowercase() == right.to_lowercase()
+}
+
 /// Everything that must be present before OCR can run.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AssetManifest {
@@ -275,7 +306,7 @@ impl AssetManifest {
             // the independent review of `PR #77` pointed it out.
             if assets[..index]
                 .iter()
-                .any(|earlier| earlier.file_name.eq_ignore_ascii_case(&asset.file_name))
+                .any(|earlier| collides_on_windows(&earlier.file_name, &asset.file_name))
             {
                 return Err(ManifestError::DuplicateFileName {
                     file_name: asset.file_name.clone(),
@@ -562,6 +593,35 @@ mod tests {
             matches!(error, ManifestError::DuplicateFileName { .. }),
             "got {error}"
         );
+    }
+
+    #[test]
+    fn two_names_differing_only_outside_ascii_are_refused_as_duplicates() {
+        // UP-TAKE I-336. `eq_ignore_ascii_case` is ASCII-only by name, so this
+        // pair passed the duplicate check while NTFS would fold them to one
+        // file. It was unreachable until roadmap 1.31 created a real manifest
+        // source, which is why the row sat open rather than being wrong.
+        let error = AssetManifest::new(vec![
+            asset("MOD\u{c8}LE.onnx", "https://example.test/a"),
+            asset("mod\u{e8}le.onnx", "https://example.test/b"),
+        ])
+        .unwrap_err();
+        assert!(
+            matches!(error, ManifestError::DuplicateFileName { .. }),
+            "got {error}"
+        );
+    }
+
+    #[test]
+    fn names_that_differ_by_more_than_case_are_still_distinct() {
+        // The fold is a conservative over-approximation, so this guards the
+        // other direction: it must not start refusing ordinary distinct names.
+        AssetManifest::new(vec![
+            asset("ch_PP-OCRv4_det.onnx", "https://example.test/a"),
+            asset("ch_PP-OCRv4_rec.onnx", "https://example.test/b"),
+            asset("ppocr_keys_v1.txt", "https://example.test/c"),
+        ])
+        .unwrap();
     }
 
     #[test]

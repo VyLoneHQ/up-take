@@ -165,13 +165,22 @@ impl PaddleEngine {
                 config.dictionary.display()
             ))
         })?;
-        let dictionary = CharacterDictionary::from_lines(&dictionary_text);
-        if dictionary.is_empty() {
+        // The LITERAL reading is what the emptiness guard is asked about, and the
+        // order is load-bearing: `from_ppocr_dictionary` appends a space
+        // unconditionally, so a dictionary built from an empty file is never
+        // `is_empty()` and this guard would be dead code that reports the
+        // failure much later, as a class-count mismatch of 2 against 6625.
+        if CharacterDictionary::from_lines(&dictionary_text).is_empty() {
             return Err(EngineError::Unavailable(format!(
                 "the character dictionary at {} is empty",
                 config.dictionary.display()
             )));
         }
+        // PP-OCR's own reading: the file's lines, then an appended space, then
+        // the blank at index 0. See `CharacterDictionary::from_ppocr_dictionary`
+        // for the arithmetic and the citation -- reading the file literally is
+        // one class short of every PP-OCRv4 recogniser (UP-TAKE `I-333`).
+        let dictionary = CharacterDictionary::from_ppocr_dictionary(&dictionary_text);
 
         let detection = open_session(&config.detection_model, "detection")?;
         let recognition = open_session(&config.recognition_model, "recognition")?;
