@@ -27,8 +27,13 @@
 //! ```
 //!
 //! **`ORT_DYLIB_PATH` pointing at System32 is a DEVELOPER convenience and never
-//! a shipping path.** `ADR-0032` decision 1 requires a runtime *we* place and
-//! checksum, and `resolve_runtime` refuses a search-path DLL for that reason.
+//! a shipping path.** `ADR-0032` **decision 2** requires the runtime to be
+//! acquired by *"a documented, checksummed step … pinned SHA-256, verified
+//! before load"*, and `resolve_runtime` refuses a search-path DLL for that
+//! reason. *(Cited as decision 1 until round 2 of this PR's review; decision 1
+//! is the `load-dynamic` feature choice and says nothing about placing or
+//! checksumming. Round 1 caught this same class once and the sweep that
+//! followed stopped at the file it was found in.)*
 //! Windows happens to carry a Microsoft-signed ONNX Runtime that satisfies
 //! `ort`'s floor, which makes a smoke test possible today without acquiring
 //! anything; it changes no code behaviour and no decision.

@@ -296,7 +296,7 @@ impl PaddleEngine {
 /// green -- `UT-F-83`'s class, in the same commit that fixed another instance
 /// of it. A comment asserting an invariant is not an invariant. Extracting the
 /// pair into one function is what makes the claim testable, which is what
-/// `dictionary_from_contents_*` below now does.)*
+/// `dictionary_from_contents` below now does.)*
 ///
 /// # Errors
 ///

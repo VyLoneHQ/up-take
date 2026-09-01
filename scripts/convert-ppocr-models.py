@@ -148,11 +148,14 @@ class Source:
 # -- intended behaviour rather than a fault, because an upstream change has to
 # reach a human.
 #
-# (Workspace probe `CL-32` additionally checks these URLs' length and ETag at
-# every session close, which closed UP-TAKE I-332. That probe is a cheap
-# tripwire and this digest check is the authority. Worded as "I-332 is open
-# about exactly that" until the review of `PR #78` pointed out it now reads as
-# a claim that the ROW is open, which it is not.)
+# (A workspace probe `CL-32` was WRITTEN on 2026-09-01 to check these URLs'
+# length and ETag at every session close, but it is on an unmerged pull request
+# and is NOT in that repository's `main`. So today this digest check is the
+# ONLY watch that exists, not the authority among two. Round 2 of `PR #78`'s
+# review read `verify-claims.py` and found the CLAIMS list stops at `CL-31`;
+# this comment had asserted the probe as live, which is the exact shape of a
+# claim about state the repository does not own. Restate it as fact only once
+# that PR merges.)
 SOURCES = [
     Source(
         "ch_PP-OCRv4_det_infer.tar",
