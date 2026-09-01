@@ -67,6 +67,15 @@ fn main() -> ExitCode {
             ("--models", Some(path)) => models = PathBuf::from(path),
             ("--image", Some(path)) => image = PathBuf::from(path),
             ("--runtime", Some(path)) => runtime = Some(PathBuf::from(path)),
+            // A KNOWN flag with its value missing is reported as such, not as
+            // "unrecognised" -- naming a flag that IS recognised sends the
+            // reader to check their spelling instead of their argument list.
+            // Review of `PR #78`, non-binding.
+            (flag @ ("--models" | "--image" | "--runtime"), None) => {
+                eprintln!("{flag} needs a value");
+                eprintln!("usage: --models <dir> --image <file.rgba> [--runtime <dll>]");
+                return ExitCode::FAILURE;
+            }
             (other, _) => {
                 eprintln!("unrecognised argument {other}");
                 eprintln!("usage: --models <dir> --image <file.rgba> [--runtime <dll>]");

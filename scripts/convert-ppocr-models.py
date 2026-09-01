@@ -93,11 +93,24 @@ from pathlib import Path
 # module docstring for why the version is exact rather than a floor.
 EXPECTED_P2O_VERSION = "1.3.1"
 
-# ONNX opset. 14 is what PP-OCRv4's operators need and what ONNX Runtime 1.17 --
-# ADR-0032's floor -- supports comfortably. Raising it is a decision, not a
-# tidy-up: a newer opset can emit operators an older runtime cannot load, and
-# the runtime is a file we place rather than one whose version we control on
-# every machine.
+# ONNX opset. 14 is what PP-OCRv4's operators need, and it loads on the oldest
+# runtime this project has actually been run against -- the Microsoft-signed
+# ONNX Runtime 1.17.260613 in Windows' System32, which the `ocr_smoke` example
+# uses.
+#
+# The 1.17 figure is a property of the `ort` CRATE, not of a decision record:
+# `ort-sys` resolves ORT_API_VERSION = 17 in this build (no `api-*` feature is
+# enabled, so it takes the minimum), so `ort` requires >= 1.17.x.
+#
+# (⚠️ This comment attributed "ADR-0032's floor" to that record until the
+# independent review of `PR #78` read all 162 lines of it and found that it
+# names no runtime version and no opset at all -- it pins the `ort` crate to
+# 2.0.0-rc.13 and stops there. The number was right and its cited authority was
+# invented. UP-TAKE I-325's class.)
+#
+# Raising the opset is a decision, not a tidy-up: a newer opset can emit
+# operators an older runtime cannot load, and the runtime is a file we place
+# rather than one whose version we control on every machine.
 OPSET_VERSION = 14
 
 UPSTREAM = "https://paddleocr.bj.bcebos.com"
@@ -130,10 +143,16 @@ class Source:
 # digest is byte-identical to the one ADR-0034 recorded on 2026-08-30, which is
 # that record's dated observation re-confirmed rather than restated.
 #
-# Nothing watches these URLs. UP-TAKE I-332 is open about exactly that: if
-# PaddleOCR republishes an archive, this script goes red on the digest, and that
-# red IS the notification. It is the intended behaviour rather than a fault --
-# an upstream change has to reach a human.
+# Nothing inside THIS repository polls these URLs. If PaddleOCR republishes an
+# archive, this script goes red on the digest, and that red IS the notification
+# -- intended behaviour rather than a fault, because an upstream change has to
+# reach a human.
+#
+# (Workspace probe `CL-32` additionally checks these URLs' length and ETag at
+# every session close, which closed UP-TAKE I-332. That probe is a cheap
+# tripwire and this digest check is the authority. Worded as "I-332 is open
+# about exactly that" until the review of `PR #78` pointed out it now reads as
+# a claim that the ROW is open, which it is not.)
 SOURCES = [
     Source(
         "ch_PP-OCRv4_det_infer.tar",

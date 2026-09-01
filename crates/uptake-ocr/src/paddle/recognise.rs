@@ -263,6 +263,23 @@ impl CharacterDictionary {
     pub fn is_empty(&self) -> bool {
         self.characters.is_empty()
     }
+
+    /// Whether the dictionary names no actual character.
+    ///
+    /// **Stronger than [`CharacterDictionary::is_empty`], and the difference is
+    /// a real file.** A dictionary file holding only newlines parses to entries
+    /// that are every one of them the empty string: the vector is not empty, so
+    /// `is_empty()` is `false`, while the dictionary describes nothing. A
+    /// truncated or failed download looks exactly like that.
+    ///
+    /// Blank lines are still **kept** by [`CharacterDictionary::from_lines`],
+    /// because a blank among real characters holds an index that the model's
+    /// class numbering depends on. This asks the different question of whether
+    /// there is any real character at all.
+    #[must_use]
+    pub fn describes_no_character(&self) -> bool {
+        self.characters.iter().all(String::is_empty)
+    }
 }
 
 /// Greedy CTC decode of one line's per-timestep class scores.
