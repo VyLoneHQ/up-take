@@ -165,13 +165,7 @@ impl PaddleEngine {
                 config.dictionary.display()
             ))
         })?;
-        let dictionary = CharacterDictionary::from_lines(&dictionary_text);
-        if dictionary.is_empty() {
-            return Err(EngineError::Unavailable(format!(
-                "the character dictionary at {} is empty",
-                config.dictionary.display()
-            )));
-        }
+        let dictionary = dictionary_from_contents(&dictionary_text, &config.dictionary)?;
 
         let detection = open_session(&config.detection_model, "detection")?;
         let recognition = open_session(&config.recognition_model, "recognition")?;
@@ -283,6 +277,48 @@ impl PaddleEngine {
             &self.dictionary,
         )))
     }
+}
+
+/// Reads a PP-OCR dictionary file's contents, refusing an empty one.
+///
+/// # The two steps are ONE function because their ORDER is the invariant
+///
+/// The emptiness check must run on the **literal** reading.
+/// [`CharacterDictionary::from_ppocr_dictionary`] appends a space
+/// unconditionally, so a dictionary built from an empty file is **never**
+/// `is_empty()` -- and a guard placed after it is dead code that lets an empty
+/// file through, to fail much later as a class-count mismatch of 2 against
+/// 6625.
+///
+/// *(⚠️ This was two statements inline in [`PaddleEngine::load`] with a comment
+/// saying the order was load-bearing, and **nothing tested it**. The
+/// independent review of `PR #78` reordered them and watched all 98 tests stay
+/// green -- `UT-F-83`'s class, in the same commit that fixed another instance
+/// of it. A comment asserting an invariant is not an invariant. Extracting the
+/// pair into one function is what makes the claim testable, which is what
+/// `dictionary_from_contents` below now does.)*
+///
+/// # Errors
+///
+/// [`EngineError::Unavailable`] naming the path, if the file holds no
+/// characters.
+fn dictionary_from_contents(
+    contents: &str,
+    path: &Path,
+) -> Result<CharacterDictionary, EngineError> {
+    // `describes_no_character`, not `is_empty`. A file holding only newlines
+    // parses to entries that are all the EMPTY STRING, so `is_empty()` is false
+    // and a plainly broken file -- a truncated or failed download -- gets
+    // through. Found by writing the test for the ordering invariant below
+    // rather than by design; the first version of this guard asked
+    // `is_empty()` and let a lone newline past.
+    if CharacterDictionary::from_lines(contents).describes_no_character() {
+        return Err(EngineError::Unavailable(format!(
+            "the character dictionary at {} is empty",
+            path.display()
+        )));
+    }
+    Ok(CharacterDictionary::from_ppocr_dictionary(contents))
 }
 
 /// The environment variable `ort` reads to find ONNX Runtime.
@@ -643,6 +679,53 @@ mod tests {
                 || message.contains("must agree"),
             "load failed for an unrelated reason: {message}"
         );
+    }
+
+    #[test]
+    fn an_empty_dictionary_file_is_refused_rather_than_gaining_an_appended_space() {
+        // THE REGRESSION THE ORDER EXISTS TO PREVENT, and the one the review of
+        // `PR #78` reproduced with every test still green. If the emptiness
+        // check ever runs on the PP-OCR reading instead of the literal one,
+        // this file yields a one-character dictionary and load() proceeds --
+        // failing much later as "the model emits 6625 classes but the
+        // dictionary describes 2".
+        let error = dictionary_from_contents("", Path::new("empty-dict.txt")).unwrap_err();
+        let EngineError::Unavailable(message) = error else {
+            panic!("an empty dictionary must be Unavailable");
+        };
+        assert!(message.contains("is empty"), "{message}");
+        assert!(message.contains("empty-dict.txt"), "{message}");
+    }
+
+    #[test]
+    fn a_whitespace_only_dictionary_is_still_refused() {
+        // A file holding just a newline reads as ZERO characters literally, and
+        // as one appended space through the PP-OCR reading. Same trap, arrived
+        // at by a file that is plausibly the result of a failed download rather
+        // than a zero-byte one.
+        assert!(
+            dictionary_from_contents(
+                "
+",
+                Path::new("d.txt")
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_real_dictionary_gains_exactly_the_appended_space() {
+        // The other direction: the guard must not refuse a good file, and the
+        // PP-OCR reading must still be the one that comes back.
+        let dictionary = dictionary_from_contents(
+            "a
+b
+c",
+            Path::new("d.txt"),
+        )
+        .unwrap();
+        assert_eq!(dictionary.class_count(), 5, "3 lines + space + blank");
+        assert_eq!(dictionary.character_for_class(4), Some(" "));
     }
 
     #[test]

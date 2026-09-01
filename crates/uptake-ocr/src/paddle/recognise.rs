@@ -164,12 +164,25 @@ pub struct CharacterDictionary {
 }
 
 impl CharacterDictionary {
-    /// Builds a dictionary from the lines of a PP-OCR `*_dict.txt`.
+    /// Builds a dictionary from the lines of a PP-OCR `*_dict.txt`, **without**
+    /// PaddleOCR's appended space.
     ///
-    /// Blank lines are **kept**, because the space character is represented by a
-    /// line containing a single space in some of PaddleOCR's dictionaries and
-    /// dropping it would shift every subsequent index. Trailing carriage returns
-    /// are stripped so a CRLF file behaves the same as an LF one.
+    /// Use [`CharacterDictionary::from_ppocr_dictionary`] for a real PP-OCR
+    /// model. This constructor is the literal reading -- one character per line,
+    /// nothing added -- and it exists for dictionaries that genuinely carry every
+    /// character they describe, and for tests that state a class list outright.
+    ///
+    /// Trailing carriage returns are stripped so a CRLF file behaves the same as
+    /// an LF one, and a single trailing newline is treated as a file-format
+    /// artifact rather than as an empty character.
+    ///
+    /// *(This was the ONLY constructor until 2026-09-01, and its doc claimed
+    /// blank lines are kept "because the space character is represented by a
+    /// line containing a single space in some of PaddleOCR's dictionaries".
+    /// **That is false of `ppocr_keys_v1.txt`**, which is the dictionary
+    /// PP-OCRv4's Chinese recogniser actually uses -- it is 6623 lines with no
+    /// space line and no trailing newline. UP-TAKE `I-333`, confirmed against
+    /// the real file while executing roadmap `1.31`.)*
     #[must_use]
     pub fn from_lines(contents: &str) -> Self {
         let characters = contents
@@ -183,6 +196,50 @@ impl CharacterDictionary {
             characters.pop();
         }
         Self { characters }
+    }
+
+    /// Builds a dictionary the way PaddleOCR itself does, for a model exported
+    /// with `use_space_char: true` -- which is every PP-OCRv4 recogniser we
+    /// convert.
+    ///
+    /// # The space is APPENDED, not read
+    ///
+    /// PaddleOCR reads the file's lines and then adds a space as one more
+    /// character; the blank is prepended after that. From
+    /// `ppocr/postprocess/rec_postprocess.py` at tag `v2.7.0`, in
+    /// `BaseRecLabelDecode.__init__`:
+    ///
+    /// ```text
+    /// for line in lines:
+    ///     line = line.decode('utf-8').strip(...)
+    ///     self.character_str.append(line)
+    /// if use_space_char:
+    ///     self.character_str.append(" ")
+    /// dict_character = self.add_special_char(dict_character)   # CTC: ['blank'] + ...
+    /// ```
+    ///
+    /// So for `ppocr_keys_v1.txt` the arithmetic is **6623 lines + 1 space + 1
+    /// blank = 6625**, and 6625 is exactly what the converted
+    /// `ch_PP-OCRv4_rec_infer` emits on its last axis. Reading the file
+    /// literally gives 6624, and [`super::PaddleEngine`]'s class-count guard
+    /// then refuses the real model outright -- which is how this was found,
+    /// rather than by the text coming out shifted by one.
+    ///
+    /// **Why a separate constructor rather than a flag.** The two readings
+    /// differ by one class, and one class is the difference between correct text
+    /// and *every* character displaced by one position. A caller that has to
+    /// name the convention it wants cannot get the PP-OCR case by default and be
+    /// silently wrong; the name is the documentation.
+    ///
+    /// The space is appended even if the file already ends with a line holding
+    /// one. PaddleOCR does not check, so neither does this -- matching the
+    /// export is the whole job, and de-duplicating here would put us one class
+    /// BELOW a model built that way.
+    #[must_use]
+    pub fn from_ppocr_dictionary(contents: &str) -> Self {
+        let mut dictionary = Self::from_lines(contents);
+        dictionary.characters.push(" ".to_owned());
+        dictionary
     }
 
     /// How many classes the model must emit for this dictionary: characters + blank.
@@ -205,6 +262,23 @@ impl CharacterDictionary {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.characters.is_empty()
+    }
+
+    /// Whether the dictionary names no actual character.
+    ///
+    /// **Stronger than [`CharacterDictionary::is_empty`], and the difference is
+    /// a real file.** A dictionary file holding only newlines parses to entries
+    /// that are every one of them the empty string: the vector is not empty, so
+    /// `is_empty()` is `false`, while the dictionary describes nothing. A
+    /// truncated or failed download looks exactly like that.
+    ///
+    /// Blank lines are still **kept** by [`CharacterDictionary::from_lines`],
+    /// because a blank among real characters holds an index that the model's
+    /// class numbering depends on. This asks the different question of whether
+    /// there is any real character at all.
+    #[must_use]
+    pub fn describes_no_character(&self) -> bool {
+        self.characters.iter().all(String::is_empty)
     }
 }
 
@@ -497,5 +571,77 @@ mod tests {
         let bitmap = frame(60, 30, [128, 128, 128, 255]);
         let point = PointF::new(5.0, 5.0);
         assert!(rectify(&bitmap, &Quad::new([point, point, point, point])).is_none());
+    }
+
+    /// The exact shape of `ppocr_keys_v1.txt`, which is what PP-OCRv4's Chinese
+    /// recogniser is exported against: no space line, and **no trailing
+    /// newline**.
+    ///
+    /// Both properties are load-bearing and both were measured from the real
+    /// file rather than assumed -- 26249 bytes, `sha256`
+    /// `28b2362a...3b1dc7f7`, fetched from PaddleOCR at tag `v2.7.0`.
+    fn ppocr_keys_shaped(lines: usize) -> String {
+        (0..lines)
+            .map(|index| format!("c{index}"))
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            )
+    }
+
+    #[test]
+    fn the_ppocr_reading_appends_a_space_that_the_file_does_not_contain() {
+        // I-333. The literal reading is one class short of the model, and the
+        // difference is precisely the space PaddleOCR appends.
+        let contents = ppocr_keys_shaped(6623);
+        let literal = CharacterDictionary::from_lines(&contents);
+        let ppocr = CharacterDictionary::from_ppocr_dictionary(&contents);
+
+        assert_eq!(literal.class_count(), 6624, "the literal reading");
+        assert_eq!(
+            ppocr.class_count(),
+            6625,
+            "must equal the last axis of the converted ch_PP-OCRv4_rec_infer model"
+        );
+        assert_eq!(
+            ppocr.character_for_class(6624),
+            Some(" "),
+            "the appended space is the LAST class, after every dictionary line"
+        );
+        assert_eq!(
+            ppocr.character_for_class(1),
+            Some("c0"),
+            "appending must not disturb the existing indices"
+        );
+    }
+
+    #[test]
+    fn a_file_with_no_trailing_newline_loses_no_character() {
+        // ppocr_keys_v1.txt does not end with a newline. An implementation that
+        // unconditionally dropped a last entry would silently lose the final
+        // character and shift nothing else, which reads as a rare OCR miss.
+        let dictionary = CharacterDictionary::from_lines(
+            "a
+b
+c",
+        );
+        assert_eq!(dictionary.class_count(), 4);
+        assert_eq!(dictionary.character_for_class(3), Some("c"));
+    }
+
+    #[test]
+    fn the_appended_space_is_not_deduplicated_against_a_space_line() {
+        // PaddleOCR appends unconditionally. Matching that is the job: being
+        // "helpful" here would put us one class BELOW a model exported from a
+        // dictionary that does carry a space line.
+        let dictionary = CharacterDictionary::from_ppocr_dictionary(
+            "a
+ 
+b",
+        );
+        assert_eq!(dictionary.class_count(), 5);
+        assert_eq!(dictionary.character_for_class(2), Some(" "));
+        assert_eq!(dictionary.character_for_class(4), Some(" "));
     }
 }
