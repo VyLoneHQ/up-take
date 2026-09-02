@@ -40,8 +40,11 @@ Until then it is written by hand.
      "sharpens" rather than "magnified", reversing 1.24 on the founder's verdict), 1.26 and 1.31
      (the OCR area and the pipeline behind it; ADR-0035 and BACKLOG.md I-337 are the source of
      the sentence about where the runtime and the models live. That sentence said "not packaged
-     yet" until I-337 landed on 2026-09-02 and the installer began carrying them; this comment
-     went on quoting the removed wording for the length of one review round), 1.27 (area types chosen from the area's own menu) and
+     yet" until the branch doing I-337's packaging work rewrote it; this comment went on quoting
+     the removed wording for the length of one review round. ⚠️ It then said I-337 "landed on
+     2026-09-02" as accomplished fact while the row was open and the branch unmerged, which is
+     the same overclaim the README comment had to be corrected for one round earlier, in the
+     same twin-document shape. I-337 closes on the merge, not before), 1.27 (area types chosen from the area's own menu) and
      1.28 (those types in a submenu), which the "Five area types" entry above derives from and
      which sit outside the 1.1-1.9f range this line used to name on its own. `P-6` asks for the
      source of the claim rather than of the page, and that range stopped covering the entry when
