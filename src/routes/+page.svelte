@@ -27,8 +27,10 @@ import {
   type MenuView,
   menuFrameCss,
   monitorFramesCss,
+  type OcrPayload,
   type Origin,
   type OverlayStateName,
+  ocrLine,
   type PhysRect,
   type PinPayload,
   physRectToCss,
@@ -85,6 +87,11 @@ let pins = $state(new SvelteMap<number, string>());
 // completion. Keyed rendering on the nonce is what restarts the animation when
 // the same action runs twice on the same area.
 let flashes = $state(new SvelteMap<number, number>());
+// Each OCR area's recognition state, keyed by area id (roadmap 1.26). Holds the
+// payload rather than the rendered line so the template can style by status.
+// A failure and a page of recognised text want different treatment, and both
+// are `detail`.
+let recognitions = $state(new SvelteMap<number, OcrPayload>());
 // The WebView owns its scale (ADR-0011); refreshed on every state event in case
 // the overlay moved to a monitor at a different DPI.
 let dpr = $state(1);
@@ -267,6 +274,13 @@ onMount(() => {
     for (const id of flashes.keys()) {
       if (!live.has(id)) flashes.delete(id);
     }
+    // Same lifetime, same reason. Rust drops its own bookkeeping for a
+    // dismissed area (`ocr::forget`) and refuses to announce a result for one
+    // that is gone; this is the view's half, and without it a long session
+    // accumulates text for rectangles nobody can see.
+    for (const id of recognitions.keys()) {
+      if (!live.has(id)) recognitions.delete(id);
+    }
   });
   const unlistenActiveMonitor = listen<ActiveMonitorPayload>(
     'overlay://active-monitor',
@@ -289,6 +303,13 @@ onMount(() => {
     const { id, url } = event.payload;
     if (url === null) pins.delete(id);
     else pins.set(id, url);
+  });
+  const unlistenOcr = listen<OcrPayload>('overlay://ocr', (event) => {
+    // Several per area rather than one: `working` lands with the area itself so
+    // it never sits blank, and the result replaces it when the engine answers.
+    // Keyed by id, so a re-recognition of the same area overwrites rather than
+    // accumulating.
+    recognitions.set(event.payload.id, event.payload);
   });
   const unlistenSelection = listen<SelectionPayload>(
     'placement://selection',
@@ -321,6 +342,7 @@ onMount(() => {
     unlistenActiveMonitor,
     unlistenFlash,
     unlistenPin,
+    unlistenOcr,
     unlistenSelection,
     unlistenHover,
     unlistenMenu,
@@ -444,6 +466,32 @@ onMount(() => {
                brings `I-289` straight back. It is not guarded here because the
                guard would have no case to cover today, and a control that
                cannot go red is this repository's `UT-F-75`. -->
+          <!-- Roadmap 1.26: an OCR area renders what the engine read, in
+               place. Not a badge and not an overlay on a pinned image -- an
+               OCR area holds no pixels of its own (`recognises_on_create` is
+               deliberately not `captures_on_create`), so this text sits over
+               the live screen the area is drawn on.
+
+               Guarded on the entry existing rather than on `area.kind`, and
+               that is the narrower of the two on purpose: converting an area
+               away from `Ocr` leaves its recognition in this map until Rust
+               says otherwise, and keying on the kind would blank the text a
+               frame before the store agrees. The entry is dropped when the
+               area goes (see the areas listener) and replaced when a new
+               recognition lands. -->
+          {#if recognitions.get(area.id)}
+            {@const recognition = recognitions.get(area.id)}
+            {#if recognition}
+              <div
+                class="ocr"
+                class:working={recognition.status === 'working'}
+                class:problem={recognition.status === 'unavailable' ||
+                  recognition.status === 'failed'}
+              >
+                {ocrLine(recognition)}
+              </div>
+            {/if}
+          {/if}
           {#if area.zoom > 1}
             <span class="zoom-badge">{formatZoom(area.zoom)}</span>
           {/if}
@@ -800,6 +848,55 @@ onMount(() => {
   position: absolute;
   object-fit: fill;
   pointer-events: none;
+}
+
+/* An OCR area's recognised text, drawn over the region it was read from
+   (roadmap 1.26).
+
+   Scrolls rather than clips or grows: the text is whatever was on screen inside
+   the rectangle, and a paragraph in a small area would otherwise either spill
+   over the neighbouring desktop or be silently truncated. Scrolling is the only
+   one of the three that neither lies about the content nor draws outside the
+   area the user claimed.
+
+   The backdrop is the reason this is legible at all -- an OCR area holds no
+   pixels of its own, so this text sits directly over whatever is underneath it,
+   which is by definition a region dense with text. `pre-wrap` because the
+   engine's line breaks are part of what it read: PP-OCRv4 returns blocks in
+   reading order, and reflowing them would merge two columns into one sentence.
+
+   `pointer-events: none` like every other piece of area chrome. The overlay is
+   click-through (ADR-0016) and the hook hit-tests Rust-side rectangles; a DOM
+   element that took the pointer would be one the hook does not know about. */
+.ocr {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: 3px;
+  background: rgba(12, 14, 18, 0.82);
+  color: rgba(244, 246, 250, 0.96);
+  font-size: 12px;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+}
+
+/* Waiting for the engine. Dimmed rather than animated: the area has just been
+   drawn and something is already moving on screen, and a spinner over a live
+   desktop competes with the thing the user is looking at. */
+.ocr.working {
+  color: rgba(244, 246, 250, 0.62);
+  font-style: italic;
+}
+
+/* A missing install or a failed recognition. Amber rather than red: nothing is
+   broken and no data is lost, and a red panel over the desktop reads as an
+   error the user has to act on immediately. */
+.ocr.problem {
+  color: #f3c969;
 }
 
 /* An area's captured pixels, filling the area exactly.

@@ -193,6 +193,67 @@ export interface ActiveMonitorPayload {
  * a ~270 KB capture never crosses this JSON bridge — see the Rust `captures`
  * module.
  */
+/**
+ * One area's OCR state, as `overlay://ocr` reports it (roadmap 1.26).
+ *
+ * Kept in step with `Status::as_str` in `src-tauri/src/ocr.rs` by hand, for the
+ * reason {@link ArmableType} is: the wire has no shared schema. The failure
+ * mode differs, though, and it is worth naming. A name Rust sends and this
+ * union does not carry is **not** refused anywhere -- unlike an arm, which Rust
+ * rejects -- it simply falls through {@link ocrLine}'s switch. That is why the
+ * default arm there renders the raw status rather than nothing.
+ */
+export type OcrStatus = 'working' | 'text' | 'empty' | 'unavailable' | 'failed';
+
+/**
+ * The payload of the `overlay://ocr` event: one area's recognition state.
+ *
+ * A separate event from `overlay://areas` for the reason {@link PinPayload} is
+ * separate: an area exists the instant the drag ends and its text lands
+ * hundreds of milliseconds later.
+ */
+export interface OcrPayload {
+  id: number;
+  status: OcrStatus;
+  /**
+   * The recognised text, or the reason there is none.
+   *
+   * One field for both, because {@link OcrPayload.status} already says which it
+   * is and both render in the same place -- the area's own rectangle. Two
+   * nullable fields would let a payload carry both or neither, which is two
+   * states nothing can draw.
+   */
+  detail: string | null;
+}
+
+/**
+ * What an area shows for a given OCR state.
+ *
+ * The recognised text is returned unchanged; every other state gets a sentence.
+ * **`empty` is a success and reads like one** -- an area drawn over a picture
+ * legitimately has no text in it, and wording that as a failure would teach the
+ * user to ignore the message that matters.
+ */
+export function ocrLine(payload: OcrPayload): string {
+  switch (payload.status) {
+    case 'working':
+      return 'Reading…';
+    case 'text':
+      return payload.detail ?? '';
+    case 'empty':
+      return 'No text found';
+    case 'unavailable':
+      return payload.detail ?? 'OCR is unavailable';
+    case 'failed':
+      return payload.detail ?? 'OCR failed';
+    default:
+      // Unreachable while this union matches `Status::as_str`, and deliberately
+      // not `never`-asserted into a crash: a Rust-side status this build does
+      // not know about should degrade to showing its name, not blank the area.
+      return payload.status;
+  }
+}
+
 export interface PinPayload {
   id: number;
   /**
@@ -716,7 +777,7 @@ export function isFreezeKey(
  */
 export type ArmableType = Extract<
   AreaKind,
-  'screenshot' | 'filter' | 'upscale'
+  'screenshot' | 'filter' | 'upscale' | 'ocr'
 >;
 
 /**
@@ -748,6 +809,12 @@ export function armedTypeForKey(
     // reached no frontend behaviour.
     case 'u':
       return 'upscale';
+    // Roadmap 1.26. `O` for OCR, the fourth type to earn a gesture. Unlike
+    // `U`'s note above, this one does reach frontend behaviour: an OCR area
+    // renders its recognised text rather than pixels, so {@link OcrPayload} and
+    // the `overlay://ocr` listener are the other half of this key.
+    case 'o':
+      return 'ocr';
     default:
       return null;
   }

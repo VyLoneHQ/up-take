@@ -15,6 +15,8 @@ import {
   type MenuView,
   menuFrameCss,
   monitorFramesCss,
+  type OcrPayload,
+  ocrLine,
   type PhysRect,
   physRectsToCss,
   physRectToCss,
@@ -488,6 +490,12 @@ describe('armedTypeForKey', () => {
     expect(armedTypeForKey(key({ key: 'u' }))).toBe('upscale');
     expect(armedTypeForKey(key({ key: 'U' }))).toBe('upscale');
     expect(armedTypeForKey(key({ key: 'F' }))).toBe('filter');
+    // Roadmap 1.26, and the 1.24 note above is why this line exists rather
+    // than being left to the pairwise test below: deleting the arm is the one
+    // change that removes the whole feature from the user's reach, and only an
+    // assertion naming the key can see it.
+    expect(armedTypeForKey(key({ key: 'o' }))).toBe('ocr');
+    expect(armedTypeForKey(key({ key: 'O' }))).toBe('ocr');
   });
 
   it('keeps the armable types distinct from each other', () => {
@@ -495,7 +503,10 @@ describe('armedTypeForKey', () => {
     // arrived, so a fallthrough between the arms would have been invisible.
     // ALL THREE PAIRWISE since 1.24, not just the first two: comparing one
     // pair cannot see a third arm falling through into either of them.
-    const armed = ['s', 'f', 'u'].map((k) => armedTypeForKey(key({ key: k })));
+    // ALL FOUR PAIRWISE since 1.26.
+    const armed = ['s', 'f', 'u', 'o'].map((k) =>
+      armedTypeForKey(key({ key: k })),
+    );
     expect(new Set(armed).size).toBe(armed.length);
     expect(armed.every((a) => a !== null)).toBe(true);
   });
@@ -512,6 +523,59 @@ describe('armedTypeForKey', () => {
     expect(armedTypeForKey(key({ key: 'q' }))).toBeNull();
     expect(armedTypeForKey(key({ key: 'Escape' }))).toBeNull();
     expect(armedTypeForKey(key({ key: 'Delete' }))).toBeNull();
+  });
+});
+
+describe('ocrLine', () => {
+  const payload = (over: Partial<OcrPayload>): OcrPayload => ({
+    id: 1,
+    status: 'text',
+    detail: null,
+    ...over,
+  });
+
+  it('returns the recognised text unchanged', () => {
+    // Unchanged including its line breaks: PP-OCRv4 returns blocks in reading
+    // order and the area renders them `pre-wrap`, so reflowing here would merge
+    // two columns into one sentence.
+    // Built rather than written as a literal so the newline in this test is
+    // unmistakably a newline, not an escape somebody has to squint at.
+    const twoLines = ['Total:', '12,00'].join(String.fromCharCode(10));
+    expect(ocrLine(payload({ status: 'text', detail: twoLines }))).toBe(
+      twoLines,
+    );
+  });
+
+  it('reads an empty result as a success rather than a failure', () => {
+    // An area drawn over a picture legitimately has no text in it. Wording this
+    // as an error is how a user learns to ignore the message that matters.
+    expect(ocrLine(payload({ status: 'empty' }))).toBe('No text found');
+  });
+
+  it('prefers the reason it was given to its own fallback', () => {
+    // The Rust side names the missing files, which is the difference between a
+    // user who can fix their install and one who files an issue.
+    expect(
+      ocrLine(
+        payload({
+          status: 'unavailable',
+          detail: 'no usable OCR models in C:/x',
+        }),
+      ),
+    ).toBe('no usable OCR models in C:/x');
+    expect(ocrLine(payload({ status: 'failed', detail: null }))).toBe(
+      'OCR failed',
+    );
+  });
+
+  it('shows an unrecognised status rather than blanking the area', () => {
+    // The unions on the two sides of this wire are hand-kept, and unlike an arm
+    // a status Rust sends is refused by nothing. Degrading to the raw name
+    // keeps the area saying something a bug report can quote.
+    const unknown = payload({
+      status: 'transcribing' as OcrPayload['status'],
+    });
+    expect(ocrLine(unknown)).toBe('transcribing');
   });
 });
 

@@ -718,6 +718,14 @@ fn has_areas(app: &AppHandle) -> bool {
 const AREAS_EVENT: &str = "overlay://areas";
 const PIN_EVENT: &str = "overlay://pin";
 
+/// The Tauri event carrying one area's OCR state (roadmap 1.26).
+///
+/// A separate event from `overlay://areas` for the reason [`PIN_EVENT`] is
+/// separate: an area exists the instant the drag ends and its recognition lands
+/// hundreds of milliseconds later, so folding the text into the area set would
+/// either delay the area or re-emit every area on every recognition.
+const OCR_EVENT: &str = "overlay://ocr";
+
 /// One area as the frontend draws it.
 #[derive(Serialize, Clone)]
 struct AreaPayload {
@@ -1066,6 +1074,18 @@ pub(crate) fn convert_area(app: &AppHandle, id: AreaId, kind: AreaType) -> bool 
     if conversion.changed && placement::captures_on_create(kind) {
         crate::output::capture_into_area(app, id, bounds);
     }
+    // **AND A CONVERSION INTO AN OCR AREA HAS TO RUN THE RECOGNITION**, which is
+    // the paragraph above applied to roadmap 1.26's type. The menu row says
+    // "Type: OCR"; an OCR area that never recognises anything is a rectangle
+    // showing the live screen, indistinguishable from `Default`, and it is the
+    // same defect a `Screenshot` holding no pinned still was.
+    //
+    // `placement::recognises_on_create` rather than `kind == AreaType::Ocr`,
+    // for the reason the capture above uses a predicate: one statement of *does
+    // this type recognise?*, reached by both of its callers.
+    if conversion.changed && placement::recognises_on_create(kind) {
+        crate::ocr::recognise_into_area(app, id, bounds);
+    }
     // **AND A CONVERSION INTO A BORN-MAGNIFIED TYPE HAS TO TAKE ITS FIRST
     // MAGNIFIED CAPTURE**, which is the same argument one paragraph up wearing
     // different clothes: an `Upscale` area showing nothing is a rectangle
@@ -1329,6 +1349,13 @@ pub(crate) fn dismiss_area(app: &AppHandle, id: AreaId) -> bool {
         // is reachable by closing an area within ~300 ms of scrolling it. That
         // is precisely the growing map this comment names.
         crate::output::cancel_magnification(app, id);
+        // The OCR bookkeeping goes the same way, and it is a smaller promise
+        // than the line above: there is no cancellation, so a frame already in
+        // the engine still runs to completion. What this drops is this module
+        // holding a name for an area that is gone. `ocr::pump` asks whether the
+        // area still exists before announcing anything, so the result itself is
+        // discarded there rather than drawn on a dismissed rectangle.
+        crate::ocr::forget(id);
         collapse_living_if_empty(app);
     }
     removed
@@ -1642,6 +1669,61 @@ pub(crate) fn emit_flash(app: &AppHandle, id: AreaId) {
     }
 }
 
+/// The payload of `overlay://ocr`: one area's recognition state.
+#[derive(Serialize, Clone)]
+struct OcrPayload {
+    id: u64,
+    /// The state, as [`crate::ocr::Status`] names it on the wire.
+    status: &'static str,
+    /// The recognised text, or the reason there is none.
+    ///
+    /// One field for both because the frontend renders it in one place -- the
+    /// area's own rectangle -- and `status` already says which it is. Two
+    /// nullable fields would let a payload carry both or neither, which is two
+    /// states nothing can draw.
+    detail: Option<String>,
+}
+
+/// Announces `id`'s OCR state, so the area can draw it.
+///
+/// Never returns an error: OCR reports progress several times per area, and a
+/// caller that has to decide what to do about a failed emit at each of them
+/// would either ignore it or log it, which is what this does once instead.
+pub(crate) fn emit_ocr(
+    app: &AppHandle,
+    id: AreaId,
+    status: crate::ocr::Status,
+    detail: Option<String>,
+) {
+    if let Err(error) = app.emit(
+        OCR_EVENT,
+        OcrPayload {
+            id: id.get(),
+            status: status.as_str(),
+            detail,
+        },
+    ) {
+        eprintln!("overlay: could not emit the OCR state: {error}");
+    }
+}
+
+/// `raw` as an [`AreaId`], if an area with that id is still live.
+///
+/// **The identity check, not a convenience.** `AreaId` has no public
+/// constructor, so a worker holding a raw number cannot fabricate one -- it has
+/// to ask the store, which is the same discipline `captures::still_holds`
+/// enforces for a pin (`I-61`). An area dismissed while its frame was in the
+/// OCR worker answers `None`, and that is the ordinary case rather than an
+/// error.
+pub(crate) fn live_area_id(app: &AppHandle, raw: u64) -> Option<AreaId> {
+    let store = app.state::<Mutex<AreaStore>>();
+    let guard = lock(&store);
+    guard
+        .iter()
+        .find(|area| area.id.get() == raw)
+        .map(|area| area.id)
+}
+
 /// The payload of `overlay://pin`: one area's capture is ready to render.
 #[derive(Serialize, Clone)]
 struct PinPayload {
@@ -1847,6 +1929,13 @@ fn armable_type(name: &str) -> Option<AreaType> {
         // ADR-0031's sequencing rather than ADR-0030's cost argument -- the live
         // loop is roadmap 1.30 and is gated on a rig judgement.
         "upscale" => Some(AreaType::Upscale),
+        // Ocr is the fourth (roadmap 1.26, key `O`). The engine, its worker and
+        // its models all shipped before this line existed and none of them had
+        // a caller -- this is the gesture that makes them reachable. It is
+        // interactive and passive by model default, so the area takes input and
+        // draws its recognised text over the region rather than capturing
+        // continuously.
+        "ocr" => Some(AreaType::Ocr),
         _ => None,
     }
 }
@@ -2037,6 +2126,15 @@ mod tests {
             &PinPayload { id: 1, url: None },
             &["id", "url"],
         );
+        assert_keys(
+            "OcrPayload",
+            &OcrPayload {
+                id: 1,
+                status: crate::ocr::Status::Text.as_str(),
+                detail: Some("Total: 12".to_string()),
+            },
+            &["id", "status", "detail"],
+        );
     }
 
     #[test]
@@ -2057,6 +2155,7 @@ mod tests {
                 "ActiveMonitorPayload",
                 "FlashPayload",
                 "PinPayload",
+                "OcrPayload",
             ],
             &[],
         );
@@ -2113,6 +2212,7 @@ mod tests {
             ("screenshot", AreaType::Screenshot),
             ("filter", AreaType::Filter),
             ("upscale", AreaType::Upscale),
+            ("ocr", AreaType::Ocr),
         ] {
             assert_eq!(armable_type(name), Some(kind), "{name} must arm");
             assert_eq!(type_name(kind), name, "{name} must round trip");
@@ -2125,11 +2225,12 @@ mod tests {
     /// other four would be invisible from the accepting side alone.
     #[test]
     fn a_modelled_type_with_no_gesture_is_still_refused() {
-        // `upscale` LEFT this list on 2026-08-21: roadmap 1.24 gave it a
-        // gesture, so it is armable now and refusing it would be the defect.
-        // The list is still the WHOLE refused set rather than a sample, which
-        // is the property the doc above names.
-        for name in ["default", "record", "ocr", "analysis"] {
+        // Two names have LEFT this list, each on the day its roadmap row
+        // shipped: `upscale` on 2026-08-21 (roadmap 1.24) and `ocr` on
+        // 2026-09-02 (roadmap 1.26). Both are armable now and refusing either
+        // would be the defect. The list is still the WHOLE refused set rather
+        // than a sample, which is the property the doc above names.
+        for name in ["default", "record", "analysis"] {
             assert_eq!(armable_type(name), None, "{name} has no gesture yet");
         }
         assert_eq!(armable_type("Filter"), None, "the wire name is lowercase");

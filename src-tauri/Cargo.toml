@@ -25,6 +25,11 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 uptake-core = { workspace = true }
 uptake-capture = { workspace = true }
+# Roadmap 1.26 gave the OCR engine its first caller in the product. `uptake-ocr`
+# owns the engine and its worker thread; `uptake-assets` owns the pinned digests
+# this host verifies the models against before loading them (ADR-0032 D2).
+uptake-ocr = { workspace = true }
+uptake-assets = { workspace = true }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 serde = { workspace = true }

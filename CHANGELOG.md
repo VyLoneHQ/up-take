@@ -25,19 +25,23 @@ Until then it is written by hand.
 - System tray icon and menu, and a single-instance guard.
 - Areas: drag to create, then move, resize and dismiss them. Areas live until dismissed or until the
   app exits, and do not survive a restart.
-- Four area types, chosen from the area's own right-click menu. A plain pinned region; a screenshot
+- Five area types, chosen from the area's own right-click menu. A plain pinned region; a screenshot
   area that captures what is under it and keeps the still, which Copy and Save export; a filter
-  area that tints what is underneath and lets clicks pass through to it; and an upscale area that
+  area that tints what is underneath and lets clicks pass through to it; an upscale area that
   sharpens the piece of screen under it in place, without magnifying it, as a still rather than a
-  live view.
+  live view; and an OCR area that reads the text under it and shows what it read, in place. The
+  OCR models are not packaged yet, so a build made from this repository reports OCR as
+  unavailable and names the files it wanted.
 - Freeze the screen while placing an area, with `Ctrl+Space`.
 - The overlay is excluded from screen capture, so other recording tools do not see it.
 
 <!-- source: STATUS.md Phase 1 (1A merged, 1B partial, 1D partial); ROADMAP.md tasks 1.1 to 1.9f,
      plus 1.23 (Filter), 1.24 and 1.29 (Upscale; 1.29 and ADR-0031 are what make the entry say
-     "sharpens" rather than "magnified", reversing 1.24 on the founder's verdict), 1.27 (area
-     types chosen from the area's own menu) and
-     1.28 (those types in a submenu), which the "Four area types" entry above derives from and
+     "sharpens" rather than "magnified", reversing 1.24 on the founder's verdict), 1.26 and 1.31
+     (the OCR area and the pipeline behind it; ADR-0035 and BACKLOG.md I-337 are the source of
+     the "not packaged yet" sentence, which is a real limit of a build made today rather than a
+     disclaimer), 1.27 (area types chosen from the area's own menu) and
+     1.28 (those types in a submenu), which the "Five area types" entry above derives from and
      which sit outside the 1.1-1.9f range this line used to name on its own. `P-6` asks for the
      source of the claim rather than of the page, and that range stopped covering the entry when
      the entry was rewritten. Corrected after the independent review of 1.28.

@@ -909,6 +909,10 @@ pub fn pump(app: &AppHandle, state: &mut PumpState) {
     pump_hook_health(app, state);
     pump_gesture(app, state);
     pump_precapture();
+    // Roadmap 1.26. Drains whatever the OCR worker has finished; a lock and an
+    // empty-queue check on the ticks where nothing has, which is almost all of
+    // them. It does not spawn and does not capture -- see `ocr::pump`.
+    crate::ocr::pump(app);
     pump_hover(app, state);
 }
 
@@ -933,7 +937,10 @@ fn pump_precapture() {
     if !matches!(*lock(&GESTURE), Some(Gesture::Create)) {
         return;
     }
-    if !armed().is_some_and(captures_on_create) {
+    // `consumes_held_frame`, not `captures_on_create`: roadmap 1.26 made OCR a
+    // second consumer of the held frame, and warming it for a Screenshot drag
+    // alone would leave every OCR area falling back to a full live capture.
+    if !armed().is_some_and(consumes_held_frame) {
         return;
     }
     precapture::refresh();
@@ -2980,7 +2987,15 @@ fn capture_on_create(app: &AppHandle, kind: AreaType, id: AreaId, bounds: Rect) 
     overlay::refresh_magnification(app, id);
     if captures_on_create(kind) {
         crate::output::capture_into_area(app, id, bounds);
-        // The spawned capture is what consumes the held frame, so the drag is
+    } else if recognises_on_create(kind) {
+        // **Roadmap 1.26.** An OCR area is not a capturing type -- nothing pins
+        // its pixels and nothing renders them -- but it does consume a frame,
+        // so it takes the same held-frame path a Screenshot does and reaches
+        // the same `frame_or_crop`. What it produces is text, not an image.
+        crate::ocr::recognise_into_area(app, id, bounds);
+    }
+    if consumes_held_frame(kind) {
+        // The spawned worker is what consumes the held frame, so the drag is
         // ended *without* clearing it. See [`precapture::end_drag`]. Retiring
         // the generation here is what stops a refresh capture still in flight
         // from landing after the gesture is over and sitting there unread.
@@ -2991,6 +3006,43 @@ fn capture_on_create(app: &AppHandle, kind: AreaType, id: AreaId, bounds: Rect) 
         // capturing drag happened to replace it.
         precapture::discard();
     }
+}
+
+/// Whether creating an area of `kind` runs OCR over its region (roadmap 1.26).
+///
+/// A separate predicate from [`captures_on_create`] rather than a widening of
+/// it, because the two answer different questions and only one of them is about
+/// pixels the user sees. `captures_on_create` means *this area holds a pinned
+/// still*, and it is consulted by `overlay::convert_area` to decide whether a
+/// conversion owes a capture and by `CaptureStore` to decide what to render. An
+/// OCR area holds no still: making it `true` there would draw a frozen
+/// screenshot underneath its text, which is the one thing an OCR area must not
+/// look like.
+///
+/// Exhaustive rather than `matches!` with a `_` arm, so adding an `AreaType`
+/// fails to compile here instead of defaulting to "recognises nothing".
+pub(crate) const fn recognises_on_create(kind: AreaType) -> bool {
+    match kind {
+        AreaType::Ocr => true,
+        AreaType::Default
+        | AreaType::Screenshot
+        | AreaType::Record
+        | AreaType::Upscale
+        | AreaType::Analysis
+        | AreaType::Filter => false,
+    }
+}
+
+/// Whether creating an area of `kind` consumes the pre-captured frame.
+///
+/// **Derived from the two predicates above rather than restated as a third
+/// list**, which is the rule [`captures_on_create`]'s own doc sets out: two
+/// hand-maintained copies of one fact agree today and drift the moment a type
+/// is added. The drift here would be silent and would cost the fast path -- an
+/// OCR area missing from a restated list falls back to a full live capture and
+/// nothing reports it as anything worse than "1.9c did not help much".
+const fn consumes_held_frame(kind: AreaType) -> bool {
+    captures_on_create(kind) || recognises_on_create(kind)
 }
 
 /// Whether creating an area of `kind` captures pixels.
@@ -3033,21 +3085,23 @@ pub(crate) const fn captures_on_create(kind: AreaType) -> bool {
 /// The menu label for converting an area *to* this type, or `None` when the
 /// menu does not offer it (roadmap task 1.27).
 ///
-/// # Why only four of the seven
+/// # Why only five of the seven
 ///
 /// A conversion has to leave the user with an area that does something.
-/// `Default`, `Screenshot`, `Filter` and -- since roadmap 1.24 -- `Upscale`
-/// have behaviour on the screen today; `Record`, `Ocr` and `Analysis` are
-/// modelled and have none, so offering them would ship three rows that turn a
-/// working area into a rectangle indistinguishable from a bug. One of the three
-/// has a roadmap task that will give it behaviour and its row arrives with it:
-/// 1.26 for `Ocr`. **`Record` and `Analysis` have no roadmap row at all**, so
-/// they are not merely unbuilt, they are unplanned (UP-TAKE `I-64`).
-/// **`Upscale` was in the second list until 2026-08-21** and this paragraph
-/// said "four rows" and "two of the four"; both counts moved with it.
-/// Said "each earns its row with the
-/// roadmap task that gives it behaviour" until the independent review of `#55`
-/// resolved the ids and found the quantifier true of half the set.
+/// `Default`, `Screenshot`, `Filter`, `Upscale` (roadmap 1.24) and -- since
+/// roadmap 1.26 -- `Ocr` have behaviour on the screen today; `Record` and
+/// `Analysis` are modelled and have none, so offering them would ship two rows
+/// that turn a working area into a rectangle indistinguishable from a bug.
+/// **`Record` and `Analysis` have no roadmap row at all**, so they are not
+/// merely unbuilt, they are unplanned (UP-TAKE `I-64`).
+///
+/// **The counts here have moved twice and both moves are the same event.**
+/// `Upscale` left the unbuilt list on 2026-08-21 and `Ocr` on 2026-09-02, each
+/// on the day its roadmap row shipped; the paragraph said "four of the seven"
+/// and named three unbuilt types until the second of those. Said "each earns
+/// its row with the roadmap task that gives it behaviour" until the independent
+/// review of `#55` resolved the ids and found the quantifier true of half the
+/// set.
 ///
 /// The row's own argument is what this defers to rather than contradicts. 1.27
 /// exists so those types are reachable *without inventing four more gestures*,
@@ -3076,7 +3130,12 @@ const fn conversion_label(kind: AreaType) -> Option<&'static str> {
         // half of it could no longer be found anywhere in the tree. A quotation
         // a reader can check has to survive the edit it describes.
         AreaType::Upscale => Some("Type: Upscale"),
-        AreaType::Record | AreaType::Ocr | AreaType::Analysis => None,
+        // Arrived with roadmap 1.26, on the same terms `Upscale` did: the doc
+        // above promised "1.26 for `Ocr`" and this is that line. An OCR area
+        // recognises its region and renders the text in place, so a conversion
+        // into it leaves the user with an area that does something.
+        AreaType::Ocr => Some("Type: OCR"),
+        AreaType::Record | AreaType::Analysis => None,
     }
 }
 
@@ -4157,11 +4216,12 @@ mod tests {
         };
         assert_eq!(opened.0, parent);
         assert_eq!(opened.1, expected, "the child list is not where it belongs");
-        // FOUR type rows since roadmap 1.24 added `Type: Upscale`; this was 3.
-        // Asserted as a count rather than a set because the set is pinned whole
-        // by `the_type_list_offers_the_four_types_that_do_something`; what this
-        // one is for is that the CHILD LIST holds them, not the top level.
-        assert_eq!(opened.2, 4);
+        // FIVE type rows since roadmap 1.26 added `Type: OCR`; this was 4 after
+        // 1.24's `Type: Upscale` and 3 before it. Asserted as a count rather
+        // than a set because the set is pinned whole by
+        // `the_type_list_offers_the_five_types_that_do_something`; what this one
+        // is for is that the CHILD LIST holds them, not the top level.
+        assert_eq!(opened.2, 5);
         // The three properties the geometry buys, asserted here rather than
         // trusted: flush against the parent row, top-aligned with it, and
         // anchored to that row rather than to the menu or the cursor.
@@ -5116,14 +5176,15 @@ mod tests {
     }
 
     #[test]
-    fn the_type_list_offers_the_four_types_that_do_something() {
-        // The other three are modelled and have no behaviour, so a row for them
+    fn the_type_list_offers_the_five_types_that_do_something() {
+        // The other two are modelled and have no behaviour, so a row for them
         // would convert a working area into one indistinguishable from a bug.
         //
-        // **THREE became FOUR on 2026-08-21**: roadmap 1.24 gave `Upscale`
-        // behaviour, and `conversion_label`'s own doc had promised the row
-        // would arrive with it. The list is asserted WHOLE and ordered, so a
-        // fifth row cannot appear without this going red.
+        // **THREE became FOUR on 2026-08-21 and FIVE on 2026-09-02**: roadmap
+        // 1.24 gave `Upscale` behaviour and roadmap 1.26 gave it to `Ocr`, and
+        // `conversion_label`'s own doc had promised each row would arrive with
+        // its task. The list is asserted WHOLE and ordered, so a sixth row
+        // cannot appear without this going red.
         let rows = menu_rows(&summary(AreaType::Default, Layer::Auto, Input::Interactive));
         assert_eq!(
             labels(type_rows(&rows)),
@@ -5134,6 +5195,7 @@ mod tests {
             vec![
                 "Type: Default",
                 "Type: Screenshot",
+                "Type: OCR",
                 "Type: Upscale",
                 "Type: Filter"
             ]
