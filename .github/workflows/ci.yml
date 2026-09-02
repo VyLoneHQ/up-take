@@ -204,7 +204,10 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       # ADR-0035: the ONNX Runtime and the PP-OCRv4 models ship INSIDE the
-      # installer, and `bundle.resources` in tauri.conf.json names them. They
+      # installer, and `bundle.resources` in tauri.release.conf.json names them
+      # (merged in with --config at the build step below; it is deliberately NOT
+      # in tauri.conf.json, because tauri-build validates resource paths at
+      # compile time). They
       # are ~31 MB of binaries acquired rather than committed, so a checkout
       # alone cannot build a bundle and these two steps are what make it
       # possible. Each verifies every byte against a pinned SHA-256 before
@@ -238,6 +241,17 @@ jobs:
       # every `cargo check`/`clippy`/`test` require 31 MB of acquired assets.
       - name: Build application
         run: pnpm tauri build --config src-tauri/tauri.release.conf.json
+
+      # Checks the ARTIFACT, not the invocation, and that distinction is the
+      # whole point. `tauri build` WITHOUT the --config above exits 0 and
+      # produces a 2.27 MB installer carrying no runtime, no models and none of
+      # the three notices -- measured, not feared. Every other gate stays green
+      # through that, because nothing else looks at what came out.
+      #
+      # So this cannot be routed around by a future release workflow that
+      # forgets the flag, which is what a check on the command line would be.
+      - name: Verify the bundle carries the runtime, the models and the notices
+        run: python scripts/verify-bundle.py
 
       # cargo-sbom publishes no Windows binary, so it is compiled here and
       # cached on its pinned version.

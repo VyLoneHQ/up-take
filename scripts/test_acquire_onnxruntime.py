@@ -8,7 +8,7 @@ loop wrote each member as it verified it, so an archive whose DLL matched and
 whose `LICENSE` did not left a verified runtime on disk **with no licence beside
 it** and exited 1. That is the precise state the licence obligation exists to
 prevent, and nothing downstream can see it: `cargo deny` walks the crate graph,
-the packaging test reads `tauri.conf.json` rather than the disk, and the
+the packaging test reads `tauri.release.conf.json` rather than the disk, and the
 application verifies the DLL's digest and not the notices'.
 
 The fix was two phases. These tests are what stop it regressing, and

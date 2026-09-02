@@ -18,9 +18,9 @@
 //! # Where the models and the runtime come from
 //!
 //! [`ADR-0035`] settled it: they **ship inside the installer**.
-//! `tauri.conf.json`'s `bundle.resources` puts the runtime and the notices
-//! beside the executable and the models in `<exe dir>/models`, which is exactly
-//! what [`models_directory`] and [`runtime_library`] resolve. An environment
+//! `tauri.release.conf.json`'s `bundle.resources` puts the runtime and the
+//! notices beside the executable and the models in `<exe dir>/models`, which is
+//! exactly what [`models_directory`] and [`runtime_library`] resolve. An environment
 //! variable overrides the models directory for development, and a developer with
 //! no bundled runtime falls through to `ORT_DYLIB_PATH`.
 //!
@@ -659,7 +659,20 @@ mod tests {
     /// Nothing else in either repository would notice.
     ///
     /// Reads `tauri.release.conf.json` at compile time, so this cannot drift
-    /// from the file the bundler actually uses.
+    /// from the file it checks.
+    ///
+    /// ⚠️ **It does NOT prove the bundler was given that file, and the previous
+    /// sentence here claimed it did** -- *"cannot drift from the file the
+    /// bundler actually uses"*. Round 3 of this change's review caught the
+    /// overclaim and named the input that defeats it: `pnpm tauri build`
+    /// without `--config src-tauri/tauri.release.conf.json` exits 0 and
+    /// produces a 2.27 MB installer carrying no runtime, no models and none of
+    /// the notices, with this test and every other gate still green. Measured,
+    /// not argued. **`scripts/verify-bundle.py` is what closes that**, by
+    /// checking the artifact rather than the invocation, and CI runs it after
+    /// every build. This test's job is narrower and still worth having: it
+    /// guards the CONTENT of the resource map, so a notice cannot be dropped
+    /// from the map itself.
     ///
     /// **Why the resources live in a release-only config at all**, since it
     /// looks like indirection for its own sake: `tauri-build`'s build script

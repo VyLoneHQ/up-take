@@ -45,8 +45,10 @@ Five of seven area types are built.
   no test measures it. Check anything you take from it before you use it.
   <!-- source: ROADMAP.md task 1.26 (the area type) and 1.31 (the pipeline that returns text);
        ADR-0035 (the runtime and the models ship in the installer) and ROADMAP.md 1.12 with
-       BACKLOG.md I-337, which LANDED 2026-09-02 -- the first caveat is now about where the
-       binaries live and how a build gets them, not about packaging being absent; BACKLOG.md
+       BACKLOG.md I-337, whose packaging work is what the sentence above describes -- the first
+       caveat is now about where the binaries live and how a build gets them, not about
+       packaging being absent. ⚠️ Written in the branch that does that work, so I-337 is still
+       marked open in BACKLOG.md as this is read; close it on the merge, not before. BACKLOG.md
        I-341 (no OCR accuracy bar exists, lane C). Delete the second caveat when I-341 is
        answered, and not before. -->
 - **An upscale area.** Sharpens the piece of screen under it, in place. It covers the same region

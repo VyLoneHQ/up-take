@@ -224,7 +224,7 @@ def main() -> int:
     # went and exited on the first failure. That is the precise state the
     # licence obligation exists to prevent, and nothing downstream can see it --
     # `cargo deny` walks the crate graph, the packaging test reads
-    # `tauri.conf.json` rather than the disk, and the application verifies the
+    # `tauri.release.conf.json` rather than the disk, and the application verifies the
     # DLL's digest and not the notices'.
     #
     # Two phases is the whole fix, and it makes the invariant structural instead
