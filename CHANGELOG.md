@@ -30,8 +30,8 @@ Until then it is written by hand.
   area that tints what is underneath and lets clicks pass through to it; an upscale area that
   sharpens the piece of screen under it in place, without magnifying it, as a still rather than a
   live view; and an OCR area that reads the text under it and shows what it read, in place. The
-  OCR models are not packaged yet, so a build made from this repository reports OCR as
-  unavailable and names the files it wanted.
+  installer carries the OCR runtime and the models; they are not in this repository, and two
+  checksummed scripts fetch them before a build can bundle them.
 - Freeze the screen while placing an area, with `Ctrl+Space`.
 - The overlay is excluded from screen capture, so other recording tools do not see it.
 

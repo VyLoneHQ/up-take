@@ -51,5 +51,6 @@
 pub mod fetch;
 pub mod install;
 pub mod manifest;
+pub mod onnxruntime;
 pub mod ppocr;
 pub mod verify;

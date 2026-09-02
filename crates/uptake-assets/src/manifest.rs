@@ -86,6 +86,17 @@ pub enum AssetKind {
     Model,
     /// The character dictionary the recogniser's classes index into.
     Dictionary,
+    /// A licence or third-party notice that must travel with a binary UP-TAKE
+    /// distributes.
+    ///
+    /// **Not decoration, and not something the build can check for itself.**
+    /// ADR-0032's licence section: MIT requires the notice to travel with a
+    /// copy, ONNX Runtime bundles other people's code so it ships a
+    /// `ThirdPartyNotices.txt` as well, and `cargo deny` walks the CRATE graph
+    /// so it can see neither file. Giving notices a kind is what lets a test
+    /// assert that they are in the manifest at all -- the only mechanical check
+    /// that exists for an obligation nothing else in this repository can reach.
+    Notice,
 }
 
 /// One file that must be acquired before OCR can run.
