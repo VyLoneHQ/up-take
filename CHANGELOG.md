@@ -39,8 +39,9 @@ Until then it is written by hand.
      plus 1.23 (Filter), 1.24 and 1.29 (Upscale; 1.29 and ADR-0031 are what make the entry say
      "sharpens" rather than "magnified", reversing 1.24 on the founder's verdict), 1.26 and 1.31
      (the OCR area and the pipeline behind it; ADR-0035 and BACKLOG.md I-337 are the source of
-     the "not packaged yet" sentence, which is a real limit of a build made today rather than a
-     disclaimer), 1.27 (area types chosen from the area's own menu) and
+     the sentence about where the runtime and the models live. That sentence said "not packaged
+     yet" until I-337 landed on 2026-09-02 and the installer began carrying them; this comment
+     went on quoting the removed wording for the length of one review round), 1.27 (area types chosen from the area's own menu) and
      1.28 (those types in a submenu), which the "Five area types" entry above derives from and
      which sit outside the 1.1-1.9f range this line used to name on its own. `P-6` asks for the
      source of the claim rather than of the page, and that range stopped covering the entry when

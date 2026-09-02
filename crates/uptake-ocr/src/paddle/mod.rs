@@ -18,7 +18,7 @@
 //! **Five of the six stages are pure**, which is the point of the split: the
 //! arithmetic that decides where a box sits and what the model said is tested in
 //! CI with no ONNX Runtime and no model file, and only session management here
-//! needs either. That is what makes 1.11 reviewable without a 25 MB fixture.
+//! needs either. That is what makes 1.11 reviewable without a ~31 MB fixture.
 
 pub mod detect;
 pub mod preprocess;

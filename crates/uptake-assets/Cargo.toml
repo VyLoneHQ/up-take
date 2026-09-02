@@ -2,7 +2,7 @@
 # in its binary: ONNX Runtime, and the PP-OCRv4 models.
 #
 # Platform-independent by design, and for the same reason uptake-ocr is: it is
-# testable without a window, without a network, and without the 25 MB of assets
+# testable without a window, without a network, and without the ~31 MB of assets
 # it exists to install. See the `fetch` module for the seam that makes that true.
 #
 # NO HTTP CLIENT DEPENDENCY HERE, and that is deliberate rather than unfinished.

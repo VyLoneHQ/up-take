@@ -215,11 +215,25 @@ def main() -> int:
     )
     print("  archive digest ok")
 
-    out: Path = arguments.out
-    out.mkdir(parents=True, exist_ok=True)
-
+    # EVERY member is extracted and verified BEFORE ANY of them is written.
+    #
+    # Round 1 of this change's independent review drilled the previous shape and
+    # found the invariant true per file and false across the set: an archive
+    # whose DLL matched and whose LICENSE did not left a verified runtime on
+    # disk with no licence beside it, because the loop wrote each file as it
+    # went and exited on the first failure. That is the precise state the
+    # licence obligation exists to prevent, and nothing downstream can see it --
+    # `cargo deny` walks the crate graph, the packaging test reads
+    # `tauri.conf.json` rather than the disk, and the application verifies the
+    # DLL's digest and not the notices'.
+    #
+    # Two phases is the whole fix, and it makes the invariant structural instead
+    # of a claim: staging cannot be left half-updated because nothing is written
+    # until everything has passed.
     root = "onnxruntime-win-x64-" + str(pins["VERSION"])
-    written: list[Path] = []
+    verified: list[tuple[Path, bytes]] = []
+    out: Path = arguments.out
+
     import io as _io
 
     with zipfile.ZipFile(_io.BytesIO(archive_bytes)) as archive:
@@ -234,20 +248,28 @@ def main() -> int:
                     "Its layout changed, which means the pinned version moved"
                     " without this script's MEMBERS map moving with it."
                 ) from None
-            # Verified AFTER extraction and BEFORE writing, so nothing that
-            # fails a check ever reaches the staging directory. ADR-0032's
-            # invariant, in the words uptake-assets uses for it: unverified
-            # bytes never become a usable file.
             check(
                 name,
                 extracted,
                 str(pins[key + "_SHA256"]),
                 int(pins[key + "_SIZE"]),  # type: ignore[arg-type]
             )
-            destination = out / name
-            destination.write_bytes(extracted)
-            written.append(destination)
-            print("  wrote " + str(destination) + "  (" + str(len(extracted)) + " bytes)")
+            print("  verified " + name)
+            verified.append((out / name, extracted))
+
+    # Phase two. Past this line every byte has passed both pins, so a partial
+    # write can only come from the filesystem itself failing -- and a stale file
+    # from an earlier version is removed rather than left beside a new one,
+    # which is the other way this directory could end up describing two
+    # different releases at once.
+    out.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    for destination, data in verified:
+        if destination.exists():
+            destination.unlink()
+        destination.write_bytes(data)
+        written.append(destination)
+        print("  wrote " + str(destination) + "  (" + str(len(data)) + " bytes)")
 
     print("")
     print("Verified and staged " + str(len(written)) + " file(s) in " + str(out) + ".")

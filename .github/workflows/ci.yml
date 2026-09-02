@@ -79,6 +79,13 @@ jobs:
       - name: Ratchet self-tests
         run: python3 scripts/test_dash_ratchet.py
 
+      # The acquisition step's own tests. They build synthetic archives rather
+      # than downloading the real 80 MB release, so they cost nothing here and
+      # still cover the invariant round 1 of I-337's review found broken:
+      # nothing is staged unless EVERY member passes its pin.
+      - name: Test the ONNX Runtime acquisition step
+        run: python3 scripts/test_acquire_onnxruntime.py
+
       - name: Em-dash ratchet
         run: python3 scripts/dash-ratchet.py --against origin/main
 

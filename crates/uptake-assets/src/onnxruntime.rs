@@ -51,6 +51,20 @@ pub const VERSION: &str = "1.29.0";
 pub const ARCHIVE_URL: &str = "https://github.com/microsoft/onnxruntime/releases/download/v1.29.0/onnxruntime-win-x64-1.29.0.zip";
 
 /// The archive's SHA-256, probed on 2026-09-02 by downloading it.
+///
+/// ⚠️ **Nothing polls this URL, and that is intended behaviour rather than a
+/// fault.** `scripts/convert-ppocr-models.py` says the same about its own
+/// upstream and it is worth saying here too: if Microsoft ever replaced this
+/// release asset in place, no probe in either repository would notice. The
+/// acquisition script would go red the next time it ran, and that red is the
+/// whole notification.
+///
+/// **The exposure is smaller here than for the models, and the difference is
+/// the host rather than an argument.** A GitHub release asset is effectively
+/// immutable once published: replacing one requires deleting and re-uploading
+/// it under the same tag. `ADR-0034`'s PaddleOCR archives sit on
+/// `paddleocr.bj.bcebos.com`, an ordinary object store with no such property,
+/// which is why those needed a workspace probe (`CL-32`) and this does not.
 pub const ARCHIVE_SHA256: &str = "c9b4b7086b529ad814f428c1bad028e20a25d7dc0699836775faace4ab5b78b2";
 
 /// The archive's length in bytes, from the same download.
