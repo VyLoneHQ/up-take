@@ -37,9 +37,10 @@ Five of seven area types are built.
   Two things worth knowing before you build this yourself. **The model files and the OCR
   runtime are not in this repository**, because they are 31 MB of binaries that belong in a
   release rather than in a git history. The installer carries them, and two scripts fetch and
-  verify them against pinned checksums before a build can bundle anything:
-  `scripts/acquire-onnxruntime.py` and `scripts/convert-ppocr-models.py`. Skip those and the
-  build stops at the bundler, which is deliberate. And **there is no accuracy standard yet**:
+  verify them against pinned checksums first: `scripts/acquire-onnxruntime.py` and
+  `scripts/convert-ppocr-models.py`. Building the app itself needs neither. Building an
+  **installer** needs both, plus the config that packages them:
+  `pnpm tauri build --config src-tauri/tauri.release.conf.json`. And **there is no accuracy standard yet**:
   it misreads characters, nothing in the project says what a good enough reading would be, and
   no test measures it. Check anything you take from it before you use it.
   <!-- source: ROADMAP.md task 1.26 (the area type) and 1.31 (the pipeline that returns text);

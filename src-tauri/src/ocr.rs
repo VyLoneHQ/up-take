@@ -27,9 +27,17 @@
 //! ⚠️ **The staging directory is NOT in the repository.** `src-tauri/assets` is
 //! gitignored and filled by `scripts/acquire-onnxruntime.py` and
 //! `scripts/convert-ppocr-models.py`, each of which verifies every byte against
-//! a pinned SHA-256 before writing. A build from a clean checkout that skips
-//! those steps fails at the bundler, which is the intended failure: it is
-//! louder than shipping an installer with no OCR in it.
+//! a pinned SHA-256 before writing.
+//!
+//! **Only the bundling step needs them**, and that is a deliberate split rather
+//! than a convenience. `tauri-build` validates `bundle.resources` paths at
+//! COMPILE time, so keeping them in `tauri.conf.json` made `cargo check`,
+//! `cargo clippy` and `cargo test` all fail on any machine without 31 MB of
+//! acquired assets. They live in `tauri.release.conf.json`, merged in with
+//! `--config` when an installer is built, so an ordinary build and `tauri dev`
+//! need nothing. **CI found this after a local run and an independent review
+//! had both passed** -- both ran where the assets already existed, which is the
+//! oldest shape there is.
 //!
 //! *(This paragraph said "it is not done -- nothing packages the files today"
 //! until 2026-09-02, which was true when `1.26` shipped and false four hours
@@ -650,18 +658,29 @@ mod tests {
     /// a signed installer** that is missing a licence it is required to carry.
     /// Nothing else in either repository would notice.
     ///
-    /// Reads `tauri.conf.json` at compile time, so this cannot drift from the
-    /// file the bundler actually uses.
+    /// Reads `tauri.release.conf.json` at compile time, so this cannot drift
+    /// from the file the bundler actually uses.
+    ///
+    /// **Why the resources live in a release-only config at all**, since it
+    /// looks like indirection for its own sake: `tauri-build`'s build script
+    /// validates every `bundle.resources` path at COMPILE time, not at bundle
+    /// time. With them in `tauri.conf.json`, `cargo check`, `cargo clippy` and
+    /// `cargo test` all fail on a machine without 31 MB of acquired assets --
+    /// which is every CI job except the one that builds an installer, and
+    /// every contributor's first checkout. Found by CI on this branch after a
+    /// local run and an independent review both passed, because both were on
+    /// machines where the assets already existed.
     #[test]
     fn the_installer_packages_every_asset_and_both_notice_sets() {
-        let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json"))
-            .expect("tauri.conf.json must be valid JSON");
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.release.conf.json"))
+                .expect("tauri.release.conf.json must be valid JSON");
         let resources = conf
             .get("bundle")
             .and_then(|bundle| bundle.get("resources"))
             .and_then(serde_json::Value::as_object)
             .expect(
-                "tauri.conf.json has no bundle.resources -- the installer packages nothing,                  so it ships no runtime, no models and no notices",
+                "tauri.release.conf.json has no bundle.resources: the installer packages nothing, so it ships no runtime, no models and no notices",
             );
         // The DESTINATIONS, which is what actually lands beside the executable.
         // Asserting on the source paths would pass while the files were

@@ -232,8 +232,12 @@ jobs:
       - name: Convert PP-OCRv4 to ONNX (pinned, checksummed)
         run: python scripts/convert-ppocr-models.py --out src-tauri/assets/models
 
+      # `--config` MERGES the release-only bundle resources into the base
+      # config. They are deliberately not in `tauri.conf.json`: `tauri-build`
+      # validates resource paths at COMPILE time, so putting them there makes
+      # every `cargo check`/`clippy`/`test` require 31 MB of acquired assets.
       - name: Build application
-        run: pnpm tauri build
+        run: pnpm tauri build --config src-tauri/tauri.release.conf.json
 
       # cargo-sbom publishes no Windows binary, so it is compiled here and
       # cached on its pinned version.
