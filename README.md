@@ -36,9 +36,9 @@ Five of seven area types are built.
 - **An OCR area.** Reads the text under it and shows you what it read, in the area itself.
   Two things worth knowing before you build this yourself. **The models are not in the
   repository and are not yet packaged**, so a build you make today reports OCR as unavailable
-  and tells you which files it wanted. And **there is no accuracy standard yet**: it reads
-  ordinary screen text well enough to be useful and it does misread characters, so do not
-  paste what it gives you somewhere that matters without looking at it.
+  and tells you which files it wanted. And **there is no accuracy standard yet**: it misreads
+  characters, nothing in the project says what a good enough reading would be, and no test
+  measures it. Check anything you take from it before you use it.
   <!-- source: ROADMAP.md task 1.26 (the area type) and 1.31 (the pipeline that returns text);
        ADR-0035 (the models ship in the installer) and ROADMAP.md 1.12 with BACKLOG.md I-337,
        which is the packaging that is NOT done and is why the caveat above is here rather than
