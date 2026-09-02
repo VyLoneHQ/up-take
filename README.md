@@ -16,10 +16,10 @@ what actually runs today if you build it yourself.
 
 ## What works today
 
-Four of seven area types are built.
+Five of seven area types are built.
 <!-- source: STATUS.md Phase 1 (1A merged, 1B partial); ROADMAP.md tasks 1.9b (Screenshot),
-     1.23 (Filter, merged 2026-08-12) and 1.24 (Upscale); PRODUCT-VISION.md section 3.1 (the
-     seven types).
+     1.23 (Filter, merged 2026-08-12), 1.24 (Upscale) and 1.26 (OCR); PRODUCT-VISION.md
+     section 3.1 (the seven types).
      This line said "Two of seven" until 2026-08-21. Filter shipped on 2026-08-12 and the
      count was never updated, so the front page of a public repository under-reported what
      was built for ten days. Update it in the same change that ships a type. -->
@@ -33,6 +33,17 @@ Four of seven area types are built.
   <!-- source: ROADMAP.md task 1.23 (merged 2026-08-12, PR #53, a59181a). The move limitation is
        that row's own "ships degraded and knowingly" note; the fix is task 1.17(b2), which is
        blocked on ADR-0028. Do not drop this sentence before b2 lands. -->
+- **An OCR area.** Reads the text under it and shows you what it read, in the area itself.
+  Two things worth knowing before you build this yourself. **The models are not in the
+  repository and are not yet packaged**, so a build you make today reports OCR as unavailable
+  and tells you which files it wanted. And **there is no accuracy standard yet**: it reads
+  ordinary screen text well enough to be useful and it does misread characters, so do not
+  paste what it gives you somewhere that matters without looking at it.
+  <!-- source: ROADMAP.md task 1.26 (the area type) and 1.31 (the pipeline that returns text);
+       ADR-0035 (the models ship in the installer) and ROADMAP.md 1.12 with BACKLOG.md I-337,
+       which is the packaging that is NOT done and is why the caveat above is here rather than
+       omitted; BACKLOG.md I-341 (no OCR accuracy bar exists, lane C). Delete the first caveat
+       when I-337 lands and the second when I-341 is answered, and not before. -->
 - **An upscale area.** Sharpens the piece of screen under it, in place. It covers the same region
   at the same size and does not magnify: what changes is how clean it looks. Three things it is
   not. It does not invent detail, and it cannot: the pixels under it are already the final ones
@@ -89,10 +100,12 @@ Around those:
 
 ## What is designed and not built
 
-Three more area types: record, read the text and describe the image. Areas that work
-on each other are the goal and are not a feature yet.
-<!-- source: PRODUCT-VISION.md section 3.1; ROADMAP.md section 1C (OCR unstarted) and Phase 2
-     (TTS, analysis); BACKLOG.md I-3 (composition unscheduled) -->
+Two more area types: record, and describe the image. Areas that work on each other are the
+goal and are not a feature yet.
+<!-- source: PRODUCT-VISION.md section 3.1; ROADMAP.md Phase 2 (analysis) and BACKLOG.md I-64
+     (Record and Analysis have no roadmap row at all); BACKLOG.md I-3 (composition unscheduled).
+     This said "Three more" and listed "read the text" until 2026-09-02: roadmap 1.26 moved the
+     OCR area into "what works today", with the two caveats stated there. -->
 
 Text extraction, reading aloud and AI description are all in that list. If you came here for those,
 they are the destination and not the current state.

@@ -44,6 +44,11 @@ pub mod engine;
 pub mod service;
 
 pub use engine::{Engine, EngineError, Recognition, TextBlock};
-pub use service::{Outcome, RequestId, Service, ServiceError};
+// `StopReason` joined this list with roadmap 1.26, which gave the crate its
+// first host: `Outcome::Stopped` carries one, so a caller that matches on an
+// outcome cannot name the thing it is holding without it. Its absence was an
+// omission in the public surface rather than a decision -- nothing outside this
+// crate had matched on an outcome before.
+pub use service::{Outcome, RequestId, Service, ServiceError, StopReason};
 
 pub mod paddle;

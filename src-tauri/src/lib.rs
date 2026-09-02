@@ -4,6 +4,7 @@ mod click_through;
 mod dev_harness;
 mod freeze;
 mod hotkey;
+mod ocr;
 mod output;
 mod overlay;
 mod overlay_state;

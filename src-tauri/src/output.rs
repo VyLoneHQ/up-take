@@ -523,6 +523,30 @@ fn capture(bounds: Rect, split: &mut Split) -> Result<(RgbaBitmap, Vec<u8>), Str
 /// would show up as nothing worse than "1.9c did not help much", which is the
 /// hardest kind of regression to notice.
 fn capture_or_crop(bounds: Rect, split: &mut Split) -> Result<(RgbaBitmap, Vec<u8>), String> {
+    let bitmap = frame_or_crop(bounds, split)?;
+    let encode = Instant::now();
+    let png = encode_png(&bitmap)?;
+    split.encode_ms = encode.elapsed().as_millis();
+    split.encoded_bytes = png.len();
+    Ok((bitmap, png))
+}
+
+/// [`capture_or_crop`]'s frame resolution, without the PNG.
+///
+/// # Why this is split out and not duplicated
+///
+/// Roadmap 1.26 gave the frame a **second** consumer with different needs: an
+/// OCR area wants the pixels and never the encoded bytes, because nothing
+/// renders them as an image and nothing puts them on the clipboard. Encoding a
+/// PNG for it would cost a full encode per recognition and throw the result
+/// away.
+///
+/// Splitting rather than writing a second resolver keeps the property
+/// [`capture_or_crop`] documents above: **one capture path and one crop**, so
+/// the frozen/held/live precedence cannot come to differ between a Screenshot
+/// area and an OCR area. The order here is ADR-0026 decision 6's, unchanged --
+/// what you see at release is what you get.
+fn frame_or_crop(bounds: Rect, split: &mut Split) -> Result<RgbaBitmap, String> {
     // The frozen still wins when the screen is frozen, and this ordering is
     // ADR-0026 decision 6: **what you see at release is what you get.** The
     // frame source is resolved here, at mouse-up, rather than at mouse-down —
@@ -536,12 +560,8 @@ fn capture_or_crop(bounds: Rect, split: &mut Split) -> Result<(RgbaBitmap, Vec<u
     // with what they see however long they take (ADR-0022 §5).
     if let Some(bitmap) = crate::freeze::crop(bounds) {
         split.source = Source::Frozen;
-        let encode = Instant::now();
-        let png = encode_png(&bitmap)?;
-        split.encode_ms = encode.elapsed().as_millis();
         split.bounds = Some(bounds);
-        split.encoded_bytes = png.len();
-        return Ok((bitmap, png));
+        return Ok(bitmap);
     }
     match crate::precapture::take(bounds) {
         Ok(bitmap) => {
@@ -551,18 +571,44 @@ fn capture_or_crop(bounds: Rect, split: &mut Split) -> Result<(RgbaBitmap, Vec<u
             // pre-capture's own cost is real but was paid during the drag,
             // before the interval starts.
             split.source = Source::Held;
-            let encode = Instant::now();
-            let png = encode_png(&bitmap)?;
-            split.encode_ms = encode.elapsed().as_millis();
             split.bounds = Some(bounds);
-            split.encoded_bytes = png.len();
-            Ok((bitmap, png))
+            Ok(bitmap)
         }
         Err(reason) => {
             split.source = Source::Fell(reason);
-            capture(bounds, split)
+            capture_bitmap(bounds, split)
         }
     }
+}
+
+/// The frame an OCR area recognises, with the same stage logging a capture gets.
+///
+/// # Why this exists beside [`capture_or_crop`] rather than being it
+///
+/// Roadmap 1.26's consumer wants the pixels and never the PNG -- nothing draws
+/// an OCR area's frame as an image and nothing puts it on the clipboard -- so
+/// going through [`capture_or_crop`] would pay a full encode per recognition
+/// and discard it. It shares [`frame_or_crop`], which is the part that must not
+/// fork: the frozen/held/live precedence is ADR-0026 decision 6 and belongs to
+/// every consumer of a region's pixels equally.
+///
+/// Owns its own [`Split`] rather than taking one, because unlike the capture
+/// path there is no second stage to fold into the same report.
+///
+/// # Errors
+///
+/// Whatever the frame resolution reports, already logged.
+pub(crate) fn frame_for_ocr(bounds: Rect) -> Result<RgbaBitmap, String> {
+    let started = Instant::now();
+    let mut split = Split::default();
+    let outcome = frame_or_crop(bounds, &mut split);
+    report(
+        "ocr-frame",
+        started,
+        &split,
+        outcome.as_ref().map(|_| ()).map_err(Clone::clone),
+    );
+    outcome
 }
 
 /// Captures `bounds` for a newly created area: publishes to the clipboard

@@ -4393,8 +4393,10 @@ dependencies = [
  "tauri-plugin-global-shortcut",
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
+ "uptake-assets",
  "uptake-capture",
  "uptake-core",
+ "uptake-ocr",
  "windows-capture",
  "windows-sys 0.61.2",
 ]
