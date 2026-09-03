@@ -272,6 +272,24 @@ mod tests {
     }
 
     #[test]
+    fn blocks_are_flattened_in_reading_order() {
+        // `blocks()` documents "in reading order" and NOTHING held it to that:
+        // round 2 of `PR #82`'s review reversed the line order inside it and all
+        // 598 tests stayed green, because the only assertion touching it counted
+        // blocks rather than reading them. A guarantee in a doc comment that no
+        // test can falsify is the same defect as round 1's, one method along.
+        let recognition = Recognition::from_lines(vec![
+            vec![block("hello", 0, 0), block("there", 50, 0)],
+            vec![block("general", 0, 40), block("kenobi", 60, 40)],
+        ]);
+        let order: Vec<&str> = recognition.blocks().map(|b| b.text.as_str()).collect();
+        assert_eq!(order, ["hello", "there", "general", "kenobi"]);
+        // And the two views agree, which is the property the restructure exists
+        // to make true rather than merely claim.
+        assert_eq!(recognition.text(), "hello there\ngeneral kenobi");
+    }
+
+    #[test]
     fn an_empty_recognition_is_an_empty_string() {
         assert_eq!(Recognition::from_lines(Vec::new()).text(), "");
         assert!(Recognition::from_lines(Vec::new()).is_empty());
