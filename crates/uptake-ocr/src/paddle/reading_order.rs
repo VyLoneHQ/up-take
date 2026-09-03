@@ -58,7 +58,8 @@ impl<T> Placed<T> {
     }
 }
 
-/// Sorts boxes into reading order: top to bottom, then left to right.
+/// Groups boxes into visual lines, in reading order: lines top to bottom, and
+/// the boxes within each line left to right.
 ///
 /// # Why grouping into lines beats sorting by `(y, x)`
 ///
@@ -74,10 +75,29 @@ impl<T> Placed<T> {
 /// needs column detection, which PP-OCR's `quad` output does not provide. A
 /// caller that needs true multi-column layout wants a layout-analysis stage this
 /// pipeline does not have.
+///
+/// ⚠️ **A flattening wrapper called `sort_into_reading_order` stood here until
+/// 2026-09-03.** `PaddleEngine::recognise` used to call it; since `UP-TAKE
+/// I-350` it calls this function directly, because the text assembler needs to
+/// know where the lines BREAK. That left the wrapper reachable only from its
+/// own tests, which round 2 of `PR #82`'s review named. It is deleted rather
+/// than documented as unused: its body was one `flatten`, and a `pub fn`
+/// nothing calls is API surface a later reader has to account for.
+///
+/// **Factored out rather than duplicated**, because the caller that assembles
+/// text needs to know where the lines BREAK, and re-deriving that from the
+/// rounded `Rect` on each block would be a second copy of this rule running on
+/// coarser data (`UP-TAKE I-350`). This module's own header warns that two
+/// sorts which disagree is a defect nobody sees until the text comes out
+/// scrambled; two GROUPINGS that disagree is the same defect.
 #[must_use]
-pub fn sort_into_reading_order<T>(mut items: Vec<Placed<T>>) -> Vec<Placed<T>> {
+pub fn group_into_lines<T>(mut items: Vec<Placed<T>>) -> Vec<Vec<Placed<T>>> {
     if items.len() < 2 {
-        return items;
+        return if items.is_empty() {
+            Vec::new()
+        } else {
+            vec![items]
+        };
     }
     // Stable pre-sort by top edge, so grouping walks the page downward and the
     // result is deterministic for boxes that tie.
@@ -107,16 +127,14 @@ pub fn sort_into_reading_order<T>(mut items: Vec<Placed<T>>) -> Vec<Placed<T>> {
         }
     }
 
-    let mut ordered = Vec::new();
-    for mut line in lines {
+    for line in &mut lines {
         line.sort_by(|a, b| {
             a.left
                 .partial_cmp(&b.left)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        ordered.extend(line);
     }
-    ordered
+    lines
 }
 
 /// Collapses whitespace runs to single spaces and trims the ends.
@@ -151,6 +169,36 @@ pub fn normalise_whitespace(text: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Round 1 of `PR #82`'s review found that changing this shape reddened
+    /// nothing: the difference was absorbed downstream twice over, by the
+    /// flattening wrapper that used to sit above this function and by
+    /// `Recognition::from_lines` dropping empty lines. Harmless and untested is
+    /// the pair of properties that lets a future edit to either absorber change
+    /// behaviour with nothing to catch it. **The wrapper is gone as of round 2,
+    /// so only one absorber remains** -- which makes pinning the shape here
+    /// worth more, not less.
+    #[test]
+    fn grouping_an_empty_input_yields_no_lines_rather_than_one_empty_line() {
+        let grouped = group_into_lines(Vec::<Placed<()>>::new());
+        assert!(
+            grouped.is_empty(),
+            "expected no lines, got {}",
+            grouped.len()
+        );
+    }
+
+    #[test]
+    fn grouping_a_single_item_yields_one_line_holding_it() {
+        let grouped = group_into_lines(vec![Placed {
+            top: 0.0,
+            bottom: 10.0,
+            left: 0.0,
+            payload: (),
+        }]);
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped.first().map(Vec::len), Some(1));
+    }
+
     fn placed(top: f32, bottom: f32, left: f32, label: &str) -> Placed<String> {
         Placed {
             top,
@@ -160,15 +208,25 @@ mod tests {
         }
     }
 
+    /// The grouping, flattened, which is what these tests assert against.
+    ///
+    /// Was `sort_into_reading_order` until round 2 of `PR #82`'s review
+    /// observed that production had stopped calling it. Kept as a test helper
+    /// so these assertions still read as statements about reading order,
+    /// while exercising the function the pipeline actually uses.
+    fn sorted<T>(items: Vec<Placed<T>>) -> Vec<Placed<T>> {
+        group_into_lines(items).into_iter().flatten().collect()
+    }
+
     fn labels(items: &[Placed<String>]) -> Vec<&str> {
         items.iter().map(|item| item.payload.as_str()).collect()
     }
 
     #[test]
     fn an_empty_or_single_item_list_is_returned_unchanged() {
-        assert!(sort_into_reading_order(Vec::<Placed<String>>::new()).is_empty());
+        assert!(sorted(Vec::<Placed<String>>::new()).is_empty());
         let one = vec![placed(5.0, 15.0, 20.0, "only")];
-        assert_eq!(labels(&sort_into_reading_order(one)), ["only"]);
+        assert_eq!(labels(&sorted(one)), ["only"]);
     }
 
     #[test]
@@ -178,10 +236,7 @@ mod tests {
             placed(10.0, 22.0, 100.0, "first"),
             placed(10.0, 22.0, 200.0, "second"),
         ];
-        assert_eq!(
-            labels(&sort_into_reading_order(items)),
-            ["first", "second", "third"]
-        );
+        assert_eq!(labels(&sorted(items)), ["first", "second", "third"]);
     }
 
     #[test]
@@ -190,7 +245,7 @@ mod tests {
             placed(100.0, 112.0, 10.0, "lower"),
             placed(10.0, 22.0, 10.0, "upper"),
         ];
-        assert_eq!(labels(&sort_into_reading_order(items)), ["upper", "lower"]);
+        assert_eq!(labels(&sorted(items)), ["upper", "lower"]);
     }
 
     #[test]
@@ -202,7 +257,7 @@ mod tests {
             placed(9.0, 23.0, 200.0, "second"),
             placed(11.0, 22.0, 100.0, "first"),
         ];
-        assert_eq!(labels(&sort_into_reading_order(items)), ["first", "second"]);
+        assert_eq!(labels(&sorted(items)), ["first", "second"]);
     }
 
     #[test]
@@ -215,7 +270,7 @@ mod tests {
             placed(10.0, 24.0, 500.0, "line1-right"),
         ];
         assert_eq!(
-            labels(&sort_into_reading_order(items)),
+            labels(&sorted(items)),
             ["line1-left", "line1-right", "line2-left", "line2-right"]
         );
     }
@@ -227,7 +282,7 @@ mod tests {
             placed(10.0, 30.0, 200.0, "small"),
             placed(6.0, 34.0, 100.0, "tall"),
         ];
-        assert_eq!(labels(&sort_into_reading_order(items)), ["tall", "small"]);
+        assert_eq!(labels(&sorted(items)), ["tall", "small"]);
     }
 
     #[test]
@@ -258,7 +313,7 @@ mod tests {
             placed(8.0, 28.0, 5.0, "b"),
             placed(16.0, 36.0, 0.0, "c"),
         ];
-        let ordered = sort_into_reading_order(items);
+        let ordered = sorted(items);
         assert_eq!(labels(&ordered), ["b", "a", "c"]);
     }
 
@@ -283,10 +338,7 @@ mod tests {
     fn ordering_is_deterministic_for_identical_boxes() {
         let first = vec![placed(10.0, 20.0, 5.0, "x"), placed(10.0, 20.0, 5.0, "y")];
         let second = first.clone();
-        assert_eq!(
-            labels(&sort_into_reading_order(first)),
-            labels(&sort_into_reading_order(second))
-        );
+        assert_eq!(labels(&sorted(first)), labels(&sorted(second)));
     }
 
     #[test]

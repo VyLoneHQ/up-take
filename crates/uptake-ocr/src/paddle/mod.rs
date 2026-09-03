@@ -585,12 +585,29 @@ impl Engine for PaddleEngine {
             });
         }
 
-        let blocks = reading_order::sort_into_reading_order(placed)
-            .into_iter()
-            .map(|item| item.payload)
-            .collect();
-        Ok(Recognition { blocks })
+        Ok(assemble(placed))
     }
+}
+
+/// Groups placed blocks into visual lines and builds the [`Recognition`].
+///
+/// **Grouped, not merely sorted.** [`Recognition::text`] needs to know where
+/// the lines BREAK, and this is the last point at which the subpixel edges
+/// that decide it still exist -- `TextBlock::bounds` has been rounded to whole
+/// pixels by then. Re-deriving lines downstream would run the same rule on
+/// coarser data and could disagree near the overlap threshold (`UP-TAKE
+/// I-350`).
+///
+/// Extracted from [`PaddleEngine::recognise`] so that it is testable at all.
+/// Inline, the only thing distinguishing this from a flat sort was a hand-run
+/// card sweep that CI does not execute, and reverting it would have left every
+/// test green.
+fn assemble(placed: Vec<Placed<TextBlock>>) -> Recognition {
+    let lines = reading_order::group_into_lines(placed)
+        .into_iter()
+        .map(|line| line.into_iter().map(|item| item.payload).collect())
+        .collect();
+    Recognition::from_lines(lines)
 }
 
 /// Converts subpixel bounds into the integer [`Rect`] a [`TextBlock`] carries.
@@ -662,6 +679,53 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("somewhere-else"), "message: {message}");
         assert!(message.contains("ours"), "message: {message}");
+    }
+
+    /// A block sitting at the given vertical band, for [`assemble`]'s tests.
+    fn placed_block(text: &str, left: f32, top: f32, bottom: f32) -> Placed<TextBlock> {
+        Placed {
+            top,
+            bottom,
+            left,
+            payload: TextBlock {
+                text: text.to_owned(),
+                bounds: rect_from_bounds(left, top, left + 40.0, bottom),
+            },
+        }
+    }
+
+    #[test]
+    fn assemble_keeps_one_visual_line_on_one_line() {
+        // `UP-TAKE I-350`. Four boxes sharing a vertical band is what one
+        // sentence at 96 px actually produces; measured, not supposed. Before
+        // the fix this came out as four lines.
+        let recognition = assemble(vec![
+            placed_block("The", 34.0, 31.0, 117.0),
+            placed_block("quick", 200.0, 30.0, 125.0),
+            placed_block("brown", 456.0, 39.0, 109.0),
+            placed_block("fox", 750.0, 30.0, 113.0),
+        ]);
+        assert_eq!(recognition.text(), "The quick brown fox");
+    }
+
+    #[test]
+    fn assemble_separates_stacked_lines() {
+        let recognition = assemble(vec![
+            placed_block("top", 0.0, 0.0, 20.0),
+            placed_block("bottom", 0.0, 40.0, 60.0),
+        ]);
+        assert_eq!(recognition.text(), "top\nbottom");
+    }
+
+    #[test]
+    fn assemble_orders_a_line_left_to_right_regardless_of_input_order() {
+        // The grouping also owns ordering WITHIN a line, so a detector that
+        // emits boxes out of order must still read correctly.
+        let recognition = assemble(vec![
+            placed_block("world", 100.0, 0.0, 20.0),
+            placed_block("hello", 0.0, 1.0, 21.0),
+        ]);
+        assert_eq!(recognition.text(), "hello world");
     }
 
     #[test]
