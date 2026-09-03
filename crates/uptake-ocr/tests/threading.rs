@@ -96,12 +96,10 @@ impl Engine for GatedEngine {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.started.send(frame.width()).unwrap();
         self.release.lock().unwrap().recv().unwrap();
-        Ok(Recognition {
-            blocks: vec![TextBlock {
-                text: format!("width {}", frame.width()),
-                bounds: Rect::new(0, 0, frame.width(), frame.height()),
-            }],
-        })
+        Ok(Recognition::from_lines(vec![vec![TextBlock {
+            text: format!("width {}", frame.width()),
+            bounds: Rect::new(0, 0, frame.width(), frame.height()),
+        }]]))
     }
 }
 

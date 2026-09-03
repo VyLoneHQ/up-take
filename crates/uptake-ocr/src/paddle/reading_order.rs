@@ -75,9 +75,26 @@ impl<T> Placed<T> {
 /// caller that needs true multi-column layout wants a layout-analysis stage this
 /// pipeline does not have.
 #[must_use]
-pub fn sort_into_reading_order<T>(mut items: Vec<Placed<T>>) -> Vec<Placed<T>> {
+pub fn sort_into_reading_order<T>(items: Vec<Placed<T>>) -> Vec<Placed<T>> {
+    group_into_lines(items).into_iter().flatten().collect()
+}
+
+/// The same grouping [`sort_into_reading_order`] performs, without flattening.
+///
+/// **Factored out rather than duplicated**, because the caller that assembles
+/// text needs to know where the lines BREAK, and re-deriving that from the
+/// rounded `Rect` on each block would be a second copy of this rule running on
+/// coarser data (`UP-TAKE I-350`). This module's own header warns that two
+/// sorts which disagree is a defect nobody sees until the text comes out
+/// scrambled; two GROUPINGS that disagree is the same defect.
+#[must_use]
+pub fn group_into_lines<T>(mut items: Vec<Placed<T>>) -> Vec<Vec<Placed<T>>> {
     if items.len() < 2 {
-        return items;
+        return if items.is_empty() {
+            Vec::new()
+        } else {
+            vec![items]
+        };
     }
     // Stable pre-sort by top edge, so grouping walks the page downward and the
     // result is deterministic for boxes that tie.
@@ -107,16 +124,14 @@ pub fn sort_into_reading_order<T>(mut items: Vec<Placed<T>>) -> Vec<Placed<T>> {
         }
     }
 
-    let mut ordered = Vec::new();
-    for mut line in lines {
+    for line in &mut lines {
         line.sort_by(|a, b| {
             a.left
                 .partial_cmp(&b.left)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        ordered.extend(line);
     }
-    ordered
+    lines
 }
 
 /// Collapses whitespace runs to single spaces and trims the ends.
