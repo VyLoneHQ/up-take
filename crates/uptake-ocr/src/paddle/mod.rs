@@ -144,20 +144,27 @@ impl PaddleEngine {
     /// review, which noted this comment claimed the common case was closed while
     /// the config shape that reproduces it went unchecked.)*
     ///
-    /// **It does not close every case:** a present-but-corrupt or
-    /// wrong-architecture DLL still panics inside `ort`, and only `ort` gaining
-    /// a fallible initialiser fixes that.
+    /// **The corrupt-DLL case is closed too, as of `I-349`'s fix.** This
+    /// paragraph used to end *"only `ort` gaining a fallible initialiser fixes
+    /// that"*. It has one: [`ort::init_from`] takes the path and returns a
+    /// `Result`, and [`load_runtime`] uses it, so a present-but-corrupt or
+    /// wrong-architecture library now returns `Unavailable` rather than
+    /// unwinding. That was `I-330`'s last untested residual.
     pub fn load(config: &PaddleConfig, options: PaddleOptions) -> Result<Self, EngineError> {
         // Unconditional, and that is the point: every way of reaching `ort`
         // without a resolvable runtime ends in a panic, so every way of reaching
         // it has to pass through here first.
-        resolve_runtime(
+        let runtime = resolve_runtime(
             config.runtime_library.as_deref(),
             std::env::var_os(DYLIB_PATH_VAR)
                 .map(PathBuf::from)
                 .as_deref(),
             &|path: &Path| path.is_file(),
         )?;
+        // Hand `ort` the file we just resolved. Without this the resolution
+        // above was advisory: `load` validated a path, dropped it, and left
+        // `ort` to find its own from the environment (`I-349`).
+        load_runtime(&runtime)?;
 
         let dictionary_text = std::fs::read_to_string(&config.dictionary).map_err(|error| {
             EngineError::Unavailable(format!(
@@ -326,20 +333,19 @@ const DYLIB_PATH_VAR: &str = "ORT_DYLIB_PATH";
 
 /// Verifies ONNX Runtime is present and reachable, before `ort` can panic on it.
 ///
-/// # Why this cannot just set the variable itself
+/// # It does not set the environment variable, and no longer asks anyone to
 ///
-/// The obvious implementation is `std::env::set_var(DYLIB_PATH_VAR, runtime)`.
-/// It is not available here and **should not be**: since the 2024 edition
-/// `set_var` is `unsafe`, because the process environment is global mutable
-/// state that other threads may be reading, and this crate is
-/// `#![forbid(unsafe_code)]`. The engine is constructed on the OCR worker thread
-/// while the UI thread is running, which is precisely the racy case that rule
-/// exists for.
+/// `std::env::set_var` is `unsafe` since the 2024 edition and this crate is
+/// `#![forbid(unsafe_code)]`, so setting `ORT_DYLIB_PATH` here was never an
+/// option. **This block used to conclude that the variable was therefore the
+/// host's to set at startup. That conclusion shipped a product whose OCR never
+/// worked** (`I-349`): the requirement existed only as a doc comment, nothing
+/// in `src-tauri` ever honoured it, and `resolve_runtime` refused the one
+/// configuration an installed build ever produces. [`load_runtime`] deletes the
+/// requirement rather than restating it, by handing the path to `ort` directly.
 ///
-/// So the variable is the **host's** to set, once, at startup, before any thread
-/// exists to race with. This function's job is to make that requirement
-/// impossible to miss: it fails with an actionable message rather than letting
-/// `ort` unwind three frames deeper with `Failed to load ONNX Runtime dylib`.
+/// What survives is this function's other job: deciding WHICH path to load, and
+/// failing with an actionable message when there is no answer.
 ///
 /// # Why it takes the environment AND the filesystem as arguments
 ///
@@ -409,12 +415,12 @@ fn resolve_runtime_path(
             actual.display(),
             wanted.display()
         ))),
-        (Some(wanted), None) => Err(EngineError::Unavailable(format!(
-            "{DYLIB_PATH_VAR} is not set; the host must set it to {} before starting \
-             the OCR service, because this crate forbids the unsafe code that \
-             setting it here would need",
-            wanted.display()
-        ))),
+        // The shipping shape: an installed UP-TAKE configures the verified
+        // bundled runtime and sets no variable. `load_runtime` loads exactly
+        // this file, so no variable is needed and none is demanded. **This arm
+        // returned an error until 2026-09-03**, which is `I-349`: it is the arm
+        // every installed build takes, so OCR was unavailable in all of them.
+        (Some(wanted), None) => Ok(wanted.to_path_buf()),
         // No configured path, but the host set the variable: a complete
         // instruction, and `ort` will use exactly this file.
         (None, Some(actual)) => Ok(actual.to_path_buf()),
@@ -428,6 +434,42 @@ fn resolve_runtime_path(
                 .to_owned(),
         )),
     }
+}
+
+/// Loads ONNX Runtime from `path`, before any other `ort` API is touched.
+///
+/// # What this replaced
+///
+/// `ort` resolves its dylib lazily inside a `OnceLock` with
+/// `.expect("Failed to load ONNX Runtime dylib")`, reading `ORT_DYLIB_PATH` and
+/// falling back to a bare library name when it is unset. Neither is acceptable
+/// here: the panic is `I-330`, and the bare-name fallback loads whatever the
+/// machine happens to offer instead of the file `ADR-0032` had us place and
+/// checksum. [`ort::init_from`] takes the path directly and returns a `Result`,
+/// so both become an ordinary `EngineError::Unavailable`.
+///
+/// **It is safe code, which is why the fix belongs here rather than in the
+/// host.** The previous design needed `unsafe` (`set_var`) and so was pushed
+/// across a crate boundary into `src-tauri`, where nothing implemented it.
+///
+/// # ONNX Runtime is loaded once per process
+///
+/// `ort` keeps the handle in a `OnceLock`, so a second call naming a different
+/// file keeps the first library and still reports success. That is why
+/// [`resolve_runtime_path`] refuses a configured path that disagrees with
+/// `ORT_DYLIB_PATH` rather than quietly preferring one of them.
+fn load_runtime(path: &Path) -> Result<(), EngineError> {
+    let environment = ort::init_from(path).map_err(|error| {
+        EngineError::Unavailable(format!(
+            "ONNX Runtime at {} could not be loaded: {error}",
+            path.display()
+        ))
+    })?;
+    // `commit` reports whether THIS call installed the environment options. A
+    // `false` means an earlier engine in this process already did, which is not
+    // a failure -- the load above is the part that had to succeed, and it has.
+    let _ = environment.commit();
+    Ok(())
 }
 
 /// Opens one ONNX session, naming which model failed.
@@ -556,17 +598,15 @@ mod tests {
     }
 
     #[test]
-    fn resolve_runtime_refuses_a_configured_path_with_the_variable_unset() {
-        let error = resolve_runtime(
-            Some(&path("C:/ours/onnxruntime.dll")),
-            None,
-            &everything_exists,
-        )
-        .unwrap_err();
-        assert!(error.is_fatal());
-        assert!(
-            error.to_string().contains("ORT_DYLIB_PATH is not set"),
-            "message: {error}"
+    fn resolve_runtime_takes_the_configured_path_with_the_variable_unset() {
+        // `I-349`'s regression test, and the shape every installed build has:
+        // a verified bundled runtime configured, no environment variable set.
+        // This arm returned an error until 2026-09-03, so OCR was unavailable
+        // in every installed build from `1.26` onward.
+        let configured = path("C:/ours/onnxruntime.dll");
+        assert_eq!(
+            resolve_runtime(Some(&configured), None, &everything_exists).unwrap(),
+            configured
         );
     }
 
@@ -668,14 +708,14 @@ mod tests {
 
         // WHICH guard fires depends on ORT_DYLIB_PATH, which this crate cannot
         // set (unsafe) and this test must not depend on: unset in a normal test
-        // run, so `resolve_runtime` refuses before the file check; set on a
-        // machine with a real runtime, so the file check refuses instead. The
+        // run, so the file check refuses the configured path; set on a machine
+        // with a real runtime, so the two disagree and that guard refuses. The
         // property pinned here holds either way -- `load` RETURNS an
         // `Unavailable` for a runtime it cannot use, and does not unwind.
         let message = error.to_string();
         assert!(
             message.contains("ONNX Runtime not found")
-                || message.contains("ORT_DYLIB_PATH is not set")
+                || message.contains("could not be loaded")
                 || message.contains("must agree"),
             "load failed for an unrelated reason: {message}"
         );
