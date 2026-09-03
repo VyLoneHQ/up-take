@@ -166,6 +166,34 @@ pub fn normalise_whitespace(text: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Round 1 of `PR #82`'s review found that changing this shape reddened
+    /// nothing: the difference is absorbed downstream twice over, by
+    /// `sort_into_reading_order`'s flatten and by `Recognition::from_lines`
+    /// dropping empty lines. Harmless today and untested, which is the pair of
+    /// properties that lets a future edit to either absorber change behaviour
+    /// with nothing to catch it.
+    #[test]
+    fn grouping_an_empty_input_yields_no_lines_rather_than_one_empty_line() {
+        let grouped = group_into_lines(Vec::<Placed<()>>::new());
+        assert!(
+            grouped.is_empty(),
+            "expected no lines, got {}",
+            grouped.len()
+        );
+    }
+
+    #[test]
+    fn grouping_a_single_item_yields_one_line_holding_it() {
+        let grouped = group_into_lines(vec![Placed {
+            top: 0.0,
+            bottom: 10.0,
+            left: 0.0,
+            payload: (),
+        }]);
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped.first().map(Vec::len), Some(1));
+    }
+
     fn placed(top: f32, bottom: f32, left: f32, label: &str) -> Placed<String> {
         Placed {
             top,

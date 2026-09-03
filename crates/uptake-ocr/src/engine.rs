@@ -13,51 +13,54 @@ use uptake_core::geometry::Rect;
 /// One run of recognition over one frame.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Recognition {
-    /// The blocks found, already in reading order.
+    /// The blocks found, grouped into visual lines, each line ordered left to
+    /// right, the lines themselves in reading order.
     ///
-    /// **Ordering is the engine's job, not the caller's.** `architecture.md`
-    /// section 3.2 puts *"reading-order sort, whitespace normalisation"* inside
-    /// the OCR pipeline, before the result leaves it. A caller that had to sort
+    /// **Ordering and grouping are the engine's job, not the caller's.**
+    /// `architecture.md` section 3.2 (in the workspace repository, not this
+    /// one) puts *"reading-order sort, whitespace normalisation"* inside the
+    /// OCR pipeline, before the result leaves it. A caller that had to sort
     /// would need the layout heuristics the engine already has, and two sorts
     /// that disagree is a defect nobody would see until the text came out
     /// scrambled on a two-column screenshot.
-    pub blocks: Vec<TextBlock>,
-    /// Where each visual line begins, as indices into [`Recognition::blocks`].
     ///
-    /// **Private on purpose.** The engine computes this from the detector's
-    /// SUBPIXEL box edges, which is the only place that precision exists;
-    /// `TextBlock::bounds` has already been rounded to whole pixels. A caller
-    /// re-deriving lines from those rounded rectangles would be running a
-    /// second copy of a rule on worse data, and near the overlap threshold the
-    /// two copies can disagree. Keeping the field private means every
-    /// `Recognition` goes through [`Recognition::from_lines`] and the invariant
-    /// holds by construction rather than by convention.
-    line_starts: Vec<usize>,
+    /// **This is the SINGLE representation, and that is the point.** An earlier
+    /// version of this fix kept a public flat `blocks` beside a private
+    /// `line_starts` index, and its own doc comment claimed the pairing
+    /// therefore "holds by construction". **It did not**: the independent
+    /// review of `PR #82` mutated the public field and showed that pushing a
+    /// block merged it onto a stale line, while truncating made whole lines
+    /// vanish from [`Recognition::text`] with no error at all. Two containers
+    /// that must agree, one of them writable, is a convention wearing a type
+    /// system's clothes. Grouping is now unrepresentable-if-wrong instead.
+    lines: Vec<Vec<TextBlock>>,
 }
 
 impl Recognition {
     /// Builds a recognition from blocks already grouped into visual lines and
     /// ordered left to right within each.
     ///
-    /// The only constructor, so [`Recognition::line_starts`] cannot disagree
-    /// with [`Recognition::blocks`].
+    /// Empty lines are dropped, so no line ever renders as a blank one.
     #[must_use]
     pub fn from_lines(lines: Vec<Vec<TextBlock>>) -> Self {
-        let mut blocks = Vec::new();
-        let mut line_starts = Vec::with_capacity(lines.len());
-        for line in lines {
-            // An empty line contributes no start, so `line_starts` never names
-            // an index that is also the next line's start.
-            if line.is_empty() {
-                continue;
-            }
-            line_starts.push(blocks.len());
-            blocks.extend(line);
-        }
         Self {
-            blocks,
-            line_starts,
+            lines: lines.into_iter().filter(|line| !line.is_empty()).collect(),
         }
+    }
+
+    /// Every block, in reading order, flattened across lines.
+    ///
+    /// An accessor rather than a public field: see the note on
+    /// [`Recognition::lines`] for what a writable one cost.
+    pub fn blocks(&self) -> impl Iterator<Item = &TextBlock> {
+        self.lines.iter().flatten()
+    }
+
+    /// The blocks grouped by visual line, for a caller that needs the layout
+    /// rather than the text.
+    #[must_use]
+    pub fn lines(&self) -> &[Vec<TextBlock>] {
+        &self.lines
     }
 
     /// The whole recognition as one string: blocks on one visual line joined
@@ -73,35 +76,36 @@ impl Recognition {
     /// to equal one line. Measured on ground-truth cards: one sentence at 14,
     /// 28 and 56 px each produced ONE block and read correctly; the same
     /// sentence at 96 px produced FOUR and came out one word per line.
+    ///
+    /// **There is no fallible indexing here any more, and that is deliberate.**
+    /// The first version of this fix sliced a flat `blocks` by a parallel index
+    /// and silently skipped a range that did not resolve. Round 1 of the review
+    /// showed that branch had no test able to drive it, and that when the
+    /// public field made it reachable it hid total content loss. `UT-F-75` is
+    /// this project's record of a guard whose refusal path is never driven, so
+    /// the guard is gone along with the shape that needed it.
     #[must_use]
     pub fn text(&self) -> String {
-        let mut lines = Vec::with_capacity(self.line_starts.len());
-        for (position, &start) in self.line_starts.iter().enumerate() {
-            let end = self
-                .line_starts
-                .get(position + 1)
-                .copied()
-                .unwrap_or(self.blocks.len());
-            // `get` rather than an index: the invariant is upheld by
-            // `from_lines`, and a bounds check is cheaper than a panic in the
-            // one function whose output the user reads.
-            let Some(line) = self.blocks.get(start..end) else {
-                continue;
-            };
-            lines.push(
+        self.lines
+            .iter()
+            .map(|line| {
                 line.iter()
                     .map(|block| block.text.as_str())
                     .collect::<Vec<_>>()
-                    .join(" "),
-            );
-        }
-        lines.join("\n")
+                    .join(" ")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Whether anything was found. A frame of blank wall is not an error.
+    ///
+    /// Equivalent to having no blocks, because [`Recognition::from_lines`]
+    /// drops empty lines: a non-empty `lines` always carries at least one
+    /// block.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.blocks.is_empty()
+        self.lines.is_empty()
     }
 }
 
@@ -284,7 +288,12 @@ mod tests {
             vec![block("beta", 0, 40)],
         ]);
         assert_eq!(recognition.text(), "alpha\nbeta");
-        assert_eq!(recognition.blocks.len(), 2);
+        assert_eq!(recognition.blocks().count(), 2);
+        assert_eq!(
+            recognition.lines().len(),
+            2,
+            "the empty line must not survive"
+        );
     }
 
     #[test]

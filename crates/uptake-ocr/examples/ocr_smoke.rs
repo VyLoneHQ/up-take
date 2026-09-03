@@ -126,8 +126,9 @@ fn main() -> ExitCode {
     let elapsed = started.elapsed();
 
     println!("recognised in {} ms", elapsed.as_millis());
-    println!("blocks: {}", recognition.blocks.len());
-    for block in &recognition.blocks {
+    println!("blocks: {}", recognition.blocks().count());
+    println!("lines:  {}", recognition.lines().len());
+    for block in recognition.blocks() {
         println!(
             "  [{:>4},{:>4} {:>4}x{:>4}]  {}",
             block.bounds.origin.x,
