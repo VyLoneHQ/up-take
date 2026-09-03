@@ -26,3 +26,12 @@ __pycache__/
 # The manifest in crates/uptake-assets/src/ppocr.rs carries their digests, which
 # is the part that IS ours to version.
 /dist
+
+# The staging directory the installer packages: the ONNX Runtime DLL, its two
+# notice files, and the converted PP-OCRv4 models. ~31 MB of binaries that are
+# ACQUIRED rather than committed -- `scripts/acquire-onnxruntime.py` and
+# `scripts/convert-ppocr-models.py` each verify every byte against a pinned
+# SHA-256 before writing here, which is ADR-0032 decision 2. Committing them
+# would put unreviewable binaries in a public repository and make the pin a
+# description rather than a check.
+/src-tauri/assets

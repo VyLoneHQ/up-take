@@ -15,23 +15,44 @@
 //! this file; it captures a rectangle, hands the frame to the service, and
 //! turns what comes back into an event the overlay can draw.
 //!
-//! # Where the models come from, and why that is a seam rather than a decision
+//! # Where the models and the runtime come from
 //!
-//! [`ADR-0035`] settled it: the runtime and the models **ship inside the
-//! installer**. That work is roadmap `1.12`'s surviving core and UP-TAKE
-//! `I-337`, and **it is not done** -- nothing packages the files today. This
-//! module therefore resolves them from a directory and reports honestly when
-//! they are not there, which is the same code path an installed UP-TAKE will
-//! take once they are: [`models_directory`] answers `<exe dir>/models`, the
-//! place the installer will write, and an environment variable overrides it for
-//! development.
+//! [`ADR-0035`] settled it: they **ship inside the installer**.
+//! `tauri.release.conf.json`'s `bundle.resources` puts the runtime and the
+//! notices beside the executable and the models in `<exe dir>/models`, which is
+//! exactly what [`models_directory`] and [`runtime_library`] resolve. An environment
+//! variable overrides the models directory for development, and a developer with
+//! no bundled runtime falls through to `ORT_DYLIB_PATH`.
 //!
-//! **The engine is never loaded from unverified bytes.** [`ADR-0032`] decision
-//! 2 requires a pinned SHA-256 verified before load, and `uptake-assets`
-//! already implements exactly that check -- so [`resolve_config`] runs
-//! `Installer::state_of` over all three files and refuses the lot if any is
-//! missing or corrupt. That costs one hash of ~15 MB, once, on the first OCR
-//! area of a session. It is not a fetch and this module has no network path.
+//! ⚠️ **The staging directory is NOT in the repository.** `src-tauri/assets` is
+//! gitignored and filled by `scripts/acquire-onnxruntime.py` and
+//! `scripts/convert-ppocr-models.py`, each of which verifies every byte against
+//! a pinned SHA-256 before writing.
+//!
+//! **Only the bundling step needs them**, and that is a deliberate split rather
+//! than a convenience. `tauri-build` validates `bundle.resources` paths at
+//! COMPILE time, so keeping them in `tauri.conf.json` made `cargo check`,
+//! `cargo clippy` and `cargo test` all fail on any machine without 31 MB of
+//! acquired assets. They live in `tauri.release.conf.json`, merged in with
+//! `--config` when an installer is built, so an ordinary build and `tauri dev`
+//! need nothing. **CI found this after a local run and an independent review
+//! had both passed** -- both ran where the assets already existed, which is the
+//! oldest shape there is.
+//!
+//! *(This paragraph said "it is not done -- nothing packages the files today"
+//! until 2026-09-02, which was true when `1.26` shipped and false four hours
+//! later. Corrected in the change that falsified it rather than left for the
+//! next reader.)*
+//!
+//! **Nothing is ever loaded from unverified bytes.** [`ADR-0032`] decision 2
+//! requires a pinned SHA-256 verified before load, and `uptake-assets`
+//! implements exactly that check -- so [`resolve_config`] runs
+//! `Installer::state_of` over all three model files, and [`runtime_library`]
+//! runs it over the DLL. **A present-but-wrong runtime is refused rather than
+//! ignored**: a bundled file can still be replaced on disk after installation,
+//! so falling back to `ORT_DYLIB_PATH` when ours fails its digest would make the
+//! check decorative. That costs one hash of ~31 MB, once, on the first OCR area
+//! of a session. It is not a fetch and this module has no network path.
 //!
 //! # Threading
 //!
@@ -56,7 +77,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use tauri::AppHandle;
 use uptake_assets::install::{AssetState, Installer};
-use uptake_assets::ppocr;
+use uptake_assets::{onnxruntime, ppocr};
 use uptake_core::area::AreaId;
 use uptake_core::geometry::Rect;
 use uptake_ocr::paddle::{PaddleConfig, PaddleEngine, PaddleOptions};
@@ -188,20 +209,81 @@ fn models_directory() -> Result<PathBuf, String> {
     Ok(directory.join(MODELS_SUBDIRECTORY))
 }
 
-/// ONNX Runtime's path, or `None` to let `ORT_DYLIB_PATH` decide.
+/// ONNX Runtime's **verified** path, or `None` to let `ORT_DYLIB_PATH` decide.
 ///
-/// **`None` is not "unchecked"** -- `PaddleEngine::load` fails with
-/// `Unavailable` when the variable is unset too, rather than letting `ort` fall
-/// back to a bare library name and panic (UP-TAKE `I-330` is the row for that
-/// panic). Returning `None` here is what lets a developer run against the
-/// System32 runtime the `ocr_smoke` example documents; an installed UP-TAKE
-/// never reaches that arm, because the DLL sits beside the executable.
-fn runtime_library() -> Option<PathBuf> {
-    let beside_executable = std::env::current_exe()
-        .ok()?
-        .parent()?
-        .join(RUNTIME_FILE_NAME);
-    beside_executable.exists().then_some(beside_executable)
+/// # The three outcomes, and why the middle one is an error rather than a
+/// fallback
+///
+/// * **Absent** -- no DLL beside the executable. `Ok(None)`, and
+///   `PaddleEngine::load` then takes whatever `ORT_DYLIB_PATH` names. This is
+///   the developer path the `ocr_smoke` example documents. **`None` is not
+///   "unchecked"**: with the variable unset too, `load` fails with `Unavailable`
+///   rather than letting `ort` fall back to a bare library name and panic
+///   (UP-TAKE `I-330`).
+/// * **Present and its bytes match the pin** -- `Ok(Some(path))`. This is what
+///   an installed UP-TAKE takes, every time.
+/// * **Present and its bytes do NOT match** -- `Err`. Not a fall back to the
+///   environment, and that is the whole point of the check. `ADR-0032` decision
+///   2 requires a pinned SHA-256 *verified before load*, and a bundled file can
+///   still be replaced on disk after installation by anything with write access
+///   to the install directory. Silently loading a different runtime because ours
+///   failed its digest would make the check decorative.
+///
+/// # Errors
+///
+/// When the runtime is present and does not match the digest pinned in
+/// [`uptake_assets::onnxruntime`], or when the manifest itself is invalid.
+fn runtime_library() -> Result<Option<PathBuf>, String> {
+    let Ok(executable) = std::env::current_exe() else {
+        // Nothing to resolve against. Not an error: the environment can still
+        // name a runtime, and this is the same answer as "no DLL beside me".
+        return Ok(None);
+    };
+    let Some(directory) = executable.parent() else {
+        return Ok(None);
+    };
+    verified_runtime_in(directory)
+}
+
+/// [`runtime_library`]'s answer for an arbitrary directory.
+///
+/// **Split out so the refusal can be driven.** `runtime_library` resolves
+/// against `current_exe`, which a test cannot move, so the corrupt-runtime arm
+/// would have been reachable by no test at all -- and a control whose refusal is
+/// never exercised is this project's `UT-F-75`. This takes the directory, so a
+/// test can write a wrong DLL into a temporary one and watch it go red.
+fn verified_runtime_in(directory: &std::path::Path) -> Result<Option<PathBuf>, String> {
+    let beside_executable = directory.join(RUNTIME_FILE_NAME);
+    if !beside_executable.exists() {
+        return Ok(None);
+    }
+
+    let manifest = onnxruntime::onnxruntime()
+        .map_err(|error| format!("UP-TAKE's own runtime manifest is invalid: {error}"))?;
+    let installer = Installer::new(directory.to_path_buf(), manifest.clone());
+    let runtime = manifest
+        .assets
+        .iter()
+        .find(|asset| asset.file_name == RUNTIME_FILE_NAME)
+        .ok_or_else(|| "the runtime manifest does not describe the runtime".to_string())?;
+
+    match installer.state_of(runtime) {
+        AssetState::Verified => Ok(Some(beside_executable)),
+        // `Missing` after `exists()` said otherwise means unreadable rather than
+        // absent -- a permissions problem or a file being written. Reported as
+        // a refusal rather than as `None`, because falling back would load some
+        // other runtime while ours sits there unread.
+        AssetState::Missing => Err(format!(
+            "{} is present but could not be read",
+            beside_executable.display()
+        )),
+        AssetState::Corrupt => Err(format!(
+            "{} does not match the ONNX Runtime {} that UP-TAKE ships, so it will not be \
+             loaded. Reinstall UP-TAKE rather than replacing this file by hand.",
+            beside_executable.display(),
+            onnxruntime::VERSION
+        )),
+    }
 }
 
 /// Resolves and **verifies** the three model files, then describes them as a
@@ -246,7 +328,7 @@ fn resolve_config() -> Result<PaddleConfig, String> {
         detection_model: directory.join(ppocr::DETECTION_FILE_NAME),
         recognition_model: directory.join(ppocr::RECOGNITION_FILE_NAME),
         dictionary: directory.join(ppocr::DICTIONARY_FILE_NAME),
-        runtime_library: runtime_library(),
+        runtime_library: runtime_library()?,
     })
 }
 
@@ -557,6 +639,128 @@ mod tests {
             uptake_core::geometry::Size::new(width, height),
             pixels,
         )
+    }
+
+    /// Every asset UP-TAKE verifies is also an asset the installer packages.
+    ///
+    /// # The only mechanical check that the licence obligation is met
+    ///
+    /// `ADR-0032`'s licence section says it plainly: ONNX Runtime is MIT, MIT
+    /// requires the notice to travel with a copy, that project bundles other
+    /// people's code so its `ThirdPartyNotices.txt` travels too, and **`cargo
+    /// deny` can see neither file** because it walks the crate graph and a
+    /// `.dll` and a `.txt` are not crates. PaddleOCR's terms ride along for the
+    /// same reason under `ADR-0034` obligation 3.
+    ///
+    /// So the failure this guards is specific and silent: somebody deletes a
+    /// line from `bundle.resources`, every test stays green, `cargo deny` stays
+    /// green, CI stays green, and UP-TAKE ships a **public GPL-3.0 product with
+    /// a signed installer** that is missing a licence it is required to carry.
+    /// Nothing else in either repository would notice.
+    ///
+    /// Reads `tauri.release.conf.json` at compile time, so this cannot drift
+    /// from the file it checks.
+    ///
+    /// ⚠️ **It does NOT prove the bundler was given that file, and the previous
+    /// sentence here claimed it did** -- *"cannot drift from the file the
+    /// bundler actually uses"*. Round 3 of this change's review caught the
+    /// overclaim and named the input that defeats it: `pnpm tauri build`
+    /// without `--config src-tauri/tauri.release.conf.json` exits 0 and
+    /// produces a 2.27 MB installer carrying no runtime, no models and none of
+    /// the notices, with this test and every other gate still green. Measured,
+    /// not argued. **`scripts/verify-bundle.py` is what closes that**, by
+    /// checking the artifact rather than the invocation, and CI runs it after
+    /// every build. This test's job is narrower and still worth having: it
+    /// guards the CONTENT of the resource map, so a notice cannot be dropped
+    /// from the map itself.
+    ///
+    /// **Why the resources live in a release-only config at all**, since it
+    /// looks like indirection for its own sake: `tauri-build`'s build script
+    /// validates every `bundle.resources` path at COMPILE time, not at bundle
+    /// time. With them in `tauri.conf.json`, `cargo check`, `cargo clippy` and
+    /// `cargo test` all fail on a machine without 31 MB of acquired assets --
+    /// which is every CI job except the one that builds an installer, and
+    /// every contributor's first checkout. Found by CI on this branch after a
+    /// local run and an independent review both passed, because both were on
+    /// machines where the assets already existed.
+    #[test]
+    fn the_installer_packages_every_asset_and_both_notice_sets() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.release.conf.json"))
+                .expect("tauri.release.conf.json must be valid JSON");
+        let resources = conf
+            .get("bundle")
+            .and_then(|bundle| bundle.get("resources"))
+            .and_then(serde_json::Value::as_object)
+            .expect(
+                "tauri.release.conf.json has no bundle.resources: the installer packages nothing, so it ships no runtime, no models and no notices",
+            );
+        // The DESTINATIONS, which is what actually lands beside the executable.
+        // Asserting on the source paths would pass while the files were
+        // installed somewhere the app never looks.
+        let destinations: BTreeSet<&str> = resources
+            .values()
+            .filter_map(serde_json::Value::as_str)
+            .collect();
+
+        let models = ppocr::ppocr_v4(UNUSED_BASE_URL).unwrap();
+        for asset in &models.assets {
+            let expected = format!("{MODELS_SUBDIRECTORY}/{}", asset.file_name);
+            assert!(
+                destinations.contains(expected.as_str()),
+                "{expected} is verified before load and NOT packaged, so an installed                  UP-TAKE can never have it"
+            );
+        }
+
+        let runtime = onnxruntime::onnxruntime().unwrap();
+        for asset in &runtime.assets {
+            assert!(
+                destinations.contains(asset.file_name.as_str()),
+                "{} is pinned and NOT packaged. For the runtime that means OCR cannot work; for a notice it means an MIT or Apache-2.0 obligation is unmet, and nothing else in this repository can see it",
+                asset.file_name
+            );
+        }
+
+        // PaddleOCR's own notice, which belongs to no manifest because
+        // `convert-ppocr-models.py` generates it rather than downloading it.
+        // Named explicitly here precisely because nothing else references it.
+        assert!(
+            destinations.contains(format!("{MODELS_SUBDIRECTORY}/NOTICE-models.txt").as_str()),
+            "the models' own notice is not packaged (ADR-0034 obligation 3)"
+        );
+    }
+
+    #[test]
+    fn a_runtime_that_is_not_ours_is_refused_rather_than_ignored() {
+        // The arm ADR-0032 decision 2 is actually about. A bundled DLL can be
+        // replaced on disk after installation by anything with write access to
+        // the install directory, so the interesting case is not "absent" -- it
+        // is "present and wrong". Falling back to ORT_DYLIB_PATH there would
+        // load some other runtime while ours sat unread, which makes the whole
+        // digest check decorative.
+        let directory = std::env::temp_dir().join("uptake-runtime-drill");
+        std::fs::create_dir_all(&directory).unwrap();
+        let planted = directory.join(RUNTIME_FILE_NAME);
+
+        // Nothing there: fall through to the environment. Not an error.
+        let _ = std::fs::remove_file(&planted);
+        assert_eq!(
+            verified_runtime_in(&directory),
+            Ok(None),
+            "no runtime beside the executable is the developer path, not a fault"
+        );
+
+        // Something there, and it is not ours.
+        std::fs::write(&planted, b"this is not ONNX Runtime").unwrap();
+        let refusal = verified_runtime_in(&directory)
+            .expect_err("a runtime that fails its digest must be refused");
+        assert!(
+            refusal.contains(&onnxruntime::VERSION.to_string()),
+            "the refusal must name the version UP-TAKE ships so the user can act on it, got:              {refusal}"
+        );
+
+        let _ = std::fs::remove_file(&planted);
+        let _ = std::fs::remove_dir(&directory);
     }
 
     #[test]

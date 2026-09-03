@@ -98,7 +98,15 @@ unwrap_used = "deny"
 expect_used = "deny"
 
 # No [profile.release] tuning here on purpose. The obvious knob, opt-level = "s",
-# would trade OCR inference speed for binary size — and the budgets in
-# quality-bars.md §1 are tight on latency (< 1.5 s OCR) while the installer is
-# currently 3 MB against a 25 MB ceiling. Size is not the constraint; revisit
-# only if it becomes one.
+# would trade OCR inference speed for binary size, and quality-bars.md §1 is
+# tight on latency (< 1.5 s OCR).
+#
+# ⚠️ The SIZE half of this note was rewritten on 2026-09-02 and it used to read
+# "the installer is currently 3 MB against a 25 MB ceiling. Size is not the
+# constraint". Both halves had gone false: ADR-0035 raised the ceiling to 35 MB
+# (40 MB hard fail) on 2026-09-01, and I-337 then bundled the ONNX Runtime and
+# the PP-OCRv4 models, taking the measured installer to 22.88 MB (MSI) and
+# 19.89 MB (NSIS). Size is now a real constraint with roughly 12 MB of headroom,
+# so this knob is worth revisiting the moment another model lands. What has NOT
+# changed is the conclusion: trading inference speed for bytes is the wrong
+# trade while the latency budget is the tighter of the two.

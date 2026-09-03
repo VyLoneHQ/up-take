@@ -34,16 +34,23 @@ Five of seven area types are built.
        that row's own "ships degraded and knowingly" note; the fix is task 1.17(b2), which is
        blocked on ADR-0028. Do not drop this sentence before b2 lands. -->
 - **An OCR area.** Reads the text under it and shows you what it read, in the area itself.
-  Two things worth knowing before you build this yourself. **The models are not in the
-  repository and are not yet packaged**, so a build you make today reports OCR as unavailable
-  and tells you which files it wanted. And **there is no accuracy standard yet**: it misreads
-  characters, nothing in the project says what a good enough reading would be, and no test
-  measures it. Check anything you take from it before you use it.
+  Two things worth knowing before you build this yourself. **The model files and the OCR
+  runtime are not in this repository**, because they are 31 MB of binaries that belong in a
+  release rather than in a git history. The installer carries them, and two scripts fetch and
+  verify them against pinned checksums first: `scripts/acquire-onnxruntime.py` and
+  `scripts/convert-ppocr-models.py`. Building the app itself needs neither. Building an
+  **installer** needs both, plus the config that packages them:
+  `pnpm tauri build --config src-tauri/tauri.release.conf.json`. And **there is no accuracy standard yet**:
+  it misreads characters, nothing in the project says what a good enough reading would be, and
+  no test measures it. Check anything you take from it before you use it.
   <!-- source: ROADMAP.md task 1.26 (the area type) and 1.31 (the pipeline that returns text);
-       ADR-0035 (the models ship in the installer) and ROADMAP.md 1.12 with BACKLOG.md I-337,
-       which is the packaging that is NOT done and is why the caveat above is here rather than
-       omitted; BACKLOG.md I-341 (no OCR accuracy bar exists, lane C). Delete the first caveat
-       when I-337 lands and the second when I-341 is answered, and not before. -->
+       ADR-0035 (the runtime and the models ship in the installer) and ROADMAP.md 1.12 with
+       BACKLOG.md I-337, whose packaging work is what the sentence above describes -- the first
+       caveat is now about where the binaries live and how a build gets them, not about
+       packaging being absent. ⚠️ Written in the branch that does that work, so I-337 is still
+       marked open in BACKLOG.md as this is read; close it on the merge, not before. BACKLOG.md
+       I-341 (no OCR accuracy bar exists, lane C). Delete the second caveat when I-341 is
+       answered, and not before. -->
 - **An upscale area.** Sharpens the piece of screen under it, in place. It covers the same region
   at the same size and does not magnify: what changes is how clean it looks. Three things it is
   not. It does not invent detail, and it cannot: the pixels under it are already the final ones

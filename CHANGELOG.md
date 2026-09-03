@@ -30,8 +30,8 @@ Until then it is written by hand.
   area that tints what is underneath and lets clicks pass through to it; an upscale area that
   sharpens the piece of screen under it in place, without magnifying it, as a still rather than a
   live view; and an OCR area that reads the text under it and shows what it read, in place. The
-  OCR models are not packaged yet, so a build made from this repository reports OCR as
-  unavailable and names the files it wanted.
+  installer carries the OCR runtime and the models; they are not in this repository, and two
+  checksummed scripts fetch them before a build can bundle them.
 - Freeze the screen while placing an area, with `Ctrl+Space`.
 - The overlay is excluded from screen capture, so other recording tools do not see it.
 
@@ -39,8 +39,12 @@ Until then it is written by hand.
      plus 1.23 (Filter), 1.24 and 1.29 (Upscale; 1.29 and ADR-0031 are what make the entry say
      "sharpens" rather than "magnified", reversing 1.24 on the founder's verdict), 1.26 and 1.31
      (the OCR area and the pipeline behind it; ADR-0035 and BACKLOG.md I-337 are the source of
-     the "not packaged yet" sentence, which is a real limit of a build made today rather than a
-     disclaimer), 1.27 (area types chosen from the area's own menu) and
+     the sentence about where the runtime and the models live. That sentence said "not packaged
+     yet" until the branch doing I-337's packaging work rewrote it; this comment went on quoting
+     the removed wording for the length of one review round. ⚠️ It then said I-337 "landed on
+     2026-09-02" as accomplished fact while the row was open and the branch unmerged, which is
+     the same overclaim the README comment had to be corrected for one round earlier, in the
+     same twin-document shape. I-337 closes on the merge, not before), 1.27 (area types chosen from the area's own menu) and
      1.28 (those types in a submenu), which the "Five area types" entry above derives from and
      which sit outside the 1.1-1.9f range this line used to name on its own. `P-6` asks for the
      source of the claim rather than of the page, and that range stopped covering the entry when

@@ -24,7 +24,7 @@
 //! `Engine` before the ONNX question was settled.
 //!
 //! The practical consequence is that every rule in this crate is tested with no
-//! network, no TLS, and none of the 25 MB of assets it exists to install:
+//! network, no TLS, and none of the ~31 MB of assets it exists to install:
 //!
 //! | Concern | Module | Needs the network? |
 //! | --- | --- | --- |
@@ -51,5 +51,6 @@
 pub mod fetch;
 pub mod install;
 pub mod manifest;
+pub mod onnxruntime;
 pub mod ppocr;
 pub mod verify;
