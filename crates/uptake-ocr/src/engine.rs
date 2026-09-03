@@ -297,9 +297,12 @@ mod tests {
 
     #[test]
     fn an_empty_line_contributes_no_break() {
-        // An empty line must not become a stray blank line, and must not leave a
-        // `line_starts` entry pointing at the next line's first block -- which
-        // would put a newline in the middle of a line.
+        // An empty line must not become a stray blank line in the output.
+        //
+        // This comment explained itself in terms of a `line_starts` index until
+        // round 3 of `PR #82`'s review: that field was the pre-restructure
+        // design and round 1 deleted it, leaving the comment describing a
+        // mechanism that no longer exists. Fourth stale comment of this change.
         let recognition = Recognition::from_lines(vec![
             vec![block("alpha", 0, 0)],
             Vec::new(),
@@ -311,6 +314,28 @@ mod tests {
             recognition.lines().len(),
             2,
             "the empty line must not survive"
+        );
+    }
+
+    #[test]
+    fn a_recognition_with_content_is_not_empty() {
+        // `is_empty()` claims equivalence to having no blocks. Round 3 of
+        // `PR #82`'s review hardcoded it to `true` and ALL 599 tests passed:
+        // the only assertion of the non-empty direction anywhere in the
+        // repository is `#[ignore]`d AND gated behind an environment variable,
+        // so `cargo test --workspace` never reached it. This holds the claim.
+        let recognition = Recognition::from_lines(vec![vec![block("alpha", 0, 0)]]);
+        assert!(
+            !recognition.is_empty(),
+            "a recognition with a block is not empty"
+        );
+        assert_eq!(recognition.blocks().count(), 1);
+        // The other direction of the same equivalence: lines that are all empty
+        // are dropped at construction, so the result is empty rather than
+        // carrying blank lines.
+        assert!(
+            Recognition::from_lines(vec![Vec::new(), Vec::new()]).is_empty(),
+            "lines holding no blocks must leave an empty recognition"
         );
     }
 
