@@ -31,6 +31,28 @@
 //! discovered later: do not quote a number from this harness as "UP-TAKE's
 //! accuracy".
 //!
+//! # One of `I-351`'s two axes, and only one
+//!
+//! That row asks for the pipeline run *"while varying `drop_score` **and the
+//! sampling mode**"*. **This harness varies `drop_score` and cannot vary the
+//! sampling mode**, because there is no knob for it: [`PaddleOptions`] has one
+//! tunable field, and `recognise.rs`'s nearest-neighbour upsampling is a
+//! literal in the code. Exposing it is a change to the engine's own API and is
+//! not this row.
+//!
+//! **So the sampling-mode candidate is untouched, not eliminated**, and the
+//! distinction matters because the first run makes it easy to conflate them.
+//! Sweeping `drop_score` moved almost nothing and the false empties turned out
+//! to be the detector, which is a finding about the EMPTIES. Roughly a fifth of
+//! the cards are non-empty MISREADS, and that is exactly the population where
+//! crop upsampling quality would show. Nothing here has looked at it. Do not
+//! read *"the detector, not `drop_score`"* as closing the sampling-mode
+//! question; it does not touch it.
+//!
+//! *(Written down because the independent review of `PR #84` predicted the
+//! misreading, having had to pull the backlog row itself to notice that half
+//! the ask was missing from the artifact.)*
+//!
 //! # Why it is an example and not a test
 //!
 //! Same constraint as `ocr_smoke.rs` and answered the same way: it needs a
