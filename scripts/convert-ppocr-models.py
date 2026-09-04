@@ -349,6 +349,46 @@ def check_shapes(out_dir: Path) -> None:
     print("  recogniser  " + str(rec_in) + " -> " + str(rec_out))
 
 
+def notice_listing(
+    detector_pins: dict[str, object],
+    produced: list[tuple[str, int, str]],
+) -> str:
+    """The licence notice's file listing: every shipped model, with its digest.
+
+    # Why this is a function and not four lines inside `main`
+
+    Round 2 of `PR #88`'s review found this logic, and `read_detector_pins`
+    beside it, covered by nothing: no test file for this script existed, and the
+    only thing that runs the code is a CI job needing a network download and a
+    `paddle2onnx` install, which asserts nothing about what it produced.
+
+    It is worth guarding because of what it is FOR. `ADR-0036` split the
+    acquisition in two, and this notice is the one artifact that still has to
+    name all three files. A listing built from what this script *produces* would
+    silently drop the detector from a LICENCE OBLIGATION, and nothing downstream
+    would say so: `cargo deny` walks the crate graph and sees no `.onnx` at all,
+    which is why the notice exists in the first place.
+
+    So the detector comes from the PINS and the rest from what was produced, and
+    the note beside each says which is which. Apache 2.0 section 4(b)
+    distinguishes modified files from unmodified ones, and one sentence covering
+    both would be half wrong.
+    """
+    entries = [
+        (
+            str(detector_pins["DETECTION_FILE_NAME"]),
+            int(detector_pins["DETECTION_SIZE"]),
+            str(detector_pins["DETECTION_SHA256"]),
+            "  (redistributed unchanged; acquired by acquire-ppocr-detector.py)",
+        )
+    ] + [(name, size, digest, "") for name, size, digest in produced]
+
+    return "\n".join(
+        "  " + name + "\n    sha256 " + digest + "\n    " + str(size) + " bytes" + note
+        for name, size, digest, note in entries
+    )
+
+
 def read_detector_pins() -> dict[str, object]:
     """The detector's pins, read from the same Rust source everything else uses.
 
@@ -501,19 +541,7 @@ def main() -> int:
             " the staging directory is not complete."
         )
 
-    entries = [
-        (
-            str(detector_pins["DETECTION_FILE_NAME"]),
-            int(detector_pins["DETECTION_SIZE"]),
-            str(detector_pins["DETECTION_SHA256"]),
-            "  (redistributed unchanged; acquired by acquire-ppocr-detector.py)",
-        )
-    ] + [(name, size, digest, "") for name, size, digest in produced]
-
-    listing = "\n".join(
-        "  " + name + "\n    sha256 " + digest + "\n    " + str(size) + " bytes" + note
-        for name, size, digest, note in entries
-    )
+    listing = notice_listing(detector_pins, produced)
     (out_dir / "NOTICE-models.txt").write_text(
         NOTICE_TEMPLATE.format(
             tag=PADDLEOCR_TAG,

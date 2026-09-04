@@ -216,32 +216,39 @@ def test_a_non_https_url_is_refused_at_the_socket(module) -> None:
         raise AssertionError("a non-HTTPS URL must be refused before any request")
 
 
-def test_the_shape_check_refuses_a_model_that_is_not_a_detector(module) -> None:
-    """The shape guard, which moved here from convert-ppocr-models.py.
+def test_the_detectors_own_shapes_are_accepted(module) -> None:
+    """The positive control for the shape rule, on the real detector's shapes.
 
-    Skipped rather than failed where `onnxruntime` is absent -- the same choice
-    the script itself makes -- and SAID so, because a silent skip is how a check
-    reports green forever. Where the package is present, this drives the guard
-    against a file that is valid ONNX and the wrong network.
+    Copied from an actual run: `[dyn, 3, dyn, dyn] -> [dyn, 1, dyn, dyn]`.
+    Symbolic dimensions are strings in onnxruntime, so they are strings here.
     """
-    try:
-        import onnxruntime  # noqa: PLC0415, F401
-    except ImportError:
-        print("      (skipped: onnxruntime is not installed)")
-        return
-
-    recogniser = (
-        HERE.parent / "src-tauri" / "assets" / "models" / "ch_PP-OCRv4_rec.onnx"
+    verdict = module.shape_complaint(
+        ["DynamicDimension.0", 3, "DynamicDimension.1", "DynamicDimension.2"],
+        ["ConvTranspose_459_o0__d0", 1, "ConvTranspose_459_o0__d2", "d3"],
     )
-    if not recogniser.is_file():
-        print("      (skipped: no staged recogniser to use as a wrong-shaped model)")
-        return
-    try:
-        module.check_shape(recogniser)
-    except SystemExit as error:
-        assert "probability map" in str(error) or "channels" in str(error), str(error)
-    else:
-        raise AssertionError("the shape check must refuse a non-detector model")
+    assert verdict is None, verdict
+
+
+def test_a_model_with_the_wrong_input_channels_is_refused(module) -> None:
+    verdict = module.shape_complaint(["N", 1, "H", "W"], ["N", 1, "H", "W"])
+    assert verdict is not None and "expected 3" in verdict, verdict
+
+
+def test_a_model_that_is_not_a_probability_map_is_refused(module) -> None:
+    """The recogniser's shape, which is what this guard exists to catch.
+
+    ⚠️ **THIS TEST USED TO SKIP IN EVERY ENVIRONMENT IT RAN IN.** It loaded a
+    gitignored model file through `onnxruntime`; locally the file was absent and
+    in the CI job this suite runs from the package is not installed, so its
+    assertion never executed. Round 2 of `PR #88`'s review proved it by deleting
+    both refusals and watching the suite stay green at 7/7.
+
+    It drives `shape_complaint` directly now: plain lists, no model, no import,
+    no file. It runs everywhere or it fails everywhere.
+    """
+    verdict = module.shape_complaint(["N", 3, "H", "W"], ["N", 6625, "T"])
+    assert verdict is not None, "a non-detector's output shape must be refused"
+    assert "probability map" in verdict, verdict
 
 
 def test_the_real_pins_still_parse(module) -> None:

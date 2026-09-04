@@ -118,6 +118,19 @@ jobs:
       - name: Test the PP-OCRv6 detector acquisition step
         run: python3 scripts/test_acquire_ppocr_detector.py
 
+      # The conversion script's pin reading and licence-notice construction.
+      # Round 2 of PR #88's review found ADR-0036 had added real logic there
+      # with no test file for that script having EVER existed -- the same
+      # finding round 1 made about its sibling, landing in the commit meant to
+      # close it. The property under guard has no other check anywhere: the
+      # notice must name all three shipped files including the one this script
+      # no longer acquires, and `cargo deny` sees no .onnx at all.
+      #
+      # No paddle2onnx and no download: it tests the pin reading and the
+      # listing, not the conversion, which the bundle job exercises for real.
+      - name: Test the model conversion step's notice and pins
+        run: python3 scripts/test_convert_ppocr_models.py
+
       - name: Em-dash ratchet
         run: python3 scripts/dash-ratchet.py --against origin/main
 

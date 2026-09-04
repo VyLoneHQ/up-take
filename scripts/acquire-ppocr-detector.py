@@ -146,6 +146,38 @@ def check(data: bytes, expected_digest: str, expected_size: int) -> None:
         )
 
 
+def shape_complaint(shape_in: list, shape_out: list) -> str | None:
+    """What is wrong with these tensor shapes for a DB detector, or `None`.
+
+    # This is split out because a test could not otherwise reach it
+
+    Round 2 of `PR #88`'s review deleted BOTH refusals inside [`check_shape`]
+    and the suite stayed at 7/7 green. The test meant to cover them skipped:
+    locally it needs a gitignored model file to use as a wrong-shaped stand-in,
+    and in the CI job it runs from, `onnxruntime` is not installed at all. So in
+    every position it is actually run from, its assertion never executed.
+
+    That is the "control that cannot go red" class this project keeps finding,
+    reappearing inside the fix for the previous instance of it -- on the guard
+    this script's own docstring calls the one that matters most.
+
+    The decision is a value now, and the shapes are plain lists. No model, no
+    `onnxruntime`, no file. [`check_shape`] loads and prints; this decides.
+    """
+    if shape_in[1] != 3:
+        return (
+            "detector takes " + str(shape_in[1]) + " channels, expected 3."
+            "\nThe pinned file is not the network this pipeline feeds."
+        )
+    if shape_out[1] != 1:
+        return (
+            "detector emits " + str(shape_out[1])
+            + " channels, expected a 1-channel probability map."
+            "\nDB post-processing in detect.rs reads one probability per pixel."
+        )
+    return None
+
+
 def check_shape(path: Path) -> None:
     """Refuses a detector whose tensor shapes are not what this pipeline feeds.
 
@@ -197,17 +229,9 @@ def check_shape(path: Path) -> None:
         ) from error
     shape_in = session.get_inputs()[0].shape
     shape_out = session.get_outputs()[0].shape
-    if shape_in[1] != 3:
-        raise SystemExit(
-            "detector takes " + str(shape_in[1]) + " channels, expected 3."
-            "\nThe pinned file is not the network this pipeline feeds."
-        )
-    if shape_out[1] != 1:
-        raise SystemExit(
-            "detector emits " + str(shape_out[1])
-            + " channels, expected a 1-channel probability map."
-            "\nDB post-processing in detect.rs reads one probability per pixel."
-        )
+    complaint = shape_complaint(shape_in, shape_out)
+    if complaint is not None:
+        raise SystemExit(complaint)
     print("  shapes " + str(shape_in) + " -> " + str(shape_out))
 
 
