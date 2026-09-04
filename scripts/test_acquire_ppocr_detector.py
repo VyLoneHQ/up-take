@@ -1,0 +1,275 @@
+#!/usr/bin/env python3
+"""Tests for the PP-OCRv6 detector acquisition step (ADR-0036).
+
+Written because round 1 of `PR #88`'s independent review classified their
+absence as BEHAVIOUR, and it was right to. `acquire-ppocr-detector.py`'s own
+docstring says it works "exactly as `acquire-onnxruntime.py` does for the
+runtime" -- and that sibling has seven tests covering exactly this case list,
+while this script had none. The property the whole change's provenance story
+rests on, *nothing that fails a check reaches the staging directory*, was true
+when drilled by hand and protected by nothing afterwards.
+
+The reviewer also noted that the commit claiming "acquisition tests 7/7" was
+true only of the OTHER script and could read as covering this one. It could.
+
+**No 9.8 MB fixture.** Every test builds a tiny synthetic payload and a matching
+synthetic pins file, then points the module's `PINS_SOURCE` at it. That is what
+lets these run in CI on a job with no assets, and it means they test the
+script's LOGIC rather than one particular release's bytes.
+
+**Which of these has been drilled, named rather than claimed.** All of the
+refusal paths below were driven by hand against the real 9,880,512-byte
+detector on 2026-09-04 before these tests existed -- wrong size, same-size bit
+flip, and a wrong-shaped model -- and each refused with nothing written. These
+tests are those drills turned into controls. `test_the_real_pins_still_parse`
+is the one that keeps the rest honest: the synthetic tests would all pass
+against a parser that had gone blind to the real file.
+
+Run: `python3 scripts/test_acquire_ppocr_detector.py`
+"""
+
+from __future__ import annotations
+
+import hashlib
+import importlib.util
+import shutil
+import sys
+import tempfile
+import traceback
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+
+#: A stand-in payload. Small, and nothing like a real ONNX file, so a test that
+#: accidentally reached for the real detector fails on the digest rather than
+#: passing by accident.
+FAKE = b"pretend this is a PP-OCRv6 detector"
+
+FAKE_NAME = "PP-OCRv6_small_det.onnx"
+FAKE_URL = "https://example.invalid/detector.onnx"
+
+
+def load_module():
+    """Imports the script under test by path, since its name has a hyphen."""
+    spec = importlib.util.spec_from_file_location(
+        "acquire_ppocr_detector", HERE / "acquire-ppocr-detector.py"
+    )
+    if spec is None or spec.loader is None:
+        raise SystemExit("could not load acquire-ppocr-detector.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def build_pins(payload: bytes, *, name: str = FAKE_NAME, digest_name: str = "DETECTION_SHA256") -> str:
+    """A synthetic `ppocr.rs`, in the real file's exact syntax.
+
+    The extraction under test is a regex over that syntax, so a shape that only
+    resembles it would test a parser nobody runs. `digest_name` is a parameter
+    so a test can RENAME a constant and check the script refuses rather than
+    carrying on with a partial mapping.
+    """
+    return (
+        "//! Synthetic pins.\n\n"
+        '/// The detector.\n'
+        'pub const DETECTION_FILE_NAME: &str = "' + name + '";\n'
+        "/// Its digest.\n"
+        "pub const " + digest_name + ": &str =\n"
+        '    "' + hashlib.sha256(payload).hexdigest() + '";\n'
+        "/// Its size.\n"
+        "pub const DETECTION_SIZE: u64 = " + str(len(payload)) + ";\n"
+        "/// Where it comes from.\n"
+        'pub const DETECTION_URL: &str = "' + FAKE_URL + '";\n'
+    )
+
+
+class Fixture:
+    """A throwaway directory with a synthetic pins file, for one test."""
+
+    def __init__(self, module, pins_text: str):
+        self.module = module
+        self.root = Path(tempfile.mkdtemp(prefix="acquire-det-test-"))
+        self.pins = self.root / "ppocr.rs"
+        self.pins.write_text(pins_text, encoding="utf-8")
+        self.out = self.root / "models"
+        self.saved = module.PINS_SOURCE
+        module.PINS_SOURCE = self.pins
+
+    def write_payload(self, data: bytes) -> Path:
+        path = self.root / "payload.bin"
+        path.write_bytes(data)
+        return path
+
+    def close(self) -> None:
+        self.module.PINS_SOURCE = self.saved
+        shutil.rmtree(self.root, ignore_errors=True)
+
+
+def run_with(module, fixture: Fixture, payload_path: Path) -> int:
+    """Invokes `main()` with the arguments the CI step uses."""
+    saved_argv = sys.argv
+    sys.argv = [
+        "acquire-ppocr-detector.py",
+        "--file",
+        str(payload_path),
+        "--out",
+        str(fixture.out),
+    ]
+    try:
+        return module.main()
+    finally:
+        sys.argv = saved_argv
+
+
+def test_a_matching_file_is_staged(module) -> None:
+    """The positive control: a file that matches its pin is written.
+
+    ⚠️ The synthetic payload is not valid ONNX, so the shape check refuses it
+    AFTER the write. That is the correct behaviour and this test asserts both
+    halves: the bytes reach the staging directory, and the shape guard still
+    speaks up. **The refusal is a SystemExit rather than a traceback only
+    because this test found it was a traceback** -- `check_shape` did not handle
+    a failed load until `PR #88` round 1 asked for these tests.
+    """
+    fixture = Fixture(module, build_pins(FAKE))
+    try:
+        try:
+            run_with(module, fixture, fixture.write_payload(FAKE))
+        except SystemExit as error:
+            assert "not loadable as ONNX" in str(error), (
+                "a synthetic payload must be refused CLEANLY by the shape check,"
+                " not crash it: " + str(error)
+            )
+        staged = fixture.out / FAKE_NAME
+        assert staged.is_file(), "the verified file must be written"
+        assert staged.read_bytes() == FAKE, "the staged bytes must be the verified ones"
+    finally:
+        fixture.close()
+
+
+def test_a_wrong_size_file_is_refused_and_nothing_is_written(module) -> None:
+    fixture = Fixture(module, build_pins(FAKE))
+    try:
+        try:
+            run_with(module, fixture, fixture.write_payload(FAKE + b"!"))
+        except SystemExit as error:
+            assert "wrong size" in str(error), str(error)
+        else:
+            raise AssertionError("a wrong-size file must be refused")
+        assert not fixture.out.exists(), (
+            "NOTHING may be staged when the check fails, and the output directory"
+            " must not even be created"
+        )
+    finally:
+        fixture.close()
+
+
+def test_a_same_size_corruption_is_refused_and_nothing_is_written(module) -> None:
+    """The case a size check alone would pass.
+
+    Drilled by hand against the real detector on 2026-09-04 with one byte XORed;
+    this is that drill as a control.
+    """
+    fixture = Fixture(module, build_pins(FAKE))
+    try:
+        corrupted = bytearray(FAKE)
+        corrupted[0] ^= 0xFF
+        try:
+            run_with(module, fixture, fixture.write_payload(bytes(corrupted)))
+        except SystemExit as error:
+            assert "pinned digest" in str(error), str(error)
+            # The refusal must not invite editing the constant.
+            assert "ADR-0036" in str(error), "the refusal must point at the record"
+        else:
+            raise AssertionError("a same-size corruption must be refused")
+        assert not fixture.out.exists(), "nothing may be staged when the digest fails"
+    finally:
+        fixture.close()
+
+
+def test_a_renamed_pin_stops_the_run(module) -> None:
+    """The parser going blind must be loud.
+
+    If the extraction silently returned nothing, every check above would pass
+    vacuously and this whole file would be a control that cannot go red.
+    """
+    fixture = Fixture(module, build_pins(FAKE, digest_name="RENAMED_SHA256"))
+    try:
+        try:
+            run_with(module, fixture, fixture.write_payload(FAKE))
+        except SystemExit as error:
+            assert "DETECTION_SHA256" in str(error), str(error)
+        else:
+            raise AssertionError("a missing pin constant must stop the run")
+    finally:
+        fixture.close()
+
+
+def test_a_non_https_url_is_refused_at_the_socket(module) -> None:
+    """ADR-0032 decision 2 says HTTPS only, and this is the line that opens a
+    socket. Asserted at the point of use rather than trusted from the pin."""
+    try:
+        module.fetch("http://example.invalid/detector.onnx")
+    except SystemExit as error:
+        assert "non-HTTPS" in str(error), str(error)
+    else:
+        raise AssertionError("a non-HTTPS URL must be refused before any request")
+
+
+def test_the_shape_check_refuses_a_model_that_is_not_a_detector(module) -> None:
+    """The shape guard, which moved here from convert-ppocr-models.py.
+
+    Skipped rather than failed where `onnxruntime` is absent -- the same choice
+    the script itself makes -- and SAID so, because a silent skip is how a check
+    reports green forever. Where the package is present, this drives the guard
+    against a file that is valid ONNX and the wrong network.
+    """
+    try:
+        import onnxruntime  # noqa: PLC0415, F401
+    except ImportError:
+        print("      (skipped: onnxruntime is not installed)")
+        return
+
+    recogniser = (
+        HERE.parent / "src-tauri" / "assets" / "models" / "ch_PP-OCRv4_rec.onnx"
+    )
+    if not recogniser.is_file():
+        print("      (skipped: no staged recogniser to use as a wrong-shaped model)")
+        return
+    try:
+        module.check_shape(recogniser)
+    except SystemExit as error:
+        assert "probability map" in str(error) or "channels" in str(error), str(error)
+    else:
+        raise AssertionError("the shape check must refuse a non-detector model")
+
+
+def test_the_real_pins_still_parse(module) -> None:
+    """The synthetic tests would all pass against a parser that had gone blind
+    to the REAL file, so this is the one that keeps them honest."""
+    pins = module.read_pins()
+    assert str(pins["DETECTION_FILE_NAME"]).endswith(".onnx")
+    assert len(str(pins["DETECTION_SHA256"])) == 64
+    assert str(pins["DETECTION_URL"]).startswith("https://")
+    assert isinstance(pins["DETECTION_SIZE"], int) and pins["DETECTION_SIZE"] > 0
+
+
+def main() -> int:
+    module = load_module()
+    tests = [value for name, value in globals().items() if name.startswith("test_")]
+    failures = 0
+    for test in tests:
+        try:
+            test(module)
+            print("ok    " + test.__name__)
+        except Exception:  # noqa: BLE001 - a test runner reports everything
+            failures += 1
+            print("FAIL  " + test.__name__)
+            traceback.print_exc()
+    print("")
+    print(str(len(tests) - failures) + "/" + str(len(tests)) + " passed")
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

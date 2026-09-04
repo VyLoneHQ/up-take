@@ -177,9 +177,24 @@ def check_shape(path: Path) -> None:
         )
         return
 
-    session = onnxruntime.InferenceSession(
-        str(path), providers=["CPUExecutionProvider"]
-    )
+    try:
+        session = onnxruntime.InferenceSession(
+            str(path), providers=["CPUExecutionProvider"]
+        )
+    except Exception as error:  # noqa: BLE001 - onnxruntime raises several types
+        # A refusal, not a traceback. The digest has already matched, so
+        # reaching here means the PINNED bytes are not loadable ONNX at all --
+        # which is a far more alarming condition than a mismatch and deserves a
+        # sentence rather than a stack trace.
+        #
+        # Found by this script's own tests (`PR #88` round 1 asked for them):
+        # the happy-path test fed it a small synthetic payload and got an
+        # unhandled exception instead of a verdict.
+        raise SystemExit(
+            "the pinned detector is not loadable as ONNX: " + str(error)
+            + "\nThe digest matched, so these ARE the pinned bytes -- which means"
+            " the pin itself names something that is not a model."
+        ) from error
     shape_in = session.get_inputs()[0].shape
     shape_out = session.get_outputs()[0].shape
     if shape_in[1] != 3:

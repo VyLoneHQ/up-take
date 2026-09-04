@@ -105,6 +105,19 @@ jobs:
       - name: Test the bundle checker
         run: python3 scripts/test_verify_bundle.py
 
+      # The DETECTOR acquisition step's own tests (ADR-0036). Its sibling
+      # `acquire-onnxruntime.py` has had tests since I-337's review found its
+      # central invariant broken; this script shipped without any, and round 1
+      # of PR #88's review classified that as BEHAVIOUR rather than an omission
+      # -- correctly, because the property the whole provenance story rests on
+      # ("nothing that fails a check reaches the staging directory") was true
+      # when drilled by hand and protected by nothing afterwards.
+      #
+      # Synthetic payloads and a synthetic pins file, so they need none of the
+      # 9.8 MB this job does not have.
+      - name: Test the PP-OCRv6 detector acquisition step
+        run: python3 scripts/test_acquire_ppocr_detector.py
+
       - name: Em-dash ratchet
         run: python3 scripts/dash-ratchet.py --against origin/main
 
@@ -260,10 +273,22 @@ jobs:
       # above pins one this repository produced -- and because the step above
       # needs a Python toolchain this one does not.
       #
-      # It runs AFTER the conversion on purpose: `convert-ppocr-models.py`
-      # writes the licence notice covering all three files including this one,
-      # and will say so if this file is not staged yet. Reversing the order
-      # would silence that note and lose a check nobody would miss.
+      # Order does NOT matter for correctness, and the comment here used to
+      # claim it did. `convert-ppocr-models.py` writes the licence notice
+      # covering all three files including this one, and it builds that listing
+      # from the PINS rather than from the directory, so it is correct whichever
+      # step runs first.
+      #
+      # Running the acquisition second means the conversion step prints a NOTE
+      # saying the detector is not staged yet. That note is informational, not a
+      # check, and reversing these two steps silences it and costs nothing.
+      #
+      # ⚠️ **This comment previously said the conversion step "will say so if
+      # this file is not staged yet" and called reversing the order a lost
+      # check.** No such code existed -- it had been written, lost in an edit,
+      # and never noticed, and round 1 of PR #88's review read the script and
+      # found nothing that could fire. The note exists now; the claim that the
+      # ordering is load-bearing does not.
       - name: Acquire the PP-OCRv6 detector (pinned, checksummed)
         run: python scripts/acquire-ppocr-detector.py --out src-tauri/assets/models
 

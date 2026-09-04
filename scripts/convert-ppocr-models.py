@@ -477,6 +477,30 @@ def main() -> int:
     # nothing downstream catches -- `cargo deny` walks the crate graph and sees
     # no `.onnx` at all, which is why this file exists in the first place.
     detector_pins = read_detector_pins()
+
+    # The detector is named in the notice but acquired elsewhere, so say plainly
+    # whether it is actually there. NOT a refusal: the two CI steps can legally
+    # run in either order, and a developer converting the recogniser alone is
+    # doing something reasonable.
+    #
+    # ⚠️ **This check did not exist until `PR #88` round 1.** A comment in
+    # `ci.yml` justified the step ORDER by claiming this script "will say so if
+    # this file is not staged yet" -- describing a check that had been written,
+    # lost in an edit, and never noticed. The reviewer read the code, found
+    # nothing that could fire, and was right. Written rather than deleted,
+    # because the note is worth having.
+    detector_staged = (out_dir / str(detector_pins["DETECTION_FILE_NAME"])).is_file()
+    if not detector_staged:
+        print(
+            "  NOTE: " + str(detector_pins["DETECTION_FILE_NAME"]) + " is named in"
+            " the notice but is not in " + str(out_dir) + " yet."
+        )
+        print(
+            "        It is acquired by scripts/acquire-ppocr-detector.py"
+            " (ADR-0036). The notice is correct either way; this is telling you"
+            " the staging directory is not complete."
+        )
+
     entries = [
         (
             str(detector_pins["DETECTION_FILE_NAME"]),
