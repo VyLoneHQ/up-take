@@ -44,8 +44,13 @@ Five of seven area types are built.
   `scripts/convert-ppocr-models.py`. Building the app itself needs neither. Building an
   **installer** needs both, plus the config that packages them:
   `pnpm tauri build --config src-tauri/tauri.release.conf.json`. And **there is no accuracy standard yet**:
-  it misreads characters, nothing in the project says what a good enough reading would be, and
-  no test measures it. Check anything you take from it before you use it.
+  it misreads characters, and nothing in the project says what a good enough reading would be.
+  Something does measure it now, which is new and is not the same as a standard:
+  `cargo run --release -p uptake-ocr --example ocr_accuracy` scores the pipeline against text of
+  known content rendered by `scripts/render-ocr-cards.py`. On the first run of that harness, 192
+  rendered cards at the shipping settings came out at a **0.33 character error rate with 54 % read
+  exactly and 25 % of cards containing text read as containing none**. Those are rendered cards,
+  so they are an upper bound on real screen text. Check anything you take from it before you use it.
   <!-- source: ROADMAP.md task 1.26 (the area type), 1.31 (the pipeline that returns text) and
        1.13 (the clipboard sentence, including the rule about which conversion wins, which is
        stated and enforced in `src-tauri/src/ocr.rs` by `Request`, `record_request`,
@@ -59,13 +64,23 @@ Five of seven area types are built.
        corrections were themselves about. Naming the four items removes the rot instead of
        resetting it: a reader who wants the count can run the tests, and a count in prose is
        a fact with no control behind it);
+       ⚠️ THE CAVEAT ABOVE LOST A CLAUSE IN THIS MERGE, DELIBERATELY. This branch's
+       copy still read "and no test measures it", which was true when 1.13 was written and
+       false the moment 1.32 merged. Resolved toward main rather than toward this branch: a
+       conflict is where a stale claim gets re-asserted by whoever resolves it, and the older
+       side is the one that had gone false.
        ADR-0035 (the runtime and the models ship in the installer) and ROADMAP.md 1.12 with
        BACKLOG.md I-337, whose packaging work is what the sentence above describes -- the first
        caveat is now about where the binaries live and how a build gets them, not about
        packaging being absent. ⚠️ Written in the branch that does that work, so I-337 is still
        marked open in BACKLOG.md as this is read; close it on the merge, not before. BACKLOG.md
        I-341 (no OCR accuracy bar exists, lane C). Delete the second caveat when I-341 is
-       answered, and not before. -->
+       answered, and not before -- the harness measuring the pipeline does NOT answer it, and
+       the sentence is written to keep those two apart. ROADMAP.md 1.32 with BACKLOG.md I-351
+       are the source of the harness sentence and of the three figures, which were produced by
+       the first run of `ocr_accuracy` on this workstation, 2026-09-04, at drop_score 0.5:
+       192 cards, CER 0.330, exact 54.2 %, empty 25.5 %. Quote them with the upper-bound
+       sentence attached or not at all. -->
 - **An upscale area.** Sharpens the piece of screen under it, in place. It covers the same region
   at the same size and does not magnify: what changes is how clean it looks. Three things it is
   not. It does not invent detail, and it cannot: the pixels under it are already the final ones
