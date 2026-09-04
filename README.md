@@ -47,10 +47,10 @@ Five of seven area types are built.
   it misreads characters, and nothing in the project says what a good enough reading would be.
   Something does measure it now, which is new and is not the same as a standard:
   `cargo run --release -p uptake-ocr --example ocr_accuracy` scores the pipeline against text of
-  known content rendered by `scripts/render-ocr-cards.py`. On the first run of that harness, 192
-  rendered cards at the shipping settings came out at a **0.33 character error rate with 54 % read
-  exactly and 25 % of cards containing text read as containing none**. Those are rendered cards,
-  so they are an upper bound on real screen text. Check anything you take from it before you use it.
+  known content rendered by `scripts/render-ocr-cards.py`. On 192 rendered cards at the shipping
+  settings it reads with a **0.14 character error rate, 67 % of cards exactly right, and 8 % of
+  cards containing text read as containing none**. Those are rendered cards, so they are an upper
+  bound on real screen text. Check anything you take from it before you use it.
   <!-- source: ROADMAP.md task 1.26 (the area type), 1.31 (the pipeline that returns text) and
        1.13 (the clipboard sentence, including the rule about which conversion wins, which is
        stated and enforced in `src-tauri/src/ocr.rs` by `Request`, `record_request`,
@@ -77,10 +77,15 @@ Five of seven area types are built.
        I-341 (no OCR accuracy bar exists, lane C). Delete the second caveat when I-341 is
        answered, and not before -- the harness measuring the pipeline does NOT answer it, and
        the sentence is written to keep those two apart. ROADMAP.md 1.32 with BACKLOG.md I-351
-       are the source of the harness sentence and of the three figures, which were produced by
-       the first run of `ocr_accuracy` on this workstation, 2026-09-04, at drop_score 0.5:
-       192 cards, CER 0.330, exact 54.2 %, empty 25.5 %. Quote them with the upper-bound
-       sentence attached or not at all. -->
+       are the source of the harness sentence, and BACKLOG.md I-363 of the three figures:
+       `ocr_accuracy` on this workstation, 2026-09-04, drop_score 0.5, det_thresh 0.2,
+       box_thresh 0.4 -- 192 cards, CER 0.140, exact 66.7 %, empty 7.8 %.
+       ⚠️ These replace the FIRST run's figures (CER 0.330, exact 54.2 %, empty 25.5 %),
+       which were measured at the upstream thresholds 0.3 / 0.6 that I-363 then changed.
+       Both numbers are real; they describe different builds, and the old ones are what the
+       founder was seeing at the rig. Quote either only with the upper-bound sentence
+       attached, and only beside the thresholds it was measured at -- a CER without its
+       detector configuration is not a fact about this product. -->
 - **An upscale area.** Sharpens the piece of screen under it, in place. It covers the same region
   at the same size and does not magnify: what changes is how clean it looks. Three things it is
   not. It does not invent detail, and it cannot: the pixels under it are already the final ones

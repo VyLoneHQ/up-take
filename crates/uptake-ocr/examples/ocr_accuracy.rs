@@ -89,7 +89,7 @@ use std::process::ExitCode;
 use uptake_core::bitmap::RgbaBitmap;
 use uptake_core::geometry::Size;
 use uptake_ocr::Engine;
-use uptake_ocr::paddle::{PaddleConfig, PaddleEngine, PaddleOptions};
+use uptake_ocr::paddle::{PaddleConfig, PaddleEngine, PaddleOptions, preprocess};
 
 /// Bytes per pixel in the flat image format `ocr_smoke.rs` documents.
 const BYTES_PER_PIXEL: usize = 4;
@@ -169,6 +169,9 @@ fn main() -> ExitCode {
     let mut cards_dir = PathBuf::from("dist/cards");
     let mut runtime: Option<PathBuf> = None;
     let mut drop_scores: Vec<f32> = Vec::new();
+    let mut limits: Vec<u32> = Vec::new();
+    let mut box_threshold: Option<f32> = None;
+    let mut det_threshold: Option<f32> = None;
     let mut filter: Option<String> = None;
 
     let mut arguments = std::env::args().skip(1);
@@ -179,6 +182,47 @@ fn main() -> ExitCode {
             ("--cards", Some(path)) => cards_dir = PathBuf::from(path),
             ("--runtime", Some(path)) => runtime = Some(PathBuf::from(path)),
             ("--filter", Some(text)) => filter = Some(text),
+            // DB post-processing, exposed because PP-OCRv6's own published
+            // config uses thresh 0.2 / box_thresh 0.4 where this crate's
+            // defaults are 0.3 / 0.6. A third stricter is a plausible cause
+            // of a marginal detection being dropped, and a plausible cause is
+            // worth a sweep rather than an argument.
+            ("--box-thresh", Some(text)) => match text.parse::<f32>() {
+                Ok(value) => box_threshold = Some(value),
+                Err(error) => {
+                    eprintln!("--box-thresh {text}: {error}");
+                    return ExitCode::FAILURE;
+                }
+            },
+            ("--det-thresh", Some(text)) => match text.parse::<f32>() {
+                Ok(value) => det_threshold = Some(value),
+                Err(error) => {
+                    eprintln!("--det-thresh {text}: {error}");
+                    return ExitCode::FAILURE;
+                }
+            },
+            // The detector's cap on the longer side. Repeatable like
+            // `--drop-score`, and here for the same reason that one is: the
+            // founder's rig pass on 2026-09-04 found that an area wider than
+            // roughly 700 logical pixels stops reading, and `limit_side_len`
+            // scaling the frame down before the detector ever sees it is the
+            // named suspect. A hypothesis about a knob is worth exactly as much
+            // as the sweep that tests it.
+            ("--limit-side-len", Some(text)) => match text.parse::<u32>() {
+                Ok(limit) if limit >= preprocess::SIDE_MULTIPLE => limits.push(limit),
+                Ok(limit) => {
+                    eprintln!(
+                        "--limit-side-len {limit} is below one {} px multiple, which would \
+                         round every frame to nothing",
+                        preprocess::SIDE_MULTIPLE
+                    );
+                    return ExitCode::FAILURE;
+                }
+                Err(error) => {
+                    eprintln!("--limit-side-len {text}: {error}");
+                    return ExitCode::FAILURE;
+                }
+            },
             ("--drop-score", Some(text)) => match text.parse::<f32>() {
                 Ok(score) if (0.0..=1.0).contains(&score) => drop_scores.push(score),
                 Ok(score) => {
@@ -194,7 +238,11 @@ fn main() -> ExitCode {
             // "unrecognised", which would send the reader to check their
             // spelling instead of their argument list. Same choice as
             // `ocr_smoke.rs`, for the reason its review recorded.
-            (flag @ ("--models" | "--cards" | "--runtime" | "--drop-score" | "--filter"), None) => {
+            (
+                flag @ ("--models" | "--cards" | "--runtime" | "--drop-score" | "--limit-side-len"
+                | "--filter"),
+                None,
+            ) => {
                 eprintln!("{flag} needs a value");
                 usage();
                 return ExitCode::FAILURE;
@@ -209,6 +257,9 @@ fn main() -> ExitCode {
     if drop_scores.is_empty() {
         // The shipping value, so a bare run measures what users actually get.
         drop_scores.push(PaddleOptions::default().drop_score);
+    }
+    if limits.is_empty() {
+        limits.push(PaddleOptions::default().limit_side_len);
     }
 
     let manifest = cards_dir.join("cards.tsv");
@@ -246,25 +297,49 @@ fn main() -> ExitCode {
         runtime_library: runtime,
     };
 
-    for drop_score in drop_scores {
-        let options = PaddleOptions {
-            drop_score,
-            ..PaddleOptions::default()
-        };
-        // Reloaded per value rather than mutated: `drop_score` lives in the
-        // engine's options and there is no setter, and a harness that reached
-        // inside to change one would be measuring a configuration the product
-        // cannot produce.
-        let mut engine = match PaddleEngine::load(&config, options) {
-            Ok(engine) => engine,
-            Err(error) => {
-                eprintln!("load failed at drop_score {drop_score}: {error}");
+    // The full cross product, so a sweep over one knob at several values of the
+    // other is one invocation rather than several a reader has to line up by
+    // hand.
+    for &limit_side_len in &limits {
+        for &drop_score in &drop_scores {
+            let mut detector = PaddleOptions::default().detector;
+            if let Some(value) = box_threshold {
+                detector.box_threshold = value;
+            }
+            if let Some(value) = det_threshold {
+                detector.threshold = value;
+            }
+            let options = PaddleOptions {
+                drop_score,
+                limit_side_len,
+                detector,
+            };
+            // Reloaded per combination rather than mutated: both knobs live in
+            // the engine's options and there is no setter, and a harness that
+            // reached inside to change one would be measuring a configuration
+            // the product cannot produce.
+            let mut engine = match PaddleEngine::load(&config, options) {
+                Ok(engine) => engine,
+                Err(error) => {
+                    eprintln!(
+                        "load failed at drop_score {drop_score}, \
+                         limit_side_len {limit_side_len}: {error}"
+                    );
+                    return ExitCode::FAILURE;
+                }
+            };
+            if let Err(error) = measure(
+                &mut engine,
+                &cards,
+                &cards_dir,
+                drop_score,
+                limit_side_len,
+                detector.threshold,
+                detector.box_threshold,
+            ) {
+                eprintln!("{error}");
                 return ExitCode::FAILURE;
             }
-        };
-        if let Err(error) = measure(&mut engine, &cards, &cards_dir, drop_score) {
-            eprintln!("{error}");
-            return ExitCode::FAILURE;
         }
     }
     ExitCode::SUCCESS
@@ -273,7 +348,7 @@ fn main() -> ExitCode {
 fn usage() {
     eprintln!(
         "usage: --models <dir> --cards <dir> [--runtime <dll>] \
-         [--drop-score <0.0..1.0>]... [--filter <substring>]"
+         [--drop-score <0.0..1.0>]... [--limit-side-len <px>]... \n         [--filter <substring>]"
     );
 }
 
@@ -283,6 +358,9 @@ fn measure(
     cards: &[Card],
     directory: &Path,
     drop_score: f32,
+    limit_side_len: u32,
+    det_threshold: f32,
+    box_threshold: f32,
 ) -> Result<(), String> {
     let mut overall = Tally::default();
     // `BTreeMap` so every breakdown prints in a stable order. A run whose rows
@@ -331,7 +409,9 @@ fn measure(
     let elapsed = started.elapsed();
 
     println!();
-    println!("=== drop_score {drop_score} ===");
+    println!(
+        "=== drop_score {drop_score}, limit_side_len {limit_side_len}, \n         det_thresh {det_threshold}, box_thresh {box_threshold} ==="
+    );
     println!(
         "{} cards in {:.1} s ({:.0} ms per card)",
         overall.cards,
