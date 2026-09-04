@@ -80,6 +80,25 @@
 //! comment asserting a guarantee no test can falsify -- which is the exact
 //! shape all three of 2026-09-03's review-found defects took.
 //!
+//! # What is tested here, and what is not
+//!
+//! Stated because round 2 of `PR #83`'s review found a guarantee in a comment
+//! with no control behind it, and the honest answer to that is a list rather
+//! than a better comment.
+//!
+//! **Driven at their own call sites:** [`forget`]'s release of the clipboard
+//! promise, and [`record_request`]'s gesture-order comparison.
+//!
+//! **NOT driven at their call sites, and the reason is the same for both:**
+//! the `Outcome::Abandoned` and `Outcome::Stopped` arms inside [`pump`], which
+//! also release the promise. `pump` needs a live [`Service`], which needs the
+//! engine, the models and the runtime, so no test in this crate can reach
+//! those arms; only the pure [`claims_clipboard`] beneath them is covered, and
+//! always through a slot built by hand. **A change to either arm can therefore
+//! be wrong with the whole suite green.** That is a disclosure, not a defect
+//! being excused: it is the same untestability the Win32 clipboard publish has
+//! and it is owed the same rig pass.
+//!
 //! [`Engine`]: uptake_ocr::Engine
 //! [`ADR-0032`]: ../../../Projects/UP-TAKE/DECISIONS/ADR-0032-onnx-runtime-is-loaded-not-downloaded.md
 //! [`ADR-0035`]: ../../../Projects/UP-TAKE/DECISIONS/ADR-0035-assets-ship-in-the-installer.md
@@ -718,6 +737,8 @@ mod tests {
         );
     }
 
+    use uptake_core::area::{AreaStore, AreaType};
+
     /// A request, for the clipboard tests. The instant is arbitrary: every
     /// assertion below is about *which* request answers, never about how long
     /// one took.
@@ -726,6 +747,74 @@ mod tests {
             id,
             started: Instant::now(),
         })
+    }
+
+    /// A real [`AreaId`], which has no public constructor by design: it has to
+    /// come from a store, which is the discipline that stops a worker holding a
+    /// raw number from fabricating one. Needs no Tauri and no Win32.
+    fn area_id(store: &mut AreaStore) -> AreaId {
+        store
+            .create(AreaType::Default, Rect::new(0, 0, 10, 10))
+            .expect("a non-empty rectangle always yields an id")
+    }
+
+    /// [`forget`] releases the clipboard promise, driven at its OWN call site.
+    ///
+    /// # Why this test exists and what its absence cost
+    ///
+    /// Round 2 of `PR #83`'s independent review drilled it: deleting the
+    /// `claims_clipboard` line inside `forget` left **all 616 workspace tests
+    /// green**. Nothing anywhere reached `forget` at all -- only the pure
+    /// `claims_clipboard` beneath it, always through a slot built by hand -- so
+    /// the guarantee that function's own comment states, *"one dismissal must
+    /// not cost two copies"*, was a sentence with no control behind it. That is
+    /// the class this project keeps finding (`UT-F-40`, `UT-F-44`, `UT-F-52`,
+    /// `UT-F-75`): a check that cannot go red.
+    ///
+    /// ⚠️ **This touches the module's global `OCR` state**, which no other test
+    /// in this file does. Stated rather than left to be discovered: the tests
+    /// here run in parallel, so a second test that took this lock would need to
+    /// be read against this one. The alternative was to leave the call site
+    /// untested, which is what the review found.
+    #[test]
+    fn dismissing_an_area_releases_the_clipboard_promise() {
+        let mut store = AreaStore::new();
+        let dismissed = area_id(&mut store);
+
+        lock().latest = Some(Request {
+            id: dismissed.get(),
+            started: Instant::now(),
+        });
+        forget(dismissed);
+        assert!(
+            lock().latest.is_none(),
+            "the dismissed area must not go on holding the promise, or the NEXT \
+             conversion's text arrives with the slot already spoken for and does \
+             not copy either"
+        );
+    }
+
+    /// The other half, and the one that stops the fix above being "clear the
+    /// slot on any dismissal". Dismissing area A while B holds the promise must
+    /// leave B's promise alone.
+    #[test]
+    fn dismissing_one_area_does_not_release_another_areas_promise() {
+        let mut store = AreaStore::new();
+        let dismissed = area_id(&mut store);
+        let promised = area_id(&mut store);
+
+        lock().latest = Some(Request {
+            id: promised.get(),
+            started: Instant::now(),
+        });
+        forget(dismissed);
+        assert_eq!(
+            lock().latest.as_ref().map(|held| held.id),
+            Some(promised.get()),
+            "B is still converting and still owns the clipboard"
+        );
+        // Left clean for anything that runs after this.
+        lock().latest = None;
     }
 
     /// The defect round 1 of `PR #83`'s review found, driven rather than

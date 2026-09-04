@@ -911,7 +911,15 @@ pub fn pump(app: &AppHandle, state: &mut PumpState) {
     pump_precapture();
     // Roadmap 1.26. Drains whatever the OCR worker has finished; a lock and an
     // empty-queue check on the ticks where nothing has, which is almost all of
-    // them. It does not spawn and does not capture -- see `ocr::pump`.
+    // them. It does not capture. **It spawns exactly once per recognition that
+    // produces text**, to publish that text to the clipboard off this thread
+    // (roadmap 1.13); see `ocr::pump`, which states why.
+    //
+    // ⚠️ This said "does not spawn and does not capture" until 2026-09-04, and
+    // it was corrected here because round 2 of `PR #83`'s independent review
+    // found it: the claim was fixed in `ocr.rs`'s own module doc by the change
+    // that falsified it, and left standing verbatim in this twin. Two documents
+    // holding one fact, only one of them updated, is `I-311`'s shape.
     crate::ocr::pump(app);
     pump_hover(app, state);
 }
