@@ -911,7 +911,23 @@ pub fn pump(app: &AppHandle, state: &mut PumpState) {
     pump_precapture();
     // Roadmap 1.26. Drains whatever the OCR worker has finished; a lock and an
     // empty-queue check on the ticks where nothing has, which is almost all of
-    // them. It does not spawn and does not capture -- see `ocr::pump`.
+    // them. It does not capture. **It spawns exactly once per recognition that
+    // produces text**, to publish that text to the clipboard off this thread
+    // (roadmap 1.13); see `ocr::pump`, which states why.
+    //
+    // ⚠️ This said "does not spawn and does not capture" until 2026-09-04, and
+    // it was corrected here because round 2 of `PR #83`'s independent review
+    // found it: the claim was fixed in `ocr.rs`'s own module doc by the change
+    // that falsified it, and left standing verbatim in this twin. Two documents
+    // holding one fact, only one of them updated, is **AGENTIC-OS `I-86`**'s
+    // shape.
+    //
+    // ⚠️ That citation said `I-311` until round 3 of the same review checked it.
+    // `I-311` is UP-TAKE's shallow-clone row and AGENTIC-OS's `I-311` is a
+    // review residue; neither is about twin documents, so the id resolved in
+    // both plausible ledgers and resolved to the wrong thing in both. The
+    // programme is named here because `I-` numbers are per-project and collide,
+    // which UP-TAKE's own `BACKLOG.md` header says in as many words.
     crate::ocr::pump(app);
     pump_hover(app, state);
 }

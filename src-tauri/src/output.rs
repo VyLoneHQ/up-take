@@ -57,6 +57,17 @@ const LCS_S_RGB: u32 = 0x7352_4742;
 const BUDGET_TARGET_MS: u128 = 300;
 const BUDGET_HARD_FAIL_MS: u128 = 600;
 
+/// §1's *selection release → OCR text on clipboard* budget (ms).
+///
+/// A separate pair from [`BUDGET_TARGET_MS`] deliberately: the image row and
+/// the OCR row are two different rows of `quality-bars.md` §1 with two
+/// different numbers, and the recognition path is five times the budget of the
+/// capture path because it runs two neural networks on the CPU in between.
+/// Reusing the image budget here would report every successful OCR copy as a
+/// hard-fail, which is the shape of a log that says less than its reader thinks.
+const OCR_BUDGET_TARGET_MS: u128 = 1_500;
+const OCR_BUDGET_HARD_FAIL_MS: u128 = 3_000;
+
 /// Environment variable that turns [`report`]'s per-action line on in a release
 /// build. See [`init_report_verbosity`].
 const REPORT_VAR: &str = "UPTAKE_DEV_REPORT";
@@ -181,6 +192,84 @@ pub(crate) fn copy_to_clipboard(app: &AppHandle, area: AreaId, bounds: Rect) {
         crate::overlay::emit_flash(app, area);
     }
     report("copy", started, &split, outcome);
+}
+
+/// Publishes recognised text to the clipboard (roadmap task **1.13**).
+///
+/// # Why this is a second function rather than a format added to the first
+///
+/// [`copy_to_clipboard`] publishes `CF_DIBV5` **and** PNG in one bracket
+/// because both describe the *same* pixels, and an app that understands only
+/// one of them should still get the picture. Text is not another view of those
+/// pixels: it is what the recogniser made of them, and a paste target offered
+/// both would choose by its own preference order rather than by what the user
+/// asked for. `1.13` is *auto-copy extracted text*, so text is what goes on the
+/// clipboard and the image does not ride along.
+///
+/// # It empties the clipboard, and that is the whole gesture
+///
+/// A user who converts an area to text and then pastes expects the text. There
+/// is exactly one clipboard, so this necessarily discards whatever was on it,
+/// including an image this module put there a moment ago. That is not a
+/// side effect to be minimised; it is the row.
+///
+/// `started` is the instant of the gesture that asked for the recognition, not
+/// the instant this function was reached: `quality-bars.md` §1 bounds
+/// *selection release → OCR text on clipboard*, and a measurement that starts
+/// after the two networks have already run would report a number the bar is not
+/// about.
+pub(crate) fn copy_text_to_clipboard(app: &AppHandle, area: AreaId, text: &str, started: Instant) {
+    // Encoded before the clipboard is opened, for the reason `copy_to_clipboard`
+    // states: the clipboard is a global system resource and every other
+    // process's access blocks while it is held.
+    let outcome = unicode_text_bytes(text)
+        .and_then(|utf16| publish_clipboard_text(overlay_hwnd(app)?, &utf16));
+    // Only on success, for the same reason Copy flashes only on success: an
+    // acknowledgement the user cannot check must not be shown after a failure.
+    if outcome.is_ok() {
+        crate::overlay::emit_flash(app, area);
+    }
+    for line in ocr_report_lines(
+        started.elapsed().as_millis(),
+        outcome,
+        REPORT_EVERY_ACTION.load(Ordering::SeqCst),
+    ) {
+        eprintln!("{line}");
+    }
+}
+
+/// Which lines an OCR auto-copy produces, as a pure function of its outcome,
+/// its elapsed time and the verbosity flag.
+///
+/// Split out for the reason [`report_lines`] records in full: a switch whose
+/// only job is to decide whether a line appears cannot be tested through a
+/// function that prints and returns nothing. The two are deliberately **not**
+/// merged: [`report_lines`] carries a stage split and the image budgets, and
+/// giving it a second budget pair plus an empty-stage case would put two
+/// unrelated rows of §1 behind one set of branches.
+fn ocr_report_lines(elapsed: u128, outcome: Result<(), String>, every_action: bool) -> Vec<String> {
+    let Err(error) = outcome else {
+        if elapsed > OCR_BUDGET_HARD_FAIL_MS {
+            return vec![format!(
+                "ocr: text on the clipboard in {elapsed} ms, over the §1 hard-fail budget ({OCR_BUDGET_HARD_FAIL_MS} ms)"
+            )];
+        }
+        if elapsed > OCR_BUDGET_TARGET_MS {
+            return vec![format!(
+                "ocr: text on the clipboard in {elapsed} ms, over the §1 target ({OCR_BUDGET_TARGET_MS} ms)"
+            )];
+        }
+        if every_action {
+            return vec![format!("ocr: text on the clipboard in {elapsed} ms")];
+        }
+        return Vec::new();
+    };
+    // A failure is reported whatever the verbosity: the text was recognised and
+    // is on screen, so the user has every reason to believe it is pastable and
+    // no way to discover otherwise. Silence here is the failure itself.
+    vec![format!(
+        "ocr: could not put the text on the clipboard after {elapsed} ms: {error}"
+    )]
 }
 
 /// Copies the whole monitor under the cursor to the clipboard, with no placement
@@ -1448,6 +1537,69 @@ fn set_clipboard_data(format: u32, data: &[u8]) -> Result<(), String> {
 /// `winuser.h` and unchanged since Windows 2000.
 const CF_DIBV5: u32 = 17;
 
+/// Predefined clipboard format for NUL-terminated UTF-16. Pinned here for the
+/// same reason as [`CF_DIBV5`]: `windows-sys` does not export the predefined
+/// `CF_*` constants from its `DataExchange` module. Stable ABI, documented in
+/// `winuser.h`.
+const CF_UNICODETEXT: u32 = 13;
+
+/// Opens the clipboard against `owner`, empties it, publishes `utf16` as
+/// [`CF_UNICODETEXT`], and closes it.
+///
+/// The `owner` contract, and why it is not NULL, is stated once on
+/// [`publish_clipboard`] and holds identically here.
+fn publish_clipboard_text(owner: HWND, utf16: &[u8]) -> Result<(), String> {
+    // SAFETY: `OpenClipboard`/`CloseClipboard` bracket every clipboard call
+    // below; `owner` is a live top-level window handle owned by this process.
+    let opened = unsafe { OpenClipboard(owner) };
+    if opened == 0 {
+        return Err("could not open the clipboard".to_string());
+    }
+    let result = (|| {
+        // SAFETY: the clipboard is open, per the check above.
+        if unsafe { EmptyClipboard() } == 0 {
+            return Err("could not empty the clipboard".to_string());
+        }
+        set_clipboard_data(CF_UNICODETEXT, utf16)
+    })();
+    // SAFETY: matches the successful `OpenClipboard` above, on every path.
+    unsafe {
+        CloseClipboard();
+    }
+    result
+}
+
+/// `text` as the bytes `CF_UNICODETEXT` expects: UTF-16 little-endian,
+/// NUL-terminated.
+///
+/// # The interior NUL is refused rather than published
+///
+/// `CF_UNICODETEXT` is a C string: a consumer reads to the first `U+0000` and
+/// stops. Recognised text containing one would therefore paste **truncated**,
+/// with no error anywhere: the clipboard call succeeds, the flash fires, and
+/// the user gets a prefix of what is on screen. That is the quiet-wrong-answer
+/// shape this project keeps finding (`export_source`'s own header records the
+/// last one), so it is an error here instead. PP-OCRv4's dictionary cannot
+/// produce a NUL, which is exactly why nothing downstream would ever catch it.
+///
+/// # Errors
+///
+/// When `text` contains an interior NUL.
+fn unicode_text_bytes(text: &str) -> Result<Vec<u8>, String> {
+    if text.contains('\0') {
+        return Err(
+            "the recognised text contains a NUL, which the clipboard would truncate at".to_string(),
+        );
+    }
+    // `encode_utf16` yields code units; the clipboard wants their little-endian
+    // bytes. The terminator is a full `u16`, not a single zero byte.
+    let mut bytes = Vec::with_capacity((text.len() + 1) * 2);
+    for unit in text.encode_utf16().chain(std::iter::once(0)) {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    Ok(bytes)
+}
+
 /// Builds a `BITMAPV5HEADER` DIB with a true alpha channel, as the packed
 /// bytes `CF_DIBV5` expects: header immediately followed by the pixels.
 ///
@@ -1604,6 +1756,112 @@ fn unique_path(dir: &std::path::Path, stem: &str) -> PathBuf {
 #[allow(clippy::unwrap_used, reason = "a failed unwrap is a failed test")]
 mod tests {
     use super::*;
+
+    /// `CF_UNICODETEXT` is UTF-16 **little-endian** with a `u16` terminator.
+    /// Asserted byte for byte rather than by round-tripping through
+    /// `String::from_utf16`, which would pass on a big-endian buffer and on one
+    /// with no terminator at all -- the two ways this can be wrong.
+    #[test]
+    fn clipboard_text_is_little_endian_utf16_with_a_terminator() {
+        assert_eq!(
+            unicode_text_bytes("Hi").unwrap(),
+            vec![b'H', 0, b'i', 0, 0, 0]
+        );
+    }
+
+    /// Recognised text is whatever was on the screen, which includes text
+    /// outside the BMP. A surrogate pair is two code units and therefore four
+    /// bytes, and an encoder that walked `chars()` instead of `encode_utf16()`
+    /// would silently truncate every one of them.
+    #[test]
+    fn text_outside_the_bmp_survives_as_a_surrogate_pair() {
+        // U+1F600, which encodes as D83D DE00.
+        let bytes = unicode_text_bytes("\u{1F600}").unwrap();
+        assert_eq!(bytes, vec![0x3D, 0xD8, 0x00, 0xDE, 0, 0]);
+    }
+
+    /// The empty string is a legitimate input -- and it is still a valid
+    /// `CF_UNICODETEXT` buffer, which is the terminator alone. A `Vec::new()`
+    /// here would hand the clipboard zero bytes to read a C string out of.
+    #[test]
+    fn empty_text_is_still_a_terminated_buffer() {
+        assert_eq!(unicode_text_bytes("").unwrap(), vec![0, 0]);
+    }
+
+    /// The quiet-wrong-answer case. A NUL inside the text would paste as a
+    /// prefix with nothing reporting a failure anywhere, so it is refused.
+    #[test]
+    fn an_interior_nul_is_refused_rather_than_truncated() {
+        let error = unicode_text_bytes("before\0after").unwrap_err();
+        assert!(
+            error.contains("truncate"),
+            "the error must say what would have happened: {error}"
+        );
+    }
+
+    /// Under the target, and quiet unless the verbose flag is on. The pair of
+    /// assertions is the point: this is the switch `report_lines`'s own header
+    /// records being untestable until it was split out.
+    #[test]
+    fn a_fast_ocr_copy_is_silent_unless_every_action_is_armed() {
+        assert!(ocr_report_lines(900, Ok(()), false).is_empty());
+        assert_eq!(ocr_report_lines(900, Ok(()), true).len(), 1);
+    }
+
+    /// Over §1's target and over its hard fail, the line appears whatever the
+    /// verbosity -- a budget breach nobody is told about is the reason the
+    /// budget is written down.
+    #[test]
+    fn an_over_budget_ocr_copy_reports_itself_even_when_quiet() {
+        let target = ocr_report_lines(OCR_BUDGET_TARGET_MS + 1, Ok(()), false);
+        assert_eq!(target.len(), 1);
+        assert!(target[0].contains("over the §1 target"), "{}", target[0]);
+
+        let hard = ocr_report_lines(OCR_BUDGET_HARD_FAIL_MS + 1, Ok(()), false);
+        assert_eq!(hard.len(), 1);
+        assert!(hard[0].contains("hard-fail"), "{}", hard[0]);
+    }
+
+    /// Exactly at a budget is not over it. The boundary is asserted because
+    /// `>` and `>=` are one character apart and the difference is invisible in
+    /// any log.
+    #[test]
+    fn a_copy_exactly_at_the_target_is_not_over_it() {
+        assert!(ocr_report_lines(OCR_BUDGET_TARGET_MS, Ok(()), false).is_empty());
+    }
+
+    /// A failed copy is always reported. The text is on screen, so the user has
+    /// every reason to believe it is pastable; nothing else would tell them.
+    #[test]
+    fn a_failed_ocr_copy_is_reported_however_quiet_the_build() {
+        let lines = ocr_report_lines(120, Err("no clipboard".to_string()), false);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("no clipboard"), "{}", lines[0]);
+    }
+
+    /// The OCR path reports against its own row of §1, not the image row.
+    ///
+    /// Driven through both functions at one elapsed time rather than asserted
+    /// between the constants: comparing the constants is a statement about two
+    /// numbers, and what matters is that the *reporting* uses the right pair.
+    /// An `ocr_report_lines` that reached for `BUDGET_HARD_FAIL_MS` would call
+    /// a perfectly healthy 700 ms recognition a hard failure, and a comparison
+    /// of literals would not notice.
+    #[test]
+    fn an_ocr_copy_is_judged_against_the_ocr_budget_not_the_image_one() {
+        let elapsed = BUDGET_HARD_FAIL_MS + 1;
+        assert!(
+            ocr_report_lines(elapsed, Ok(()), false).is_empty(),
+            "{elapsed} ms is well inside the OCR budget and must be silent"
+        );
+        let image = report_lines("copy", elapsed, "", Ok(()), false);
+        assert_eq!(
+            image.len(),
+            1,
+            "the same elapsed time is over the image budget, which is the point"
+        );
+        assert!(image[0].contains("hard-fail"), "{}", image[0]);
+    }
 
     /// Two areas, one bookkeeper. **This is the review finding that made
     /// `Magnify` per-area, driven rather than argued.**
