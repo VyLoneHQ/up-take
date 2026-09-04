@@ -86,6 +86,25 @@ jobs:
       - name: Test the ONNX Runtime acquisition step
         run: python3 scripts/test_acquire_onnxruntime.py
 
+      # The bundle checker's own tests (I-346). Synthetic assets and a synthetic
+      # pins file in a temp directory, with the module's tables rebound at them,
+      # so they need none of the 31 MB this job does not have. Here for the same
+      # reason as the two steps above it: a fast Python run on a Linux runner
+      # that is already required, so it costs no new check to register in branch
+      # protection and no queue time on the Windows runners.
+      #
+      # ⚠️ An earlier version of this comment claimed the placement was
+      # load-bearing -- that the failure modes "have to be exercised somewhere
+      # the real bytes are ABSENT". **That is false and the independent review
+      # of PR #86 measured it**: the fixtures make every assertion independent
+      # of the surrounding job, and the reviewer ran the suite with the real
+      # assets present and absent, 8/8 both times. The step would work in the
+      # bundle job too. The honest reason is cost and consistency, and a comment
+      # that dresses a convenience up as a constraint is how a later session
+      # refuses to move something for a reason that was never true.
+      - name: Test the bundle checker
+        run: python3 scripts/test_verify_bundle.py
+
       - name: Em-dash ratchet
         run: python3 scripts/dash-ratchet.py --against origin/main
 
