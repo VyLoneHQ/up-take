@@ -64,8 +64,21 @@
 //! F-33). Loading the engine is far worse than a capture -- ~15 MB of weights
 //! off disk -- so the first submission pays it on that spawned thread too.
 //!
-//! [`pump`] does **not** spawn. It runs on the existing placement poll and only
-//! drains an already-populated queue.
+//! [`pump`] runs on the existing placement poll and mostly only drains an
+//! already-populated queue, so it does no work of its own worth moving.
+//!
+//! ⚠️ **It has ONE spawn, added by `1.13`, and this paragraph said it had none
+//! until then.** The auto-copy publishes to the clipboard, which is a global
+//! system resource every other process blocks on and which a clipboard manager
+//! can hold; the poll thread it would otherwise block is the one
+//! `quality-bars.md` §1's *poll emit -> frame painted* row is measured against,
+//! and that is the only §1 row currently marked met. `output::copy_to_clipboard`
+//! is dispatched off-thread for the same reason (`placement.rs`, the
+//! `MenuAction::Copy` arm). Corrected here in the change that falsified it: an
+//! independent review of `PR #83` raised the thread as a non-binding hunch, the
+//! fix was taken, and a header still promising "does not spawn" would be a doc
+//! comment asserting a guarantee no test can falsify -- which is the exact
+//! shape all three of 2026-09-03's review-found defects took.
 //!
 //! [`Engine`]: uptake_ocr::Engine
 //! [`ADR-0032`]: ../../../Projects/UP-TAKE/DECISIONS/ADR-0032-onnx-runtime-is-loaded-not-downloaded.md
@@ -210,6 +223,43 @@ impl Ocr {
             latest: None,
         }
     }
+}
+
+/// Records `request` as the conversion the clipboard is promised to, unless a
+/// LATER gesture already holds the promise.
+///
+/// # This comparison is the whole of the guarantee, and it was missing
+///
+/// Found by the independent review of `PR #83`, round 1, and it is a real
+/// defect rather than a tidiness point. [`recognise_into_area`] takes the
+/// gesture instant on the caller's thread and then **spawns**, and the spawned
+/// thread captures a frame before it takes this lock. That capture is bounded
+/// by `quality-bars.md` §1's own image budget (300 ms target, 600 ms hard fail)
+/// and varies with the area's size, and the session's first conversion also
+/// pays the engine's cold load while holding the lock a second thread is
+/// waiting on.
+///
+/// So **lock-acquisition order is not gesture order**, and the first version of
+/// this assigned the slot unconditionally. Click A then B, let A's capture be
+/// the slower, and A's thread arrives last and overwrites B: the *older* click
+/// takes the clipboard, B's text is drawn on screen and silently declined, and
+/// the module's own doc comment, the commit message and the README all promise
+/// the opposite. Every one of the four tests below drove `claims_clipboard` on
+/// a slot built by hand, so not one of them could see it.
+///
+/// A strictly-later held request wins. An equal instant replaces, and that is
+/// deliberate rather than an accident of `>` against `>=`: two gestures with
+/// the same `Instant` are indistinguishable in the only ordering that exists
+/// here, so refusing would be picking one arbitrarily and calling it the
+/// user's intent.
+fn record_request(latest: &mut Option<Request>, request: Request) {
+    if latest
+        .as_ref()
+        .is_some_and(|held| held.started > request.started)
+    {
+        return;
+    }
+    *latest = Some(request);
 }
 
 /// The gesture instant `id`'s recognised text should be timed against, if `id`
@@ -447,10 +497,13 @@ pub(crate) fn recognise_into_area(app: &AppHandle, id: AreaId, bounds: Rect) {
                 // coming, and letting it take the slot would mean a later
                 // *successful* conversion silently declined to copy because a
                 // failed one was holding the promise.
-                guard.latest = Some(Request {
-                    id: id.get(),
-                    started,
-                });
+                record_request(
+                    &mut guard.latest,
+                    Request {
+                        id: id.get(),
+                        started,
+                    },
+                );
             }
             Err(error) => {
                 // The worker died between building it and here. Reported
@@ -573,10 +626,24 @@ pub(crate) fn pump(app: &AppHandle) {
     // area dismissed while its frame was in the worker gets no copy, which is
     // right -- the user threw that conversion away, and taking their clipboard
     // for it would be the opposite of what they just did.
+    //
+    // **Spawned, not called here.** [`pump`] runs on `click_through`'s 60 Hz
+    // poll thread, which is the thread `quality-bars.md` §1's *poll emit ->
+    // frame painted* row (8 ms target, 16 ms hard fail) is measured against
+    // and the one row currently marked met. Publishing takes the clipboard,
+    // a global system resource every other process blocks on, and a clipboard
+    // manager or viewer chain can hold it. `copy_to_clipboard` is dispatched
+    // the same way for the same reason (`placement.rs`, the `MenuAction::Copy`
+    // arm), and this path was the exception until the independent review of
+    // `PR #83` raised it. Non-binding there and taken anyway: the cost is one
+    // thread per conversion and the risk was a met bar.
     if let Some((raw, text, started)) = clipboard
         && let Some(id) = crate::overlay::live_area_id(app, raw)
     {
-        crate::output::copy_text_to_clipboard(app, id, &text, started);
+        let app = app.clone();
+        std::thread::spawn(move || {
+            crate::output::copy_text_to_clipboard(&app, id, &text, started);
+        });
     }
 }
 
@@ -659,6 +726,82 @@ mod tests {
             id,
             started: Instant::now(),
         })
+    }
+
+    /// The defect round 1 of `PR #83`'s review found, driven rather than
+    /// argued. Gestures A then B; B's thread reaches the lock first because A's
+    /// capture was slower, then A's arrives. A must not take the promise back.
+    #[test]
+    fn a_slower_earlier_gesture_does_not_steal_the_promise_from_a_later_one() {
+        let first = Instant::now();
+        // A later gesture, expressed as an instant that is strictly later. The
+        // real gap is however long the user took between two clicks.
+        let second = first + std::time::Duration::from_millis(120);
+
+        let mut latest = None;
+        // B's thread wins the lock, even though its gesture came second.
+        record_request(
+            &mut latest,
+            Request {
+                id: 2,
+                started: second,
+            },
+        );
+        // A's thread arrives afterwards, carrying the EARLIER gesture.
+        record_request(
+            &mut latest,
+            Request {
+                id: 1,
+                started: first,
+            },
+        );
+
+        assert_eq!(
+            latest.as_ref().map(|held| held.id),
+            Some(2),
+            "the later gesture keeps the clipboard, whatever order the threads arrived in"
+        );
+    }
+
+    /// The ordinary order still works, or the guard above would be a way of
+    /// never updating the slot at all.
+    #[test]
+    fn a_later_gesture_takes_the_promise_from_an_earlier_one() {
+        let first = Instant::now();
+        let second = first + std::time::Duration::from_millis(120);
+
+        let mut latest = None;
+        record_request(
+            &mut latest,
+            Request {
+                id: 1,
+                started: first,
+            },
+        );
+        record_request(
+            &mut latest,
+            Request {
+                id: 2,
+                started: second,
+            },
+        );
+
+        assert_eq!(latest.as_ref().map(|held| held.id), Some(2));
+    }
+
+    /// An empty slot always takes the request. The state after a dismissal,
+    /// after a worker stop, and before the session's first conversion.
+    #[test]
+    fn an_empty_slot_takes_whatever_arrives() {
+        let mut latest = None;
+        record_request(
+            &mut latest,
+            Request {
+                id: 9,
+                started: Instant::now(),
+            },
+        );
+        assert_eq!(latest.as_ref().map(|held| held.id), Some(9));
     }
 
     #[test]
