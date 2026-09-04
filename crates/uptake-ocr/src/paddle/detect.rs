@@ -53,22 +53,62 @@ use super::quad::{PointF, Quad, min_area_rect};
 /// | **0.2 / 0.4 (here)** | **0.140** | **66.7 %** | **7.8 %** |
 /// | 0.2 / 0.3 | 0.133 | 67.2 % | 7.3 % |
 ///
-/// `box_threshold` is the load-bearing one: on a width sweep holding the text
-/// identical and varying only the surrounding canvas, `0.6` read 4 of 12 cards
-/// and `0.4` read 12 of 12, at either `threshold`.
+/// `box_threshold` is the load-bearing one. On a width sweep holding the text
+/// pixel-identical and varying only the surrounding canvas, cards read out of
+/// 12, at the shipping `limit_side_len`:
 ///
-/// **The feared trade did not happen.** Loosening a filter should buy fewer
-/// silent empties at the cost of more confident nonsense; instead the exact-match
-/// rate went UP by thirteen points, so the boxes being recovered are real text.
+/// | | `box` 0.6 | `box` 0.4 |
+/// | --- | --- | --- |
+/// | `threshold` 0.3 | 4 | **12** |
+/// | `threshold` 0.2 | 6 | **12** |
 ///
-/// # Why 0.2 / 0.4 rather than the 0.2 / 0.3 that measured best
+/// `0.4` reads all twelve at either `threshold`; `0.6` reads neither column
+/// fully. Reproduce with `render-ocr-cards.py --width-sweep`.
 ///
-/// Because `0.2 / 0.4` is **PP-OCRv6's own published configuration** -- Baidu
-/// loosened its own defaults in the generation after the one we ship -- so it has
-/// corroboration outside this project's synthetic card set. The 0.007 CER between
-/// them is inside what 192 rendered cards can resolve, and those cards are an
-/// upper bound on real screen text by construction. Taking the better number
-/// would be tuning to our own fixture.
+/// *(This said "`0.6` read 4 of 12 and `0.4` read 12 of 12, at either
+/// `threshold`". The second half was right and the first was not: 4 is the
+/// figure at `threshold` 0.3 and 6 at 0.2. Caught by running the sweep through
+/// the shipped tool while committing it, which is the whole reason the
+/// independent review of `PR #87` asked for it to be shipped.)*
+///
+/// **The feared trade did not happen** *on this fixture*. Loosening a filter
+/// should buy fewer silent empties at the cost of more confident nonsense;
+/// instead the exact-match rate went UP by thirteen points. Read the next
+/// section before concluding the trade does not exist.
+///
+/// # Why 0.4, when the fixture says lower is always better
+///
+/// Sweeping `box_threshold` down from 0.5 with `threshold` at 0.2:
+///
+/// | `box_threshold` | CER | empty |
+/// | --- | --- | --- |
+/// | 0.50 | 0.197 | 13.5 % |
+/// | 0.45 | 0.158 | 9.9 % |
+/// | 0.40 | 0.140 | 7.8 % |
+/// | 0.30 | 0.133 | 7.3 % |
+/// | 0.25 and below, to 0.05 | 0.132 | 6.8 % |
+///
+/// **It never turns.** The curve improves monotonically and then plateaus, so
+/// the fixture's own optimum is "as low as you like" -- which is not a result,
+/// it is the shape of a test set that cannot measure the cost.
+///
+/// The cards are clean text on plain backgrounds with **nothing to falsely
+/// detect**. A real screen has window borders, icons, table rules and UI chrome,
+/// and a low box threshold picks those up as text. That failure cannot appear
+/// here, so this fixture can only ever show the benefit of loosening and never
+/// the price. `BACKLOG.md` `I-367` is the row for giving it distractors.
+///
+/// So the value is NOT taken from the plateau. `0.4` is the loosest value
+/// **Baidu itself ships** across the PP-OCRv6 tiers -- `tiny` uses 0.4, `small`
+/// and `medium` use 0.45 -- which is the only evidence available about where the
+/// real cost begins, and it is external to our own test set.
+///
+/// *(An earlier revision of this comment said `0.2 / 0.4` simply "is PP-OCRv6's
+/// own published configuration". The independent review of `PR #87` checked all
+/// three v6 configs and found only the smallest tier uses 0.4; the two larger
+/// ones use 0.45, a value that was not in the table at all. It has been measured
+/// since -- 0.45 is worse than 0.4 here -- but the point stands that the
+/// justification was stated more precisely than the evidence supported.)*
 ///
 /// # What was NOT changed, and why that matters
 ///
