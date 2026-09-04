@@ -29,7 +29,8 @@ Until then it is written by hand.
   area that captures what is under it and keeps the still, which Copy and Save export; a filter
   area that tints what is underneath and lets clicks pass through to it; an upscale area that
   sharpens the piece of screen under it in place, without magnifying it, as a still rather than a
-  live view; and an OCR area that reads the text under it and shows what it read, in place. The
+  live view; and an OCR area that reads the text under it, shows what it read in place, and puts
+  that text on the clipboard so it can be pasted straight into something else. The
   installer carries the OCR runtime and the models; they are not in this repository, and two
   checksummed scripts fetch them before a build can bundle them.
 - Freeze the screen while placing an area, with `Ctrl+Space`.
@@ -44,7 +45,10 @@ Until then it is written by hand.
      the removed wording for the length of one review round. ⚠️ It then said I-337 "landed on
      2026-09-02" as accomplished fact while the row was open and the branch unmerged, which is
      the same overclaim the README comment had to be corrected for one round earlier, in the
-     same twin-document shape. I-337 closes on the merge, not before), 1.27 (area types chosen from the area's own menu) and
+     same twin-document shape. I-337 closes on the merge, not before), 1.13 (the clipboard half
+     of that entry: the recognised text is copied automatically, which is the whole of what 1.13
+     is. It reached this line on the branch that built it rather than a session later, which is
+     the correction the two notes above record being needed twice), 1.27 (area types chosen from the area's own menu) and
      1.28 (those types in a submenu), which the "Five area types" entry above derives from and
      which sit outside the 1.1-1.9f range this line used to name on its own. `P-6` asks for the
      source of the claim rather than of the page, and that range stopped covering the entry when

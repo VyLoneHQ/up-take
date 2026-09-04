@@ -33,7 +33,10 @@ Five of seven area types are built.
   <!-- source: ROADMAP.md task 1.23 (merged 2026-08-12, PR #53, a59181a). The move limitation is
        that row's own "ships degraded and knowingly" note; the fix is task 1.17(b2), which is
        blocked on ADR-0028. Do not drop this sentence before b2 lands. -->
-- **An OCR area.** Reads the text under it and shows you what it read, in the area itself.
+- **An OCR area.** Reads the text under it, shows you what it read in the area itself, and puts
+  that text on your clipboard, so the next thing you do can be a paste. It takes the clipboard
+  for the conversion you asked for most recently: convert two areas at once and the second one
+  is what you paste, whichever finishes first.
   Two things worth knowing before you build this yourself. **The model files and the OCR
   runtime are not in this repository**, because they are 31 MB of binaries that belong in a
   release rather than in a git history. The installer carries them, and two scripts fetch and
@@ -43,7 +46,9 @@ Five of seven area types are built.
   `pnpm tauri build --config src-tauri/tauri.release.conf.json`. And **there is no accuracy standard yet**:
   it misreads characters, nothing in the project says what a good enough reading would be, and
   no test measures it. Check anything you take from it before you use it.
-  <!-- source: ROADMAP.md task 1.26 (the area type) and 1.31 (the pipeline that returns text);
+  <!-- source: ROADMAP.md task 1.26 (the area type), 1.31 (the pipeline that returns text) and
+       1.13 (the clipboard sentence, including the rule about which conversion wins, which is
+       stated in `src-tauri/src/ocr.rs`'s `Request` and driven by four tests there);
        ADR-0035 (the runtime and the models ship in the installer) and ROADMAP.md 1.12 with
        BACKLOG.md I-337, whose packaging work is what the sentence above describes -- the first
        caveat is now about where the binaries live and how a build gets them, not about

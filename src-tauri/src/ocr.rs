@@ -74,6 +74,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::Instant;
 
 use tauri::AppHandle;
 use uptake_assets::install::{AssetState, Installer};
@@ -164,6 +165,40 @@ struct Ocr {
     /// A set rather than a count: a stop has to be reconciled against **each**
     /// outstanding area, and a count cannot name them.
     waiting: BTreeSet<u64>,
+    /// The conversion the clipboard is currently promised to (roadmap `1.13`).
+    ///
+    /// See [`Request`] for why this is one slot rather than a set.
+    latest: Option<Request>,
+}
+
+/// The most recent conversion the user asked for, and when they asked.
+///
+/// # Why the clipboard follows one request rather than every result
+///
+/// There is exactly one clipboard and several areas may be converting at once
+/// (§3.3 makes many areas the normal case, not a corner). Copying **every**
+/// text result as it lands means the clipboard holds whichever recognition
+/// happened to finish last: an order set by how much text each area contains
+/// and how the worker was scheduled, which is to say arbitrary, and not
+/// something the user can predict or see.
+///
+/// So the clipboard follows the user's latest intent: convert an area, and that
+/// area's text is what you paste. A result for an *earlier* conversion arriving
+/// afterwards is still drawn in its own area (nothing is lost on screen), but
+/// it does not take the clipboard back from the conversion the user asked for
+/// more recently. Dropping the slot once it is honoured is what stops a
+/// second, later result claiming a promise that has already been kept.
+struct Request {
+    /// The area, raw. Raw rather than an [`AreaId`] because that is what
+    /// arrives back from the worker, and comparing raw-to-raw keeps the
+    /// identity check where it already is, in `overlay::live_area_id`.
+    id: u64,
+    /// The instant of the gesture, for `quality-bars.md` §1's *selection
+    /// release → OCR text on clipboard* row. Taken on the caller's thread
+    /// before anything is captured: the bar starts at the gesture, and a clock
+    /// started after the frame was grabbed would measure a different thing and
+    /// report it against the same number.
+    started: Instant,
 }
 
 impl Ocr {
@@ -172,8 +207,31 @@ impl Ocr {
             service: None,
             unavailable: None,
             waiting: BTreeSet::new(),
+            latest: None,
         }
     }
+}
+
+/// The gesture instant `id`'s recognised text should be timed against, if `id`
+/// is the conversion the clipboard was promised to, consuming the promise.
+///
+/// `Some` means *copy this one*; `None` means leave the clipboard alone.
+/// Returning the instant rather than a bool keeps the two inseparable: the
+/// caller cannot copy without also having the clock the copy is measured
+/// against, which is the pairing `quality-bars.md` §1's row is stated in.
+///
+/// Pure, and separated from [`pump`] for the reason `output::report_lines`
+/// records: this decision is the whole of `1.13`'s behaviour, and inside a
+/// function that also drains a queue, takes a lock and emits Tauri events there
+/// is nothing a test can hold on to. Every case below is driven by a test.
+fn claims_clipboard(latest: &mut Option<Request>, id: u64) -> Option<Instant> {
+    if latest.as_ref().is_some_and(|request| request.id == id) {
+        // Taken rather than read in place: the promise is kept exactly once, so
+        // a re-delivered or duplicated outcome for the same id cannot claim the
+        // clipboard a second time.
+        return latest.take().map(|request| request.started);
+    }
+    None
 }
 
 static OCR: Mutex<Ocr> = Mutex::new(Ocr::new());
@@ -339,6 +397,11 @@ fn resolve_config() -> Result<PaddleConfig, String> {
 /// something the instant it is drawn rather than sitting blank for the several
 /// hundred milliseconds a cold load takes.
 pub(crate) fn recognise_into_area(app: &AppHandle, id: AreaId, bounds: Rect) {
+    // The clock for `quality-bars.md` §1's *selection release → OCR text on
+    // clipboard* row starts here, on the caller's thread, before the frame is
+    // captured and before the engine is built. Anything later would exclude
+    // work the bar includes.
+    let started = Instant::now();
     crate::overlay::emit_ocr(app, id, Status::Working, None);
     let app = app.clone();
     std::thread::spawn(move || {
@@ -379,6 +442,15 @@ pub(crate) fn recognise_into_area(app: &AppHandle, id: AreaId, bounds: Rect) {
         match service.submit(RequestId::new(id.get()), frame) {
             Ok(()) => {
                 guard.waiting.insert(id.get());
+                // Promised on submission rather than on the gesture: a
+                // conversion that never reached the worker has no result
+                // coming, and letting it take the slot would mean a later
+                // *successful* conversion silently declined to copy because a
+                // failed one was holding the promise.
+                guard.latest = Some(Request {
+                    id: id.get(),
+                    started,
+                });
             }
             Err(error) => {
                 // The worker died between building it and here. Reported
@@ -406,6 +478,12 @@ pub(crate) fn pump(app: &AppHandle) {
     // it would put an unrelated subsystem inside OCR's critical section for no
     // reason.
     let mut announcements: Vec<(u64, Status, Option<String>)> = Vec::new();
+    // The one text result, if any, that `1.13` puts on the clipboard. Decided
+    // under the lock and acted on outside it, for the same reason the
+    // announcements are: publishing touches a global system resource that every
+    // other process blocks on, and that does not belong inside OCR's critical
+    // section.
+    let mut clipboard: Option<(u64, String, Instant)> = None;
     {
         let mut guard = lock();
         let Some(service) = guard.service.as_ref() else {
@@ -424,7 +502,11 @@ pub(crate) fn pump(app: &AppHandle) {
                             announcements.push((id.get(), Status::Empty, None));
                         }
                         Ok(recognition) => {
-                            announcements.push((id.get(), Status::Text, Some(recognition.text())));
+                            let text = recognition.text();
+                            if let Some(started) = claims_clipboard(&mut guard.latest, id.get()) {
+                                clipboard = Some((id.get(), text.clone(), started));
+                            }
+                            announcements.push((id.get(), Status::Text, Some(text)));
                         }
                         Err(error) => {
                             announcements.push((id.get(), Status::Failed, Some(error.to_string())));
@@ -433,6 +515,11 @@ pub(crate) fn pump(app: &AppHandle) {
                 }
                 Outcome::Abandoned { id } => {
                     guard.waiting.remove(&id.get());
+                    // Its answer is never coming, so it must not keep holding
+                    // the clipboard's promise: an area converted after it would
+                    // otherwise land its text on screen and decline to copy it.
+                    // The instant is discarded: there is no copy to time.
+                    let _ = claims_clipboard(&mut guard.latest, id.get());
                     announcements.push((
                         id.get(),
                         Status::Failed,
@@ -453,6 +540,9 @@ pub(crate) fn pump(app: &AppHandle) {
                     // guarantees is delivered first. This clears the residue of
                     // ids whose areas were dismissed in the meantime.
                     guard.waiting.clear();
+                    // And the promise with them: the worker is gone, so no
+                    // outstanding conversion can still deliver text.
+                    guard.latest = None;
                 }
                 // `Outcome` is `#[non_exhaustive]`, so a variant added to the
                 // service reaches this arm rather than failing to compile.
@@ -473,6 +563,20 @@ pub(crate) fn pump(app: &AppHandle) {
         if let Some(id) = crate::overlay::live_area_id(app, raw) {
             crate::overlay::emit_ocr(app, id, status, detail);
         }
+    }
+    // After the announcements, not before them: the copy fires the same flash
+    // Copy does, and an acknowledgement that arrives while the area still says
+    // "working" acknowledges nothing the user can see. Draw the text, then say
+    // it is on the clipboard.
+    //
+    // `live_area_id` is asked here for the reason the loop above asks it: an
+    // area dismissed while its frame was in the worker gets no copy, which is
+    // right -- the user threw that conversion away, and taking their clipboard
+    // for it would be the opposite of what they just did.
+    if let Some((raw, text, started)) = clipboard
+        && let Some(id) = crate::overlay::live_area_id(app, raw)
+    {
+        crate::output::copy_text_to_clipboard(app, id, &text, started);
     }
 }
 
@@ -498,7 +602,15 @@ fn describe_stop(reason: &StopReason) -> String {
 /// The result itself is discarded in [`pump`], which asks whether the area
 /// still exists before drawing on it.
 pub(crate) fn forget(id: AreaId) {
-    lock().waiting.remove(&id.get());
+    let mut guard = lock();
+    guard.waiting.remove(&id.get());
+    // The dismissed area also gives up the clipboard's promise. `pump` would
+    // decline to copy it anyway -- `live_area_id` answers `None` for an area
+    // that is gone -- but leaving the slot filled would make the *next*
+    // conversion's text arrive with the promise already spoken for, and it
+    // would not copy either. One dismissal must not cost two copies.
+    // The instant is discarded: there is no copy to time.
+    let _ = claims_clipboard(&mut guard.latest, id.get());
 }
 
 #[cfg(test)]
@@ -537,6 +649,69 @@ mod tests {
             ppocr::ppocr_v4(UNUSED_BASE_URL).is_ok(),
             "the placeholder base URL must still build a valid manifest"
         );
+    }
+
+    /// A request, for the clipboard tests. The instant is arbitrary: every
+    /// assertion below is about *which* request answers, never about how long
+    /// one took.
+    fn request(id: u64) -> Option<Request> {
+        Some(Request {
+            id,
+            started: Instant::now(),
+        })
+    }
+
+    #[test]
+    fn the_conversion_the_user_asked_for_takes_the_clipboard() {
+        let mut latest = request(7);
+        assert!(
+            claims_clipboard(&mut latest, 7).is_some(),
+            "the promised area's text is what the user expects to paste"
+        );
+    }
+
+    /// The case the one-slot design exists for. Two areas convert; the *older*
+    /// one finishes first. Copying it would leave the clipboard holding text
+    /// the user did not most recently ask for, chosen by nothing more than
+    /// which region had less text in it.
+    #[test]
+    fn an_earlier_conversion_finishing_later_does_not_take_the_clipboard() {
+        // The user converted A, then B: B holds the promise.
+        let mut latest = request(2);
+        assert!(
+            claims_clipboard(&mut latest, 1).is_none(),
+            "A's result must not take a clipboard promised to B"
+        );
+        assert!(
+            latest.is_some(),
+            "and it must not consume B's promise on the way past"
+        );
+        assert!(claims_clipboard(&mut latest, 2).is_some(), "B still copies");
+    }
+
+    /// The promise is kept exactly once. Without the `take`, an outcome
+    /// delivered twice -- or a second `pump` over a queue that had not been
+    /// drained -- would republish over a clipboard the user may have replaced
+    /// in between.
+    #[test]
+    fn the_same_result_cannot_take_the_clipboard_twice() {
+        let mut latest = request(3);
+        assert!(claims_clipboard(&mut latest, 3).is_some());
+        assert!(
+            claims_clipboard(&mut latest, 3).is_none(),
+            "the promise is spent"
+        );
+        assert!(latest.is_none());
+    }
+
+    /// With nothing promised, nothing copies. This is the state after a
+    /// dismissal, after a worker stop, and before the first conversion of the
+    /// session -- and in all three the clipboard belongs to whatever the user
+    /// last put there.
+    #[test]
+    fn no_outstanding_conversion_means_the_clipboard_is_left_alone() {
+        let mut latest = None;
+        assert!(claims_clipboard(&mut latest, 4).is_none());
     }
 
     #[test]
