@@ -46,12 +46,16 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import re
 import shutil
 import sys
 import urllib.request
 import zipfile
 from pathlib import Path
+
+# Sibling module, imported by path-independent name because both this script and
+# its test suite are run as `python scripts/<name>.py` from the repository root,
+# which puts `scripts/` on `sys.path` as the script's own directory.
+import rust_consts
 
 #: Where the pins live. One source, read rather than copied.
 PINS_SOURCE = (
@@ -102,34 +106,31 @@ def parse_pins(source: str) -> dict[str, object]:
     """
     pins: dict[str, object] = {}
 
+    # The extraction itself moved to `scripts/rust_consts.py` when
+    # `verify-bundle.py` needed the same thing for `ppocr.rs` (BACKLOG.md
+    # I-346). What stays here is the REQUIRED set and the messages, because
+    # those are this script's, and the two callers want different ones. The
+    # regex is now in one place rather than two that must agree.
     for name in REQUIRED_STRINGS:
-        # Non-greedy up to the closing quote, and anchored on the const name, so
-        # a doc comment quoting the same text cannot be picked up instead.
-        match = re.search(
-            r'pub const ' + name + r':\s*&str\s*=\s*\n?\s*"([^"]*)"\s*;',
-            source,
-        )
-        if match is None:
+        value = rust_consts.string_const(source, name)
+        if value is None:
             raise SystemExit(
                 "could not find `pub const " + name + ": &str` in "
                 + str(PINS_SOURCE)
                 + ".\nThe pins moved and this script cannot read them. Fix the"
                 " extraction rather than copying the value here."
             )
-        pins[name] = match.group(1)
+        pins[name] = value
 
     for name in REQUIRED_NUMBERS:
-        match = re.search(
-            r'pub const ' + name + r':\s*u64\s*=\s*([0-9_]+)\s*;',
-            source,
-        )
-        if match is None:
+        number = rust_consts.u64_const(source, name)
+        if number is None:
             raise SystemExit(
                 "could not find `pub const " + name + ": u64` in "
                 + str(PINS_SOURCE)
                 + ".\nThe pins moved and this script cannot read them."
             )
-        pins[name] = int(match.group(1).replace("_", ""))
+        pins[name] = number
 
     return pins
 
