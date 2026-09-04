@@ -7,30 +7,125 @@
 //! the input is a slice of floats, so every rule below is tested against maps
 //! this file's own tests draw by hand.
 //!
-//! The stages, in order, each with the reference implementation's default:
+//! The stages, in order, each with UP-TAKE's default:
 //!
-//! 1. **Binarize** at `threshold` (0.3).
+//! 1. **Binarize** at `threshold` (0.2).
 //! 2. **Connect** the surviving pixels into regions (4-connectivity).
 //! 3. **Fit** a minimum-area rectangle to each region.
 //! 4. **Score** each region by the mean probability under its box, and drop it
-//!    below `box_threshold` (0.6).
+//!    below `box_threshold` (0.4).
 //! 5. **Unclip** by `unclip_ratio` (1.5), because DB is trained on shrunk
 //!    regions.
 //! 6. **Drop** boxes thinner than `min_size` (3 px), which are noise.
 //! 7. **Scale** back to source-frame coordinates.
+//!
+//! ⚠️ **Stages 1 and 4 no longer use PP-OCR's numbers.** They said 0.3 and 0.6,
+//! which is upstream's configuration for the detector this crate ships, until
+//! 2026-09-04. UP-TAKE reads screens rather than photographed documents and the
+//! upstream values discard legible screen text; [`DetectorOptions`]'s own header
+//! carries the measurement and the reasoning. The other four are unchanged and
+//! unmeasured.
 
 use super::quad::{PointF, Quad, min_area_rect};
 
-/// The knobs DB's post-processing exposes, with PP-OCR's defaults.
+/// The knobs DB's post-processing exposes.
 ///
 /// Named constants rather than magic numbers at the call site: every one of
-/// these is a value the reference implementation chose, and a session that
-/// changes one should have to say which.
+/// these is a value somebody chose, and a session that changes one should have
+/// to say which and why.
+///
+/// # Two of these are NO LONGER PP-OCR's defaults, and that is deliberate
+///
+/// `threshold` and `box_threshold` were `0.3` and `0.6`, which is exactly what
+/// Baidu ships in `inference.yml` for `PP-OCRv4_mobile_det` **and** for
+/// `PP-OCRv5_mobile_det`. Nothing was mis-transcribed: the implementation was
+/// faithful and the values were upstream's.
+///
+/// **Upstream tunes them for photographed documents. UP-TAKE reads screens**,
+/// and on screen text `0.6` throws away text that is plainly there. Measured on
+/// 2026-09-04 against 192 rendered ground-truth cards (`1.32`'s harness), with
+/// nothing else changed:
+///
+/// | `threshold` / `box_threshold` | CER | exact | empty |
+/// | --- | --- | --- | --- |
+/// | 0.3 / 0.6 (upstream) | 0.330 | 54.2 % | 25.5 % |
+/// | 0.3 / 0.4 | 0.140 | 67.2 % | 8.9 % |
+/// | **0.2 / 0.4 (here)** | **0.140** | **66.7 %** | **7.8 %** |
+/// | 0.2 / 0.3 | 0.133 | 67.2 % | 7.3 % |
+///
+/// `box_threshold` is the load-bearing one. On a width sweep holding the text
+/// pixel-identical and varying only the surrounding canvas, cards read out of
+/// 12, at the shipping `limit_side_len`:
+///
+/// | | `box` 0.6 | `box` 0.4 |
+/// | --- | --- | --- |
+/// | `threshold` 0.3 | 4 | **12** |
+/// | `threshold` 0.2 | 6 | **12** |
+///
+/// `0.4` reads all twelve at either `threshold`; `0.6` reads neither column
+/// fully. Reproduce with `render-ocr-cards.py --width-sweep`.
+///
+/// *(This said "`0.6` read 4 of 12 and `0.4` read 12 of 12, at either
+/// `threshold`". The second half was right and the first was not: 4 is the
+/// figure at `threshold` 0.3 and 6 at 0.2. Caught by running the sweep through
+/// the shipped tool while committing it, which is the whole reason the
+/// independent review of `PR #87` asked for it to be shipped.)*
+///
+/// **The feared trade did not happen** *on this fixture*. Loosening a filter
+/// should buy fewer silent empties at the cost of more confident nonsense;
+/// instead the exact-match rate went UP by thirteen points. Read the next
+/// section before concluding the trade does not exist.
+///
+/// # Why 0.4, when the fixture says lower is always better
+///
+/// Sweeping `box_threshold` down from 0.5 with `threshold` at 0.2:
+///
+/// | `box_threshold` | CER | empty |
+/// | --- | --- | --- |
+/// | 0.50 | 0.197 | 13.5 % |
+/// | 0.45 | 0.158 | 9.9 % |
+/// | 0.40 | 0.140 | 7.8 % |
+/// | 0.30 | 0.133 | 7.3 % |
+/// | 0.25 and below, to 0.05 | 0.132 | 6.8 % |
+///
+/// **It never turns.** The curve improves monotonically and then plateaus, so
+/// the fixture's own optimum is "as low as you like" -- which is not a result,
+/// it is the shape of a test set that cannot measure the cost.
+///
+/// The cards are clean text on plain backgrounds with **nothing to falsely
+/// detect**. A real screen has window borders, icons, table rules and UI chrome,
+/// and a low box threshold picks those up as text. That failure cannot appear
+/// here, so this fixture can only ever show the benefit of loosening and never
+/// the price. `BACKLOG.md` `I-367` is the row for giving it distractors.
+///
+/// So the value is NOT taken from the plateau. `0.4` is the loosest value
+/// **Baidu itself ships** across the PP-OCRv6 tiers -- `tiny` uses 0.4, `small`
+/// and `medium` use 0.45 -- which is the only evidence available about where the
+/// real cost begins, and it is external to our own test set.
+///
+/// *(An earlier revision of this comment said `0.2 / 0.4` simply "is PP-OCRv6's
+/// own published configuration". The independent review of `PR #87` checked all
+/// three v6 configs and found only the smallest tier uses 0.4; the two larger
+/// ones use 0.45, a value that was not in the table at all. It has been measured
+/// since -- 0.45 is worse than 0.4 here -- but the point stands that the
+/// justification was stated more precisely than the evidence supported.)*
+///
+/// # What was NOT changed, and why that matters
+///
+/// `unclip_ratio` stays `1.5` although v6 uses `1.4`, and `min_size` stays `3.0`.
+/// **Neither was measured.** Changing an unmeasured constant in the same commit
+/// as a measured one is how a result stops being attributable.
+///
+/// Found by the founder at the rig, 2026-09-04: an OCR area wider than roughly
+/// 700 px stopped reading. `BACKLOG.md` `I-363`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DetectorOptions {
-    /// Probability above which a pixel counts as text. PP-OCR's `det_db_thresh`.
+    /// Probability above which a pixel counts as text. PP-OCR's `det_db_thresh`,
+    /// lowered from upstream's `0.3` for screen text -- see the type's header.
     pub threshold: f32,
-    /// Mean-probability floor for a whole box. PP-OCR's `det_db_box_thresh`.
+    /// Mean-probability floor for a whole box. PP-OCR's `det_db_box_thresh`,
+    /// lowered from upstream's `0.6` for screen text. **This is the one that
+    /// mattered** -- see the type's header for the measurement.
     pub box_threshold: f32,
     /// How far to grow each box. PP-OCR's `det_db_unclip_ratio`.
     pub unclip_ratio: f32,
@@ -41,8 +136,8 @@ pub struct DetectorOptions {
 impl Default for DetectorOptions {
     fn default() -> Self {
         Self {
-            threshold: 0.3,
-            box_threshold: 0.6,
+            threshold: 0.2,
+            box_threshold: 0.4,
             unclip_ratio: 1.5,
             min_size: 3.0,
         }
@@ -355,15 +450,22 @@ mod tests {
 
     #[test]
     fn a_block_below_the_pixel_threshold_is_invisible() {
-        // 0.2 is under the 0.3 binarize threshold, so no pixel survives.
-        let data = map_with(40, 40, &[(10, 12, 20, 6, 0.2)]);
+        // 0.1 is under the 0.2 binarize threshold, so no pixel survives.
+        // ⚠️ This block was 0.2 against a 0.3 threshold until `I-363` lowered
+        // the threshold to 0.2. Left at 0.2 the test would have been asserting
+        // against the boundary itself rather than under it, which passes or
+        // fails on the comparison operator rather than on the property.
+        let data = map_with(40, 40, &[(10, 12, 20, 6, 0.1)]);
         assert!(detect(&data, 40, 40).is_empty());
     }
 
     #[test]
     fn a_block_over_the_pixel_threshold_but_under_the_box_threshold_is_dropped() {
-        // Every pixel is 0.45: above binarize (0.3), below box mean (0.6).
-        let data = map_with(40, 40, &[(10, 12, 20, 6, 0.45)]);
+        // Every pixel is 0.3: above binarize (0.2), below box mean (0.4).
+        // ⚠️ This block was 0.45 against 0.3 / 0.6 until `I-363`. At the new
+        // thresholds 0.45 is ABOVE the box mean, so the old value would have
+        // made this test assert the opposite of its own name.
+        let data = map_with(40, 40, &[(10, 12, 20, 6, 0.3)]);
         assert!(
             detect(&data, 40, 40).is_empty(),
             "the box-mean threshold did not reject a weak region"

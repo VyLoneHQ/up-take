@@ -194,6 +194,80 @@ def write_manifest(cards: list[dict[str, object]], path: Path) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="")
 
 
+#: The width-sweep set: one line of text, identical in every card, on canvases
+#: of increasing width. Chosen to straddle `limit_side_len` (960) so the
+#: downscaling boundary is inside the range rather than at its edge.
+SWEEP_WIDTHS = (608, 672, 736, 800, 864, 928, 992, 1056, 1120, 1184, 1248, 1312)
+
+#: The line the sweep uses. Six words at a comfortable size: the point is that
+#: the GLYPHS never change, so any difference in the reading is caused by the
+#: empty space around them and nothing else.
+SWEEP_TEXT = "The quick brown fox jumps over"
+SWEEP_SIZE = 18
+
+
+def write_width_sweep(out: Path) -> int:
+    """Renders one line of text on canvases of increasing width.
+
+    # Why this is a separate mode rather than another axis of the grid
+
+    The grid varies what the text IS. This varies what surrounds it, holding the
+    text pixel-identical, which is the only way to show that a reading failure
+    is caused by the frame rather than by the content. The founder's rig report
+    on 2026-09-04 was about area WIDTH ("smaller than 700px"), and the grid
+    cannot express that question at all.
+
+    # Why it exists as shipped tooling rather than a scratch script
+
+    It was a scratch script, and the independent review of `PR #87` was right to
+    call that out: the detector's threshold change is justified in a doc comment
+    partly by "0.6 read 4 of 12 cards and 0.4 read 12 of 12", and no committed
+    tool reproduced those figures. A number baked into a public type's
+    documentation that nobody can re-derive is an assertion wearing a
+    measurement's clothes.
+    """
+    out.mkdir(parents=True, exist_ok=True)
+    font = load_font(FONTS["ui"], SWEEP_SIZE)
+    probe = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    left, top, right, bottom = probe.textbbox((0, 0), SWEEP_TEXT, font=font)
+    text_width, text_height = right - left, bottom - top
+    height = text_height + PADDING * 2
+    background, foreground = POLARITIES["dark-on-light"]
+
+    cards = []
+    for width in SWEEP_WIDTHS:
+        if width < text_width + PADDING * 2:
+            sys.exit(
+                f"canvas width {width} cannot hold {text_width} px of text plus padding;"
+                " the sweep must never crop the line it is holding constant"
+            )
+        image = Image.new("RGB", (width, height), background)
+        ImageDraw.Draw(image).text(
+            (PADDING - left, PADDING - top), SWEEP_TEXT, font=font, fill=foreground
+        )
+        name = f"w{width:04d}.rgba"
+        write_rgba(image, out / name)
+        cards.append(
+            {
+                "file": name,
+                "text": SWEEP_TEXT,
+                "text_key": f"w{width:04d}",
+                "font": "ui",
+                "font_file": FONTS["ui"],
+                "size_px": SWEEP_SIZE,
+                "glyph_height_px": text_height,
+                "polarity": "dark-on-light",
+                "width": width,
+                "height": height,
+            }
+        )
+
+    write_manifest(cards, out / "cards.tsv")
+    print(f"{len(cards)} width-sweep cards written to {out}")
+    print(f"the text is {text_width}x{text_height} px in every one; only the canvas differs")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", default="dist/cards", help="output directory")
@@ -212,7 +286,15 @@ def main() -> int:
         default=",".join(TEXTS),
         help=f"comma-separated text keys from {sorted(TEXTS)}",
     )
+    parser.add_argument(
+        "--width-sweep",
+        action="store_true",
+        help="render the constant-text, varying-canvas set instead of the grid",
+    )
     arguments = parser.parse_args()
+
+    if arguments.width_sweep:
+        return write_width_sweep(Path(arguments.out))
 
     sizes = [int(size) for size in arguments.sizes.split(",") if size]
     font_keys = [key for key in arguments.fonts.split(",") if key]

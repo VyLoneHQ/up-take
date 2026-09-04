@@ -995,13 +995,52 @@ c",
         assert_eq!(rect.size.height, 0);
     }
 
+    /// The defaults, split into the ones that are upstream's and the two that
+    /// deliberately are not.
+    ///
+    /// ⚠️ **This was called `the_default_options_are_the_reference_implementations`
+    /// and asserted 0.3 / 0.6 until 2026-09-04.** That name stated a property
+    /// `I-363` deliberately gave up: upstream tunes its detector for
+    /// photographed documents, and on screen text its box threshold discarded a
+    /// quarter of legible cards. Renamed rather than edited under the old name,
+    /// because a test still claiming to pin "the reference implementation's"
+    /// values while pinning ours is a name asserting the opposite of what it
+    /// checks.
     #[test]
-    fn the_default_options_are_the_reference_implementations() {
+    fn the_detector_thresholds_are_ours_and_the_rest_are_upstreams() {
         let options = PaddleOptions::default();
-        assert!((options.detector.threshold - 0.3).abs() < f32::EPSILON);
-        assert!((options.detector.box_threshold - 0.6).abs() < f32::EPSILON);
+
+        // Ours, and measured. `DetectorOptions`'s header carries the table.
+        assert!(
+            (options.detector.threshold - 0.2).abs() < f32::EPSILON,
+            "threshold is UP-TAKE's screen-text value, not upstream's 0.3"
+        );
+        assert!(
+            (options.detector.box_threshold - 0.4).abs() < f32::EPSILON,
+            "box_threshold is UP-TAKE's screen-text value, not upstream's 0.6"
+        );
+
+        // Upstream's, and unmeasured by us. A later change that moves one of
+        // these owes the same evidence the two above have.
         assert!((options.detector.unclip_ratio - 1.5).abs() < f32::EPSILON);
         assert!((options.drop_score - 0.5).abs() < f32::EPSILON);
         assert_eq!(options.limit_side_len, preprocess::DEFAULT_LIMIT_SIDE_LEN);
+    }
+
+    /// The two thresholds are ordered, and the order is what makes the pipeline
+    /// coherent: a pixel floor above the box-mean floor would binarize away the
+    /// very pixels the box score is then computed over.
+    ///
+    /// Asserted because `I-363` moved both, and a later change that moves only
+    /// one could invert them without any other test noticing.
+    #[test]
+    fn the_pixel_threshold_never_exceeds_the_box_threshold() {
+        let detector = PaddleOptions::default().detector;
+        assert!(
+            detector.threshold <= detector.box_threshold,
+            "binarize floor {} is above the box-mean floor {}",
+            detector.threshold,
+            detector.box_threshold
+        );
     }
 }
