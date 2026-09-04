@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { onMount } from 'svelte';
 import { SvelteMap } from 'svelte/reactivity';
+import { overflowFade } from '$lib/overflow-fade';
 import {
   type ActiveMonitorPayload,
   type AreaFrame,
@@ -482,11 +483,21 @@ onMount(() => {
           {#if recognitions.get(area.id)}
             {@const recognition = recognitions.get(area.id)}
             {#if recognition}
+              <!-- `use:overflowFade` sets `data-overflowing`, which the
+                   stylesheet turns into a fade at the bottom edge. The panel
+                   cannot be scrolled -- it is `pointer-events: none` like every
+                   other piece of chrome (ADR-0016) -- so a message longer than
+                   its area used to be silently cut off and looked identical to
+                   a complete one. The founder hit that at the rig on
+                   2026-09-03 and could only report the first line of an error
+                   (BACKLOG.md I-353). The fade does not make the rest
+                   reachable; resizing the area does. It says there is a rest. -->
               <div
                 class="ocr"
                 class:working={recognition.status === 'working'}
                 class:problem={recognition.status === 'unavailable' ||
                   recognition.status === 'failed'}
+                use:overflowFade
               >
                 {ocrLine(recognition)}
               </div>
@@ -871,16 +882,60 @@ onMount(() => {
 .ocr {
   position: absolute;
   inset: 0;
-  overflow: auto;
+  /* `hidden`, not `auto`. `auto` rendered a scrollbar over content the user
+     could not reach, because this panel is `pointer-events: none` (see the
+     note above) -- an affordance that promised something the overlay's own
+     interaction model forbids. `overflowFade` marks the element instead and
+     the rule below fades its bottom edge, so a truncated message is visibly
+     truncated. BACKLOG.md I-353. */
+  overflow: hidden;
+  /* The backdrop's channels, once. The fade below has to be the SAME surface
+     continuing rather than a second one, so it needs this colour at a
+     different alpha -- and two literals that must agree is how a later tweak
+     to one of them leaves a visible seam nobody is looking for. */
+  --ocr-backdrop-rgb: 12, 14, 18;
   margin: 0;
   padding: 6px 8px;
   border-radius: 3px;
-  background: rgba(12, 14, 18, 0.82);
+  background: rgba(var(--ocr-backdrop-rgb), 0.82);
   color: rgba(244, 246, 250, 0.96);
   font-size: 12px;
   line-height: 1.35;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  pointer-events: none;
+}
+
+/* There is more text than fits. A fade rather than an ellipsis or a badge: the
+   panel already sits over a region dense with text, and one more glyph in the
+   corner is a thing to decode, whereas text dissolving into the bottom edge
+   reads as "continues" without being read at all.
+
+   `::after` rather than a `mask-image` on the panel: a mask would fade the
+   backdrop with the text, and the backdrop is the only reason any of this is
+   legible over the live screen. The gradient matches that backdrop's colour
+   deliberately -- it is the same surface continuing, not a new one.
+
+   `pointer-events: none` is inherited from `.ocr` and restated for the same
+   reason it is there: ADR-0016. Nothing in this element may take the pointer.
+
+   ⚠️ **`:global(...)` around the attribute is load-bearing, not tidiness.**
+   `overflowFade` sets `data-overflowing` at run time, so the compiler cannot
+   see the attribute in the markup and prunes the whole rule as unreachable --
+   `vite-plugin-svelte` says so as a warning and the build still succeeds, so
+   the first version of this shipped a fade that could never render. The class
+   stays scoped; only the attribute test is global. */
+.ocr:global([data-overflowing='true'])::after {
+  content: '';
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 18px;
+  border-radius: 0 0 3px 3px;
+  background: linear-gradient(
+    to bottom,
+    rgba(var(--ocr-backdrop-rgb), 0),
+    rgba(var(--ocr-backdrop-rgb), 0.94)
+  );
   pointer-events: none;
 }
 
