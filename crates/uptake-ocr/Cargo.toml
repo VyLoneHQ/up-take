@@ -33,3 +33,15 @@ ort = { workspace = true }
 
 [lints]
 workspace = true
+
+# `test = true` so `cargo test --all-features` runs the accuracy harness's own
+# unit tests. An example defaults to `test = false`, which compiles its
+# `#[cfg(test)]` module and never runs it -- and the module in question verifies
+# the edit-distance metric that produces every figure the harness prints. An
+# unverified metric is worse than no metric, because it reports.
+#
+# The example itself is NOT run by this: it needs a runtime, two models and a
+# dictionary CI does not have. Only its test module runs.
+[[example]]
+name = "ocr_accuracy"
+test = true
