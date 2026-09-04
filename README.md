@@ -48,11 +48,17 @@ Five of seven area types are built.
   no test measures it. Check anything you take from it before you use it.
   <!-- source: ROADMAP.md task 1.26 (the area type), 1.31 (the pipeline that returns text) and
        1.13 (the clipboard sentence, including the rule about which conversion wins, which is
-       stated in `src-tauri/src/ocr.rs`'s `Request` and `record_request`, and driven by seven
-       tests there. It said "four tests" and named only `Request` until round 1 of PR #83's
-       independent review found that the rule was documented and not enforced: gesture order
-       was not compared, so lock-acquisition order decided it. The three tests that close that
-       are the difference between the two counts);
+       stated and enforced in `src-tauri/src/ocr.rs` by `Request`, `record_request`,
+       `claims_clipboard` and `forget`, each driven by tests beside them.
+       ⚠️ THIS DELIBERATELY CARRIES NO TEST COUNT, AND THE THIRD WRONG COUNT IS WHY.
+       It said "four tests" until round 1 of PR #83's review found the rule documented and
+       not enforced (gesture order was not compared, so lock-acquisition order decided it),
+       and the fix here changed it to "seven". Round 2 then added two more tests to the same
+       mechanism and this line was not touched, so round 3 found it stale again at "nine" --
+       a number corrected in one commit and broken by the next, which is the class the two
+       corrections were themselves about. Naming the four items removes the rot instead of
+       resetting it: a reader who wants the count can run the tests, and a count in prose is
+       a fact with no control behind it);
        ADR-0035 (the runtime and the models ship in the installer) and ROADMAP.md 1.12 with
        BACKLOG.md I-337, whose packaging work is what the sentence above describes -- the first
        caveat is now about where the binaries live and how a build gets them, not about
