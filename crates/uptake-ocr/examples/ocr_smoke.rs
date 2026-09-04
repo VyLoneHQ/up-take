@@ -49,6 +49,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use uptake_assets::ppocr;
 use uptake_core::bitmap::RgbaBitmap;
 use uptake_core::geometry::Size;
 use uptake_ocr::Engine;
@@ -99,9 +100,12 @@ fn main() -> ExitCode {
     println!("frame {} x {}", frame.size().width, frame.size().height);
 
     let config = PaddleConfig {
-        detection_model: models.join("ch_PP-OCRv4_det.onnx"),
-        recognition_model: models.join("ch_PP-OCRv4_rec.onnx"),
-        dictionary: models.join("ppocr_keys_v1.txt"),
+        // Read from the pins rather than retyped. These were string literals
+        // until ADR-0036 renamed the detector, which is the change that finds a
+        // second copy of a pinned fact.
+        detection_model: models.join(ppocr::DETECTION_FILE_NAME),
+        recognition_model: models.join(ppocr::RECOGNITION_FILE_NAME),
+        dictionary: models.join(ppocr::DICTIONARY_FILE_NAME),
         runtime_library: runtime,
     };
 

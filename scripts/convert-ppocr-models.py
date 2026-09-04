@@ -11,10 +11,21 @@ artifact and means what ADR-0032 decision 2 says it means.
 What it does
 ------------
 
-Downloads three upstream files over HTTPS, verifies each against a pinned
-SHA-256 before using it, converts the two Paddle inference models to ONNX, and
-prints the digests of what came out. Nothing is written outside the output
-directory, and a digest mismatch stops the run.
+Downloads two upstream files over HTTPS, verifies each against a pinned SHA-256
+before using it, converts the recogniser to ONNX, copies the dictionary
+unchanged, and prints the digests of what came out. Nothing is written outside
+the output directory, and a digest mismatch stops the run.
+
+⚠️ **THE DETECTOR IS NOT HERE, as of ADR-0036.** It is PaddlePaddle's own ONNX
+build of PP-OCRv6, downloaded and verified by
+`scripts/acquire-ppocr-detector.py`. This script said "three upstream files" and
+"the two Paddle inference models" until that change, and both counts are now
+wrong -- corrected here rather than left for the next reader to trip over.
+
+This script still WRITES the licence notice for all three shipped files,
+including the one it does not acquire, reading that file's pins from
+`crates/uptake-assets/src/ppocr.rs`. A notice built only from what this script
+produces would have dropped the detector from a licence obligation silently.
 
 Why the source digests are pinned and the output digests are not
 ---------------------------------------------------------------
@@ -89,6 +100,9 @@ import tarfile
 import urllib.request
 from pathlib import Path
 
+# Sibling module; `scripts/` is on sys.path as this script's own directory.
+import rust_consts
+
 # The converter this script is written against, asserted before use. See the
 # module docstring for why the version is exact rather than a floor.
 EXPECTED_P2O_VERSION = "1.3.1"
@@ -157,12 +171,6 @@ class Source:
 # claim about state the repository does not own. Restate it as fact only once
 # that PR merges.)
 SOURCES = [
-    Source(
-        "ch_PP-OCRv4_det_infer.tar",
-        UPSTREAM + "/PP-OCRv4/chinese/ch_PP-OCRv4_det_infer.tar",
-        "5f7217e0a89612e2f80d62f3c99a8bf5f7ae9cdc1ffd706be7dde07765627edf",
-        4894720,
-    ),
     Source(
         "ch_PP-OCRv4_rec_infer.tar",
         UPSTREAM + "/PP-OCRv4/chinese/ch_PP-OCRv4_rec_infer.tar",
@@ -320,19 +328,11 @@ def check_shapes(out_dir: Path) -> None:
         )
         return
 
-    detector = onnxruntime.InferenceSession(
-        str(out_dir / "ch_PP-OCRv4_det.onnx"), providers=["CPUExecutionProvider"]
-    )
-    det_in = detector.get_inputs()[0].shape
-    det_out = detector.get_outputs()[0].shape
-    if det_in[1] != 3:
-        raise SystemExit("detector takes " + str(det_in[1]) + " channels, expected 3")
-    if det_out[1] != 1:
-        raise SystemExit(
-            "detector emits " + str(det_out[1])
-            + " channels, expected a 1-channel probability map"
-        )
-
+    # The DETECTOR's shape check is not here. It MOVED to
+    # scripts/acquire-ppocr-detector.py with the detector itself (ADR-0036) --
+    # moved rather than dropped, because it is the check that proves Baidu's
+    # ONNX fits this pipeline, and it matters more on bytes we did not produce
+    # than on bytes we did.
     recogniser = onnxruntime.InferenceSession(
         str(out_dir / "ch_PP-OCRv4_rec.onnx"), providers=["CPUExecutionProvider"]
     )
@@ -346,8 +346,34 @@ def check_shapes(out_dir: Path) -> None:
             + str(EXPECTED_RECOGNISER_CLASSES) + ". The dictionary and the model "
             "are no longer a matching pair -- see UP-TAKE I-333."
         )
-    print("  detector    " + str(det_in) + " -> " + str(det_out))
     print("  recogniser  " + str(rec_in) + " -> " + str(rec_out))
+
+
+def read_detector_pins() -> dict[str, object]:
+    """The detector's pins, read from the same Rust source everything else uses.
+
+    This script no longer acquires the detector (ADR-0036) but must still NAME
+    it in the licence notice, so it reads the constants rather than restating
+    them. One statement of a pinned fact, as everywhere else here.
+    """
+    source = (
+        Path(__file__).resolve().parent.parent
+        / "crates" / "uptake-assets" / "src" / "ppocr.rs"
+    )
+    if not source.is_file():
+        raise SystemExit("cannot find the detector's pins at " + str(source))
+    text = source.read_text(encoding="utf-8")
+    pins: dict[str, object] = {}
+    for name in ("DETECTION_FILE_NAME", "DETECTION_SHA256"):
+        value = rust_consts.string_const(text, name)
+        if value is None:
+            raise SystemExit("could not read `" + name + "` from " + str(source))
+        pins[name] = value
+    size = rust_consts.u64_const(text, "DETECTION_SIZE")
+    if size is None:
+        raise SystemExit("could not read `DETECTION_SIZE` from " + str(source))
+    pins["DETECTION_SIZE"] = size
+    return pins
 
 
 NOTICE_TEMPLATE = """Third-party notices for the model files distributed with UP-TAKE
@@ -371,14 +397,20 @@ PaddleOCR, by PaddlePaddle Authors, licensed under the Apache License 2.0.
 What was done to them
 ---------------------
 
-The .pdmodel and .pdiparams inference models from PaddleOCR's official PP-OCRv4
-release were converted to ONNX with paddle2onnx {converter} (Apache License 2.0)
-at opset {opset}. The weights are unchanged; the container format is not. The
-character dictionary is copied byte for byte.
+Apache 2.0 section 4(b) requires a notice that files were modified. Some of
+these were and some were not, so they are listed apart rather than under one
+sentence that would be half wrong.
 
-Apache 2.0 section 4(b) requires a derivative work to carry a notice that files
-were modified: the two .onnx files below are modified forms of PaddleOCR's
-released models in the sense described above.
+MODIFIED HERE. The recogniser's .pdmodel and .pdiparams from PaddleOCR's
+official PP-OCRv4 release were converted to ONNX with paddle2onnx {converter}
+(Apache License 2.0) at opset {opset}. The weights are unchanged; the container
+format is not. That conversion is UP-TAKE ADR-0034's choice, and its digest
+pins an artifact this project produced.
+
+REDISTRIBUTED UNCHANGED. The detector is PaddlePaddle's own ONNX build of
+PP-OCRv6, downloaded and verified byte for byte rather than converted here
+(UP-TAKE ADR-0036). The character dictionary is likewise copied byte for byte.
+Neither is modified in section 4(b)'s sense.
 
 Files
 -----
@@ -421,7 +453,8 @@ def main() -> int:
     print("Converting")
     produced = []
     for archive_name, stem, output_name in (
-        ("ch_PP-OCRv4_det_infer.tar", "det", "ch_PP-OCRv4_det.onnx"),
+        # The DETECTOR IS NOT HERE. ADR-0036 takes it as Baidu's own published
+        # ONNX; scripts/acquire-ppocr-detector.py downloads and verifies it.
         ("ch_PP-OCRv4_rec_infer.tar", "rec", "ch_PP-OCRv4_rec.onnx"),
     ):
         model_dir = extract_model(payloads[archive_name], cache, stem)
@@ -437,9 +470,25 @@ def main() -> int:
     print("Checking the converted models against UP-TAKE's assumptions")
     check_shapes(out_dir)
 
+    # The DETECTOR is added from the pins, not from `produced`, and that is the
+    # whole point of these four lines. `ADR-0036` moved it out of this script;
+    # a notice built only from what this script writes would have silently
+    # dropped it from a LICENCE OBLIGATION, which is the one kind of omission
+    # nothing downstream catches -- `cargo deny` walks the crate graph and sees
+    # no `.onnx` at all, which is why this file exists in the first place.
+    detector_pins = read_detector_pins()
+    entries = [
+        (
+            str(detector_pins["DETECTION_FILE_NAME"]),
+            int(detector_pins["DETECTION_SIZE"]),
+            str(detector_pins["DETECTION_SHA256"]),
+            "  (redistributed unchanged; acquired by acquire-ppocr-detector.py)",
+        )
+    ] + [(name, size, digest, "") for name, size, digest in produced]
+
     listing = "\n".join(
-        "  " + name + "\n    sha256 " + digest + "\n    " + str(size) + " bytes"
-        for name, size, digest in produced
+        "  " + name + "\n    sha256 " + digest + "\n    " + str(size) + " bytes" + note
+        for name, size, digest, note in entries
     )
     (out_dir / "NOTICE-models.txt").write_text(
         NOTICE_TEMPLATE.format(
