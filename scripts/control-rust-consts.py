@@ -98,27 +98,73 @@ def rust_reserved_names() -> tuple[str, ...]:
     return tuple(re.findall(r'"([^"]+)"', block.group(1)))
 
 
+#: Everything in `is_plain_file_name`'s body that is STRUCTURE rather than a rule.
+#: Stripped after the recognised predicates, so whatever is left is a rule this
+#: control does not police. Order matters: longest first, so a prefix of one
+#: does not eat another.
+_SCAFFOLDING = (
+    "let stem = name.split('.').next().unwrap_or(name);",
+    ".iter()",
+    ".any(|reserved| stem.eq_ignore_ascii_case(reserved))",
+    "RESERVED_DEVICE_NAMES",
+    "return false;",
+    "return true;",
+    "} else if",
+    "else if",
+    "else",
+    "if",
+    "||",
+    "&&",
+    "!",
+    "{",
+    "}",
+    "(",
+    ")",
+)
+
+
 def rust_rule_probes() -> list[tuple[str, str]]:
     """Reads `is_plain_file_name`'s RULES out of the Rust and turns each into a probe.
 
     # Why this exists, and what it replaces
 
-    `PR #88` round 6, BEHAVIOUR 2. This file's docstring claimed it read "the
-    reserved-name list **and the rule set**" out of the Rust and that "a rule
-    added to one and not the other fails here". Only the list was read. The
-    rules were hand-written Python literals in `MUST_REFUSE`, so a rule added to
-    `is_plain_file_name` and not to `plain_file_name` left this control printing
-    `4/4 passed` -- the exact `F-22` / `F-37` silence the file said it had ended,
-    still present for every rule except one.
+    `PR #88` round 6, BEHAVIOUR 2. This file claimed it read "the reserved-name
+    list **and the rule set**" out of the Rust and that "a rule added to one and
+    not the other fails here". Only the list was read. The rules were
+    hand-written Python literals, so a rule added to `is_plain_file_name` and not
+    to `plain_file_name` left this control printing `4/4 passed` -- the exact
+    `F-22` / `F-37` silence the file said it had ended.
 
-    So the rules are extracted now. Each character the Rust rejects becomes a
-    probe built around it, and a rule whose shape this parser does not recognise
-    is a REFUSAL rather than a silent omission -- otherwise the parser going
-    blind would look identical to agreement.
+    # And why the FIRST fix for that was still wrong, in three shapes
 
-    Returns (probe, why) pairs. The probes are synthesised from what the Rust
-    actually says, so a new `name.contains('|')` clause upstream produces a
-    `a|b.onnx` probe here with no edit to this file.
+    `PR #88` round 7 and `PR #89` round 2, independently. The first version
+    scanned clauses with a LINE-ANCHORED pattern, `^\\s*if (.+?) \\{`, which sees
+    only a rule written as a single-line top-level `if`. Three shapes slipped
+    past it, each drilled with the Rust rule added and the Python left alone,
+    each leaving the control green at `5/5`:
+
+    * **the trailing expression.** The reserved-device rule is not an `if` at
+      all -- it is the function's final expression. So the one place a rule
+      provably already lives was the one place the scanner did not look, and
+      anyone adding the next rule beside the last one lands there.
+    * **`} else if name.starts_with(' ') {`.** Ordinary Rust; the line does not
+      begin with `if`.
+    * **a `rustfmt`-wrapped condition.** The first clause is already three
+      disjuncts long, and a fourth takes it past 100 columns, at which point the
+      formatter breaks the line and the pattern stops matching.
+
+    The control's green was conditional on a formatting choice nothing enforces.
+
+    # So this does not parse SHAPES at all
+
+    It collects every recognised PREDICATE from the whole body regardless of
+    line structure, then strips those predicates and the structural scaffolding
+    and asserts **nothing is left**. A rule in any shape is either recognised
+    and probed, or it is residue and refused. `else if`, a wrapped condition and
+    a trailing expression are all just text by then.
+
+    Returns (probe, why) pairs synthesised from what the Rust actually says, so a
+    new `contains('|')` upstream produces an `a|b.onnx` probe with no edit here.
     """
     if not MANIFEST.is_file():
         raise SystemExit("cannot find " + str(MANIFEST))
@@ -132,67 +178,68 @@ def rust_rule_probes() -> list[tuple[str, str]]:
             + ".\nThe Rust guard moved and this control cannot read its rules,"
             " which is the divergence it exists to detect. Fix the extraction."
         )
-    text = body.group(1)
+    text = re.sub(r"//[^\n]*", "", body.group(1))
 
     probes: list[tuple[str, str]] = []
-    recognised = 0
+    residue = text
 
-    # `name.is_empty() || name == "." || name == ".."`
-    for literal in re.findall(r'name == "([^"]*)"', text):
-        probes.append((literal, "Rust rejects the literal " + repr(literal)))
-        recognised += 1
-    if "name.is_empty()" in text:
-        probes.append(("", "Rust rejects an empty name"))
-        recognised += 1
+    def take(pattern: str, build) -> None:
+        """Collect probes from every match anywhere in the body, then remove it."""
+        nonlocal residue
+        for match in re.finditer(pattern, text):
+            probes.extend(build(match))
+        residue = re.sub(pattern, "", residue)
 
-    # `name.contains('X')`
-    for char in re.findall(r"name\.contains\('(\\?.)'\)", text):
-        actual = {"\\\\": "\\", "\\'": "'", "\\n": "\n"}.get(char, char)
-        probes.append(("a" + actual + "b.onnx", "Rust rejects names containing " + repr(actual)))
-        recognised += 1
+    def unescape(char: str) -> str:
+        return {"\\\\": "\\", "\\'": "'", "\\n": "\n", "\\t": "\t", "\\0": "\0"}.get(char, char)
 
-    # `name.ends_with('X')`
-    for char in re.findall(r"name\.ends_with\('(\\?.)'\)", text):
-        actual = {"\\\\": "\\", "\\'": "'"}.get(char, char)
-        probes.append(("model.onnx" + actual, "Rust rejects names ending in " + repr(actual)))
-        recognised += 1
-
-    # the reserved-device check, whatever it is spelled as
+    take(
+        r'name == "([^"]*)"',
+        lambda m: [(m.group(1), "Rust rejects the literal " + repr(m.group(1)))],
+    )
+    take(
+        r"name\.is_empty\(\)",
+        lambda m: [("", "Rust rejects an empty name")],
+    )
+    take(
+        r"name\.contains\('(\\.|[^'])'\)",
+        lambda m: [
+            ("a" + unescape(m.group(1)) + "b.onnx",
+             "Rust rejects names containing " + repr(unescape(m.group(1))))
+        ],
+    )
+    take(
+        r"name\.ends_with\('(\\.|[^'])'\)",
+        lambda m: [
+            ("model.onnx" + unescape(m.group(1)),
+             "Rust rejects names ending in " + repr(unescape(m.group(1))))
+        ],
+    )
+    take(
+        r"name\.starts_with\('(\\.|[^'])'\)",
+        lambda m: [
+            (unescape(m.group(1)) + "model.onnx",
+             "Rust rejects names starting with " + repr(unescape(m.group(1))))
+        ],
+    )
     if "RESERVED_DEVICE_NAMES" in text:
         for reserved in rust_reserved_names():
             probes.append((reserved, "Rust rejects the device stem " + reserved))
             probes.append((reserved + ".onnx", "Rust rejects " + reserved + " with an extension"))
-        recognised += 1
 
-    # Every guard CLAUSE must be one this parser understands, checked per clause.
-    #
-    # Counting probes against clauses was the first attempt and it was wrong:
-    # nine probes come from four clauses, so a fifth clause still satisfied
-    # 9 >= 5 and passed. The drill caught it -- `name.len() > 255` added to the
-    # Rust left this control green, which is the exact silence it exists to end.
-    #
-    # An unrecognised clause is a REFUSAL, not a skip. A parser that quietly
-    # passes over a rule is indistinguishable from one that agrees with it.
-    known = (
-        re.compile(r"name\.is_empty\(\)"),
-        re.compile(r'name == "[^"]*"'),
-        re.compile(r"name\.contains\('(?:\\.|[^'])'\)"),
-        re.compile(r"name\.ends_with\('(?:\\.|[^'])'\)"),
-    )
-    for condition in re.findall(r"^\s*if (.+?) \{", text, re.M):
-        residue = condition
-        for pattern in known:
-            residue = pattern.sub("", residue)
-        residue = residue.replace("||", "").replace("&&", "").strip()
-        if residue:
-            raise SystemExit(
-                "is_plain_file_name has a guard clause this control cannot read:"
-                + chr(10) + "    if " + condition
-                + chr(10) + "Unrecognised part: " + repr(residue)
-                + chr(10) + "A rule it cannot read is a rule it cannot police."
-                " Teach the extraction the new shape rather than leaving it"
-                " silently unpoliced."
-            )
+    for token in _SCAFFOLDING:
+        residue = residue.replace(token, "")
+    residue = residue.strip()
+
+    if residue:
+        raise SystemExit(
+            "is_plain_file_name contains a rule this control cannot read:"
+            + chr(10) + "    " + repr(residue[:200])
+            + chr(10) + "A rule it cannot read is a rule it cannot police, and a"
+            " control that skips one silently is indistinguishable from one that"
+            " agrees. Teach the extraction the new predicate rather than leaving"
+            " it unpoliced."
+        )
     if not probes:
         raise SystemExit("read no rules at all from is_plain_file_name")
     return probes

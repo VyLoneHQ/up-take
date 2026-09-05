@@ -340,7 +340,12 @@ def main() -> int:
         try:
             test(module)
             print("ok    " + test.__name__)
-        except Exception:  # noqa: BLE001 - a test runner reports everything
+        # BaseException, not Exception: SystemExit derives from it, and a
+        # refusal in the code under test raises SystemExit -- which would
+        # abort the whole run with no FAIL line, no summary and every later
+        # test unrun. PR #88 round 6 PROSE 5 fixed this in ONE runner;
+        # PR #89 round 2 found the three beside it untouched.
+        except BaseException:  # noqa: BLE001, B036 - a test runner reports everything
             failures += 1
             print("FAIL  " + test.__name__)
             traceback.print_exc()
