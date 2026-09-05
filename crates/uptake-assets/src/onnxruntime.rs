@@ -53,7 +53,7 @@ pub const ARCHIVE_URL: &str = "https://github.com/microsoft/onnxruntime/releases
 /// The archive's SHA-256, probed on 2026-09-02 by downloading it.
 ///
 /// ⚠️ **Nothing polls this URL, and that is intended behaviour rather than a
-/// fault.** `scripts/convert-ppocr-models.py` says the same about its own
+/// fault.** `scripts/write-model-notice.py` says the same about its own
 /// upstream and it is worth saying here too: if Microsoft ever replaced this
 /// release asset in place, no probe in either repository would notice. The
 /// acquisition script would go red the next time it ran, and that red is the
@@ -303,7 +303,13 @@ mod tests {
         // target is a decision, and the hard fail is the line that must not
         // move without one.
         //
-        const HARD_FAIL: u64 = 40_000_000;
+        // ⚠️ RAISED 2026-09-05 to 60 MB by ADR-0037, which is the decision
+        // record this test's own message demanded. It fired when both models
+        // became the PP-OCRv6 small tier, said "moving
+        // this line needs a decision record, not a bigger constant", and the
+        // record was written before this constant moved. That order is the
+        // whole point of the check.
+        const HARD_FAIL: u64 = 60_000_000;
         assert!(
             installer_payload_bytes() < HARD_FAIL,
             "installer payload is {} bytes, past ADR-0035's {} byte hard fail;              moving this line needs a decision record, not a bigger constant",

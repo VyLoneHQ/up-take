@@ -88,7 +88,7 @@ jobs:
 
       # The bundle checker's own tests (I-346). Synthetic assets and a synthetic
       # pins file in a temp directory, with the module's tables rebound at them,
-      # so they need none of the 31 MB this job does not have. Here for the same
+      # so they need none of the 47.6 MB this job does not have. Here for the same
       # reason as the two steps above it: a fast Python run on a Linux runner
       # that is already required, so it costs no new check to register in branch
       # protection and no queue time on the Windows runners.
@@ -118,6 +118,19 @@ jobs:
       - name: Test the PP-OCRv6 detector acquisition step
         run: python3 scripts/test_acquire_ppocr_detector.py
 
+      # The recogniser step's own tests. Same shape and same reason: synthetic
+      # pins and synthetic payloads, so they need no model, no download and no
+      # onnxruntime, and they behave identically whether or not it is installed
+      # -- a suite that skips depending on the environment is UT-F-101.
+      # PyYAML because the extraction is a real YAML parse now: PR #89 round 1
+      # found the hand-rolled one corrupted two of 18,708 entries, with every
+      # digest around it certifying the corruption rather than detecting it.
+      - name: Install PyYAML for the card and recogniser suites
+        run: python3 -m pip install PyYAML
+
+      - name: Test the PP-OCRv6 recogniser acquisition step
+        run: python3 scripts/test_acquire_ppocr_recogniser.py
+
       # Holds the Python name guard to the Rust one it duplicates. There are two
       # implementations of one rule because the Rust guards what the PRODUCT
       # installs and the Python guards what the BUILD stages, in different
@@ -133,18 +146,21 @@ jobs:
       - name: Rust and Python name guards agree
         run: python3 scripts/control-rust-consts.py
 
-      # The conversion script's pin reading and licence-notice construction.
-      # Round 2 of PR #88's review found ADR-0036 had added real logic there
-      # with no test file for that script having EVER existed -- the same
-      # finding round 1 made about its sibling, landing in the commit meant to
-      # close it. The property under guard has no other check anywhere: the
-      # notice must name all three shipped files including the one this script
-      # no longer acquires, and `cargo deny` sees no .onnx at all.
-      #
-      # No paddle2onnx and no download: it tests the pin reading and the
-      # listing, not the conversion, which the bundle job exercises for real.
-      - name: Test the model conversion step's notice and pins
-        run: python3 scripts/test_convert_ppocr_models.py
+      # The licence notice's own tests. The load-bearing one reads
+      # tauri.release.conf.json and asserts the notice names exactly the model
+      # files the installer bundles, in both directions.
+      - name: Test the model licence notice
+        run: python3 scripts/test_write_model_notice.py
+
+      # The card corpus's own tests (roadmap 1.33). Constants only -- no Pillow,
+      # no rendering, no cards on disk -- because what they defend is the
+      # 192-card default denominator every recorded accuracy figure is over, and
+      # the presence of the umlauts 1.33 uses to choose a recogniser. The PIL
+      # import is stubbed unconditionally rather than skipped when absent: a
+      # skip here would skip in every environment it runs in, which is UT-F-101,
+      # found on 2026-09-04 inside the fix for the previous round's finding.
+      - name: Test the card corpus
+        run: python3 scripts/test_render_ocr_cards.py
 
       - name: Em-dash ratchet
         run: python3 scripts/dash-ratchet.py --against origin/main
@@ -263,13 +279,13 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # ADR-0035: the ONNX Runtime and the PP-OCRv4 models ship INSIDE the
+      # ADR-0035: the ONNX Runtime and the OCR models ship INSIDE the
       # installer, and `bundle.resources` in tauri.release.conf.json names them
       # (merged in with --config at the build step below; it is deliberately NOT
       # in tauri.conf.json, because tauri-build validates resource paths at
       # compile time). They
-      # are ~31 MB of binaries acquired rather than committed, so a checkout
-      # alone cannot build a bundle and these two steps are what make it
+      # are ~47.6 MB of binaries acquired rather than committed, so a checkout
+      # alone cannot build a bundle and these steps are what make it
       # possible. Each verifies every byte against a pinned SHA-256 before
       # writing (ADR-0032 decision 2), so a tampered or moved upstream artifact
       # fails the build rather than reaching an installer.
@@ -285,45 +301,55 @@ jobs:
       - name: Acquire ONNX Runtime (pinned, checksummed)
         run: python scripts/acquire-onnxruntime.py --out src-tauri/assets
 
-      # Pinned exactly: paddle2onnx 2.1.0's C extension fails to load on Windows
-      # and 1.3.1 is the newest release that converts these artifacts here. The
-      # script asserts the version it finds, so a drift is a refusal rather than
-      # a silently different conversion.
-      - name: Install the model conversion toolchain
-        run: python -m pip install paddle2onnx==1.3.1 onnxruntime
+      # ⚠️ THE paddle2onnx PINNING RATIONALE THAT STOOD HERE IS GONE, and so is
+      # paddle2onnx. It explained why 1.3.1 was pinned and said the script asserts
+      # the version it finds; ADR-0037 took the recogniser to Baidu's own ONNX, so
+      # no script converts anything and none asserts any version. Struck rather
+      # than deleted silently, because a reader who remembers the pin needs to see
+      # it go.
+      # onnxruntime because both acquisition steps pass --require-onnxruntime,
+      # which makes their shape and class checks a REFUSAL here rather than the
+      # skip they are on a developer's machine (PR #89 round 1, F4). PyYAML
+      # because the dictionary is a real YAML parse (F1). paddle2onnx is GONE:
+      # ADR-0037 took the recogniser to Baidu's own ONNX, so nothing converts.
+      - name: Install the acquisition toolchain
+        run: python -m pip install onnxruntime PyYAML
 
-      - name: Convert the PP-OCRv4 recogniser to ONNX (pinned, checksummed)
-        run: python scripts/convert-ppocr-models.py --out src-tauri/assets/models
+      # Built from the PINS, which are the same constants the installer's
+      # resources map and verify-bundle.py read. PR #89 round 1 F2 found the
+      # old notice naming two files nobody receives and omitting two that
+      # ship -- an Apache-2.0 section 4 defect that cargo deny cannot see,
+      # because it walks the crate graph and sees no .onnx.
+      - name: Write the model licence notice
+        run: python scripts/write-model-notice.py --out src-tauri/assets/models
+
+      # The RECOGNISER, downloaded rather than converted (ADR-0037). Its
+      # dictionary is EXTRACTED from the model's own inference.yml, because
+      # PP-OCRv6 does not publish the character list standalone the way v4 did
+      # -- so DICTIONARY_SHA256 pins this repository's extraction rather than a
+      # file Baidu publishes, and the script re-derives it every run.
+      - name: Acquire the PP-OCRv6 recogniser (pinned, checksummed)
+        run: python scripts/acquire-ppocr-recogniser.py --out src-tauri/assets/models --require-onnxruntime
 
       # The DETECTOR is downloaded rather than converted (ADR-0036): Baidu
-      # publishes PP-OCRv6 as ONNX itself. Separate step because it is a
-      # separate provenance story -- this digest pins THEIR artifact, the step
-      # above pins one this repository produced -- and because the step above
-      # needs a Python toolchain this one does not.
+      # publishes PP-OCRv6 as ONNX itself, and ADR-0037 took the recogniser the
+      # same way. Two steps rather than one because they are two artifacts with
+      # two pins, and each refuses independently.
       #
-      # Order does NOT matter for correctness, and the comment here used to
-      # claim it did. `convert-ppocr-models.py` writes the licence notice
-      # covering all three files including this one, and it builds that listing
-      # from the PINS rather than from the directory, so it is correct whichever
-      # step runs first.
-      #
-      # Running the acquisition second means the conversion step prints a NOTE
-      # saying the detector is not staged yet. That note is informational, not a
-      # check, and reversing these two steps silences it and costs nothing.
-      #
-      # ⚠️ **This comment previously said the conversion step "will say so if
-      # this file is not staged yet" and called reversing the order a lost
-      # check.** No such code existed -- it had been written, lost in an edit,
-      # and never noticed, and round 1 of PR #88's review read the script and
-      # found nothing that could fire. The note exists now; the claim that the
-      # ordering is load-bearing does not.
+      # ⚠️ THE ORDERING PARAGRAPH THAT STOOD HERE IS GONE, and so is what it
+      # described. It explained that the conversion step wrote the notice and
+      # printed a NOTE when the detector was not staged yet. The notice is now
+      # written by write-model-notice.py from the PINS, and nothing converts:
+      # PR #89 round 1 F2 found the old notice naming two files nobody receives
+      # and omitting the two that ship. Order still does not matter, and now
+      # there is no note to silence.
       - name: Acquire the PP-OCRv6 detector (pinned, checksummed)
-        run: python scripts/acquire-ppocr-detector.py --out src-tauri/assets/models
+        run: python scripts/acquire-ppocr-detector.py --out src-tauri/assets/models --require-onnxruntime
 
       # `--config` MERGES the release-only bundle resources into the base
       # config. They are deliberately not in `tauri.conf.json`: `tauri-build`
       # validates resource paths at COMPILE time, so putting them there makes
-      # every `cargo check`/`clippy`/`test` require 31 MB of acquired assets.
+      # every `cargo check`/`clippy`/`test` require 47.6 MB of acquired assets.
       - name: Build application
         run: pnpm tauri build --config src-tauri/tauri.release.conf.json
 

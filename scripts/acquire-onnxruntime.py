@@ -37,7 +37,8 @@ source must go red when it can no longer read it, not pass on nothing.
 What this deliberately does NOT do
 ----------------------------------
 
-It does not convert the PP-OCRv4 models -- that is `convert-ppocr-models.py`,
+It does not fetch the OCR models -- those are `acquire-ppocr-detector.py`
+and `acquire-ppocr-recogniser.py`,
 which has its own toolchain and its own pinned sources. Both write into the same
 staging directory and neither knows about the other.
 """

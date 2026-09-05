@@ -25,14 +25,15 @@
 //! no bundled runtime falls through to `ORT_DYLIB_PATH`.
 //!
 //! ⚠️ **The staging directory is NOT in the repository.** `src-tauri/assets` is
-//! gitignored and filled by `scripts/acquire-onnxruntime.py` and
-//! `scripts/convert-ppocr-models.py`, each of which verifies every byte against
+//! gitignored and filled by `scripts/acquire-onnxruntime.py`,
+//! `scripts/acquire-ppocr-detector.py` and `scripts/acquire-ppocr-recogniser.py`,
+//! each of which verifies every byte against
 //! a pinned SHA-256 before writing.
 //!
 //! **Only the bundling step needs them**, and that is a deliberate split rather
 //! than a convenience. `tauri-build` validates `bundle.resources` paths at
 //! COMPILE time, so keeping them in `tauri.conf.json` made `cargo check`,
-//! `cargo clippy` and `cargo test` all fail on any machine without 31 MB of
+//! `cargo clippy` and `cargo test` all fail on any machine without 47.6 MB of
 //! acquired assets. They live in `tauri.release.conf.json`, merged in with
 //! `--config` when an installer is built, so an ordinary build and `tauri dev`
 //! need nothing. **CI found this after a local run and an independent review
@@ -51,7 +52,7 @@
 //! runs it over the DLL. **A present-but-wrong runtime is refused rather than
 //! ignored**: a bundled file can still be replaced on disk after installation,
 //! so falling back to `ORT_DYLIB_PATH` when ours fails its digest would make the
-//! check decorative. That costs one hash of ~31 MB, once, on the first OCR area
+//! check decorative. That costs one hash of ~47.6 MB, once, on the first OCR area
 //! of a session. It is not a fetch and this module has no network path.
 //!
 //! # Threading
@@ -120,11 +121,11 @@ use uptake_ocr::{Outcome, RequestId, Service, StopReason};
 ///
 /// **Not a shipping path.** An installed UP-TAKE has its models beside the
 /// executable and sets nothing; this exists so a developer can point at the
-/// output of `scripts/convert-ppocr-models.py` without an install, exactly as
+/// output of the acquisition scripts without an install, exactly as
 /// the `ocr_smoke` example does.
 const MODELS_DIR_VARIABLE: &str = "UPTAKE_MODELS_DIR";
 
-/// The base URL [`ppocr::ppocr_v4`] wants and this module never uses.
+/// The base URL [`ppocr::ppocr_models`] wants and this module never uses.
 ///
 /// `AssetManifest` carries a URL per asset because it was built for a *fetch*,
 /// and `ADR-0035` deleted the fetch. Verification reads bytes off disk and
@@ -424,7 +425,7 @@ fn verified_runtime_in(directory: &std::path::Path) -> Result<Option<PathBuf>, S
 /// question rather than answering one.
 fn resolve_config() -> Result<PaddleConfig, String> {
     let directory = models_directory()?;
-    let manifest = ppocr::ppocr_v4(UNUSED_BASE_URL)
+    let manifest = ppocr::ppocr_models(UNUSED_BASE_URL)
         .map_err(|error| format!("UP-TAKE's own model manifest is invalid: {error}"))?;
 
     // Named individually rather than reported as a count. "2 of 3 models are
@@ -732,7 +733,7 @@ mod tests {
         // report "UP-TAKE's own model manifest is invalid" at run time. This
         // test is the only thing that reads that constant outside the resolver.
         assert!(
-            ppocr::ppocr_v4(UNUSED_BASE_URL).is_ok(),
+            ppocr::ppocr_models(UNUSED_BASE_URL).is_ok(),
             "the placeholder base URL must still build a valid manifest"
         );
     }
@@ -1085,7 +1086,7 @@ mod tests {
     /// looks like indirection for its own sake: `tauri-build`'s build script
     /// validates every `bundle.resources` path at COMPILE time, not at bundle
     /// time. With them in `tauri.conf.json`, `cargo check`, `cargo clippy` and
-    /// `cargo test` all fail on a machine without 31 MB of acquired assets --
+    /// `cargo test` all fail on a machine without 47.6 MB of acquired assets --
     /// which is every CI job except the one that builds an installer, and
     /// every contributor's first checkout. Found by CI on this branch after a
     /// local run and an independent review both passed, because both were on
@@ -1110,7 +1111,7 @@ mod tests {
             .filter_map(serde_json::Value::as_str)
             .collect();
 
-        let models = ppocr::ppocr_v4(UNUSED_BASE_URL).unwrap();
+        let models = ppocr::ppocr_models(UNUSED_BASE_URL).unwrap();
         for asset in &models.assets {
             let expected = format!("{MODELS_SUBDIRECTORY}/{}", asset.file_name);
             assert!(
@@ -1129,7 +1130,7 @@ mod tests {
         }
 
         // PaddleOCR's own notice, which belongs to no manifest because
-        // `convert-ppocr-models.py` generates it rather than downloading it.
+        // `write-model-notice.py` generates it rather than downloading it.
         // Named explicitly here precisely because nothing else references it.
         assert!(
             destinations.contains(format!("{MODELS_SUBDIRECTORY}/NOTICE-models.txt").as_str()),
@@ -1177,7 +1178,7 @@ mod tests {
         // assumed. The three names come from `uptake-assets`, so a rename there
         // travels here.
         let directory = std::env::temp_dir().join("uptake-ocr-models-that-do-not-exist");
-        let manifest = ppocr::ppocr_v4(UNUSED_BASE_URL).unwrap();
+        let manifest = ppocr::ppocr_models(UNUSED_BASE_URL).unwrap();
         let installer = Installer::new(directory, manifest.clone());
         for asset in &manifest.assets {
             assert_eq!(
