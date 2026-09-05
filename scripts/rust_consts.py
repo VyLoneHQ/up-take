@@ -19,6 +19,7 @@ literals, and the failure mode when it stops being enough is a caller getting
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 #: Matches the whole declaration, anchored on the const name so a doc comment
 #: quoting the same digest cannot be picked up instead. The optional newline
@@ -48,25 +49,76 @@ def u64_const(source: str, name: str) -> int | None:
     return None if match is None else int(match.group(1).replace("_", ""))
 
 
-#: Windows device stems, refused with or without an extension.
+#: Where the reserved device stems are DEFINED. There is no second copy.
 #:
-#: ⚠️ This said "whatever the extension", which was FALSE -- `NUL.onnx` is an
-#: ordinary file. See `plain_file_name` below for the measurement and for why
-#: the extension forms are still refused. Corrected here as well as there
-#: because the two sat nine lines apart and only one was fixed first.
+#: `PR #88` round 9 found the copy that used to live here was a real divergence
+#: hole: the shared corpus draws its device cases from the RUST list, so a stem
+#: added to the PYTHON list alone produced no corpus case, and every control
+#: stayed green while the two guards genuinely disagreed. Drilled with `CONIN$`.
 #:
-#: **Mirrored from `crates/uptake-assets/src/manifest.rs`'s
-#: `RESERVED_DEVICE_NAMES`.** That duplication is a cost and is taken
-#: deliberately: the Rust list guards what the PRODUCT installs and this one
-#: guards what the BUILD stages, and neither can import the other. What makes it
-#: safe is `control-rust-consts.py`, which compares the two guards' VERDICTS on
-#: a shared corpus -- so a rule added to one and not the other is a red control
-#: rather than the `F-22` / `F-37` silence, whatever shape it is written in.
-RESERVED_DEVICE_NAMES = (
-    "CON", "PRN", "AUX", "NUL",
-    "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+#: Worse, that hole was a REGRESSION this file introduced. The version before it
+#: carried `test_the_reserved_lists_agree`, which compared the two lists as sets
+#: and would have caught it; replacing the approach deleted the check along with
+#: the parser it sat beside, and the new three-line contract then asserted the
+#: case it no longer covered.
+#:
+#: So the list is not duplicated and then policed. It is read from the Rust,
+#: which is the only place it is written. A stem added there is here on the next
+#: run, and "added to Python only" is not a state that exists.
+#:
+#: ⚠️ **This is DATA extraction, not the predicate parsing rounds 7 and 8
+#: killed.** A `const NAME: [&str; N] = [...]` literal is a list; reading it was
+#: never the part that failed. What failed was inferring RULES from the shape of
+#: Rust code, and nothing here does that -- the rules are compared by verdict, on
+#: the corpus, by `control-rust-consts.py`.
+_MANIFEST = (
+    Path(__file__).resolve().parent.parent
+    / "crates"
+    / "uptake-assets"
+    / "src"
+    / "manifest.rs"
 )
+
+_RESERVED_CACHE: tuple[str, ...] | None = None
+
+
+def reserved_device_names() -> tuple[str, ...]:
+    """The Rust guard's `RESERVED_DEVICE_NAMES`, read from its one definition.
+
+    Raises `SystemExit` rather than returning an empty tuple. An empty list here
+    would make `plain_file_name` accept every device name silently, which is the
+    failure this whole family of checks exists to prevent.
+    """
+    global _RESERVED_CACHE  # noqa: PLW0603 - a read-through cache of a file constant
+    if _RESERVED_CACHE is not None:
+        return _RESERVED_CACHE
+    if not _MANIFEST.is_file():
+        raise SystemExit(
+            "cannot find " + str(_MANIFEST) + ", which is where the reserved"
+            " device names are defined. Without it this guard would accept"
+            " every device name."
+        )
+    source = _MANIFEST.read_text(encoding="utf-8")
+    block = re.search(
+        r"const RESERVED_DEVICE_NAMES:\s*\[&str;\s*\d+\]\s*=\s*\[(.*?)\];",
+        source,
+        re.S,
+    )
+    if block is None:
+        raise SystemExit(
+            "could not find `const RESERVED_DEVICE_NAMES` in " + str(_MANIFEST)
+            + ".\nIt moved or was renamed. Fix this extraction rather than"
+            " pasting the list back here: a second copy is what round 9 found."
+        )
+    names = tuple(re.findall(r'"([^"]+)"', block.group(1)))
+    if not names:
+        raise SystemExit(
+            "read an EMPTY reserved-device list from " + str(_MANIFEST)
+            + ". A blind extraction and a genuinely empty list are"
+            " indistinguishable to every caller, so this refuses."
+        )
+    _RESERVED_CACHE = names
+    return names
 
 
 def plain_file_name(value: str, const_name: str) -> str:
@@ -140,7 +192,7 @@ def plain_file_name(value: str, const_name: str) -> str:
             " be the name pinned."
         )
     stem = value.split(".")[0]
-    if stem.upper() in RESERVED_DEVICE_NAMES:
+    if stem.upper() in reserved_device_names():
         raise SystemExit(
             const_name + " is " + repr(value) + ", whose stem is the Windows"
             " device " + stem.upper() + "."

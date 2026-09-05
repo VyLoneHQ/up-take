@@ -9,7 +9,7 @@ the Python guards what the BUILD stages, in different languages and different
 processes, and neither can call the other. Two implementations of one rule is
 `F-22` / `F-37`, so the duplication has to be policed rather than trusted.
 
-# Why it no longer reads the Rust at all
+# Why it no longer reads the Rust guard's CODE
 
 `PR #88` rounds 6, 7 and 8 each found a different way for the two to diverge
 without this control noticing:
@@ -30,7 +30,9 @@ parser. The founder chose to replace the approach rather than patch it again.
 
 # What replaces it
 
-**Nothing parses anything.** `uptake-assets`' `the_name_guard_cases_file_is_current`
+**No rule is inferred from source shape any more.** (`rust_consts.py` does read
+the reserved-device LIST out of `manifest.rs`, which is data extraction and was
+never the part that failed -- see round 9 below.) `uptake-assets`' `the_name_guard_cases_file_is_current`
 test runs the REAL Rust guard over a systematic corpus and writes every verdict
 to `crates/uptake-assets/name-guard-cases.tsv`. This control reads that file and
 asserts the Python guard returns the same verdict for the same name. Divergence
@@ -39,6 +41,16 @@ is caught from either direction:
     rule added to Rust, file not regenerated  -> the RUST test fails
     rule added to Rust, file regenerated      -> THIS control fails
     rule added to Python only                 -> THIS control fails
+
+⚠️ The third line was false for ONE thing and round 9 drilled it: the reserved
+device list was restated on both sides, and the corpus draws its device cases
+from the Rust list, so a stem added to the Python list alone produced no case
+and every control stayed green. The version before this one had a list-agreement
+test that caught exactly that, and replacing the approach deleted it.
+
+`rust_consts.py` has no list any more -- it reads the Rust one, so "added to
+Python only" is not a state the device list can be in. The three lines are about
+RULES, and for rules they hold in both directions.
 
 A rule's SHAPE is now irrelevant. `else if`, a wrapped condition, a trailing
 expression and a negation all move a verdict, and a moved verdict is what this

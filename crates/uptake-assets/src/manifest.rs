@@ -402,6 +402,20 @@ mod tests {
     //   rule added to Rust, file not regenerated  -> THIS test fails
     //   rule added to Rust, file regenerated      -> the Python control fails
     //   rule added to Python only                 -> the Python control fails
+
+    // ⚠️ The third line was FALSE for one thing when it was written, and round 9
+    // drilled it: `RESERVED_DEVICE_NAMES` was restated on both sides and the
+    // corpus drew its device cases from the RUST list, so a stem added to the
+    // PYTHON list alone produced no corpus case and every control stayed green.
+    // Worse, the version before this one carried a list-agreement test that
+    // would have caught it, and replacing the approach deleted that check along
+    // with the parser it sat beside.
+    //
+    // There is no second list now. `scripts/rust_consts.py` READS this one, so
+    // "added to Python only" is not a state the device list can be in. The
+    // three lines above are about RULES, and for rules they hold -- a predicate
+    // added to either guard moves a verdict, which the drills exercise in both
+    // directions.
     //
     // The residual, stated rather than left to be found: a rule whose effect is
     // invisible on every name in the corpus. That is why the corpus is
@@ -518,7 +532,13 @@ mod tests {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(CASES_FILE);
         let rendered = rendered_cases();
 
-        if std::env::var("UPTAKE_REGENERATE_NAME_GUARD").is_ok() {
+        // `== "1"`, not `is_ok()`. PR #88 round 9 FINDING 2: `is_ok()` is
+        // true for ANY value, so `UPTAKE_REGENERATE_NAME_GUARD=0` -- an
+        // operator instruction meaning OFF -- made the staleness gate
+        // report green and silently rewrite the committed file. Every
+        // piece of documentation spells the switch `=1`; this now agrees
+        // with them.
+        if std::env::var("UPTAKE_REGENERATE_NAME_GUARD").as_deref() == Ok("1") {
             if let Err(error) = std::fs::write(&path, &rendered) {
                 panic!("could not write {}: {error}", path.display());
             }
@@ -736,11 +756,20 @@ mod tests {
     }
 
     #[test]
-    fn a_windows_device_name_is_refused_whatever_the_extension() {
-        // CON, NUL and friends are DEVICES on Windows, not files, and the rule
-        // survives an extension: "NUL.onnx" is the null device. An asset written
-        // to one is silently discarded and then re-fetched on every launch,
-        // because reading it back never matches the digest.
+    fn a_windows_device_stem_is_refused_with_or_without_an_extension() {
+        // ⚠️ THE FOURTH SITE of a claim corrected in the other three, and the
+        // one the correcting commit's own Enumeration command could not reach:
+        // it grepped for "null device too" and this line says "is the null
+        // device" (PR #88 round 9, FINDING 3).
+        //
+        // What is true: NUL reaches a device, and CON does through a relative
+        // path. What is NOT: "the rule survives an extension". NUL.onnx,
+        // AUX.dll and com9.txt are ordinary files -- measured, see
+        // RESERVED_DEVICE_NAMES above.
+        //
+        // The names below are all still refused and the rule is genuinely flat,
+        // because the behaviour is path-form and platform dependent and a flat
+        // rule costs nothing. Only the stated reason was wrong.
         for name in [
             "CON",
             "con",

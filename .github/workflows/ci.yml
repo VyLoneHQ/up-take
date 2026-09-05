@@ -127,9 +127,11 @@ jobs:
       # the device LIST, and round 7 found its first rule-reader saw only
       # single-line top-level `if` clauses -- so a rule in the trailing
       # expression, behind an `else if`, or wrapped by rustfmt slipped past.
-      # It now collects every recognised predicate from the whole body and
-      # REFUSES on anything left over, so an unreadable rule is a red control
-      # rather than a silent pass.
+      # Round 8 replaced the parsing entirely: the Rust guard's own test writes
+      # its verdicts over a systematic corpus to name-guard-cases.tsv, and this
+      # control asserts the Python guard agrees name for name. A rule's SHAPE is
+      # irrelevant -- else-if, wrapping, a trailing expression and a negation all
+      # move a verdict, and a moved verdict is what gets compared.
       - name: Rust and Python name guards agree
         run: python3 scripts/control-rust-consts.py
 
