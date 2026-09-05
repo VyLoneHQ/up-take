@@ -266,6 +266,72 @@ def test_the_real_pins_still_parse(module) -> None:
     assert str(pins["ARCHIVE_URL"]).startswith("https://")
 
 
+def test_a_pin_that_escapes_the_output_directory_is_REFUSED(module) -> None:
+    """PR #88 round 5, F2: the guard was APPLIED here in round 4 and never drilled.
+
+    Deleting `rust_consts.plain_file_name(...)` from this script left all five
+    script suites green, so the whole of round 4's fix could be reverted in this
+    file with nothing to notice. The detector script's call site was covered;
+    this one was not, and the asymmetry is the finding.
+
+    Driven for every member, not just the runtime: each is joined onto `--out`
+    by the same line, and a guard that covers one of three is the shape this
+    round found one level up.
+    """
+    for key in NAMES:
+        harness = Harness(FAKE, FAKE)
+        escaped = harness.directory.parent / "escaped-ort.dll"
+        escaped.unlink(missing_ok=True)
+        try:
+            pins = harness.pins.read_text(encoding="utf-8")
+            harness.pins.write_text(
+                pins.replace(
+                    'pub const ' + key + '_FILE_NAME: &str = "' + NAMES[key] + '";',
+                    'pub const ' + key + '_FILE_NAME: &str = "../../escaped-ort.dll";',
+                ),
+                encoding="utf-8",
+            )
+            assert harness.run(module) != 0, (
+                key + " with a traversing pin was accepted"
+            )
+            assert not escaped.exists(), (
+                key + " was refused and still wrote outside --out"
+            )
+        finally:
+            escaped.unlink(missing_ok=True)
+            harness.cleanup()
+
+
+def test_a_pin_naming_a_WINDOWS_DEVICE_is_REFUSED(module) -> None:
+    """The class the traversal test cannot see.
+
+    `NUL` is not a traversal and passes every separator check. Writing to it
+    succeeds, reports a byte count, and discards the bytes: the reviewer drove
+    the sibling script to exit 0 printing *wrote 35 bytes* and *verified* with
+    the staging directory empty. Worse here, because the two-phase write means
+    a device name in the LICENCE pin leaves a staged runtime with no licence
+    beside it, which is the half-updated state that phase split exists to make
+    impossible.
+    """
+    for key in NAMES:
+        harness = Harness(FAKE, FAKE)
+        try:
+            pins = harness.pins.read_text(encoding="utf-8")
+            harness.pins.write_text(
+                pins.replace(
+                    'pub const ' + key + '_FILE_NAME: &str = "' + NAMES[key] + '";',
+                    'pub const ' + key + '_FILE_NAME: &str = "NUL";',
+                ),
+                encoding="utf-8",
+            )
+            assert harness.run(module) != 0, key + " = NUL was accepted"
+            assert not harness.out.exists() or not list(harness.out.iterdir()), (
+                key + " = NUL was refused after staging something"
+            )
+        finally:
+            harness.cleanup()
+
+
 def main() -> int:
     module = load_module()
     tests = [value for name, value in globals().items() if name.startswith("test_")]
