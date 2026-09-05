@@ -358,6 +358,191 @@ impl AssetManifest {
 mod tests {
     use super::*;
 
+    // ---------------------------------------------------------------------
+    // The shared name-guard corpus (PR #88 rounds 6, 7 and 8)
+    //
+    // `rust_consts.plain_file_name` in Python duplicates `is_plain_file_name`
+    // here, because the Rust guards what the PRODUCT installs and the Python
+    // guards what the BUILD stages -- different languages, different processes,
+    // neither can call the other. Three rounds of review each found a different
+    // way for the two to diverge unnoticed:
+    //
+    //   round 6  the control read only the reserved-name LIST, not the rules
+    //   round 7  it read rules with a line-anchored regex, so a rule in the
+    //            trailing expression, behind an `else if`, or wrapped by
+    //            rustfmt was invisible
+    //   round 8  it stripped `!`, so it saw WHICH predicate a rule used and
+    //            never whether the rule was that predicate or its negation
+    //
+    // Every fix was correct and every one was incomplete one shape down,
+    // because reading Rust predicates with a Python regex is a parser problem
+    // solved without a parser. The founder chose to replace the approach rather
+    // than patch it a fourth time.
+    //
+    // So NOTHING PARSES ANYTHING NOW. This test runs the real guard over a
+    // systematic corpus and writes the verdicts to a committed file. The Python
+    // control reads that same file and asserts its own guard agrees, name for
+    // name. A rule added to either side changes a verdict, and whichever side
+    // did not get it goes red:
+    //
+    //   rule added to Rust, file not regenerated  -> THIS test fails
+    //   rule added to Rust, file regenerated      -> the Python control fails
+    //   rule added to Python only                 -> the Python control fails
+    //
+    // The residual, stated rather than left to be found: a rule whose effect is
+    // invisible on every name in the corpus. That is why the corpus is
+    // generated systematically over the interesting character classes and
+    // positions rather than hand-listed.
+    // ---------------------------------------------------------------------
+
+    /// Where the generated verdicts live, relative to the crate root.
+    const CASES_FILE: &str = "name-guard-cases.tsv";
+
+    /// Characters probed beyond plain ASCII, and why each is here.
+    ///
+    /// The ASCII range is covered exhaustively in `corpus()` rather than
+    /// sampled. These are the ones outside it worth naming.
+    const BEYOND_ASCII: [char; 4] = [
+        '\u{a0}',    // non-breaking space: whitespace that is not ASCII
+        '\u{3000}',  // ideographic space: removed by `str::trim`, invisible to a byte scan
+        '\u{e9}',    // a non-ASCII letter
+        '\u{10000}', // outside the basic multilingual plane
+    ];
+
+    /// Every name both guards are checked against.
+    ///
+    /// Systematic rather than hand-listed: each interesting character is placed
+    /// at the start, the end, and the middle of an otherwise ordinary name, and
+    /// alone. A rule about any of those positions therefore moves a verdict.
+    fn corpus() -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+
+        // The structural cases.
+        for fixed in ["", ".", "..", "...", "a", "model.onnx", "MODEL.ONNX"] {
+            names.push(fixed.to_owned());
+        }
+
+        // EVERY ASCII code point, in every position, alone and in context, plus
+        // the non-ASCII characters above.
+        //
+        // Exhaustive rather than sampled, and that is not thoroughness for its
+        // own sake. The first version of this corpus hand-picked fourteen
+        // characters, and its own drill found that a Rust rule rejecting '|'
+        // and a Python rule rejecting a leading 'z' BOTH passed unnoticed,
+        // because no name carried either. A rule invisible on every name is the
+        // one residual this design has, so the corpus closes it by covering the
+        // whole range a file name is written in.
+        let probes: Vec<char> = (0u8..=127).map(char::from).chain(BEYOND_ASCII).collect();
+        for character in probes {
+            names.push(character.to_string());
+            names.push(format!("{character}model.onnx"));
+            names.push(format!("model.onnx{character}"));
+            names.push(format!("mo{character}del.onnx"));
+            names.push(format!("model{character}.onnx"));
+        }
+
+        // Every reserved device stem, bare and with extensions, in three cases.
+        for reserved in RESERVED_DEVICE_NAMES {
+            names.push((*reserved).to_owned());
+            names.push(reserved.to_lowercase());
+            names.push(format!("{reserved}.onnx"));
+            names.push(format!("{}.onnx", reserved.to_lowercase()));
+            names.push(format!("{reserved}x"));
+            names.push(format!("x{reserved}"));
+        }
+
+        // Lengths, because a bound is a plausible future rule.
+        for length in [1_usize, 2, 8, 64, 255, 256, 300] {
+            names.push("a".repeat(length));
+        }
+
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// TSV- and line-safe, and reversible. The Python side decodes the same way.
+    fn escape(name: &str) -> String {
+        let mut out = String::new();
+        for character in name.chars() {
+            match character {
+                '\\' => out.push_str("\\\\"),
+                '\t' => out.push_str("\\t"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                c if (c as u32) < 0x20 || (c as u32) == 0x7f => {
+                    out.push_str(&format!("\\x{:02x}", c as u32));
+                }
+                c => out.push(c),
+            }
+        }
+        out
+    }
+
+    fn rendered_cases() -> String {
+        let mut lines = vec![
+            "# GENERATED by uptake-assets' the_name_guard_cases_file_is_current test.".to_owned(),
+            "# Do not hand-edit. Regenerate with:".to_owned(),
+            "#   UPTAKE_REGENERATE_NAME_GUARD=1 cargo test -p uptake-assets name_guard".to_owned(),
+            "# Read by scripts/control-rust-consts.py, which asserts the Python guard agrees."
+                .to_owned(),
+            "# name\\tverdict  (verdict is `plain` or `refused`)".to_owned(),
+        ];
+        for name in corpus() {
+            let verdict = if is_plain_file_name(&name) {
+                "plain"
+            } else {
+                "refused"
+            };
+            lines.push(format!("{}\t{}", escape(&name), verdict));
+        }
+        lines.join("\n") + "\n"
+    }
+
+    #[test]
+    fn the_name_guard_cases_file_is_current() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(CASES_FILE);
+        let rendered = rendered_cases();
+
+        if std::env::var("UPTAKE_REGENERATE_NAME_GUARD").is_ok() {
+            if let Err(error) = std::fs::write(&path, &rendered) {
+                panic!("could not write {}: {error}", path.display());
+            }
+            return;
+        }
+
+        let committed = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+            panic!(
+                "{} is missing ({error}).\nRegenerate it: \
+                 UPTAKE_REGENERATE_NAME_GUARD=1 cargo test -p uptake-assets name_guard",
+                path.display()
+            )
+        });
+
+        assert_eq!(
+            committed.replace("\r\n", "\n"),
+            rendered,
+            "\n{} is stale. The guard's behaviour changed and the file the Python \
+             control reads did not.\nRegenerate it: \
+             UPTAKE_REGENERATE_NAME_GUARD=1 cargo test -p uptake-assets name_guard\n\
+             Then expect scripts/control-rust-consts.py to go red until the Python \
+             guard implements the same rule -- that is the point.",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn the_corpus_covers_both_verdicts_and_is_not_degenerate() {
+        // A corpus that is all-refused or all-plain would let the control pass
+        // against a guard that answers a constant, which is the vacuous-control
+        // failure this repository keeps finding.
+        let names = corpus();
+        let refused = names.iter().filter(|n| !is_plain_file_name(n)).count();
+        let plain = names.len() - refused;
+        assert!(refused > 20, "only {refused} refused names in the corpus");
+        assert!(plain > 5, "only {plain} accepted names in the corpus");
+    }
+
     const ZEROS: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
     fn digest() -> Sha256Digest {
