@@ -11,6 +11,11 @@
 # runner checks out LF. Added 2026-07-21.
 *.md text eol=lf
 *.txt text eol=lf
+# The name-guard cases file is compared BYTE FOR BYTE against what the Rust
+# test regenerates, so a CRLF checkout would fail that test on any fresh
+# clone -- CI included. The test also normalises CRLF when reading, so this
+# is belt and braces rather than the only defence.
+*.tsv text eol=lf
 *.json text eol=lf
 *.yaml text eol=lf
 *.yml text eol=lf
