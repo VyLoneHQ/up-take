@@ -124,8 +124,8 @@ PINNED = {
     # is read from the same constant either way, so this table did not have to
     # learn the difference -- only the file name moved.
     "assets/models/PP-OCRv6_small_det.onnx": ("ppocr.rs", "DETECTION_SHA256"),
-    "assets/models/ch_PP-OCRv4_rec.onnx": ("ppocr.rs", "RECOGNITION_SHA256"),
-    "assets/models/ppocr_keys_v1.txt": ("ppocr.rs", "DICTIONARY_SHA256"),
+    "assets/models/PP-OCRv6_tiny_rec.onnx": ("ppocr.rs", "RECOGNITION_SHA256"),
+    "assets/models/ppocr_keys_v6.txt": ("ppocr.rs", "DICTIONARY_SHA256"),
 }
 
 #: Resources that have no pin, and why. Listed rather than skipped: see the
