@@ -89,10 +89,16 @@ pub const RUNTIME_SHA256: &str = "69d8e6d3879a3b4001cdc74c8ed9ccc7e7f799a5b84705
 /// 35 MB target with nothing announcing it. Found by round 3 of `PR #88`'s
 /// independent review.
 ///
-/// The total is `RUNTIME_SIZE + DETECTION_SIZE + RECOGNITION_SIZE +
-/// DICTIONARY_SIZE`, every term a pinned constant in this crate, and
-/// `installer_payload_bytes()` below sums them so the number cannot be
-/// hand-copied and cannot drift again.
+/// **Do not read a formula out of this comment either.** This said the total
+/// was `RUNTIME_SIZE + DETECTION_SIZE + RECOGNITION_SIZE + DICTIONARY_SIZE`,
+/// which went wrong by 344,343 bytes the moment the two notice files were added
+/// to the sum, in the same round that added them -- a stale total inside the
+/// paragraph about stale totals. `PR #88` round 6, PROSE 3, and the third time
+/// this file family has had a fact corrected in one place and left standing
+/// nine lines away (`manifest.rs:182` records the first, UP-TAKE `I-334`).
+///
+/// [`installer_payload_bytes`] is the answer. It sums the pins, a unit test
+/// asserts it equals them, and no prose here restates which ones.
 pub const RUNTIME_SIZE: u64 = 16_149_344;
 
 /// The bytes this crate's pins put in the installer, before compression.

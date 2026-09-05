@@ -19,8 +19,17 @@ at run time and the Python guards what the BUILD stages, in different languages,
 in different processes, and neither can import the other.
 
 **So the duplication stays and stops being silent.** This control reads the
-reserved-name list and the rule set out of the Rust source and asserts the
-Python agrees. A rule added to one and not the other fails here.
+reserved-name list AND the guard's own clauses out of the Rust source, turns
+each clause into a probe, and asserts the Python refuses it. A rule added to one
+and not the other fails here.
+
+⚠️ **That sentence was an overclaim until round 6 of `PR #88` caught it.** The
+control read only the device LIST; the rules were hand-written Python literals,
+so a new clause in `is_plain_file_name` -- a leading space, a control character,
+a length bound -- left this printing `4/4 passed` while the guards diverged.
+`rust_rule_probes()` is the fix, and it REFUSES rather than skips when it meets
+a clause shape it does not recognise, because a parser that quietly skips one is
+indistinguishable from agreement.
 
 Run: `python3 scripts/control-rust-consts.py`
 """
@@ -89,12 +98,134 @@ def rust_reserved_names() -> tuple[str, ...]:
     return tuple(re.findall(r'"([^"]+)"', block.group(1)))
 
 
+def rust_rule_probes() -> list[tuple[str, str]]:
+    """Reads `is_plain_file_name`'s RULES out of the Rust and turns each into a probe.
+
+    # Why this exists, and what it replaces
+
+    `PR #88` round 6, BEHAVIOUR 2. This file's docstring claimed it read "the
+    reserved-name list **and the rule set**" out of the Rust and that "a rule
+    added to one and not the other fails here". Only the list was read. The
+    rules were hand-written Python literals in `MUST_REFUSE`, so a rule added to
+    `is_plain_file_name` and not to `plain_file_name` left this control printing
+    `4/4 passed` -- the exact `F-22` / `F-37` silence the file said it had ended,
+    still present for every rule except one.
+
+    So the rules are extracted now. Each character the Rust rejects becomes a
+    probe built around it, and a rule whose shape this parser does not recognise
+    is a REFUSAL rather than a silent omission -- otherwise the parser going
+    blind would look identical to agreement.
+
+    Returns (probe, why) pairs. The probes are synthesised from what the Rust
+    actually says, so a new `name.contains('|')` clause upstream produces a
+    `a|b.onnx` probe here with no edit to this file.
+    """
+    if not MANIFEST.is_file():
+        raise SystemExit("cannot find " + str(MANIFEST))
+    source = MANIFEST.read_text(encoding="utf-8")
+    body = re.search(
+        r"fn is_plain_file_name\(name: &str\) -> bool \{(.*?)\n\}", source, re.S
+    )
+    if body is None:
+        raise SystemExit(
+            "could not find `fn is_plain_file_name` in " + str(MANIFEST)
+            + ".\nThe Rust guard moved and this control cannot read its rules,"
+            " which is the divergence it exists to detect. Fix the extraction."
+        )
+    text = body.group(1)
+
+    probes: list[tuple[str, str]] = []
+    recognised = 0
+
+    # `name.is_empty() || name == "." || name == ".."`
+    for literal in re.findall(r'name == "([^"]*)"', text):
+        probes.append((literal, "Rust rejects the literal " + repr(literal)))
+        recognised += 1
+    if "name.is_empty()" in text:
+        probes.append(("", "Rust rejects an empty name"))
+        recognised += 1
+
+    # `name.contains('X')`
+    for char in re.findall(r"name\.contains\('(\\?.)'\)", text):
+        actual = {"\\\\": "\\", "\\'": "'", "\\n": "\n"}.get(char, char)
+        probes.append(("a" + actual + "b.onnx", "Rust rejects names containing " + repr(actual)))
+        recognised += 1
+
+    # `name.ends_with('X')`
+    for char in re.findall(r"name\.ends_with\('(\\?.)'\)", text):
+        actual = {"\\\\": "\\", "\\'": "'"}.get(char, char)
+        probes.append(("model.onnx" + actual, "Rust rejects names ending in " + repr(actual)))
+        recognised += 1
+
+    # the reserved-device check, whatever it is spelled as
+    if "RESERVED_DEVICE_NAMES" in text:
+        for reserved in rust_reserved_names():
+            probes.append((reserved, "Rust rejects the device stem " + reserved))
+            probes.append((reserved + ".onnx", "Rust rejects " + reserved + " with an extension"))
+        recognised += 1
+
+    # Every guard CLAUSE must be one this parser understands, checked per clause.
+    #
+    # Counting probes against clauses was the first attempt and it was wrong:
+    # nine probes come from four clauses, so a fifth clause still satisfied
+    # 9 >= 5 and passed. The drill caught it -- `name.len() > 255` added to the
+    # Rust left this control green, which is the exact silence it exists to end.
+    #
+    # An unrecognised clause is a REFUSAL, not a skip. A parser that quietly
+    # passes over a rule is indistinguishable from one that agrees with it.
+    known = (
+        re.compile(r"name\.is_empty\(\)"),
+        re.compile(r'name == "[^"]*"'),
+        re.compile(r"name\.contains\('(?:\\.|[^'])'\)"),
+        re.compile(r"name\.ends_with\('(?:\\.|[^'])'\)"),
+    )
+    for condition in re.findall(r"^\s*if (.+?) \{", text, re.M):
+        residue = condition
+        for pattern in known:
+            residue = pattern.sub("", residue)
+        residue = residue.replace("||", "").replace("&&", "").strip()
+        if residue:
+            raise SystemExit(
+                "is_plain_file_name has a guard clause this control cannot read:"
+                + chr(10) + "    if " + condition
+                + chr(10) + "Unrecognised part: " + repr(residue)
+                + chr(10) + "A rule it cannot read is a rule it cannot police."
+                " Teach the extraction the new shape rather than leaving it"
+                " silently unpoliced."
+            )
+    if not probes:
+        raise SystemExit("read no rules at all from is_plain_file_name")
+    return probes
+
+
 def refuses(module, value: str) -> bool:
     try:
         module.plain_file_name(value, "TEST_CONST")
     except SystemExit:
         return True
     return False
+
+
+def test_EVERY_RULE_the_rust_states_is_enforced_by_the_python(module) -> None:
+    """The finding this control was written for, and did not cover.
+
+    `MUST_REFUSE` below is a hand-written list; this reads the Rust guard's own
+    clauses and synthesises a probe per rule, so a rule added to
+    `is_plain_file_name` and not to `plain_file_name` goes red here without
+    anyone editing this file.
+    """
+    probes = rust_rule_probes()
+    assert probes, "read NO rules from the Rust guard; the extraction is blind"
+    leaked = [
+        (probe, why) for probe, why in probes if not refuses(module, probe)
+    ]
+    assert not leaked, (
+        "plain_file_name ACCEPTED inputs the Rust guard refuses:"
+        + "".join(
+            chr(10) + "  " + repr(probe) + " -- " + why
+            for probe, why in leaked[:10]
+        )
+    )
 
 
 def test_the_reserved_lists_agree(module) -> None:
@@ -140,7 +271,13 @@ def main() -> int:
         try:
             test(module)
             print("ok    " + test.__name__)
-        except Exception:  # noqa: BLE001 - a control reports everything
+        # BaseException, not Exception. PR #88 round 6, PROSE 5: SystemExit
+        # derives from BaseException, and SystemExit is exactly what
+        # plain_file_name and rust_reserved_names raise -- so the first refusal
+        # aborted the whole run with no FAIL line, no summary, and every later
+        # test unrun. CI still went red, so no false green was reachable; what
+        # was lost is the diagnostics this comment promises.
+        except BaseException:  # noqa: BLE001, B036 - a control reports everything
             failures += 1
             print("FAIL  " + test.__name__)
             traceback.print_exc()

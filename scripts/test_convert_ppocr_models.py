@@ -257,6 +257,34 @@ def test_write_notice_SAYS_SO_when_the_detector_is_not_staged(module) -> None:
         shutil.rmtree(out, ignore_errors=True)
 
 
+def test_write_notice_REFUSES_a_pin_that_is_not_a_plain_name(module) -> None:
+    """PR #88 round 6, BEHAVIOUR 1: the third execute-site, undrilled.
+
+    With a pin of "../escaped.onnx" the notice named a file that is not the
+    staged file, and the NOTE that tells an operator the staging directory is
+    incomplete was SILENCED, because the escaped path existed one directory up.
+    With "NUL" the notice named a device as a shipped file. Both are refused
+    now, and both are driven here because the two sibling scripts refuse them
+    and this one did not.
+    """
+    for bad in ("../escaped.onnx", "NUL", "det.onnx:stream", "det.onnx."):
+        out = Path(tempfile.mkdtemp(prefix="notice-guard-"))
+        try:
+            pins = {
+                "DETECTION_FILE_NAME": bad,
+                "DETECTION_SHA256": "a" * 64,
+                "DETECTION_SIZE": 9_880_512,
+            }
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    module.write_notice(out, pins, [])
+            except SystemExit:
+                continue
+            raise AssertionError(bad + " was accepted as a detector file name")
+        finally:
+            shutil.rmtree(out, ignore_errors=True)
+
+
 def main() -> int:
     module = load_module()
     tests = [value for name, value in globals().items() if name.startswith("test_")]

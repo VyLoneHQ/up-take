@@ -490,7 +490,19 @@ def write_notice(out_dir, detector_pins, produced) -> str:
     # lost in an edit, and never noticed. The reviewer read the code, found
     # nothing that could fire, and was right. Written rather than deleted,
     # because the note is worth having.
-    detector_staged = (out_dir / str(detector_pins["DETECTION_FILE_NAME"])).is_file()
+    # PR #88 round 6, BEHAVIOUR 1: the THIRD execute-site of the guarded
+    # construct, and it was unguarded while `rust_consts` was already
+    # imported in this file. Nothing is written outside `out_dir` here --
+    # the join feeds `.is_file()`, not a write -- but with a pin of
+    # "../escaped.onnx" the notice named a file that is not the staged file,
+    # and the NOTE that tells an operator the staging directory is
+    # incomplete was SILENCED by the same bad pin, because the escaped path
+    # existed. A guard covering two of three is the shape round 5 found one
+    # level up.
+    detector_name = rust_consts.plain_file_name(
+        str(detector_pins["DETECTION_FILE_NAME"]), "DETECTION_FILE_NAME"
+    )
+    detector_staged = (out_dir / detector_name).is_file()
     if not detector_staged:
         print(
             "  NOTE: " + str(detector_pins["DETECTION_FILE_NAME"]) + " is named in"
