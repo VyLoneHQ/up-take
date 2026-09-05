@@ -1,17 +1,33 @@
-//! The PP-OCRv4 manifest: what UP-TAKE must acquire before OCR can run.
+//! The OCR model manifest: what UP-TAKE must acquire before OCR can run.
 //!
-//! # These digests are OURS, and that is the whole point
+//! # TWO of these digests are ours and ONE is Baidu's, and the split is the point
 //!
-//! [`ADR-0034`] chose option A -- we convert PaddleOCR's official release to
-//! ONNX ourselves rather than take a third party's conversion -- specifically so
-//! that the SHA-256 pinned here means what [`ADR-0032`] decision 2 says a
-//! checksum means. A hash over bytes someone else produced proves only that a
-//! file arrived intact. A hash over bytes *we* produced pins our own artifact.
+//! ⚠️ **This header said "These digests are OURS" of all three until
+//! 2026-09-04.** That stopped being true when [`ADR-0036`] made the detector
+//! PaddlePaddle's own ONNX build of PP-OCRv6. Corrected here rather than left
+//! standing, because the whole value of the section is knowing *whose bytes*
+//! each hash covers.
 //!
-//! The two model digests below were produced by
-//! `scripts/convert-ppocr-models.py` on 2026-09-01, from upstream archives that
-//! script verified against their own pinned digests first. The dictionary is
-//! PaddleOCR's file copied byte for byte.
+//! [`ADR-0034`] chose to convert PaddleOCR's official release to ONNX ourselves
+//! rather than take **a third party's** conversion, specifically so that the
+//! SHA-256 pinned here means what [`ADR-0032`] decision 2 says a checksum means.
+//! A hash over bytes someone else produced proves only that a file arrived
+//! intact; a hash over bytes *we* produced pins our own artifact.
+//!
+//! | File | Whose bytes | Acquired by |
+//! | --- | --- | --- |
+//! | [`RECOGNITION_FILE_NAME`] | **ours**, converted | `convert-ppocr-models.py` |
+//! | [`DICTIONARY_FILE_NAME`] | PaddleOCR's, copied byte for byte | the same script |
+//! | [`DETECTION_FILE_NAME`] | **Baidu's**, unmodified | `acquire-ppocr-detector.py` |
+//!
+//! **`ADR-0034`'s objection was to an unaccountable converter, and it still
+//! holds.** The model's own author publishing ONNX under its own name is a
+//! different provenance class, which that record never considered -- the
+//! artifact predated it by eighty-two days. [`ADR-0036`] has the argument.
+//!
+//! The recogniser's digest was produced by `scripts/convert-ppocr-models.py` on
+//! 2026-09-01, from an upstream archive that script verified against its own
+//! pinned digest first.
 //!
 //! # Where the files are served from is NOT settled here
 //!
@@ -30,16 +46,48 @@
 //!
 //! [`ADR-0032`]: https://github.com/VyLoneHQ/up-take
 //! [`ADR-0034`]: https://github.com/VyLoneHQ/up-take
+//! [`ADR-0036`]: https://github.com/VyLoneHQ/up-take
 
 use crate::manifest::{Asset, AssetKind, AssetManifest, ManifestError, Sha256Digest};
 
-/// The detection model: PP-OCRv4's Differentiable Binarization network.
-pub const DETECTION_FILE_NAME: &str = "ch_PP-OCRv4_det.onnx";
-/// SHA-256 of [`DETECTION_FILE_NAME`] as this repository's script produces it.
+/// The detection model: **PP-OCRv6 small**'s Differentiable Binarization network.
+///
+/// # This one is NOT converted here, and that is `ADR-0036`
+///
+/// Every other pin in this file is a digest over bytes **this repository
+/// produced** with `scripts/convert-ppocr-models.py`, which is what `ADR-0034`
+/// chose and why. The detector is different: Baidu publishes PP-OCRv6 as ONNX
+/// itself, so `scripts/acquire-ppocr-detector.py` downloads and verifies it the
+/// way `acquire-onnxruntime.py` handles the runtime, and this digest pins
+/// **their** artifact.
+///
+/// `ADR-0034` rejected taking *a third party's* conversion, on the ground that
+/// such a checksum "proves nothing about provenance". **That objection stands.**
+/// The model's own author publishing under its own name is a different thing,
+/// and `ADR-0034` never considered it -- the artifact predated that record by
+/// eighty-two days.
+///
+/// ⚠️ **A republish upstream reads as CORRUPT, not as UPDATED.** The digest
+/// cannot tell "Baidu changed the file" from "somebody substituted it", and it
+/// must not: that is the whole point of pinning. If verification starts failing
+/// on a clean download, read `ADR-0036` before touching this constant.
+pub const DETECTION_FILE_NAME: &str = "PP-OCRv6_small_det.onnx";
+/// SHA-256 of [`DETECTION_FILE_NAME`] as **Baidu publishes it**.
+///
+/// Observed identical on two independent downloads, 2026-09-04.
 pub const DETECTION_SHA256: &str =
-    "69ce850fec741a2a4568c7c924bb025c9d4f1129e5f96ab428c799ccc5ef2275";
+    "d73e0058b7a8086bbd57f3d10b8bcd4ff95363f67e06e2762b5e814fe9c9410e";
 /// Size of [`DETECTION_FILE_NAME`] in bytes.
-pub const DETECTION_SIZE: u64 = 4_729_474;
+pub const DETECTION_SIZE: u64 = 9_880_512;
+
+/// Where [`DETECTION_FILE_NAME`] is fetched from.
+///
+/// PaddlePaddle's own HuggingFace organisation. Named here rather than in the
+/// script for the reason every other pin is: the acquisition step reads it out
+/// of this source, so there is exactly one statement of where the bytes come
+/// from and a change to it cannot be made in only one place.
+pub const DETECTION_URL: &str =
+    "https://huggingface.co/PaddlePaddle/PP-OCRv6_small_det_onnx/resolve/main/inference.onnx";
 
 /// The recognition model: PP-OCRv4's CRNN, 6625 output classes.
 pub const RECOGNITION_FILE_NAME: &str = "ch_PP-OCRv4_rec.onnx";
@@ -63,8 +111,13 @@ pub const DICTIONARY_SIZE: u64 = 26_249;
 /// the model to the dictionary: 6623 lines in [`DICTIONARY_FILE_NAME`], plus the
 /// space PaddleOCR appends, plus the CTC blank. Reading the dictionary literally
 /// gives 6624 and the engine refuses the pair -- UP-TAKE `I-333`. If a future
-/// conversion changes this number, the two files below stop being a matching set
-/// and both digests move together.
+/// conversion changes this number, the RECOGNISER and the DICTIONARY stop being
+/// a matching set and those two digests move together.
+///
+/// ⚠️ **The detector is not in that pair, and this said "the two files below"
+/// when it was.** Detection is language- and dictionary-independent across
+/// PP-OCRv4, v5 and v6 -- there is no `en_` detector in any of them -- which is
+/// exactly why `ADR-0036` could swap it alone without touching this number.
 pub const RECOGNITION_CLASS_COUNT: usize = 6625;
 
 /// The manifest for PP-OCRv4, served from `base_url`.

@@ -80,10 +80,48 @@ pub const RUNTIME_SHA256: &str = "69d8e6d3879a3b4001cdc74c8ed9ccc7e7f799a5b84705
 ///
 /// **16.1 MB, and that number has a consequence.** `ADR-0035` set the installer
 /// target at `< 35 MB` with a 40 MB hard fail, against a measured 29.2 MB that
-/// predates this pin. The runtime and the models together are ~31.7 MB before
-/// compression and before the application itself, so this figure is the one to
-/// read when the installer bar is next measured.
+/// predates this pin.
+///
+/// **Do not read a total out of this comment.** It said "~31.7 MB" and
+/// designated itself "the figure to read when the installer bar is next
+/// measured", which was exact at `3e58ad3` and went 5.15 MB stale the moment
+/// `ADR-0036` swapped in a larger detector -- landing on the wrong side of the
+/// 35 MB target with nothing announcing it. Found by round 3 of `PR #88`'s
+/// independent review.
+///
+/// **Do not read a formula out of this comment either.** This said the total
+/// was `RUNTIME_SIZE + DETECTION_SIZE + RECOGNITION_SIZE + DICTIONARY_SIZE`,
+/// which went wrong by 344,343 bytes the moment the two notice files were added
+/// to the sum, in the same round that added them -- a stale total inside the
+/// paragraph about stale totals. `PR #88` round 6, PROSE 3, and the third time
+/// this file family has had a fact corrected in one place and left standing
+/// nine lines away (`manifest.rs:182` records the first, UP-TAKE `I-334`).
+///
+/// [`installer_payload_bytes`] is the answer. It sums the pins, a unit test
+/// asserts it equals them, and no prose here restates which ones.
 pub const RUNTIME_SIZE: u64 = 16_149_344;
+
+/// The bytes this crate's pins put in the installer, before compression.
+///
+/// Exists because a hand-written total in a doc comment drifted (see
+/// [`RUNTIME_SIZE`]). Derived, so it moves when a pin moves.
+///
+/// **Every pinned file the release config bundles is counted, notices
+/// included.** An earlier version summed only the runtime and the three model
+/// files and so under-reported by 344,343 bytes -- `PR #88` round 4, F6. The
+/// two notice files are not incidental: they are the MIT and Apache-2.0
+/// obligations `ADR-0032` and `ADR-0034` put in the installer, `cargo deny`
+/// cannot see them because it walks the crate graph, and a budget that ignores
+/// them is a budget that would let them be dropped to save space.
+#[must_use]
+pub const fn installer_payload_bytes() -> u64 {
+    RUNTIME_SIZE
+        + LICENCE_SIZE
+        + NOTICES_SIZE
+        + crate::ppocr::DETECTION_SIZE
+        + crate::ppocr::RECOGNITION_SIZE
+        + crate::ppocr::DICTIONARY_SIZE
+}
 
 /// ONNX Runtime's MIT licence text, as it travels in the installer.
 pub const LICENCE_FILE_NAME: &str = "LICENSE-onnxruntime.txt";
@@ -236,6 +274,60 @@ mod tests {
         assert!(
             ARCHIVE_URL.contains(VERSION),
             "the archive URL must name the version this file pins"
+        );
+    }
+
+    #[test]
+    fn the_installer_payload_is_derived_and_not_hand_written() {
+        // The whole point of the function: it cannot disagree with the pins.
+        assert_eq!(
+            installer_payload_bytes(),
+            RUNTIME_SIZE
+                + LICENCE_SIZE
+                + NOTICES_SIZE
+                + crate::ppocr::DETECTION_SIZE
+                + crate::ppocr::RECOGNITION_SIZE
+                + crate::ppocr::DICTIONARY_SIZE
+        );
+    }
+
+    #[test]
+    fn the_installer_payload_stays_inside_adr_0035s_hard_fail() {
+        // ADR-0035 set a < 35 MB target and a 40 MB HARD FAIL, and until this
+        // function existed both were sentences in a decision record.
+        //
+        // ⚠️ THIS CHECK WOULD NOT HAVE CAUGHT THE INCIDENT IT NAMES, and the
+        // comment used to claim it would. Round 3's F2 was a hand-copied total
+        // going stale and "landing past the TARGET with nothing going red";
+        // this asserts the HARD FAIL. PR #88 round 10, FINDING 3 -- a check
+        // described by the failure it does not detect.
+        //
+        // The target is still not asserted, and that is deliberate: a payload
+        // past it is a decision, not a defect. What was missing is the payload
+        // being past it RIGHT NOW with nothing saying so. It is said here:
+        //
+        //   payload at this head   37,212,782 B = 37.21 MB
+        //   ADR-0035 target        < 35 MB      EXCEEDED by 2.21 MB
+        //   ADR-0035 hard fail     40 MB        2.79 MB of headroom left
+        //
+        // ADR-0036's own consequences estimate "roughly 34.4 MB". The derived
+        // figure is 37.21 MB, so that estimate is 2.8 MB light and this
+        // function is the authoritative number.
+        //
+        // ⚠️ UNIT MISMATCH, stated rather than papered over: this sums
+        // UNCOMPRESSED asset bytes and excludes the application binary, while
+        // ADR-0035's 40 MB is an INSTALLER size and its 29.2 MB figure included
+        // the app. The two are not the same quantity. Comparing them is
+        // conservative -- the installer compresses to less than its payload --
+        // but it is not like for like, and a future round should either measure
+        // the artifact or restate the bar in payload terms.
+        const HARD_FAIL: u64 = 40_000_000;
+        assert!(
+            installer_payload_bytes() < HARD_FAIL,
+            "installer payload is {} bytes, past ADR-0035's {} byte hard fail; \
+             moving this line needs a decision record, not a bigger constant",
+            installer_payload_bytes(),
+            HARD_FAIL
         );
     }
 }

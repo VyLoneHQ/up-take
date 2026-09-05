@@ -31,6 +31,13 @@ uptake-core = { workspace = true }
 thiserror = { workspace = true }
 ort = { workspace = true }
 
+# Examples only, never shipped. The two examples build a `PaddleConfig` and used
+# to hardcode the model file names, which made them a second copy of a pinned
+# fact -- and ADR-0036 renamed the detector, which is exactly the change that
+# finds such a copy. They read `uptake_assets::ppocr`'s constants now.
+[dev-dependencies]
+uptake-assets = { workspace = true }
+
 [lints]
 workspace = true
 

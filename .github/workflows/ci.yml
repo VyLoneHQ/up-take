@@ -105,6 +105,49 @@ jobs:
       - name: Test the bundle checker
         run: python3 scripts/test_verify_bundle.py
 
+      # The DETECTOR acquisition step's own tests (ADR-0036). Its sibling
+      # `acquire-onnxruntime.py` has had tests since I-337's review found its
+      # central invariant broken; this script shipped without any, and round 1
+      # of PR #88's review classified that as BEHAVIOUR rather than an omission
+      # -- correctly, because the property the whole provenance story rests on
+      # ("nothing that fails a check reaches the staging directory") was true
+      # when drilled by hand and protected by nothing afterwards.
+      #
+      # Synthetic payloads and a synthetic pins file, so they need none of the
+      # 9.8 MB this job does not have.
+      - name: Test the PP-OCRv6 detector acquisition step
+        run: python3 scripts/test_acquire_ppocr_detector.py
+
+      # Holds the Python name guard to the Rust one it duplicates. There are two
+      # implementations of one rule because the Rust guards what the PRODUCT
+      # installs and the Python guards what the BUILD stages, in different
+      # languages and different processes, and neither can import the other.
+      # Round 5 of PR #88 found the Python was the strictly weaker of the two
+      # and was the one guarding a write. Round 6 found this control read only
+      # the device LIST, and round 7 found its first rule-reader saw only
+      # single-line top-level `if` clauses -- so a rule in the trailing
+      # expression, behind an `else if`, or wrapped by rustfmt slipped past.
+      # Round 8 replaced the parsing entirely: the Rust guard's own test writes
+      # its verdicts over a systematic corpus to name-guard-cases.tsv, and this
+      # control asserts the Python guard agrees name for name. A rule's SHAPE is
+      # irrelevant -- else-if, wrapping, a trailing expression and a negation all
+      # move a verdict, and a moved verdict is what gets compared.
+      - name: Rust and Python name guards agree
+        run: python3 scripts/control-rust-consts.py
+
+      # The conversion script's pin reading and licence-notice construction.
+      # Round 2 of PR #88's review found ADR-0036 had added real logic there
+      # with no test file for that script having EVER existed -- the same
+      # finding round 1 made about its sibling, landing in the commit meant to
+      # close it. The property under guard has no other check anywhere: the
+      # notice must name all three shipped files including the one this script
+      # no longer acquires, and `cargo deny` sees no .onnx at all.
+      #
+      # No paddle2onnx and no download: it tests the pin reading and the
+      # listing, not the conversion, which the bundle job exercises for real.
+      - name: Test the model conversion step's notice and pins
+        run: python3 scripts/test_convert_ppocr_models.py
+
       - name: Em-dash ratchet
         run: python3 scripts/dash-ratchet.py --against origin/main
 
@@ -251,8 +294,33 @@ jobs:
       - name: Install the model conversion toolchain
         run: python -m pip install paddle2onnx==1.3.1 onnxruntime
 
-      - name: Convert PP-OCRv4 to ONNX (pinned, checksummed)
+      - name: Convert the PP-OCRv4 recogniser to ONNX (pinned, checksummed)
         run: python scripts/convert-ppocr-models.py --out src-tauri/assets/models
+
+      # The DETECTOR is downloaded rather than converted (ADR-0036): Baidu
+      # publishes PP-OCRv6 as ONNX itself. Separate step because it is a
+      # separate provenance story -- this digest pins THEIR artifact, the step
+      # above pins one this repository produced -- and because the step above
+      # needs a Python toolchain this one does not.
+      #
+      # Order does NOT matter for correctness, and the comment here used to
+      # claim it did. `convert-ppocr-models.py` writes the licence notice
+      # covering all three files including this one, and it builds that listing
+      # from the PINS rather than from the directory, so it is correct whichever
+      # step runs first.
+      #
+      # Running the acquisition second means the conversion step prints a NOTE
+      # saying the detector is not staged yet. That note is informational, not a
+      # check, and reversing these two steps silences it and costs nothing.
+      #
+      # ⚠️ **This comment previously said the conversion step "will say so if
+      # this file is not staged yet" and called reversing the order a lost
+      # check.** No such code existed -- it had been written, lost in an edit,
+      # and never noticed, and round 1 of PR #88's review read the script and
+      # found nothing that could fire. The note exists now; the claim that the
+      # ordering is load-bearing does not.
+      - name: Acquire the PP-OCRv6 detector (pinned, checksummed)
+        run: python scripts/acquire-ppocr-detector.py --out src-tauri/assets/models
 
       # `--config` MERGES the release-only bundle resources into the base
       # config. They are deliberately not in `tauri.conf.json`: `tauri-build`
