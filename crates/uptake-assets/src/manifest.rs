@@ -211,13 +211,27 @@ impl Asset {
     }
 }
 
-/// Windows device names that are not file names, whatever the extension.
+/// Windows device stems, refused with or without an extension.
 ///
-/// Opening `CON`, `NUL` or `COM1` on Windows reaches a **device**, not a file in
-/// the directory, and the rule applies whatever the extension -- so `NUL.onnx`
-/// is the null device too. An asset written to one is silently discarded, and
-/// then re-downloaded on every launch, because reading it back never matches
-/// the digest.
+/// Opening `NUL` reaches a **device**, not a file in the directory: the write
+/// succeeds, `is_file()` is false, reading back gives nothing, and the name is
+/// absent from the listing. An asset written there is silently discarded and
+/// re-fetched on every launch, because reading it back never matches the digest.
+///
+/// ⚠️ **THE "WHATEVER THE EXTENSION" HALF WAS FALSE AND IS CORRECTED.** This
+/// said `NUL.onnx` "is the null device too". It is not. Measured on Windows 11
+/// Pro 26200 (`PR #88` round 8, confirmed by a second probe): `NUL.onnx`,
+/// `nul.onnx`, `CON.txt`, `COM1.txt`, `LPT9.onnx` and `NUL.tar.gz` each take 35
+/// bytes, read 35 back, and appear in the directory listing. Only the BARE stem
+/// reaches a device, and even that is path-form dependent -- `CON` hits the
+/// device through a relative path and behaves as a file through an absolute
+/// one, while `NUL` hits it either way.
+///
+/// **The extension forms are still refused, on the honest reason rather than
+/// the false one.** The behaviour varies by path form, by API and by Windows
+/// version; a flat rule costs nothing and does not turn on which runtime opened
+/// the file. `scripts/rust_consts.py` states the same corrected version, and
+/// `name-guard-cases.tsv` is what holds the two to it.
 const RESERVED_DEVICE_NAMES: [&str; 22] = [
     "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
     "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",

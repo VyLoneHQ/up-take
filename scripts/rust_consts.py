@@ -48,15 +48,20 @@ def u64_const(source: str, name: str) -> int | None:
     return None if match is None else int(match.group(1).replace("_", ""))
 
 
-#: Windows device names that are not file names, whatever the extension.
+#: Windows device stems, refused with or without an extension.
+#:
+#: ⚠️ This said "whatever the extension", which was FALSE -- `NUL.onnx` is an
+#: ordinary file. See `plain_file_name` below for the measurement and for why
+#: the extension forms are still refused. Corrected here as well as there
+#: because the two sat nine lines apart and only one was fixed first.
 #:
 #: **Mirrored from `crates/uptake-assets/src/manifest.rs`'s
 #: `RESERVED_DEVICE_NAMES`.** That duplication is a cost and is taken
 #: deliberately: the Rust list guards what the PRODUCT installs and this one
 #: guards what the BUILD stages, and neither can import the other. What makes it
-#: safe is `control-rust-consts.py`, which reads both and fails if they diverge
-#: -- so a rule added to one and not the other is a red control rather than the
-#: `F-22` / `F-37` silence.
+#: safe is `control-rust-consts.py`, which compares the two guards' VERDICTS on
+#: a shared corpus -- so a rule added to one and not the other is a red control
+#: rather than the `F-22` / `F-37` silence, whatever shape it is written in.
 RESERVED_DEVICE_NAMES = (
     "CON", "PRN", "AUX", "NUL",
     "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
@@ -85,14 +90,30 @@ def plain_file_name(value: str, const_name: str) -> str:
 
     Each accepted class was drilled on Windows and each is worse than it looks:
 
-    * `NUL`, `CON`, `LPT9.onnx` reach a **device**, not a file. `write_bytes`
-      succeeds, `exists()` is True, reading back gives an empty string, and the
-      name is absent from the directory listing. The run printed *wrote 35
-      bytes* and *verified*, and left the staging directory **empty**.
+    * `NUL`, and `CON` when the path is relative, reach a **device** rather than
+      a file. `write_bytes` succeeds, `exists()` is True, `is_file()` is False,
+      reading back gives nothing, and the name is absent from the directory
+      listing. The run printed *wrote 35 bytes* and *verified* and left the
+      staging directory **empty**.
     * `model.onnx:stream` writes into an alternate data stream, leaving a
       **zero-byte** `model.onnx` for anything that later hashes the staged file.
     * `model.onnx.` and `model.onnx ` are stripped by the Win32 path parser, so
       the name printed is not the name on disk.
+
+    ⚠️ **`NUL.onnx` IS AN ORDINARY FILE, and this docstring said otherwise.**
+    `PR #88` round 8 caught the claim and a probe on Windows 11 Pro 26200
+    confirmed it: `NUL.onnx`, `nul.onnx`, `CON.txt`, `COM1.txt`, `LPT9.onnx` and
+    `NUL.tar.gz` all take 35 bytes, read 35 back and appear in the listing. The
+    device is reached only by the BARE stem, and even that depends on how the
+    path is formed -- with a relative name `CON` hits the device, and through
+    Python's absolute-path handling it does not, while `NUL` does both ways.
+
+    **The extension names are still refused, and the reason is now the honest
+    one.** Not "they reach a device" -- they do not. The rule is a flat one
+    because the behaviour is path-form dependent and platform dependent, a flat
+    rule costs nothing, and the alternative is a guard whose correctness turns
+    on which runtime opened the file. `manifest.rs` states the same corrected
+    version; the two must agree, and `name-guard-cases.tsv` is what makes them.
 
     This now mirrors `is_plain_file_name` rule for rule, including rejecting
     both separators on every platform: a pin written on Windows must not become
