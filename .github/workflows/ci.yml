@@ -136,8 +136,13 @@ jobs:
       # installs and the Python guards what the BUILD stages, in different
       # languages and different processes, and neither can import the other.
       # Round 5 of PR #88 found the Python was the strictly weaker of the two
-      # and was the one guarding a write. This control reads the reserved-name
-      # list out of manifest.rs and fails if they diverge.
+      # and was the one guarding a write. Round 6 found this control read only
+      # the device LIST, and round 7 found its first rule-reader saw only
+      # single-line top-level `if` clauses -- so a rule in the trailing
+      # expression, behind an `else if`, or wrapped by rustfmt slipped past.
+      # It now collects every recognised predicate from the whole body and
+      # REFUSES on anything left over, so an unreadable rule is a red control
+      # rather than a silent pass.
       - name: Rust and Python name guards agree
         run: python3 scripts/control-rust-consts.py
 
