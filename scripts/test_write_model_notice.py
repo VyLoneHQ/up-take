@@ -134,6 +134,41 @@ def test_a_missing_pin_REFUSES_rather_than_writing_a_short_notice(module) -> Non
         shutil.rmtree(scratch, ignore_errors=True)
 
 
+def test_a_pin_that_is_not_a_plain_name_is_REFUSED(module) -> None:
+    """PR #88 round 6, BEHAVIOUR 1, carried across the rewrite.
+
+    That finding was in the script this one replaces. Deleting that script would
+    have removed the instance and left the class open here: nothing is joined to
+    a path in this file, but the notice NAMES these files as distributed, so a
+    pin of "../escaped.onnx" or "NUL" would put that in an Apache-2.0 section 4
+    notice as a shipped artifact.
+    """
+    import re as _re
+
+    saved = module.PINS_SOURCE
+    scratch = Path(tempfile.mkdtemp(prefix="notice-badpin-"))
+    try:
+        real = saved.read_text(encoding="utf-8")
+        for bad in ("../escaped.onnx", "NUL", "det.onnx:stream", "det.onnx."):
+            spoofed = _re.sub(
+                r'pub const DETECTION_FILE_NAME: &str = "[^"]*";',
+                'pub const DETECTION_FILE_NAME: &str = "' + bad + '";',
+                real,
+                count=1,
+            )
+            target = scratch / "ppocr.rs"
+            target.write_text(spoofed, encoding="utf-8")
+            module.PINS_SOURCE = target
+            try:
+                module.read_pins()
+            except SystemExit:
+                continue
+            raise AssertionError(bad + " was accepted as a pinned file name")
+    finally:
+        module.PINS_SOURCE = saved
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
 def main() -> int:
     module = load_module()
     tests = [value for name, value in globals().items() if name.startswith("test_")]

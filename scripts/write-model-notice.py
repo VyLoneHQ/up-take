@@ -121,6 +121,16 @@ def read_pins() -> dict[str, object]:
         for suffix in ("FILE_NAME", "SHA256"):
             name = prefix + "_" + suffix
             value = rust_consts.string_const(source, name)
+            if suffix == "FILE_NAME" and value is not None:
+                # PR #88 round 6, BEHAVIOUR 1, carried across the rewrite.
+                # That finding was a pinned name joined onto a directory in the
+                # script this one REPLACES, and deleting that script would have
+                # taken the class member with it while leaving the class open
+                # here. Nothing is joined to a path in this file, but the notice
+                # NAMES these files as the ones distributed: a pin of
+                # "../escaped.onnx" or "NUL" would put that in an Apache-2.0
+                # section 4 notice as a shipped artifact.
+                value = rust_consts.plain_file_name(value, name)
             if value is None:
                 raise SystemExit(
                     "could not find `pub const " + name + ": &str` in "
