@@ -125,29 +125,62 @@ def run_with(module, fixture: Fixture, payload_path: Path) -> int:
         sys.argv = saved_argv
 
 
+def _shape_ok(path, **_):
+    """A loader-free stand-in for a detector whose shapes are right."""
+    return None
+
+
 def test_a_matching_file_is_staged(module) -> None:
     """The positive control: a file that matches its pin is written.
 
-    ⚠️ The synthetic payload is not valid ONNX, so the shape check refuses it
-    AFTER the write. That is the correct behaviour and this test asserts both
-    halves: the bytes reach the staging directory, and the shape guard still
-    speaks up. **The refusal is a SystemExit rather than a traceback only
-    because this test found it was a traceback** -- `check_shape` did not handle
-    a failed load until `PR #88` round 1 asked for these tests.
+    ⚠️ **It has to get PAST the shape check now.** `PR #88` round 10 FINDING 4
+    found that `main()` wrote the file and THEN checked its shape, so a refused
+    detector was left in the staging directory while three separate places
+    claimed "nothing that fails a check reaches the staging directory". The
+    ordering is fixed, so a synthetic payload -- which is not loadable ONNX --
+    now stages nothing at all. This test used to swallow that refusal and assert
+    the file was there anyway, which was only true while the guard ran last.
     """
     fixture = Fixture(module, build_pins(FAKE))
+    real = module.check_shape
+    module.check_shape = _shape_ok
     try:
-        try:
-            run_with(module, fixture, fixture.write_payload(FAKE))
-        except SystemExit as error:
-            assert "not loadable as ONNX" in str(error), (
-                "a synthetic payload must be refused CLEANLY by the shape check,"
-                " not crash it: " + str(error)
-            )
+        code = run_with(module, fixture, fixture.write_payload(FAKE))
+        assert code == 0, "the happy path did not return 0"
         staged = fixture.out / FAKE_NAME
         assert staged.is_file(), "the verified file must be written"
         assert staged.read_bytes() == FAKE, "the staged bytes must be the verified ones"
     finally:
+        module.check_shape = real
+        fixture.close()
+
+
+def test_a_FAILED_shape_check_stages_NOTHING(module) -> None:
+    """`PR #88` round 10, FINDING 4, driven end to end.
+
+    The claim in this file's docstring, in `ci.yml` and in the script itself was
+    true of the size and digest checks and false of the shape check. The
+    reviewer drilled it: the refused detector sat in the staging directory
+    afterwards. This is that drill, kept.
+    """
+
+    def refuse(path, **_):
+        raise SystemExit("DRILL: detector emits 3 channels, expected 1")
+
+    fixture = Fixture(module, build_pins(FAKE))
+    real = module.check_shape
+    module.check_shape = refuse
+    try:
+        try:
+            run_with(module, fixture, fixture.write_payload(FAKE))
+        except SystemExit as error:
+            assert "DRILL" in str(error)
+            staged = sorted(p.name for p in fixture.out.iterdir()) if fixture.out.is_dir() else []
+            assert staged == [], "the shape check refused and staged " + str(staged)
+            return
+        raise AssertionError("a refused shape was accepted")
+    finally:
+        module.check_shape = real
         fixture.close()
 
 

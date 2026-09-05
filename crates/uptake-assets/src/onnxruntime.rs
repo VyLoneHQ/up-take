@@ -293,20 +293,39 @@ mod tests {
 
     #[test]
     fn the_installer_payload_stays_inside_adr_0035s_hard_fail() {
-        // ADR-0035 set a < 35 MB target and a 40 MB HARD FAIL. Until now both
-        // were sentences in a decision record, and a doc comment carrying a
-        // hand-copied total went 5.15 MB stale across ADR-0036's detector swap
-        // -- landing past the target with nothing going red (PR #88 round 3,
-        // F2). This is the check that would have caught it.
+        // ADR-0035 set a < 35 MB target and a 40 MB HARD FAIL, and until this
+        // function existed both were sentences in a decision record.
         //
-        // The TARGET is deliberately not asserted here: a payload past the
-        // target is a decision, and the hard fail is the line that must not
-        // move without one.
+        // ⚠️ THIS CHECK WOULD NOT HAVE CAUGHT THE INCIDENT IT NAMES, and the
+        // comment used to claim it would. Round 3's F2 was a hand-copied total
+        // going stale and "landing past the TARGET with nothing going red";
+        // this asserts the HARD FAIL. PR #88 round 10, FINDING 3 -- a check
+        // described by the failure it does not detect.
         //
+        // The target is still not asserted, and that is deliberate: a payload
+        // past it is a decision, not a defect. What was missing is the payload
+        // being past it RIGHT NOW with nothing saying so. It is said here:
+        //
+        //   payload at this head   37,212,782 B = 37.21 MB
+        //   ADR-0035 target        < 35 MB      EXCEEDED by 2.21 MB
+        //   ADR-0035 hard fail     40 MB        2.79 MB of headroom left
+        //
+        // ADR-0036's own consequences estimate "roughly 34.4 MB". The derived
+        // figure is 37.21 MB, so that estimate is 2.8 MB light and this
+        // function is the authoritative number.
+        //
+        // ⚠️ UNIT MISMATCH, stated rather than papered over: this sums
+        // UNCOMPRESSED asset bytes and excludes the application binary, while
+        // ADR-0035's 40 MB is an INSTALLER size and its 29.2 MB figure included
+        // the app. The two are not the same quantity. Comparing them is
+        // conservative -- the installer compresses to less than its payload --
+        // but it is not like for like, and a future round should either measure
+        // the artifact or restate the bar in payload terms.
         const HARD_FAIL: u64 = 40_000_000;
         assert!(
             installer_payload_bytes() < HARD_FAIL,
-            "installer payload is {} bytes, past ADR-0035's {} byte hard fail;              moving this line needs a decision record, not a bigger constant",
+            "installer payload is {} bytes, past ADR-0035's {} byte hard fail; \
+             moving this line needs a decision record, not a bigger constant",
             installer_payload_bytes(),
             HARD_FAIL
         );

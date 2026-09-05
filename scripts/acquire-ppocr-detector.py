@@ -46,7 +46,9 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import shutil
 import sys
+import tempfile
 import urllib.request
 from pathlib import Path
 
@@ -293,14 +295,35 @@ def main() -> int:
     # it. Nothing that fails a check reaches the staging directory.
     check(data, str(pins["DETECTION_SHA256"]), int(pins["DETECTION_SIZE"]))
 
-    arguments.out.mkdir(parents=True, exist_ok=True)
-    target = arguments.out / file_name
-    target.write_bytes(data)
-    print("  wrote " + str(target) + "  (" + str(len(data)) + " bytes)")
-    # After the write, because onnxruntime loads from a path rather than from
-    # bytes. The digest already passed, so what is on disk is the pinned file;
-    # this is asserting what that file IS, not whether it arrived intact.
-    check_shape(target)
+    # ...and that sentence is TRUE OF THE SHAPE CHECK TOO now, which it was not.
+    #
+    # `PR #88` round 10, FINDING 4: this wrote the file and then called
+    # `check_shape`, so a wrong-shaped detector was left in the staging
+    # directory after the refusal. The claim above, and the same words in
+    # `ci.yml` and in this file's own test docstring, were false for exactly the
+    # check this pull request adds. The ordering was explained honestly in a
+    # comment -- onnxruntime loads from a path, not from bytes -- but an honest
+    # explanation of a gap is not the same as not having one.
+    #
+    # So the model is written to a scratch directory, checked there, and moved
+    # into `--out` only once it has passed. `acquire-ppocr-recogniser.py` does
+    # the same for the same reason.
+    scratch = Path(tempfile.mkdtemp(prefix="acquire-det-"))
+    try:
+        probe = scratch / file_name
+        probe.write_bytes(data)
+        # `--require-onnxruntime` is PR #89's, not this branch's; the skip
+        # arm here is still a skip. Kept out deliberately rather than
+        # imported, so this pull request carries only its own change.
+        check_shape(probe)
+
+        arguments.out.mkdir(parents=True, exist_ok=True)
+        target = arguments.out / file_name
+        target.write_bytes(data)
+        print("  wrote " + str(target) + "  (" + str(len(data)) + " bytes)")
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
     print("")
     print(
         "Verified against the pin in crates/uptake-assets/src/ppocr.rs."

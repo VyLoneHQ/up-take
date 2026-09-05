@@ -4,8 +4,10 @@
 //!
 //! Two decisions land on one piece of work. [`ADR-0032`] chose to load ONNX
 //! Runtime at run time from a path UP-TAKE places, rather than let a build fetch
-//! one from a CDN. [`ADR-0034`] chose to convert PaddleOCR's official PP-OCRv4
-//! release to ONNX ourselves, rather than take a third party's conversion. Both
+//! one from a CDN. [`ADR-0034`] chose to convert PaddleOCR's official release to
+//! ONNX ourselves, rather than take a third party's conversion -- **for the
+//! RECOGNISER; [`ADR-0036`] superseded it for the detector, which is Baidu's own
+//! ONNX, downloaded and verified rather than converted.** Both
 //! records require the identical discipline, in the same words -- *"a documented,
 //! checksummed step: pinned SHA-256, verified before load, HTTPS only"* -- and
 //! both deferred the same question to roadmap `1.12`: whether these files ship
@@ -24,7 +26,7 @@
 //! `Engine` before the ONNX question was settled.
 //!
 //! The practical consequence is that every rule in this crate is tested with no
-//! network, no TLS, and none of the ~31 MB of assets it exists to install:
+//! network, no TLS, and none of the ~37 MB of assets it exists to install:
 //!
 //! | Concern | Module | Needs the network? |
 //! | --- | --- | --- |

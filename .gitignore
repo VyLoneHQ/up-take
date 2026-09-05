@@ -25,17 +25,24 @@ __pycache__/
 # a reader the wrong provenance for one of the three.
 #
 # NEVER committed. ADR-0034 decided we convert the official release ourselves,
-# and ADR-0004 keeps this repository public and GPL-3.0: ~15 MB of third-party
+# and ADR-0004 keeps this repository public and GPL-3.0: ~21 MB of third-party
 # model weights do not belong in its history, where they would be permanent.
 # The manifest in crates/uptake-assets/src/ppocr.rs carries their digests, which
 # is the part that IS ours to version.
 /dist
 
 # The staging directory the installer packages: the ONNX Runtime DLL, its two
-# notice files, and the converted PP-OCRv4 models. ~31 MB of binaries that are
-# ACQUIRED rather than committed -- `scripts/acquire-onnxruntime.py` and
-# `scripts/convert-ppocr-models.py` each verify every byte against a pinned
-# SHA-256 before writing here, which is ADR-0032 decision 2. Committing them
+# notice files, and the OCR models. ~37 MB of binaries that are ACQUIRED rather
+# than committed -- `scripts/acquire-onnxruntime.py`,
+# `scripts/acquire-ppocr-detector.py` and `scripts/convert-ppocr-models.py`
+# each verify every byte against a pinned SHA-256 before writing here, which is
+# ADR-0032 decision 2.
+#
+# ⚠️ This block said "the converted PP-OCRv4 models", named TWO scripts, and
+# said ~31 MB. All three were stale, and it sits eleven lines below the block
+# this pull request edited specifically to correct the same provenance claim --
+# PR #88 round 10, FINDING 2. The detector is Baidu's own ONNX and is not
+# converted here (ADR-0036). Committing them
 # would put unreviewable binaries in a public repository and make the pin a
 # description rather than a check.
 /src-tauri/assets

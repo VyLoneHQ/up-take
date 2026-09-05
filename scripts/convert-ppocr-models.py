@@ -404,7 +404,10 @@ def read_detector_pins() -> dict[str, object]:
         raise SystemExit("cannot find the detector's pins at " + str(source))
     text = source.read_text(encoding="utf-8")
     pins: dict[str, object] = {}
-    for name in ("DETECTION_FILE_NAME", "DETECTION_SHA256"):
+    # DETECTION_URL joined the set for PR #88 round 10 FINDING 7: the notice
+    # must say where the detector came from, and the only honest source for
+    # that is the pin.
+    for name in ("DETECTION_FILE_NAME", "DETECTION_SHA256", "DETECTION_URL"):
         value = rust_consts.string_const(text, name)
         if value is None:
             raise SystemExit("could not read `" + name + "` from " + str(source))
@@ -432,7 +435,8 @@ PaddleOCR, by PaddlePaddle Authors, licensed under the Apache License 2.0.
 
     https://github.com/PaddlePaddle/PaddleOCR
     Dictionary taken at tag {tag}
-    Model archives from {upstream}
+    Recogniser archive from {upstream}
+    Detector from {detector_url}
 
 What was done to them
 ---------------------
@@ -519,6 +523,13 @@ def write_notice(out_dir, detector_pins, produced) -> str:
         NOTICE_TEMPLATE.format(
             tag=PADDLEOCR_TAG,
             upstream=UPSTREAM,
+            # PR #88 round 10, FINDING 7: the notice named the detector in its
+            # file list and pointed every artifact at bcebos.com, which is where
+            # the detector is NOT from. It is Baidu's own ONNX on HuggingFace
+            # (ADR-0036), and an Apache-2.0 section 4 notice that misstates the
+            # source of a redistributed file is the kind of wrong worth fixing.
+            # Read from the pin rather than restated.
+            detector_url=str(detector_pins["DETECTION_URL"]),
             converter=EXPECTED_P2O_VERSION,
             opset=OPSET_VERSION,
             files=listing,

@@ -99,6 +99,7 @@ def test_the_detector_is_named_even_though_this_script_never_writes_it(module) -
         {
             "DETECTION_FILE_NAME": FAKE_DETECTOR,
             "DETECTION_SIZE": 9_880_512,
+                "DETECTION_URL": "https://example.invalid/det.onnx",
             "DETECTION_SHA256": FAKE_DIGEST,
         },
         [("ch_PP-OCRv4_rec.onnx", 10_812_334, "a" * 64)],
@@ -212,6 +213,7 @@ def test_write_notice_NAMES_EVERY_FILE_including_the_detector(module) -> None:
             "DETECTION_FILE_NAME": "PP-OCRv6_small_det.onnx",
             "DETECTION_SHA256": "a" * 64,
             "DETECTION_SIZE": 9_880_512,
+                "DETECTION_URL": "https://example.invalid/det.onnx",
         }
         produced = [("ch_PP-OCRv4_rec.onnx", 10_812_334, "b" * 64),
                     ("ppocr_keys_v1.txt", 26_249, "c" * 64)]
@@ -236,6 +238,7 @@ def test_write_notice_SAYS_SO_when_the_detector_is_not_staged(module) -> None:
             "DETECTION_FILE_NAME": "PP-OCRv6_small_det.onnx",
             "DETECTION_SHA256": "a" * 64,
             "DETECTION_SIZE": 9_880_512,
+                "DETECTION_URL": "https://example.invalid/det.onnx",
         }
         printed = io.StringIO()
         with contextlib.redirect_stdout(printed):
@@ -274,6 +277,7 @@ def test_write_notice_REFUSES_a_pin_that_is_not_a_plain_name(module) -> None:
                 "DETECTION_FILE_NAME": bad,
                 "DETECTION_SHA256": "a" * 64,
                 "DETECTION_SIZE": 9_880_512,
+                "DETECTION_URL": "https://example.invalid/det.onnx",
             }
             try:
                 with contextlib.redirect_stdout(io.StringIO()):
