@@ -239,7 +239,12 @@ def main() -> int:
 
     with zipfile.ZipFile(_io.BytesIO(archive_bytes)) as archive:
         for key, member in MEMBERS.items():
-            name = str(pins[key + "_FILE_NAME"])
+            # Same guard as acquire-ppocr-detector.py: the pinned name is
+            # joined onto `out` below, and PR #88 round 4 F3 named this file
+            # as carrying the identical unvalidated pattern.
+            name = rust_consts.plain_file_name(
+                str(pins[key + "_FILE_NAME"]), key + "_FILE_NAME"
+            )
             path = root + "/" + member
             try:
                 extracted = archive.read(path)

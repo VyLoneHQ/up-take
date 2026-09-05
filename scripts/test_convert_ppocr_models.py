@@ -33,6 +33,8 @@ import importlib.util
 import shutil
 import sys
 import tempfile
+import contextlib
+import io
 import traceback
 from pathlib import Path
 
@@ -195,6 +197,64 @@ def test_the_real_pins_still_parse(module) -> None:
     assert str(pins["DETECTION_FILE_NAME"]).endswith(".onnx")
     assert len(str(pins["DETECTION_SHA256"])) == 64
     assert isinstance(pins["DETECTION_SIZE"], int) and pins["DETECTION_SIZE"] > 0
+
+
+def test_write_notice_NAMES_EVERY_FILE_including_the_detector(module) -> None:
+    """PR #88 round 4, F2: replacing the listing with a constant was 6/6 green.
+
+    The listing was drilled as a function in round 2 and its CALL SITE was not,
+    so a notice naming no file at all would have been written silently. This
+    drives the composition and the write together.
+    """
+    out = Path(tempfile.mkdtemp(prefix="notice-test-"))
+    try:
+        pins = {
+            "DETECTION_FILE_NAME": "PP-OCRv6_small_det.onnx",
+            "DETECTION_SHA256": "a" * 64,
+            "DETECTION_SIZE": 9_880_512,
+        }
+        produced = [("ch_PP-OCRv4_rec.onnx", 10_812_334, "b" * 64),
+                    ("ppocr_keys_v1.txt", 26_249, "c" * 64)]
+        written = module.write_notice(out, pins, produced)
+
+        assert (out / "NOTICE-models.txt").is_file(), "no notice was written"
+        for name, _, _ in produced:
+            assert name in written, name + " is missing from the notice"
+        assert pins["DETECTION_FILE_NAME"] in written, (
+            "the DETECTOR is missing from the notice, which is the licence "
+            "obligation this listing exists to carry"
+        )
+    finally:
+        shutil.rmtree(out, ignore_errors=True)
+
+
+def test_write_notice_SAYS_SO_when_the_detector_is_not_staged(module) -> None:
+    """The NOTE whose deletion was also 6/6 green (round 4, M6)."""
+    out = Path(tempfile.mkdtemp(prefix="notice-test-"))
+    try:
+        pins = {
+            "DETECTION_FILE_NAME": "PP-OCRv6_small_det.onnx",
+            "DETECTION_SHA256": "a" * 64,
+            "DETECTION_SIZE": 9_880_512,
+        }
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            module.write_notice(out, pins, [])
+        assert "NOTE:" in printed.getvalue(), (
+            "the detector is absent from the staging directory and nothing said so"
+        )
+
+        # And the opposite: staged, so no NOTE. Without this the assertion above
+        # would pass against a script that printed the note unconditionally.
+        (out / pins["DETECTION_FILE_NAME"]).write_bytes(b"staged")
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            module.write_notice(out, pins, [])
+        assert "NOTE:" not in printed.getvalue(), (
+            "the detector IS staged and the note fired anyway"
+        )
+    finally:
+        shutil.rmtree(out, ignore_errors=True)
 
 
 def main() -> int:

@@ -272,7 +272,13 @@ def main() -> int:
     arguments = parser.parse_args()
 
     pins = read_pins()
-    file_name = str(pins["DETECTION_FILE_NAME"])
+    # Validated before it is joined onto --out. PR #88 round 4, F3: a decoy
+    # pin of "../../escaped.onnx" wrote two directories ABOVE the staging
+    # directory, with the digest and size checks both passing -- they check
+    # the bytes, not the destination.
+    file_name = rust_consts.plain_file_name(
+        str(pins["DETECTION_FILE_NAME"]), "DETECTION_FILE_NAME"
+    )
     print("PP-OCRv6 detector: " + file_name)
 
     if arguments.file is not None:
