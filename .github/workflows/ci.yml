@@ -118,6 +118,16 @@ jobs:
       - name: Test the PP-OCRv6 detector acquisition step
         run: python3 scripts/test_acquire_ppocr_detector.py
 
+      # Holds the Python name guard to the Rust one it duplicates. There are two
+      # implementations of one rule because the Rust guards what the PRODUCT
+      # installs and the Python guards what the BUILD stages, in different
+      # languages and different processes, and neither can import the other.
+      # Round 5 of PR #88 found the Python was the strictly weaker of the two
+      # and was the one guarding a write. This control reads the reserved-name
+      # list out of manifest.rs and fails if they diverge.
+      - name: Rust and Python name guards agree
+        run: python3 scripts/control-rust-consts.py
+
       # The conversion script's pin reading and licence-notice construction.
       # Round 2 of PR #88's review found ADR-0036 had added real logic there
       # with no test file for that script having EVER existed -- the same
