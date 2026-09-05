@@ -178,7 +178,26 @@ def shape_complaint(shape_in: list, shape_out: list) -> str | None:
     return None
 
 
-def check_shape(path: Path) -> None:
+def onnxruntime_session(path: Path):
+    """Opens `path` with onnxruntime. The default loader for [`check_shape`].
+
+    Separated out so [`check_shape`] takes it as a seam. Round 3 of `PR #88`'s
+    review found the reason: `shape_complaint` was falsifiable and its
+    INVOCATION was not, so deleting the guard's body, turning its `SystemExit`
+    into `pass`, or swallowing the unloadable-ONNX error each left the suite
+    9/9 green. The guard only ever executes in the `build` job, where the real
+    detector passes, so its refusal branch ran in no job at all.
+
+    With this seam a stub loader drives every branch of `check_shape` with no
+    `onnxruntime`, no model and no file -- the same trick `shape_complaint`
+    already uses one level down.
+    """
+    import onnxruntime  # noqa: PLC0415
+
+    return onnxruntime.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+
+
+def check_shape(path: Path, load=onnxruntime_session) -> None:
     """Refuses a detector whose tensor shapes are not what this pipeline feeds.
 
     # Why a byte check is not enough here, and was enough before
@@ -198,21 +217,21 @@ def check_shape(path: Path) -> None:
 
     Skipped, loudly, when `onnxruntime` is absent -- the same choice the
     converter makes, and for the same reason: a check that can vanish without
-    saying so reports green forever.
+    saying so reports green forever. The absence arrives as an `ImportError`
+    out of `load`, which is why that except arm comes first.
+
+    `load` is a seam, not a convenience: it is what makes every branch below
+    reachable from a test with no `onnxruntime` installed. See
+    [`onnxruntime_session`].
     """
     try:
-        import onnxruntime  # noqa: PLC0415
+        session = load(path)
     except ImportError:
         print(
             "  NOT CHECKED: onnxruntime is not installed, so the detector's"
             " shapes were not verified. Install it to enable this."
         )
         return
-
-    try:
-        session = onnxruntime.InferenceSession(
-            str(path), providers=["CPUExecutionProvider"]
-        )
     except Exception as error:  # noqa: BLE001 - onnxruntime raises several types
         # A refusal, not a traceback. The digest has already matched, so
         # reaching here means the PINNED bytes are not loadable ONNX at all --

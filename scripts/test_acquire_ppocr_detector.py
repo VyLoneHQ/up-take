@@ -35,7 +35,11 @@ import importlib.util
 import shutil
 import sys
 import tempfile
+import contextlib
+import inspect
+import io
 import traceback
+import types
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -259,6 +263,102 @@ def test_the_real_pins_still_parse(module) -> None:
     assert len(str(pins["DETECTION_SHA256"])) == 64
     assert str(pins["DETECTION_URL"]).startswith("https://")
     assert isinstance(pins["DETECTION_SIZE"], int) and pins["DETECTION_SIZE"] > 0
+
+
+# ---------------------------------------------------------------------------
+# The shape guard's WIRING (PR #88 round 3, F1)
+#
+# Round 2 made the shape DECISION falsifiable -- `shape_complaint` is a pure
+# function over two lists -- and left the INVOCATION unguarded. The reviewer
+# drilled three mutations and each left the suite 9/9 green:
+#
+#   W1  delete the body of `check_shape`
+#   W2  `raise SystemExit(complaint)` -> `pass`
+#   W3  swallow the unloadable-ONNX SystemExit
+#
+# The guard only ever runs in the `build` job, where onnxruntime is installed
+# and the real detector passes, so its refusal branch executed in no job at all.
+# `check_shape` now takes a `load` seam and these drive every branch of it with
+# no onnxruntime, no model and no file.
+# ---------------------------------------------------------------------------
+
+
+class _StubSession:
+    """The two-method surface `check_shape` actually uses."""
+
+    def __init__(self, shape_in, shape_out):
+        self._in = shape_in
+        self._out = shape_out
+
+    def get_inputs(self):
+        return [types.SimpleNamespace(shape=self._in)]
+
+    def get_outputs(self):
+        return [types.SimpleNamespace(shape=self._out)]
+
+
+def _loader(shape_in, shape_out):
+    return lambda path: _StubSession(shape_in, shape_out)
+
+
+GOOD_IN = ["N", 3, "H", "W"]
+GOOD_OUT = ["N", 1, "H", "W"]
+
+
+def test_a_correctly_shaped_detector_is_accepted(module) -> None:
+    """The control that stops the three below passing vacuously."""
+    module.check_shape(Path("no-such-file.onnx"), load=_loader(GOOD_IN, GOOD_OUT))
+
+
+def test_the_wrong_input_channels_are_REFUSED_through_check_shape(module) -> None:
+    """W1 and W2: the complaint must reach a SystemExit, not just be computed."""
+    try:
+        module.check_shape(Path("x.onnx"), load=_loader(["N", 1, "H", "W"], GOOD_OUT))
+    except SystemExit as exit_:
+        assert "channels" in str(exit_), "refused, but not about the channel count"
+        return
+    raise AssertionError("a 1-channel input was accepted by check_shape")
+
+
+def test_a_non_probability_map_output_is_REFUSED_through_check_shape(module) -> None:
+    try:
+        module.check_shape(Path("x.onnx"), load=_loader(GOOD_IN, ["N", 3, "H", "W"]))
+    except SystemExit as exit_:
+        assert "probability map" in str(exit_), "refused, but not about the output"
+        return
+    raise AssertionError("a 3-channel output was accepted by check_shape")
+
+
+def test_an_unloadable_model_is_REFUSED_rather_than_swallowed(module) -> None:
+    """W3: a load failure after the digest matched is a refusal, not a skip."""
+
+    def explode(path):
+        raise RuntimeError("not an ONNX file")
+
+    try:
+        module.check_shape(Path("x.onnx"), load=explode)
+    except SystemExit as exit_:
+        assert "not loadable" in str(exit_)
+        return
+    raise AssertionError("an unloadable model was accepted by check_shape")
+
+
+def test_a_missing_onnxruntime_skips_LOUDLY_and_does_not_refuse(module) -> None:
+    """The one branch that must NOT raise -- and must still announce itself."""
+
+    def missing(path):
+        raise ImportError("No module named 'onnxruntime'")
+
+    stdout = io.StringIO()
+    with contextlib.redirect_stdout(stdout):
+        module.check_shape(Path("x.onnx"), load=missing)
+    assert "NOT CHECKED" in stdout.getvalue(), "skipped silently, which is the whole failure"
+
+
+def test_the_default_loader_is_the_real_one(module) -> None:
+    """A seam whose default drifted would make every test above a fiction."""
+    signature = inspect.signature(module.check_shape)
+    assert signature.parameters["load"].default is module.onnxruntime_session
 
 
 def main() -> int:

@@ -17,8 +17,12 @@ vite.config.ts.timestamp-*
 __pycache__/
 *.pyc
 
-# Converted PP-OCRv4 models, their verified upstream downloads, and the
-# generated NOTICE. Written by scripts/convert-ppocr-models.py.
+# The OCR model files, their verified upstream downloads, and the generated
+# NOTICE. Written by TWO scripts, which is the part that used to be wrong here:
+# scripts/convert-ppocr-models.py converts the recogniser and the dictionary,
+# and scripts/acquire-ppocr-detector.py DOWNLOADS the detector already in ONNX
+# from Baidu (ADR-0036). Saying "converted ... by convert-ppocr-models.py" told
+# a reader the wrong provenance for one of the three.
 #
 # NEVER committed. ADR-0034 decided we convert the official release ourselves,
 # and ADR-0004 keeps this repository public and GPL-3.0: ~15 MB of third-party

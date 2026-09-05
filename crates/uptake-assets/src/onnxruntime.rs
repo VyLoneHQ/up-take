@@ -80,10 +80,32 @@ pub const RUNTIME_SHA256: &str = "69d8e6d3879a3b4001cdc74c8ed9ccc7e7f799a5b84705
 ///
 /// **16.1 MB, and that number has a consequence.** `ADR-0035` set the installer
 /// target at `< 35 MB` with a 40 MB hard fail, against a measured 29.2 MB that
-/// predates this pin. The runtime and the models together are ~31.7 MB before
-/// compression and before the application itself, so this figure is the one to
-/// read when the installer bar is next measured.
+/// predates this pin.
+///
+/// **Do not read a total out of this comment.** It said "~31.7 MB" and
+/// designated itself "the figure to read when the installer bar is next
+/// measured", which was exact at `3e58ad3` and went 5.15 MB stale the moment
+/// `ADR-0036` swapped in a larger detector -- landing on the wrong side of the
+/// 35 MB target with nothing announcing it. Found by round 3 of `PR #88`'s
+/// independent review.
+///
+/// The total is `RUNTIME_SIZE + DETECTION_SIZE + RECOGNITION_SIZE +
+/// DICTIONARY_SIZE`, every term a pinned constant in this crate, and
+/// `installer_payload_bytes()` below sums them so the number cannot be
+/// hand-copied and cannot drift again.
 pub const RUNTIME_SIZE: u64 = 16_149_344;
+
+/// The bytes this crate's pins put in the installer, before compression.
+///
+/// Exists because a hand-written total in a doc comment drifted (see
+/// [`RUNTIME_SIZE`]). Derived, so it moves when a pin moves.
+#[must_use]
+pub const fn installer_payload_bytes() -> u64 {
+    RUNTIME_SIZE
+        + crate::ppocr::DETECTION_SIZE
+        + crate::ppocr::RECOGNITION_SIZE
+        + crate::ppocr::DICTIONARY_SIZE
+}
 
 /// ONNX Runtime's MIT licence text, as it travels in the installer.
 pub const LICENCE_FILE_NAME: &str = "LICENSE-onnxruntime.txt";
@@ -236,6 +258,38 @@ mod tests {
         assert!(
             ARCHIVE_URL.contains(VERSION),
             "the archive URL must name the version this file pins"
+        );
+    }
+
+    #[test]
+    fn the_installer_payload_is_derived_and_not_hand_written() {
+        // The whole point of the function: it cannot disagree with the pins.
+        assert_eq!(
+            installer_payload_bytes(),
+            RUNTIME_SIZE
+                + crate::ppocr::DETECTION_SIZE
+                + crate::ppocr::RECOGNITION_SIZE
+                + crate::ppocr::DICTIONARY_SIZE
+        );
+    }
+
+    #[test]
+    fn the_installer_payload_stays_inside_adr_0035s_hard_fail() {
+        // ADR-0035 set a < 35 MB target and a 40 MB HARD FAIL. Until now both
+        // were sentences in a decision record, and a doc comment carrying a
+        // hand-copied total went 5.15 MB stale across ADR-0036's detector swap
+        // -- landing past the target with nothing going red (PR #88 round 3,
+        // F2). This is the check that would have caught it.
+        //
+        // The TARGET is deliberately not asserted here: the payload is past it
+        // as of ADR-0036 and that was a decision, not an accident. The hard
+        // fail is the line that must not move without a new ADR.
+        const HARD_FAIL: u64 = 40_000_000;
+        assert!(
+            installer_payload_bytes() < HARD_FAIL,
+            "installer payload is {} bytes, past ADR-0035's {} byte hard fail;              moving this line needs a decision record, not a bigger constant",
+            installer_payload_bytes(),
+            HARD_FAIL
         );
     }
 }
