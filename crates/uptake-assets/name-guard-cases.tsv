@@ -3,6 +3,7 @@
 #   UPTAKE_REGENERATE_NAME_GUARD=1 cargo test -p uptake-assets name_guard
 # Read by scripts/control-rust-consts.py, which asserts the Python guard agrees.
 # name\tverdict  (verdict is `plain` or `refused`)
+# cases: 803
 	refused
 \x00	plain
 \x00model.onnx	plain
@@ -74,8 +75,8 @@
 !model.onnx	plain
 "	plain
 "model.onnx	plain
-#	plain
-#model.onnx	plain
+\x23	plain
+\x23model.onnx	plain
 $	plain
 $model.onnx	plain
 %	plain
@@ -374,7 +375,7 @@ mo\x1fdel.onnx	plain
 mo del.onnx	plain
 mo!del.onnx	plain
 mo"del.onnx	plain
-mo#del.onnx	plain
+mo\x23del.onnx	plain
 mo$del.onnx	plain
 mo%del.onnx	plain
 mo&del.onnx	plain
@@ -475,7 +476,7 @@ model\x1f.onnx	plain
 model .onnx	plain
 model!.onnx	plain
 model".onnx	plain
-model#.onnx	plain
+model\x23.onnx	plain
 model$.onnx	plain
 model%.onnx	plain
 model&.onnx	plain
@@ -523,7 +524,7 @@ model.onnx\x1f	plain
 model.onnx 	refused
 model.onnx!	plain
 model.onnx"	plain
-model.onnx#	plain
+model.onnx\x23	plain
 model.onnx$	plain
 model.onnx%	plain
 model.onnx&	plain

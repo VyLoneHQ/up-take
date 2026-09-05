@@ -498,6 +498,15 @@ mod tests {
                 '\t' => out.push_str("\\t"),
                 '\n' => out.push_str("\\n"),
                 '\r' => out.push_str("\\r"),
+                // '#' is escaped for the READER's sake, not the writer's:
+                // the Python control skips lines beginning with '#' to drop
+                // this file's header, and the corpus legitimately contains
+                // "#" and "#model.onnx". PR #88 round 10 found the file
+                // carrying 803 data rows while the control compared 801, so
+                // a Python-only rule about '#' passed unnoticed. Escaping it
+                // removes the collision rather than teaching the reader to
+                // tell a datum from a comment.
+                '#' => out.push_str("\\x23"),
                 c if (c as u32) < 0x20 || (c as u32) == 0x7f => {
                     out.push_str(&format!("\\x{:02x}", c as u32));
                 }
@@ -515,6 +524,10 @@ mod tests {
             "# Read by scripts/control-rust-consts.py, which asserts the Python guard agrees."
                 .to_owned(),
             "# name\\tverdict  (verdict is `plain` or `refused`)".to_owned(),
+            // DECLARED so the reader can prove it parsed all of it. Round
+            // 10's finding was a reader that silently dropped two rows; a
+            // count it must match turns any future drop into a refusal.
+            format!("# cases: {}", corpus().len()),
         ];
         for name in corpus() {
             let verdict = if is_plain_file_name(&name) {

@@ -124,7 +124,16 @@ def read_cases() -> list[tuple[str, bool]]:
             "\n  " + REGENERATE
         )
     cases: list[tuple[str, bool]] = []
+    declared: int | None = None
     for number, line in enumerate(CASES.read_text(encoding="utf-8").splitlines(), 1):
+        if line.startswith("# cases: "):
+            declared = int(line.removeprefix("# cases: ").strip())
+            continue
+        # A name is never written with a literal '#' -- the Rust side escapes it
+        # as \x23 precisely so a datum cannot look like this header. PR #88
+        # round 10: it did not, the corpus contains "#" and "#model.onnx", and
+        # this loop silently dropped both. The file had 803 rows and the control
+        # compared 801, so a Python-only rule about '#' passed unnoticed.
         if not line or line.startswith("#"):
             continue
         if "\t" not in line:
@@ -140,6 +149,21 @@ def read_cases() -> list[tuple[str, bool]]:
         raise SystemExit(
             str(CASES) + " parsed to ZERO cases. A control that compares nothing"
             " passes against anything. Regenerate it:\n  " + REGENERATE
+        )
+    # The generator DECLARES how many cases it wrote, and this must match. A
+    # reader that drops rows compares fewer names than the file contains and
+    # says nothing about it -- which is exactly what round 10 found, and the
+    # reason a count is asserted rather than trusted to a parsing convention.
+    if declared is None:
+        raise SystemExit(
+            str(CASES) + " carries no `# cases: N` line, so this reader cannot"
+            " prove it parsed all of it. Regenerate it:\n  " + REGENERATE
+        )
+    if declared != len(cases):
+        raise SystemExit(
+            str(CASES) + " declares " + str(declared) + " cases and this reader"
+            " parsed " + str(len(cases)) + ". Rows are being dropped silently,"
+            " which makes every comparison below narrower than it claims."
         )
     return cases
 
