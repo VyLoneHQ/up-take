@@ -105,6 +105,16 @@ jobs:
       - name: Test the bundle checker
         run: python3 scripts/test_verify_bundle.py
 
+      # The card corpus's own tests (roadmap 1.33). Constants only -- no Pillow,
+      # no rendering, no cards on disk -- because what they defend is the
+      # 192-card default denominator every recorded accuracy figure is over, and
+      # the presence of the umlauts 1.33 uses to choose a recogniser. The PIL
+      # import is stubbed unconditionally rather than skipped when absent: a
+      # skip here would skip in every environment it runs in, which is UT-F-101,
+      # found on 2026-09-04 inside the fix for the previous round's finding.
+      - name: Test the card corpus
+        run: python3 scripts/test_render_ocr_cards.py
+
       - name: Em-dash ratchet
         run: python3 scripts/dash-ratchet.py --against origin/main
 
