@@ -90,20 +90,20 @@ pub const DETECTION_URL: &str =
     "https://huggingface.co/PaddlePaddle/PP-OCRv6_small_det_onnx/resolve/main/inference.onnx";
 
 /// The recognition model: PP-OCRv4's CRNN, 6625 output classes.
-pub const RECOGNITION_FILE_NAME: &str = "PP-OCRv6_tiny_rec.onnx";
+pub const RECOGNITION_FILE_NAME: &str = "PP-OCRv6_small_rec.onnx";
 /// SHA-256 of [`RECOGNITION_FILE_NAME`] as this repository's script produces it.
 pub const RECOGNITION_SHA256: &str =
-    "9ef676d6ed3c88256a2d92c640c44f25b0c40947e111b14b8be8f594091563e6";
+    "5435fd747c9e0efe15a96d0b378d5bd157e9492ed8fd80edf08f30d02fa24634";
 /// Size of [`RECOGNITION_FILE_NAME`] in bytes.
-pub const RECOGNITION_SIZE: u64 = 4_462_639;
+pub const RECOGNITION_SIZE: u64 = 21_159_378;
 
 /// The character dictionary, copied from PaddleOCR unchanged.
-pub const DICTIONARY_FILE_NAME: &str = "ppocr_keys_v6.txt";
+pub const DICTIONARY_FILE_NAME: &str = "ppocr_keys_v6_small.txt";
 /// SHA-256 of [`DICTIONARY_FILE_NAME`]. PaddleOCR's own file, at tag `v2.7.0`.
 pub const DICTIONARY_SHA256: &str =
-    "68577a4d149a44888702fd8839121d27bfe0b1f414fb1bf528dffc95d5c6f7b1";
+    "2cbba745bb6abc80f81bc5650fbc4107f34839a2f6b406f5a1d30dc1b7f83e51";
 /// Size of [`DICTIONARY_FILE_NAME`] in bytes.
-pub const DICTIONARY_SIZE: u64 = 27_154;
+pub const DICTIONARY_SIZE: u64 = 74_945;
 
 /// How many classes [`RECOGNITION_FILE_NAME`] emits on its last axis.
 ///
@@ -118,7 +118,7 @@ pub const DICTIONARY_SIZE: u64 = 27_154;
 /// when it was.** Detection is language- and dictionary-independent across
 /// PP-OCRv4, v5 and v6 -- there is no `en_` detector in any of them -- which is
 /// exactly why `ADR-0036` could swap it alone without touching this number.
-pub const RECOGNITION_CLASS_COUNT: usize = 6906;
+pub const RECOGNITION_CLASS_COUNT: usize = 18710;
 
 /// The manifest for PP-OCRv4, served from `base_url`.
 ///
@@ -240,7 +240,7 @@ mod tests {
         // 6623 lines in ppocr_keys_v1.txt, + 1 appended space, + 1 CTC blank.
         // Stated as arithmetic rather than as a bare constant so a future change
         // to either side has to restate which half moved. UP-TAKE I-333.
-        const DICTIONARY_LINES: usize = 6904;
+        const DICTIONARY_LINES: usize = 18708;
         assert_eq!(RECOGNITION_CLASS_COUNT, DICTIONARY_LINES + 1 + 1);
     }
 }

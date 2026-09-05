@@ -99,9 +99,19 @@ pub const RUNTIME_SIZE: u64 = 16_149_344;
 ///
 /// Exists because a hand-written total in a doc comment drifted (see
 /// [`RUNTIME_SIZE`]). Derived, so it moves when a pin moves.
+///
+/// **Every pinned file the release config bundles is counted, notices
+/// included.** An earlier version summed only the runtime and the three model
+/// files and so under-reported by 344,343 bytes -- `PR #88` round 4, F6. The
+/// two notice files are not incidental: they are the MIT and Apache-2.0
+/// obligations `ADR-0032` and `ADR-0034` put in the installer, `cargo deny`
+/// cannot see them because it walks the crate graph, and a budget that ignores
+/// them is a budget that would let them be dropped to save space.
 #[must_use]
 pub const fn installer_payload_bytes() -> u64 {
     RUNTIME_SIZE
+        + LICENCE_SIZE
+        + NOTICES_SIZE
         + crate::ppocr::DETECTION_SIZE
         + crate::ppocr::RECOGNITION_SIZE
         + crate::ppocr::DICTIONARY_SIZE
@@ -267,6 +277,8 @@ mod tests {
         assert_eq!(
             installer_payload_bytes(),
             RUNTIME_SIZE
+                + LICENCE_SIZE
+                + NOTICES_SIZE
                 + crate::ppocr::DETECTION_SIZE
                 + crate::ppocr::RECOGNITION_SIZE
                 + crate::ppocr::DICTIONARY_SIZE
@@ -281,10 +293,17 @@ mod tests {
         // -- landing past the target with nothing going red (PR #88 round 3,
         // F2). This is the check that would have caught it.
         //
-        // The TARGET is deliberately not asserted here: the payload is past it
-        // as of ADR-0036 and that was a decision, not an accident. The hard
-        // fail is the line that must not move without a new ADR.
-        const HARD_FAIL: u64 = 40_000_000;
+        // The TARGET is deliberately not asserted here: a payload past the
+        // target is a decision, and the hard fail is the line that must not
+        // move without one.
+        //
+        // ⚠️ RAISED 2026-09-05 to 60 MB by ADR-0037, which is the decision
+        // record this test's own message demanded. It fired at 47,264,179
+        // bytes when both models became the PP-OCRv6 small tier, said "moving
+        // this line needs a decision record, not a bigger constant", and the
+        // record was written before this constant moved. That order is the
+        // whole point of the check.
+        const HARD_FAIL: u64 = 60_000_000;
         assert!(
             installer_payload_bytes() < HARD_FAIL,
             "installer payload is {} bytes, past ADR-0035's {} byte hard fail;              moving this line needs a decision record, not a bigger constant",

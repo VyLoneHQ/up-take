@@ -5,8 +5,8 @@
       "assets/ThirdPartyNotices-onnxruntime.txt": "ThirdPartyNotices-onnxruntime.txt",
       "assets/models/NOTICE-models.txt": "models/NOTICE-models.txt",
       "assets/models/PP-OCRv6_small_det.onnx": "models/PP-OCRv6_small_det.onnx",
-      "assets/models/PP-OCRv6_tiny_rec.onnx": "models/PP-OCRv6_tiny_rec.onnx",
-      "assets/models/ppocr_keys_v6.txt": "models/ppocr_keys_v6.txt",
+      "assets/models/PP-OCRv6_small_rec.onnx": "models/PP-OCRv6_small_rec.onnx",
+      "assets/models/ppocr_keys_v6_small.txt": "models/ppocr_keys_v6_small.txt",
       "assets/onnxruntime.dll": "onnxruntime.dll"
     }
   }
