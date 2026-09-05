@@ -361,6 +361,74 @@ def test_the_default_loader_is_the_real_one(module) -> None:
     assert signature.parameters["load"].default is module.onnxruntime_session
 
 
+def test_main_ACTUALLY_INVOKES_the_shape_guard(module) -> None:
+    """PR #88 round 4, F1: `pass  # MUTANT` at the call site left the suite 15/15.
+
+    Round 3 made every BRANCH of `check_shape` reachable. It did not make the
+    one line that connects the guard to the pipeline reachable, so deleting
+    `check_shape(target)` from `main()` changed nothing any gate could see -- the
+    only observable difference was a print that nothing asserts on.
+
+    The existing positive control structurally cannot catch it: it wraps
+    `run_with` in a bare `try/except SystemExit` with no `else`, and it has to,
+    because with onnxruntime installed the synthetic payload raises "not
+    loadable" and without it the guard prints NOT CHECKED and returns. It must
+    tolerate both, so it cannot assert the guard ran.
+
+    A recorder can, and it works in both environments because it does not care
+    what the loader does.
+    """
+    fixture = Fixture(module, build_pins(FAKE))
+    seen: list[Path] = []
+    real = module.check_shape
+    module.check_shape = lambda target, **_: seen.append(Path(target))
+    try:
+        payload = fixture.write_payload(FAKE)
+        try:
+            run_with(module, fixture, payload)
+        except SystemExit:
+            pass
+    finally:
+        module.check_shape = real
+        fixture.close()
+
+    assert seen, (
+        "main() staged the detector without invoking check_shape; the guard is "
+        "wired to nothing"
+    )
+    assert seen[0].name == FAKE_NAME, (
+        "check_shape was called on " + seen[0].name + ", not the staged file"
+    )
+
+
+def test_a_pin_that_escapes_the_staging_directory_is_REFUSED(module) -> None:
+    """PR #88 round 4, F3: the decoy wrote two directories above --out."""
+    fixture = Fixture(
+        module, build_pins(FAKE, name="../../escaped-outside-out.onnx")
+    )
+    # `../../` from <root>/models lands in <root>'s PARENT, which is the shared
+    # temp directory rather than anything this fixture owns. So the target is
+    # cleared first and removed after: an earlier run that escaped would
+    # otherwise fail this test for the wrong reason, and a run that tidied up
+    # would let it PASS for the wrong reason. Found by drilling this very test.
+    escaped = fixture.root.parent / "escaped-outside-out.onnx"
+    escaped.unlink(missing_ok=True)
+    try:
+        payload = fixture.write_payload(FAKE)
+        try:
+            run_with(module, fixture, payload)
+        except SystemExit as exit_:
+            assert "separator" in str(exit_), (
+                "refused, but not for the path separator: " + str(exit_)
+            )
+            assert not escaped.exists(), "refused, and still wrote outside --out"
+            return
+        raise AssertionError("a pin containing .. was accepted and written")
+    finally:
+        escaped.unlink(missing_ok=True)
+        fixture.close()
+
+
 def main() -> int:
     module = load_module()
     tests = [value for name, value in globals().items() if name.startswith("test_")]

@@ -462,6 +462,61 @@ and is reproduced in PaddleOCR's own repository at the tag named above.
 """
 
 
+def write_notice(out_dir, detector_pins, produced) -> str:
+    """Writes `NOTICE-models.txt` and returns what it wrote.
+
+    # Why this is a function rather than eight lines inside `main()`
+
+    `PR #88` round 4, F2. Round 2 extracted `notice_listing()` and drilled the
+    FUNCTION; the reviewer drilled the CALL SITE instead and replaced the
+    listing with a constant string, leaving the suite 6/6 green. A notice naming
+    no file at all would have been written and nothing would have said so. The
+    staging NOTE below has the same shape: deleting it entirely was also 6/6.
+
+    Both now live here, where a test can call them without a network, without
+    `paddle2onnx` and without a conversion. `main()`'s remaining exposure is the
+    single call to this function.
+
+    ⚠️ **That last call is still unguarded, and this docstring is the
+    disclosure rather than a claim to have closed the class.** `main()` needs a
+    download and a converter, so it cannot run in the `web` job where this
+    suite runs, and a test that drives it would be a mock of the whole script.
+    The honest position is that the composition is tested and the wiring is
+    not. Recorded rather than left for the next reviewer to find again.
+    """
+    # ⚠️ **This check did not exist until `PR #88` round 1.** A comment in
+    # `ci.yml` justified the step ORDER by claiming this script "will say so if
+    # this file is not staged yet" -- describing a check that had been written,
+    # lost in an edit, and never noticed. The reviewer read the code, found
+    # nothing that could fire, and was right. Written rather than deleted,
+    # because the note is worth having.
+    detector_staged = (out_dir / str(detector_pins["DETECTION_FILE_NAME"])).is_file()
+    if not detector_staged:
+        print(
+            "  NOTE: " + str(detector_pins["DETECTION_FILE_NAME"]) + " is named in"
+            " the notice but is not in " + str(out_dir) + " yet."
+        )
+        print(
+            "        It is acquired by scripts/acquire-ppocr-detector.py"
+            " (ADR-0036). The notice is correct either way; this is telling you"
+            " the staging directory is not complete."
+        )
+
+    listing = notice_listing(detector_pins, produced)
+    (out_dir / "NOTICE-models.txt").write_text(
+        NOTICE_TEMPLATE.format(
+            tag=PADDLEOCR_TAG,
+            upstream=UPSTREAM,
+            converter=EXPECTED_P2O_VERSION,
+            opset=OPSET_VERSION,
+            files=listing,
+        ),
+        encoding="utf-8",
+    )
+    print("  wrote " + str(out_dir / "NOTICE-models.txt"))
+    return (out_dir / "NOTICE-models.txt").read_text(encoding="utf-8")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Convert PP-OCRv4 to ONNX.")
     parser.add_argument(
@@ -523,36 +578,7 @@ def main() -> int:
     # run in either order, and a developer converting the recogniser alone is
     # doing something reasonable.
     #
-    # ⚠️ **This check did not exist until `PR #88` round 1.** A comment in
-    # `ci.yml` justified the step ORDER by claiming this script "will say so if
-    # this file is not staged yet" -- describing a check that had been written,
-    # lost in an edit, and never noticed. The reviewer read the code, found
-    # nothing that could fire, and was right. Written rather than deleted,
-    # because the note is worth having.
-    detector_staged = (out_dir / str(detector_pins["DETECTION_FILE_NAME"])).is_file()
-    if not detector_staged:
-        print(
-            "  NOTE: " + str(detector_pins["DETECTION_FILE_NAME"]) + " is named in"
-            " the notice but is not in " + str(out_dir) + " yet."
-        )
-        print(
-            "        It is acquired by scripts/acquire-ppocr-detector.py"
-            " (ADR-0036). The notice is correct either way; this is telling you"
-            " the staging directory is not complete."
-        )
-
-    listing = notice_listing(detector_pins, produced)
-    (out_dir / "NOTICE-models.txt").write_text(
-        NOTICE_TEMPLATE.format(
-            tag=PADDLEOCR_TAG,
-            upstream=UPSTREAM,
-            converter=EXPECTED_P2O_VERSION,
-            opset=OPSET_VERSION,
-            files=listing,
-        ),
-        encoding="utf-8",
-    )
-    print("  wrote " + str(out_dir / "NOTICE-models.txt"))
+    write_notice(out_dir, detector_pins, produced)
 
     print("\nManifest values -- these are what belong in AssetManifest:")
     for name, size, digest in produced:
