@@ -14,7 +14,7 @@ The history in three steps, because the shape matters more than the bug:
 1. `bundle.resources` lived in `tauri.conf.json`. Every build packaged the
    assets, structurally, because that file is read unconditionally. But
    `tauri-build` validates resource paths at COMPILE time, so every `cargo
-   check` on a machine without the gitignored 31 MB staging directory failed.
+   check` on a machine without the gitignored 47.6 MB staging directory failed.
 2. The fix moved the resources into `tauri.release.conf.json`, merged in with
    `--config` only when an installer is built. That fixed the compile problem.
 3. **It also made packaging depend on remembering a flag.** Exactly one line in

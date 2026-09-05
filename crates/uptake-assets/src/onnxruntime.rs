@@ -304,8 +304,8 @@ mod tests {
         // move without one.
         //
         // ⚠️ RAISED 2026-09-05 to 60 MB by ADR-0037, which is the decision
-        // record this test's own message demanded. It fired at 47,264,179
-        // bytes when both models became the PP-OCRv6 small tier, said "moving
+        // record this test's own message demanded. It fired when both models
+        // became the PP-OCRv6 small tier, said "moving
         // this line needs a decision record, not a bigger constant", and the
         // record was written before this constant moved. That order is the
         // whole point of the check.

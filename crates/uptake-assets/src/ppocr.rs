@@ -1,6 +1,6 @@
 //! The OCR model manifest: what UP-TAKE must acquire before OCR can run.
 //!
-//! # TWO of these digests are ours and ONE is Baidu's, and the split is the point
+//! # ONE of these digests is ours and TWO are Baidu's, and the split is the point
 //!
 //! ⚠️ **This header said "These digests are OURS" of all three until
 //! 2026-09-04.** That stopped being true when [`ADR-0036`] made the detector
@@ -97,7 +97,7 @@ pub const DETECTION_SIZE: u64 = 9_880_512;
 pub const DETECTION_URL: &str =
     "https://huggingface.co/PaddlePaddle/PP-OCRv6_small_det_onnx/resolve/main/inference.onnx";
 
-/// The recognition model: PP-OCRv4's CRNN, 6625 output classes.
+/// The recognition model: PP-OCRv6 small, 18710 output classes.
 pub const RECOGNITION_FILE_NAME: &str = "PP-OCRv6_small_rec.onnx";
 /// SHA-256 of [`RECOGNITION_FILE_NAME`] as this repository's script produces it.
 pub const RECOGNITION_SHA256: &str =
@@ -144,9 +144,9 @@ pub const DICTIONARY_SIZE: u64 = 74_946;
 /// How many classes [`RECOGNITION_FILE_NAME`] emits on its last axis.
 ///
 /// Recorded here as well as in `uptake-ocr` because it is the number that ties
-/// the model to the dictionary: 6623 lines in [`DICTIONARY_FILE_NAME`], plus the
+/// the model to the dictionary: 18708 lines in [`DICTIONARY_FILE_NAME`], plus the
 /// space PaddleOCR appends, plus the CTC blank. Reading the dictionary literally
-/// gives 6624 and the engine refuses the pair -- UP-TAKE `I-333`. If a future
+/// gives 18709 and the engine refuses the pair -- UP-TAKE `I-333`. If a future
 /// conversion changes this number, the RECOGNISER and the DICTIONARY stop being
 /// a matching set and those two digests move together.
 ///

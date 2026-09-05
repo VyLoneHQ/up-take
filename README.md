@@ -38,19 +38,19 @@ Five of seven area types are built.
   for the conversion you asked for most recently: convert two areas at once and the second one
   is what you paste, whichever finishes first.
   Two things worth knowing before you build this yourself. **The model files and the OCR
-  runtime are not in this repository**, because they are 31 MB of binaries that belong in a
-  release rather than in a git history. The installer carries them, and two scripts fetch and
-  verify them against pinned checksums first: `scripts/acquire-onnxruntime.py` and
+  runtime are not in this repository**, because they are 47.6 MB of binaries that belong in a
+  release rather than in a git history. The installer carries them, and three scripts fetch
+  and verify them against pinned checksums first: `scripts/acquire-onnxruntime.py`,
   `scripts/acquire-ppocr-detector.py` and `scripts/acquire-ppocr-recogniser.py`.
-  Building the app itself needs neither. Building an
-  **installer** needs both, plus the config that packages them:
+  Building the app itself needs none of them. Building an
+  **installer** needs all three, plus the config that packages them:
   `pnpm tauri build --config src-tauri/tauri.release.conf.json`. And **there is no accuracy standard yet**:
   it misreads characters, and nothing in the project says what a good enough reading would be.
   Something does measure it now, which is new and is not the same as a standard:
   `cargo run --release -p uptake-ocr --example ocr_accuracy` scores the pipeline against text of
   known content rendered by `scripts/render-ocr-cards.py`. On 192 rendered cards at the shipping
-  settings it reads with a **0.14 character error rate, 67 % of cards exactly right, and 8 % of
-  cards containing text read as containing none**. Those are rendered cards, so they are an upper
+  settings it reads with a **0.018 character error rate, 87 % of cards exactly right, and no
+  card containing text read as containing none**. At 14 px and above every card is exact. Those are rendered cards, so they are an upper
   bound on real screen text. Check anything you take from it before you use it.
   <!-- source: ROADMAP.md task 1.26 (the area type), 1.31 (the pipeline that returns text) and
        1.13 (the clipboard sentence, including the rule about which conversion wins, which is
@@ -80,7 +80,8 @@ Five of seven area types are built.
        the sentence is written to keep those two apart. ROADMAP.md 1.32 with BACKLOG.md I-351
        are the source of the harness sentence, and BACKLOG.md I-363 of the three figures:
        `ocr_accuracy` on this workstation, 2026-09-04, drop_score 0.5, det_thresh 0.2,
-       box_thresh 0.4 -- 192 cards, CER 0.140, exact 66.7 %, empty 7.8 %.
+       box_thresh 0.4 -- 192 cards, CER 0.018, exact 87.0 %, empty 0.0 %, measured
+       2026-09-05 after ADR-0037 took BOTH models to the PP-OCRv6 small tier.
        ⚠️ These replace the FIRST run's figures (CER 0.330, exact 54.2 %, empty 25.5 %),
        which were measured at the upstream thresholds 0.3 / 0.6 that I-363 then changed.
        Both numbers are real; they describe different builds, and the old ones are what the
