@@ -40,12 +40,16 @@ HERE = Path(__file__).resolve().parent
 FAKE_MODEL = b"pretend this is a PP-OCRv6 recogniser"
 FAKE_NAME = "PP-OCRv6_small_rec.onnx"
 FAKE_DICT_NAME = "ppocr_keys_v6_small.txt"
-FAKE_CLASSES = 7
+FAKE_CLASSES = 9
 
 #: A minimal `inference.yml`, in the real file's exact shape: a `character_dict`
 #: block of `- x` lines. Five entries plus blank plus the CTC blank is
 #: FAKE_CLASSES, so the matched-pair arithmetic is exercised rather than stated.
-FAKE_YML = b"""Global:
+#: Includes the two shapes that broke the hand-rolled extraction, so this
+#: fixture can see PR #89 round 1's F1: a YAML-escaped apostrophe (written
+#: as a doubled quote inside a single-quoted scalar) and U+3000 IDEOGRAPHIC
+#: SPACE, which `str.strip()` removes because it is Unicode whitespace.
+FAKE_YML = """Global:
   model_name: PP-OCRv6_small_rec
 PostProcess:
   name: CTCLabelDecode
@@ -54,9 +58,11 @@ PostProcess:
   - b
   - '9'
   - ':'
+  - ''''
+  - \u3000
   -
-"""
-EXPECTED_DICT = b"a\nb\n9\n:\n "
+""".encode("utf-8")
+EXPECTED_DICT = "a\nb\n9\n:\n'\n\u3000\n ".encode("utf-8")
 
 
 def load_module():
@@ -161,6 +167,65 @@ def test_a_yml_without_the_block_is_REFUSED(module) -> None:
         assert "character_dict" in str(exit_)
         return
     raise AssertionError("a yml with no character_dict block was accepted")
+
+
+def test_a_doubled_quote_is_ONE_apostrophe(module) -> None:
+    """PR #89 round 1, F1, first half.
+
+    Upstream writes the apostrophe as a YAML single-quoted scalar, so the
+    doubled quote is an ESCAPE. The hand-rolled extraction stripped the outer
+    pair and kept two characters, and CTC class 7 then decoded to two
+    apostrophes: `Kund's` came out `Kund''s`. Nothing saw it, because the entry
+    COUNT was unaffected and both digests were measured from the corrupt output.
+    """
+    entries = module.extract_dictionary(FAKE_YML).decode("utf-8").split("\n")
+    assert "'" in entries, "the apostrophe entry is missing entirely"
+    assert "''" not in entries, (
+        "the doubled quote survived as two characters; every apostrophe the "
+        "recogniser reads would be emitted twice"
+    )
+
+
+def test_an_ideographic_space_survives_verbatim(module) -> None:
+    """PR #89 round 1, F1, second half.
+
+    U+3000 is whitespace, so `str.strip()` removed it, and the blank-is-a-space
+    rule then substituted ASCII U+0020. A parser keeps it. This one is NOT
+    caught by the one-character post-condition -- an ASCII space is one
+    character too -- which is why the parser is the fix.
+    """
+    entries = module.extract_dictionary(FAKE_YML).decode("utf-8").split("\n")
+    assert "　" in entries, (
+        "U+3000 IDEOGRAPHIC SPACE was mangled; it decodes as an ASCII space, "
+        "which is a different character in the model's alphabet"
+    )
+
+
+def test_a_multi_character_entry_is_REFUSED(module) -> None:
+    """The post-condition. Every real entry is exactly one character, measured
+    across all 18,708 rather than assumed."""
+    bad = FAKE_YML.replace(b"  - b\n", b"  - bc\n")
+    try:
+        module.extract_dictionary(bad)
+    except SystemExit as exit_:
+        assert "one character" in str(exit_)
+        return
+    raise AssertionError("a two-character dictionary entry was accepted")
+
+
+def test_the_extraction_matches_a_real_yaml_parse(module) -> None:
+    """The control that would have caught the whole finding.
+
+    The hand-rolled version agreed with a real parse on 18,706 of 18,708
+    entries, and the two it got wrong were invisible to every other check. This
+    asserts agreement on the fixture rather than trusting the reading.
+    """
+    import yaml
+
+    parsed = yaml.safe_load(FAKE_YML.decode("utf-8"))["PostProcess"]["character_dict"]
+    expected = [" " if entry is None else str(entry) for entry in parsed]
+    got = module.extract_dictionary(FAKE_YML).decode("utf-8").split("\n")
+    assert got == expected, "the extraction disagrees with a real YAML parse"
 
 
 # --- the class-count decision, as a value ---------------------------------

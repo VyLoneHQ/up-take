@@ -122,6 +122,12 @@ jobs:
       # pins and synthetic payloads, so they need no model, no download and no
       # onnxruntime, and they behave identically whether or not it is installed
       # -- a suite that skips depending on the environment is UT-F-101.
+      # PyYAML because the extraction is a real YAML parse now: PR #89 round 1
+      # found the hand-rolled one corrupted two of 18,708 entries, with every
+      # digest around it certifying the corruption rather than detecting it.
+      - name: Install PyYAML for the card and recogniser suites
+        run: python3 -m pip install PyYAML
+
       - name: Test the PP-OCRv6 recogniser acquisition step
         run: python3 scripts/test_acquire_ppocr_recogniser.py
 
@@ -292,7 +298,7 @@ jobs:
       # script asserts the version it finds, so a drift is a refusal rather than
       # a silently different conversion.
       - name: Install the model conversion toolchain
-        run: python -m pip install paddle2onnx==1.3.1 onnxruntime
+        run: python -m pip install paddle2onnx==1.3.1 onnxruntime PyYAML
 
       # ⚠️ ADR-0037 (2026-09-05) took the RECOGNISER to Baidu's published ONNX
       # too, so this step converts nothing UP-TAKE ships any more. It stays

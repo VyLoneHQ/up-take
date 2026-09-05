@@ -129,9 +129,9 @@ pub const DICTIONARY_FILE_NAME: &str = "ppocr_keys_v6_small.txt";
 /// constant. The `v2.7.0` tag this line used to name belonged to PP-OCRv4's
 /// standalone `ppocr_keys_v1.txt`, which `ADR-0037` stopped shipping.
 pub const DICTIONARY_SHA256: &str =
-    "2cbba745bb6abc80f81bc5650fbc4107f34839a2f6b406f5a1d30dc1b7f83e51";
+    "f7aa897ca828a4c7c9e2739c30f9161a33306d532f020bcdb91dcfb664a5507e";
 /// Size of [`DICTIONARY_FILE_NAME`] in bytes.
-pub const DICTIONARY_SIZE: u64 = 74_945;
+pub const DICTIONARY_SIZE: u64 = 74_946;
 
 /// How many classes [`RECOGNITION_FILE_NAME`] emits on its last axis.
 ///

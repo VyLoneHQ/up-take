@@ -141,34 +141,92 @@ def check(data: bytes, digest: str, size: int, what: str) -> None:
 def extract_dictionary(inference_yml: bytes) -> bytes:
     """Derives the character list from the model's own `inference.yml`.
 
-    Deterministic on purpose: this output is what `DICTIONARY_SHA256` pins, so
-    any wobble here reads as a corrupted download rather than as what it is.
+    # This was hand-rolled and it was wrong, in two entries out of 18,708
 
-    One line per entry, no trailing newline, which is the shape PP-OCRv4's
-    `ppocr_keys_v1.txt` had and which `recognise.rs` reads. An entry that is
-    blank in the YAML is the space character; PaddleOCR quotes it inconsistently
-    across releases, so both forms are handled.
+    Round 1 of `PR #89`'s review diffed the hand-rolled version against a real
+    YAML parse of the same file and found two divergences, both invisible to
+    every check around them:
+
+    * **index 6.** Upstream writes a YAML single-quoted scalar whose doubled
+      quote is one escaped apostrophe. Stripping the outer pair by hand left
+      **two** characters. CTC class 7 then decoded to two apostrophes, so every
+      apostrophe the recogniser read came out doubled: `Kund's` as `Kund''s`.
+    * **index 1748.** Upstream writes U+3000 IDEOGRAPHIC SPACE. `str.strip()`
+      strips **all** Unicode whitespace, so the value became empty, and the
+      blank-is-a-space rule then substituted ASCII U+0020.
+
+    **Nothing could see either.** The entry COUNT was unaffected, so
+    `check_classes` passed; `DICTIONARY_SIZE` and `DICTIONARY_SHA256` were
+    measured from the corrupted output, so the pin certified the corruption
+    rather than detecting it. That is the exact outcome this module's header
+    claims the design prevents -- *"a change upstream shows up as a digest
+    mismatch rather than as a silently different alphabet"* -- and the alphabet
+    was already silently different on the first acquisition.
+
+    So it is a real parse now. The file is valid YAML fetched from a URL this
+    repository already pins, and hand-rolling a parser for it bought nothing.
+
+    # The post-condition, which is cheap and would have caught half of it
+
+    Every entry in the real dictionary is exactly one character; that was
+    measured across all 18,708 rather than assumed. Asserting it catches the
+    doubled quote outright, and catches any future scalar this code reads
+    wrongly. It does **not** catch the U+3000 case -- an ASCII space is one
+    character too -- which is why the parser is the fix and the post-condition
+    is the belt.
+
+    The output shape is one entry per line with no trailing newline, which is
+    what PP-OCRv4's `ppocr_keys_v1.txt` had and what `recognise.rs` reads.
     """
-    text = inference_yml.decode("utf-8")
-    block = re.search(r"character_dict:\s*\n((?:[ \t]*-[ \t]?.*\n)+)", text)
-    if block is None:
+    try:
+        import yaml  # noqa: PLC0415
+    except ImportError:
         raise SystemExit(
-            "the downloaded inference.yml has no `character_dict:` block.\n"
-            "Upstream changed its layout, which means the extraction below no"
+            "PyYAML is needed to read the model's inference.yml."
+            "\nInstall it: python -m pip install PyYAML"
+            "\nIt is NOT optional and this step does not fall back to a"
+            " hand-rolled parse: PR #89 round 1 found that the hand-rolled one"
+            " corrupted two entries, and every digest around it certified the"
+            " corruption instead of detecting it."
+        ) from None
+
+    try:
+        document = yaml.safe_load(inference_yml.decode("utf-8"))
+    except Exception as error:  # noqa: BLE001 - yaml raises several types
+        raise SystemExit(
+            "the downloaded inference.yml is not valid YAML: " + str(error)
+        ) from error
+
+    entries = None
+    if isinstance(document, dict):
+        post_process = document.get("PostProcess")
+        if isinstance(post_process, dict):
+            entries = post_process.get("character_dict")
+    if entries is None:
+        raise SystemExit(
+            "the downloaded inference.yml has no `PostProcess.character_dict`."
+            "\nUpstream changed its layout, which means this extraction no"
             " longer describes the file. Fix the extraction; do not hand-copy a"
             " dictionary."
         )
-    entries: list[str] = []
-    for line in block.group(1).splitlines():
-        value = line.strip()[1:]
-        if value.startswith(" "):
-            value = value[1:]
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
-            value = value[1:-1]
-        entries.append(value if value != "" else " ")
-    if not entries:
-        raise SystemExit("the `character_dict:` block is empty")
-    return "\n".join(entries).encode("utf-8")
+    if not isinstance(entries, list) or not entries:
+        raise SystemExit("`PostProcess.character_dict` is not a non-empty list")
+
+    # A YAML scalar that is empty reads as None, and PaddleOCR uses that for the
+    # space. Every other entry is taken verbatim from the parser.
+    values = [" " if entry is None else str(entry) for entry in entries]
+
+    wrong = [(index, value) for index, value in enumerate(values) if len(value) != 1]
+    if wrong:
+        detail = "\n  ".join(
+            "index " + str(index) + ": " + repr(value) for index, value in wrong[:10]
+        )
+        raise SystemExit(
+            "the character dictionary has " + str(len(wrong)) + " entries that"
+            " are not exactly one character, and each one shifts what the"
+            " recogniser decodes:\n  " + detail
+        )
+    return "\n".join(values).encode("utf-8")
 
 
 def onnxruntime_session(path: Path):
