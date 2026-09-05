@@ -5,7 +5,9 @@ Roadmap `1.33`, [`ADR-0037`]. The sibling of `acquire-ppocr-detector.py`, and
 deliberately its shape: same pin extraction, same verify-before-write order,
 same refusal style. `ADR-0037` supersedes `ADR-0034` for the recogniser as well
 as the detector, so **nothing in UP-TAKE's OCR path is converted here any
-more** and `convert-ppocr-models.py` produces nothing this product ships.
+more**, and `convert-ppocr-models.py` is deleted: it converted nothing this
+product ships, and `scripts/write-model-notice.py` took over the one job it
+still did.
 
 # Two artifacts, two different kinds of digest, and the difference matters
 
@@ -48,7 +50,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import re
+import shutil
 import sys
+import tempfile
 import urllib.request
 from pathlib import Path
 
@@ -266,20 +270,42 @@ def class_complaint(shape_out, expected: int) -> str | None:
     return None
 
 
-def check_classes(path: Path, expected: int, load=onnxruntime_session) -> None:
+def check_classes(path: Path, expected: int, load=onnxruntime_session, *, required: bool = False) -> None:
     """Refuses a recogniser whose alphabet does not match the pinned dictionary.
 
-    Skipped, loudly, when `onnxruntime` is absent -- the absence arrives as an
-    `ImportError` out of `load`, which is why that arm comes first. `load` is a
-    seam, not a convenience: it is what makes every branch below reachable from
-    a test with no `onnxruntime` installed.
+    `load` is a seam, not a convenience: it is what makes every branch below
+    reachable from a test with no `onnxruntime` installed.
+
+    # `required` exists because a skip in CI is a permanent green
+
+    `PR #89` round 1, F4. Without `onnxruntime` this returns cleanly and the
+    script exits 0, which is right for a developer's local run and wrong for the
+    build. The guard was live in CI only because an unrelated step happened to
+    `pip install onnxruntime` in the same job -- and this change's own comment
+    proposes deleting that step. Acting on that comment would have converted the
+    check into a permanent pass that prints `NOT CHECKED` into a log nobody
+    reads, with nothing in `ci.yml` or here asserting otherwise.
+
+    So the CI step passes `--require-onnxruntime` and the absence becomes a
+    refusal there while staying a skip everywhere else. The obligation is a flag
+    the job carries rather than a sentence the next editor has to remember,
+    which is the difference `A6` asks for.
     """
     try:
         session = load(path)
     except ImportError:
+        if required:
+            raise SystemExit(
+                "onnxruntime is not installed and --require-onnxruntime was"
+                " given, so the recogniser's class count could not be verified"
+                " against the dictionary."
+                "\nThis flag is passed by CI precisely so the check cannot"
+                " become a silent pass. Install it, or drop the flag knowingly."
+            ) from None
         print(
             "  NOT CHECKED: onnxruntime is not installed, so the recogniser's"
             " class count was not verified against the dictionary."
+            " Pass --require-onnxruntime to make this a refusal."
         )
         return
     except Exception as error:  # noqa: BLE001 - onnxruntime raises several types
@@ -315,6 +341,12 @@ def main() -> int:
         type=Path,
         default=None,
         help="extract from this inference.yml instead of downloading it",
+    )
+    parser.add_argument(
+        "--require-onnxruntime",
+        action="store_true",
+        help="treat a missing onnxruntime as a refusal rather than a skip;"
+        " passed by CI so the class check cannot become a silent pass",
     )
     arguments = parser.parse_args()
 
@@ -355,22 +387,43 @@ def main() -> int:
         dictionary_name,
     )
 
-    # Both verified before either is written. `acquire-onnxruntime.py`'s tests
-    # exist because an earlier version wrote each member as it verified it,
-    # which left a verified model on disk with no dictionary beside it -- and a
-    # model without its matching dictionary is the I-333 failure on disk.
-    arguments.out.mkdir(parents=True, exist_ok=True)
-    model_target = arguments.out / model_name
-    model_target.write_bytes(model)
-    print("  wrote " + str(model_target))
-    dictionary_target = arguments.out / dictionary_name
-    dictionary_target.write_bytes(dictionary)
-    print("  wrote " + str(dictionary_target))
+    # Everything verified before ANYTHING is staged.
+    #
+    # `PR #89` round 1, F3: this used to write both files and then check the
+    # class count, so a mismatched pair was left on disk after the refusal --
+    # the on-disk `I-333` state the digest path is careful to prevent, left open
+    # on the class path. The docstring claimed the opposite in as many words.
+    #
+    # The model has to exist as a FILE for onnxruntime to open it, so it is
+    # written to a scratch directory, checked there, and only moved into `--out`
+    # once it has passed. `acquire-onnxruntime.py`'s two-phase write is the same
+    # idea and exists for the same reason.
+    scratch = Path(tempfile.mkdtemp(prefix="acquire-rec-"))
+    try:
+        probe = scratch / model_name
+        probe.write_bytes(model)
+        # The loader is passed EXPLICITLY rather than left to the default. A
+        # default argument binds at definition time, so a test that swaps
+        # `onnxruntime_session` on the module would not reach this call and
+        # would be testing nothing -- which is how the happy-path test failed
+        # when the guard moved in front of the writes.
+        check_classes(
+            probe,
+            int(pins["RECOGNITION_CLASS_COUNT"]),  # type: ignore[arg-type]
+            load=onnxruntime_session,
+            required=arguments.require_onnxruntime,
+        )
 
-    # After the write, because onnxruntime loads from a path. The digests have
-    # already passed, so this asserts what the file IS rather than whether it
-    # arrived intact.
-    check_classes(model_target, int(pins["RECOGNITION_CLASS_COUNT"]))  # type: ignore[arg-type]
+        arguments.out.mkdir(parents=True, exist_ok=True)
+        model_target = arguments.out / model_name
+        model_target.write_bytes(model)
+        print("  wrote " + str(model_target))
+        dictionary_target = arguments.out / dictionary_name
+        dictionary_target.write_bytes(dictionary)
+        print("  wrote " + str(dictionary_target))
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
     print("")
     print(
         "Verified against the pins in crates/uptake-assets/src/ppocr.rs."

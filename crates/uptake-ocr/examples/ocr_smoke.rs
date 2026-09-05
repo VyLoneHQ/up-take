@@ -19,7 +19,8 @@
 //! # Usage
 //!
 //! ```text
-//! python scripts/convert-ppocr-models.py --out dist/models
+//! python scripts/acquire-ppocr-detector.py --out dist/models
+//! python scripts/acquire-ppocr-recogniser.py --out dist/models
 //!
 //! set ORT_DYLIB_PATH=C:\Windows\System32\onnxruntime.dll
 //! cargo run -p uptake-ocr --example ocr_smoke -- ^
@@ -43,7 +44,7 @@
 //! A flat `.rgba` file: little-endian `u32` width, little-endian `u32` height,
 //! then `width * height * 4` bytes. Decoding a PNG would mean an image-decoding
 //! dependency in a crate whose whole point is that it has almost none, for a
-//! manual diagnostic. `scripts/convert-ppocr-models.py`'s sibling in the PR
+//! manual diagnostic. `scripts/acquire-ppocr-recogniser.py`'s sibling in the PR
 //! description writes one; any five lines of Pillow will.
 
 use std::path::{Path, PathBuf};

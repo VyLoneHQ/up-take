@@ -41,7 +41,8 @@ Five of seven area types are built.
   runtime are not in this repository**, because they are 31 MB of binaries that belong in a
   release rather than in a git history. The installer carries them, and two scripts fetch and
   verify them against pinned checksums first: `scripts/acquire-onnxruntime.py` and
-  `scripts/convert-ppocr-models.py`. Building the app itself needs neither. Building an
+  `scripts/acquire-ppocr-detector.py` and `scripts/acquire-ppocr-recogniser.py`.
+  Building the app itself needs neither. Building an
   **installer** needs both, plus the config that packages them:
   `pnpm tauri build --config src-tauri/tauri.release.conf.json`. And **there is no accuracy standard yet**:
   it misreads characters, and nothing in the project says what a good enough reading would be.

@@ -306,18 +306,74 @@ def test_the_default_loader_is_the_real_one(module) -> None:
 
 
 def test_both_files_are_staged_on_the_happy_path(module) -> None:
+    """The positive control.
+
+    ⚠️ It has to get PAST the class check now, which is the point of `PR #89`
+    round 1's F3: the guard runs BEFORE anything is staged, so a synthetic
+    payload that is not loadable ONNX stages nothing at all. This used to
+    swallow that `SystemExit` and assert the files were there anyway, which was
+    only true while the guard ran last. A stub loader reporting the pinned count
+    is what makes the happy path actually happy.
+    """
     fixture = Fixture(module, build_pins(FAKE_MODEL, EXPECTED_DICT))
+    real = module.onnxruntime_session
+    module.onnxruntime_session = _session(["N", "T", FAKE_CLASSES])
     try:
         with contextlib.redirect_stdout(io.StringIO()):
-            try:
-                run_with(module, fixture, FAKE_MODEL, FAKE_YML)
-            except SystemExit:
-                pass  # the synthetic payload is not loadable ONNX; that is fine
+            code = run_with(module, fixture, FAKE_MODEL, FAKE_YML)
+        assert code == 0, "the happy path did not return 0"
         assert (fixture.out / FAKE_NAME).is_file(), "the model was not staged"
         assert (fixture.out / FAKE_DICT_NAME).is_file(), "the dictionary was not staged"
         assert (fixture.out / FAKE_DICT_NAME).read_bytes() == EXPECTED_DICT
     finally:
+        module.onnxruntime_session = real
         fixture.close()
+
+
+def test_a_MISMATCHED_class_count_stages_NOTHING(module) -> None:
+    """PR #89 round 1, F3, driven end to end through `main()`.
+
+    The reviewer set the pin to 999 and found both files on disk after the
+    refusal -- the on-disk `I-333` state the digest path is careful to prevent,
+    left open on the class path, while the docstring claimed the opposite.
+    """
+    fixture = Fixture(module, build_pins(FAKE_MODEL, EXPECTED_DICT, classes=999))
+    real = module.onnxruntime_session
+    module.onnxruntime_session = _session(["N", "T", FAKE_CLASSES])
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            try:
+                run_with(module, fixture, FAKE_MODEL, FAKE_YML)
+            except SystemExit as exit_:
+                assert "MATCHED PAIR" in str(exit_)
+                staged = sorted(p.name for p in fixture.out.iterdir()) if fixture.out.is_dir() else []
+                assert staged == [], "refused, and staged " + str(staged)
+                return
+        raise AssertionError("a mismatched class count was accepted")
+    finally:
+        module.onnxruntime_session = real
+        fixture.close()
+
+
+def test_require_onnxruntime_turns_the_skip_into_a_REFUSAL(module) -> None:
+    """PR #89 round 1, F4. Without the flag the absence is a skip, which is
+    right locally and is a permanent green in CI."""
+
+    def missing(path):
+        raise ImportError("No module named 'onnxruntime'")
+
+    try:
+        module.check_classes(Path("x.onnx"), 18710, load=missing, required=True)
+    except SystemExit as exit_:
+        assert "could not be verified" in str(exit_)
+    else:
+        raise AssertionError("--require-onnxruntime did not refuse")
+
+    # And the other direction: a local run must still work.
+    printed = io.StringIO()
+    with contextlib.redirect_stdout(printed):
+        module.check_classes(Path("x.onnx"), 18710, load=missing, required=False)
+    assert "NOT CHECKED" in printed.getvalue()
 
 
 def test_main_ACTUALLY_INVOKES_the_class_guard(module) -> None:

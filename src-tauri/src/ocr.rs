@@ -26,7 +26,7 @@
 //!
 //! ⚠️ **The staging directory is NOT in the repository.** `src-tauri/assets` is
 //! gitignored and filled by `scripts/acquire-onnxruntime.py` and
-//! `scripts/convert-ppocr-models.py`, each of which verifies every byte against
+//! `scripts/acquire-ppocr-recogniser.py`, each of which verifies every byte against
 //! a pinned SHA-256 before writing.
 //!
 //! **Only the bundling step needs them**, and that is a deliberate split rather
@@ -120,11 +120,11 @@ use uptake_ocr::{Outcome, RequestId, Service, StopReason};
 ///
 /// **Not a shipping path.** An installed UP-TAKE has its models beside the
 /// executable and sets nothing; this exists so a developer can point at the
-/// output of `scripts/convert-ppocr-models.py` without an install, exactly as
+/// output of the acquisition scripts without an install, exactly as
 /// the `ocr_smoke` example does.
 const MODELS_DIR_VARIABLE: &str = "UPTAKE_MODELS_DIR";
 
-/// The base URL [`ppocr::ppocr_v4`] wants and this module never uses.
+/// The base URL [`ppocr::ppocr_models`] wants and this module never uses.
 ///
 /// `AssetManifest` carries a URL per asset because it was built for a *fetch*,
 /// and `ADR-0035` deleted the fetch. Verification reads bytes off disk and
@@ -424,7 +424,7 @@ fn verified_runtime_in(directory: &std::path::Path) -> Result<Option<PathBuf>, S
 /// question rather than answering one.
 fn resolve_config() -> Result<PaddleConfig, String> {
     let directory = models_directory()?;
-    let manifest = ppocr::ppocr_v4(UNUSED_BASE_URL)
+    let manifest = ppocr::ppocr_models(UNUSED_BASE_URL)
         .map_err(|error| format!("UP-TAKE's own model manifest is invalid: {error}"))?;
 
     // Named individually rather than reported as a count. "2 of 3 models are
@@ -732,7 +732,7 @@ mod tests {
         // report "UP-TAKE's own model manifest is invalid" at run time. This
         // test is the only thing that reads that constant outside the resolver.
         assert!(
-            ppocr::ppocr_v4(UNUSED_BASE_URL).is_ok(),
+            ppocr::ppocr_models(UNUSED_BASE_URL).is_ok(),
             "the placeholder base URL must still build a valid manifest"
         );
     }
@@ -1110,7 +1110,7 @@ mod tests {
             .filter_map(serde_json::Value::as_str)
             .collect();
 
-        let models = ppocr::ppocr_v4(UNUSED_BASE_URL).unwrap();
+        let models = ppocr::ppocr_models(UNUSED_BASE_URL).unwrap();
         for asset in &models.assets {
             let expected = format!("{MODELS_SUBDIRECTORY}/{}", asset.file_name);
             assert!(
@@ -1129,7 +1129,7 @@ mod tests {
         }
 
         // PaddleOCR's own notice, which belongs to no manifest because
-        // `convert-ppocr-models.py` generates it rather than downloading it.
+        // `write-model-notice.py` generates it rather than downloading it.
         // Named explicitly here precisely because nothing else references it.
         assert!(
             destinations.contains(format!("{MODELS_SUBDIRECTORY}/NOTICE-models.txt").as_str()),
@@ -1177,7 +1177,7 @@ mod tests {
         // assumed. The three names come from `uptake-assets`, so a rename there
         // travels here.
         let directory = std::env::temp_dir().join("uptake-ocr-models-that-do-not-exist");
-        let manifest = ppocr::ppocr_v4(UNUSED_BASE_URL).unwrap();
+        let manifest = ppocr::ppocr_models(UNUSED_BASE_URL).unwrap();
         let installer = Installer::new(directory, manifest.clone());
         for asset in &manifest.assets {
             assert_eq!(

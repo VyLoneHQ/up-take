@@ -53,7 +53,7 @@ pub const ARCHIVE_URL: &str = "https://github.com/microsoft/onnxruntime/releases
 /// The archive's SHA-256, probed on 2026-09-02 by downloading it.
 ///
 /// ⚠️ **Nothing polls this URL, and that is intended behaviour rather than a
-/// fault.** `scripts/convert-ppocr-models.py` says the same about its own
+/// fault.** `scripts/write-model-notice.py` says the same about its own
 /// upstream and it is worth saying here too: if Microsoft ever replaced this
 /// release asset in place, no probe in either repository would notice. The
 /// acquisition script would go red the next time it ran, and that red is the

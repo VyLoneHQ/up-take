@@ -16,7 +16,7 @@
 //!
 //! | File | Whose bytes | Acquired by |
 //! | --- | --- | --- |
-//! | [`RECOGNITION_FILE_NAME`] | **ours**, converted | `convert-ppocr-models.py` |
+//! | [`RECOGNITION_FILE_NAME`] | **Baidu's**, unmodified | `acquire-ppocr-recogniser.py` |
 //! | [`DICTIONARY_FILE_NAME`] | PaddleOCR's, copied byte for byte | the same script |
 //! | [`DETECTION_FILE_NAME`] | **Baidu's**, unmodified | `acquire-ppocr-detector.py` |
 //!
@@ -25,13 +25,21 @@
 //! different provenance class, which that record never considered -- the
 //! artifact predated it by eighty-two days. [`ADR-0036`] has the argument.
 //!
-//! The recogniser's digest was produced by `scripts/convert-ppocr-models.py` on
-//! 2026-09-01, from an upstream archive that script verified against its own
-//! pinned digest first.
+//! ⚠️ **THE RECOGNISER IS NO LONGER CONVERTED EITHER.** This paragraph said its
+//! digest came from `convert-ppocr-models.py` on 2026-09-01, which was true
+//! until [`ADR-0037`] took the recogniser to Baidu's own published ONNX on
+//! 2026-09-05, superseding `ADR-0034` for it as `ADR-0036` had for the
+//! detector. **Nothing in UP-TAKE's OCR path is converted here now**, and that
+//! script is deleted.
+//!
+//! The one artifact still OURS is the dictionary: PP-OCRv6 keeps its character
+//! list inside the recogniser's `inference.yml` rather than publishing it
+//! standalone, so [`DICTIONARY_SHA256`] pins this repository's extraction. The
+//! characters are upstream's, in upstream's order; the container is ours.
 //!
 //! # Where the files are served from is NOT settled here
 //!
-//! [`ppocr_v4`] takes a base URL rather than hardcoding one, and that is a
+//! [`ppocr_models`] takes a base URL rather than hardcoding one, and that is a
 //! deliberate refusal rather than a convenience. Publishing converted model
 //! artifacts to a public location is an outward-facing supply-chain step of the
 //! same class `ADR-0032` and `ADR-0034` both stopped for, and it has not been
@@ -52,14 +60,14 @@ use crate::manifest::{Asset, AssetKind, AssetManifest, ManifestError, Sha256Dige
 
 /// The detection model: **PP-OCRv6 small**'s Differentiable Binarization network.
 ///
-/// # This one is NOT converted here, and that is `ADR-0036`
+/// # Baidu's artifact, not ours, and that is `ADR-0036`
 ///
-/// Every other pin in this file is a digest over bytes **this repository
-/// produced** with `scripts/convert-ppocr-models.py`, which is what `ADR-0034`
-/// chose and why. The detector is different: Baidu publishes PP-OCRv6 as ONNX
-/// itself, so `scripts/acquire-ppocr-detector.py` downloads and verifies it the
-/// way `acquire-onnxruntime.py` handles the runtime, and this digest pins
-/// **their** artifact.
+/// ⚠️ **This paragraph used to say every OTHER pin in this file was a digest
+/// over bytes this repository produced by conversion.** That stopped being
+/// true on 2026-09-05: `ADR-0037` took the recogniser to Baidu's published
+/// ONNX as well, so both models are now downloaded and verified byte for byte,
+/// the way `acquire-onnxruntime.py` handles the runtime. Only the dictionary
+/// is still ours, and only because upstream does not publish it separately.
 ///
 /// `ADR-0034` rejected taking *a third party's* conversion, on the ground that
 /// such a checksum "proves nothing about provenance". **That objection stands.**
@@ -148,7 +156,14 @@ pub const DICTIONARY_SIZE: u64 = 74_946;
 /// exactly why `ADR-0036` could swap it alone without touching this number.
 pub const RECOGNITION_CLASS_COUNT: usize = 18710;
 
-/// The manifest for PP-OCRv4, served from `base_url`.
+/// The manifest for UP-TAKE's OCR assets, served from `base_url`.
+///
+/// ⚠️ **This was `ppocr_v4` and its doc said "the manifest for PP-OCRv4"**
+/// until 2026-09-05. `ADR-0036` moved the detector to PP-OCRv6 and `ADR-0037`
+/// moved the recogniser, so the name described nothing this function returns.
+/// Renamed rather than re-documented: `PR #88` round 3's F3 found the header
+/// corrected and the name left standing a hundred lines below it, which is
+/// the shape where a reader trusts whichever they read first.
 ///
 /// `base_url` is joined with a single `/` and each asset's file name. It must be
 /// HTTPS; [`Asset::validate`] enforces that, and this function surfaces the
@@ -161,7 +176,7 @@ pub const RECOGNITION_CLASS_COUNT: usize = 18710;
 ///
 /// [`ManifestError`] if the resulting manifest is not valid: a non-HTTPS base,
 /// or a base that makes two assets collide.
-pub fn ppocr_v4(base_url: &str) -> Result<AssetManifest, ManifestError> {
+pub fn ppocr_models(base_url: &str) -> Result<AssetManifest, ManifestError> {
     let base = base_url.trim_end_matches('/');
     let entry = |file_name: &str, digest: &str, size: u64, kind: AssetKind| Asset {
         file_name: file_name.to_owned(),
@@ -202,11 +217,11 @@ pub fn ppocr_v4(base_url: &str) -> Result<AssetManifest, ManifestError> {
 mod tests {
     use super::*;
 
-    const BASE: &str = "https://example.invalid/models/v4";
+    const BASE: &str = "https://example.invalid/models";
 
     #[test]
     fn every_pinned_digest_is_well_formed() {
-        // `ppocr_v4` would otherwise reach `unreachable!` at run time on a typo
+        // `ppocr_models` would otherwise reach `unreachable!` at run time on a typo
         // in a 64-character constant, which is the least testable place for a
         // hand-copied hash to be wrong.
         for digest in [DETECTION_SHA256, RECOGNITION_SHA256, DICTIONARY_SHA256] {
@@ -219,7 +234,7 @@ mod tests {
 
     #[test]
     fn the_manifest_names_three_assets_and_validates() {
-        let manifest = ppocr_v4(BASE).unwrap();
+        let manifest = ppocr_models(BASE).unwrap();
         assert_eq!(manifest.assets.len(), 3);
         assert_eq!(
             manifest.total_bytes(),
@@ -229,7 +244,7 @@ mod tests {
 
     #[test]
     fn the_two_models_and_the_one_dictionary_are_classified_apart() {
-        let manifest = ppocr_v4(BASE).unwrap();
+        let manifest = ppocr_models(BASE).unwrap();
         assert_eq!(manifest.of_kind(AssetKind::Model).count(), 2);
         assert_eq!(manifest.of_kind(AssetKind::Dictionary).count(), 1);
         // No runtime here on purpose: ADR-0032's DLL is a separate acquisition
@@ -240,7 +255,7 @@ mod tests {
 
     #[test]
     fn a_trailing_slash_on_the_base_does_not_double_up() {
-        let manifest = ppocr_v4("https://example.invalid/models/v4/").unwrap();
+        let manifest = ppocr_models("https://example.invalid/models/").unwrap();
         assert!(
             manifest
                 .assets
@@ -250,13 +265,13 @@ mod tests {
         );
         assert_eq!(
             manifest.assets[0].url,
-            format!("https://example.invalid/models/v4/{DETECTION_FILE_NAME}")
+            format!("https://example.invalid/models/{DETECTION_FILE_NAME}")
         );
     }
 
     #[test]
     fn a_plain_http_base_is_refused_rather_than_downgraded() {
-        let error = ppocr_v4("http://example.invalid/models").unwrap_err();
+        let error = ppocr_models("http://example.invalid/models").unwrap_err();
         assert!(
             matches!(error, ManifestError::InsecureUrl { .. }),
             "{error:?}"

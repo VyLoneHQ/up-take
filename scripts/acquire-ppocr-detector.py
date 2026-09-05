@@ -18,12 +18,16 @@ Baidu publishing PP-OCRv6 as ONNX under its own name is a different thing, and
 `ADR-0034` never considered it. So the split is deliberate:
 
     detector    -> downloaded here, digest pins BAIDU's artifact
-    recogniser  -> converted by convert-ppocr-models.py, digest pins OURS
-    dictionary  -> copied byte for byte by that same script
+    recogniser  -> downloaded by acquire-ppocr-recogniser.py, digest pins THEIRS
+    dictionary  -> extracted from the recogniser's inference.yml by that
+                   same script, so its digest pins OUR extraction
 
-⚠️ **A reader of `convert-ppocr-models.py` will find it covers only two of the
-three files.** That is stated in its header too. Two acquisition mechanisms
-where there was one is the cost `ADR-0036` accepted knowingly.
+⚠️ **`convert-ppocr-models.py` is GONE.** This paragraph used to warn that it
+covered only two of the three files. `ADR-0037` took the recogniser to Baidu's
+own ONNX on 2026-09-05, which left that script converting nothing UP-TAKE
+ships, and `scripts/write-model-notice.py` took over the one job it still did.
+Two acquisition steps where there was one is the cost `ADR-0036` accepted
+knowingly, and `ADR-0037` made it uniform rather than mixed.
 
 What a digest mismatch means here, and what it does not
 ------------------------------------------------------
@@ -197,7 +201,7 @@ def onnxruntime_session(path: Path):
     return onnxruntime.InferenceSession(str(path), providers=["CPUExecutionProvider"])
 
 
-def check_shape(path: Path, load=onnxruntime_session) -> None:
+def check_shape(path: Path, load=onnxruntime_session, *, required: bool = False) -> None:
     """Refuses a detector whose tensor shapes are not what this pipeline feeds.
 
     # Why a byte check is not enough here, and was enough before
@@ -211,7 +215,7 @@ def check_shape(path: Path, load=onnxruntime_session) -> None:
 
     So the shape contract is asserted: three input channels (RGB, normalised)
     and a single-channel probability map out, which is what DB post-processing
-    consumes. This check MOVED here from `convert-ppocr-models.py` along with
+    consumes. This check MOVED here from the conversion script along with
     the detector, and it matters more on bytes we did not produce than on the
     ones we did.
 
@@ -220,6 +224,14 @@ def check_shape(path: Path, load=onnxruntime_session) -> None:
     saying so reports green forever. The absence arrives as an `ImportError`
     out of `load`, which is why that except arm comes first.
 
+    **`required` makes the skip a refusal**, and CI passes it. `PR #89` round 1
+    F4 found this construction on BOTH acquisition scripts: the guard was live
+    in the build job only because an unrelated step happened to install
+    onnxruntime in it, and a comment proposing to delete that step would have
+    turned the check into a permanent green printing `NOT CHECKED` into a log
+    nobody reads. A flag the job carries beats a sentence the next editor has to
+    remember.
+
     `load` is a seam, not a convenience: it is what makes every branch below
     reachable from a test with no `onnxruntime` installed. See
     [`onnxruntime_session`].
@@ -227,9 +239,17 @@ def check_shape(path: Path, load=onnxruntime_session) -> None:
     try:
         session = load(path)
     except ImportError:
+        if required:
+            raise SystemExit(
+                "onnxruntime is not installed and --require-onnxruntime was"
+                " given, so the detector's shapes could not be verified."
+                "\nThis flag is passed by CI precisely so the check cannot"
+                " become a silent pass. Install it, or drop the flag knowingly."
+            ) from None
         print(
             "  NOT CHECKED: onnxruntime is not installed, so the detector's"
-            " shapes were not verified. Install it to enable this."
+            " shapes were not verified. Install it to enable this, or pass"
+            " --require-onnxruntime to make the absence a refusal."
         )
         return
     except Exception as error:  # noqa: BLE001 - onnxruntime raises several types
@@ -269,6 +289,12 @@ def main() -> int:
         default=None,
         help="verify this file instead of downloading; checked identically",
     )
+    parser.add_argument(
+        "--require-onnxruntime",
+        action="store_true",
+        help="treat a missing onnxruntime as a refusal rather than a skip;"
+        " passed by CI so the shape check cannot become a silent pass",
+    )
     arguments = parser.parse_args()
 
     pins = read_pins()
@@ -300,7 +326,7 @@ def main() -> int:
     # After the write, because onnxruntime loads from a path rather than from
     # bytes. The digest already passed, so what is on disk is the pinned file;
     # this is asserting what that file IS, not whether it arrived intact.
-    check_shape(target)
+    check_shape(target, required=arguments.require_onnxruntime)
     print("")
     print(
         "Verified against the pin in crates/uptake-assets/src/ppocr.rs."
