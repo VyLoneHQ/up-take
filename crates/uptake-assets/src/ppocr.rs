@@ -97,9 +97,37 @@ pub const RECOGNITION_SHA256: &str =
 /// Size of [`RECOGNITION_FILE_NAME`] in bytes.
 pub const RECOGNITION_SIZE: u64 = 21_159_378;
 
-/// The character dictionary, copied from PaddleOCR unchanged.
+/// Where [`RECOGNITION_FILE_NAME`] is fetched from.
+///
+/// Baidu's own published ONNX, same organisation and same shape as
+/// [`DETECTION_URL`]. `ADR-0037` supersedes `ADR-0034` for the recogniser as
+/// well, so nothing in UP-TAKE's OCR path is converted here any more.
+pub const RECOGNITION_URL: &str =
+    "https://huggingface.co/PaddlePaddle/PP-OCRv6_small_rec_onnx/resolve/main/inference.onnx";
+
+/// Where the dictionary is DERIVED from, which is not the same as fetched.
+///
+/// PP-OCRv6 does not publish the character list as a standalone file the way
+/// PP-OCRv4 did. It lives inside the model's own `inference.yml`, as the
+/// `character_dict` block, so the acquisition step downloads that and extracts
+/// it.
+///
+/// **[`DICTIONARY_SHA256`] is therefore a digest over OUR extraction, not over
+/// a file Baidu published**, and that is the same distinction `ADR-0034` drew
+/// about the converted models: a hash over bytes someone else produced proves
+/// they arrived intact, and a hash over bytes we produced pins our own
+/// artifact. The extraction is deterministic and the script re-derives it, so a
+/// change upstream shows up as a digest mismatch rather than as a silently
+/// different alphabet.
+pub const DICTIONARY_URL: &str =
+    "https://huggingface.co/PaddlePaddle/PP-OCRv6_small_rec_onnx/resolve/main/inference.yml";
+
+/// The character dictionary, extracted from the recogniser's own `inference.yml`.
 pub const DICTIONARY_FILE_NAME: &str = "ppocr_keys_v6_small.txt";
-/// SHA-256 of [`DICTIONARY_FILE_NAME`]. PaddleOCR's own file, at tag `v2.7.0`.
+/// SHA-256 of [`DICTIONARY_FILE_NAME`] **as this repository extracts it** from
+/// [`DICTIONARY_URL`]. Not a digest over a file Baidu publishes: see that
+/// constant. The `v2.7.0` tag this line used to name belonged to PP-OCRv4's
+/// standalone `ppocr_keys_v1.txt`, which `ADR-0037` stopped shipping.
 pub const DICTIONARY_SHA256: &str =
     "2cbba745bb6abc80f81bc5650fbc4107f34839a2f6b406f5a1d30dc1b7f83e51";
 /// Size of [`DICTIONARY_FILE_NAME`] in bytes.
