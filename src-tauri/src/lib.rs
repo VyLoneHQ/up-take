@@ -188,7 +188,7 @@ pub fn run() -> tauri::Result<()> {
                     "UP-TAKE starting"
                 ),
                 Err(error) => eprintln!(
-                    "diagnostics: no log file this run ({error});                      continuing, because a capture tool that will not start                      without its own log is worse than one without a log"
+                    "diagnostics: no log file this run ({error}); continuing, because a capture tool that will not start without its own log is worse than one without a log"
                 ),
             }
 

@@ -1,6 +1,10 @@
 //! Task 1.15: structured logging, and the one place a failure reaches the user.
 //!
-//! This module implements `SPECS/architecture.md` section 5's error contract.
+//! This module implements section 5 of `SPECS/architecture.md` **in the
+//! private planning repository** -- the qualifier this crate uses everywhere
+//! else (`output.rs:5`, `freeze.rs`, `hotkey.rs`) and that round 2 of
+//! `PR #94` found missing here, where the bare path looks resolvable and is
+//! not. Its error contract:
 //! It did not invent that contract: the three error classes, the `thiserror` /
 //! `anyhow` split and the never-lose-the-capture rule were written down long
 //! before this file existed. What was missing was a destination.
@@ -303,12 +307,46 @@ mod tests {
     /// rather than pretended away here.
     #[test]
     fn no_captured_content_reaches_a_log_macro() {
-        let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut files = Vec::new();
-        collect_rust_files(&source_root, &mut files);
+        // ⚠️ THE WHOLE WORKSPACE, not just this crate.
+        //
+        // Round 2 of `PR #94`'s review drilled the narrower version: it added
+        // `tracing` to `uptake-ocr` -- the crate that PRODUCES recognised text
+        // -- logged that text from it, and the control stayed green. The root
+        // `Cargo.toml`'s own comment for this change invites exactly that
+        // ("libraries emit events with fields"), so the crate most likely to
+        // grow the forbidden line was the one outside the scan.
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace = manifest.parent().expect("src-tauri has a parent");
+        let mut roots = vec![manifest.join("src")];
+        if let Ok(entries) = fs::read_dir(workspace.join("crates")) {
+            for entry in entries.flatten() {
+                let source = entry.path().join("src");
+                if source.is_dir() {
+                    roots.push(source);
+                }
+            }
+        }
+        // The count is asserted per ROOT, not in total: a total would stay
+        // healthy while one crate silently stopped being read.
         assert!(
-            files.len() > 5,
-            "the scan found only {} source files, so it is not reading the crate",
+            roots.len() >= 4,
+            "found only {} source roots, so the workspace walk is broken",
+            roots.len()
+        );
+
+        let mut files = Vec::new();
+        for root in &roots {
+            let before = files.len();
+            collect_rust_files(root, &mut files);
+            assert!(
+                files.len() > before,
+                "{} contributed no source files",
+                root.display()
+            );
+        }
+        assert!(
+            files.len() > 20,
+            "the scan found only {} source files, so it is not reading the workspace",
             files.len()
         );
 
@@ -349,7 +387,7 @@ mod tests {
     /// rest of the file into one unit and reported every forbidden word in it.
     /// A runaway parse must stop, and it must stop loudly rather than by
     /// silently dropping the call.
-    const MAX_CONTINUATION_LINES: usize = 40;
+    const MAX_CONTINUATION_LINES: usize = 80;
 
     fn logical_calls(source: &str) -> Vec<(usize, String)> {
         let lines: Vec<&str> = source.lines().collect();
@@ -372,7 +410,7 @@ mod tests {
             // has no user's screen to read -- but it is a hole and is named
             // rather than left for a reviewer to find.
             if trimmed.starts_with("#[cfg(test)]") {
-                index = skip_braced_item(&lines, index);
+                index = skip_test_item(&lines, index);
                 continue;
             }
             if trimmed.starts_with("//") {
@@ -404,7 +442,10 @@ mod tests {
                     // scan does not understand, and a control that quietly
                     // skips what it cannot read reports green forever.
                     panic!(
-                        "the privacy scan could not balance the call starting at line {}: {}",
+                        "PRIVACY SCAN LIMIT, NOT A LEAK: could not balance the \
+                         call starting at line {} within {MAX_CONTINUATION_LINES} \
+                         lines, so it was not checked. Shorten the call or raise \
+                         the bound. Line: {}",
                         index + 1,
                         lines[index].trim()
                     );
@@ -424,24 +465,104 @@ mod tests {
         found
     }
 
-    /// The index just past the `{ ... }` item beginning at or after `from`.
-    fn skip_braced_item(lines: &[&str], from: usize) -> usize {
+    /// The index just past the attribute beginning at `from`, which may span
+    /// several lines.
+    fn skip_attribute(lines: &[&str], from: usize) -> usize {
         let mut index = from;
         let mut depth = 0i32;
         let mut opened = false;
         while index < lines.len() {
             for c in strip_literals(lines[index]).chars() {
                 match c {
-                    '{' => {
+                    '[' | '(' => {
                         depth += 1;
                         opened = true;
                     }
-                    '}' => depth -= 1,
+                    ']' | ')' => depth -= 1,
                     _ => {}
                 }
             }
             index += 1;
             if opened && depth <= 0 {
+                return index;
+            }
+        }
+        index
+    }
+
+    /// The index just past the `#[cfg(test)]` item beginning at `from`.
+    ///
+    /// # ⚠️ THIS DECIDES WHAT KIND OF ITEM IT IS BEFORE SKIPPING ANYTHING, AND
+    /// THE REASON IS THAT THIS CRATE HAS ALREADY SHIPPED THE OTHER VERSION
+    ///
+    /// `payload_keys.rs:348-372` records it in full: a first fix there began
+    /// skipping immediately and stopped at the next closing brace, "which
+    /// assumes every `#[cfg(test)]` item HAS a closing brace. `lib.rs:15` is
+    /// `#[cfg(test)]` followed by `mod payload_keys;`, a declaration with no
+    /// braces at all... **281 of 296 lines unscanned**."
+    ///
+    /// Round 2 of `PR #94`'s review found this file reproducing that
+    /// superseded version, and drilled it: splitting `use tauri::{Manager,
+    /// RunEvent, WindowEvent};` into three plain `use` lines -- a change
+    /// `cargo fmt` or an organise-imports action could make, with no semantic
+    /// effect -- removed the only brace pair the runaway skip happened to
+    /// anchor on, and a live leak planted in `pub fn run()` went GREEN.
+    /// Today's safety was an accident of one grouped import.
+    ///
+    /// So: `mod x;`, `use ...;`, `const ...;` and anything else ending in `;`
+    /// before an opening brace start no skip at all.
+    fn skip_test_item(lines: &[&str], from: usize) -> usize {
+        // The attribute itself is consumed either way.
+        let mut index = from + 1;
+
+        // Find the item the attribute applies to, stepping over further
+        // attributes and comments.
+        //
+        // ⚠️ An attribute is not necessarily ONE LINE. This module's own test
+        // block is `#[cfg(test)]` followed by a four-line
+        // `#[allow(clippy::unwrap_used, ...)]`, and a version of this loop that
+        // skipped only lines BEGINNING with `#` stopped on
+        // `clippy::unwrap_used,`, took that for the item, and resumed scanning
+        // inside the test module -- which then tripped over the `SINKS` array's
+        // own entries. So attributes are balanced, not counted.
+        while index < lines.len() {
+            let trimmed = lines[index].trim();
+            if trimmed.is_empty() || trimmed.starts_with("//") {
+                index += 1;
+                continue;
+            }
+            if trimmed.starts_with('#') {
+                index = skip_attribute(lines, index);
+                continue;
+            }
+            break;
+        }
+        if index >= lines.len() {
+            return index;
+        }
+
+        // A declaration terminated before any brace opens: skip nothing beyond
+        // the declaration itself. This is the case that swallowed a file.
+        let first = lines[index];
+        let stripped = strip_literals(first);
+        let brace_at = stripped.find('{');
+        let semi_at = stripped.find(';');
+        if brace_at.is_none() || semi_at.is_some_and(|s| brace_at.is_none_or(|b| s < b)) {
+            return index + 1;
+        }
+
+        // A braced item: balance it.
+        let mut depth = 0i32;
+        while index < lines.len() {
+            for c in strip_literals(lines[index]).chars() {
+                match c {
+                    '{' => depth += 1,
+                    '}' => depth -= 1,
+                    _ => {}
+                }
+            }
+            index += 1;
+            if depth <= 0 {
                 return index;
             }
         }
