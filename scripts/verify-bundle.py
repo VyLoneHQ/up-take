@@ -120,7 +120,10 @@ PINNED = {
     "assets/onnxruntime.dll": ("onnxruntime.rs", "RUNTIME_SHA256"),
     "assets/LICENSE-onnxruntime.txt": ("onnxruntime.rs", "LICENCE_SHA256"),
     "assets/ThirdPartyNotices-onnxruntime.txt": ("onnxruntime.rs", "NOTICES_SHA256"),
-    "assets/models/ch_PP-OCRv4_det.onnx": ("ppocr.rs", "DETECTION_SHA256"),
+    # ADR-0036: Baidu's own ONNX, downloaded rather than converted. The pin
+    # is read from the same constant either way, so this table did not have to
+    # learn the difference -- only the file name moved.
+    "assets/models/PP-OCRv6_small_det.onnx": ("ppocr.rs", "DETECTION_SHA256"),
     "assets/models/ch_PP-OCRv4_rec.onnx": ("ppocr.rs", "RECOGNITION_SHA256"),
     "assets/models/ppocr_keys_v1.txt": ("ppocr.rs", "DICTIONARY_SHA256"),
 }

@@ -11,10 +11,30 @@ artifact and means what ADR-0032 decision 2 says it means.
 What it does
 ------------
 
-Downloads three upstream files over HTTPS, verifies each against a pinned
-SHA-256 before using it, converts the two Paddle inference models to ONNX, and
-prints the digests of what came out. Nothing is written outside the output
-directory, and a digest mismatch stops the run.
+Downloads two upstream files over HTTPS, verifies each against a pinned SHA-256
+before using it, converts the recogniser to ONNX, copies the dictionary
+unchanged, and prints the digests of what came out. A digest mismatch stops the
+run.
+
+**Nothing that fails a check reaches the output directory.** The conversion
+happens in a scratch directory, the shape check runs THERE, and the results are
+moved into `--out` only once they have passed. This sentence used to read
+"nothing is written outside the output directory" and was doing double duty as
+a staging guarantee it did not hold: `PR #88` round 11 FINDING 1 (`I-373`)
+drilled a refused recogniser sitting in the staging directory. The scratch
+directory is now the one thing written outside `--out`, and it is removed on
+every path.
+
+⚠️ **THE DETECTOR IS NOT HERE, as of ADR-0036.** It is PaddlePaddle's own ONNX
+build of PP-OCRv6, downloaded and verified by
+`scripts/acquire-ppocr-detector.py`. This script said "three upstream files" and
+"the two Paddle inference models" until that change, and both counts are now
+wrong -- corrected here rather than left for the next reader to trip over.
+
+This script still WRITES the licence notice for all three shipped files,
+including the one it does not acquire, reading that file's pins from
+`crates/uptake-assets/src/ppocr.rs`. A notice built only from what this script
+produces would have dropped the detector from a licence obligation silently.
 
 Why the source digests are pinned and the output digests are not
 ---------------------------------------------------------------
@@ -84,10 +104,15 @@ import hashlib
 import importlib.util
 import io
 import os
+import shutil
 import sys
 import tarfile
+import tempfile
 import urllib.request
 from pathlib import Path
+
+# Sibling module; `scripts/` is on sys.path as this script's own directory.
+import rust_consts
 
 # The converter this script is written against, asserted before use. See the
 # module docstring for why the version is exact rather than a floor.
@@ -157,12 +182,6 @@ class Source:
 # claim about state the repository does not own. Restate it as fact only once
 # that PR merges.)
 SOURCES = [
-    Source(
-        "ch_PP-OCRv4_det_infer.tar",
-        UPSTREAM + "/PP-OCRv4/chinese/ch_PP-OCRv4_det_infer.tar",
-        "5f7217e0a89612e2f80d62f3c99a8bf5f7ae9cdc1ffd706be7dde07765627edf",
-        4894720,
-    ),
     Source(
         "ch_PP-OCRv4_rec_infer.tar",
         UPSTREAM + "/PP-OCRv4/chinese/ch_PP-OCRv4_rec_infer.tar",
@@ -303,39 +322,68 @@ def convert(converter, model_dir: Path, destination: Path) -> bytes:
     return blob
 
 
-def check_shapes(out_dir: Path) -> None:
-    """Opens both models in ONNX Runtime and asserts the shapes UP-TAKE assumes.
+def onnxruntime_session(path: Path):
+    """Opens `path` with onnxruntime. The default loader for [`check_shapes`].
+
+    Separated out so [`check_shapes`] takes it as a seam, exactly as
+    `acquire-ppocr-detector.py` does and for the reason round 3 of `PR #88`
+    found there: a guard whose refusal branch executes in no job at all is a
+    guard nothing can go red on. With this seam a stub loader drives every
+    branch below with no `onnxruntime`, no model and no file.
+
+    ⚠️ **That last sentence was ASPIRATIONAL when it was written**, and round 12
+    caught it. Round 11's fix copied the seam across from the detector and did
+    not copy the tests that make a seam worth having, so for one round this
+    docstring described a drill that existed only in the other file. Deleting
+    both shape refusals, deleting the unloadable-ONNX refusal, or making the
+    skip silent each left the suite 12/12 green. It is true now:
+    `test_convert_ppocr_models.py` drives every branch below through `load`.
+    """
+    import onnxruntime  # noqa: PLC0415
+
+    return onnxruntime.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+
+
+def check_shapes(directory: Path, load=onnxruntime_session) -> None:
+    """Opens the converted RECOGNISER and asserts the shapes UP-TAKE assumes.
+
+    ⚠️ This summary said "both models" until `PR #88` round 11 (FINDING 4). It
+    did open two, until this branch moved the detector out with `ADR-0036`; the
+    body was corrected and the line a reader sees first was not.
+
+    ⚠️ `directory` is NOT the staging directory, and the parameter was renamed
+    from `out_dir` to say so. It is the scratch directory [`main`] converts
+    into: a check that runs after the file is staged cannot keep anything out
+    of the staging directory, which is round 11 FINDING 1 (`I-373`).
 
     Skipped with a loud line if onnxruntime is absent, rather than failing: the
     conversion is this script's job and the check is a bonus. A SILENT skip
     would be the defect -- a check that can vanish without saying so reports
     green forever.
     """
+    # The DETECTOR's shape check is not here. It MOVED to
+    # scripts/acquire-ppocr-detector.py with the detector itself (ADR-0036) --
+    # moved rather than dropped, because it is the check that proves Baidu's
+    # ONNX fits this pipeline, and it matters more on bytes we did not produce
+    # than on bytes we did.
     try:
-        import onnxruntime  # noqa: PLC0415
+        recogniser = load(directory / "ch_PP-OCRv4_rec.onnx")
     except ImportError:
         print(
             "  NOT CHECKED: onnxruntime is not installed, so the converted "
             "models' shapes were not verified. Install it to enable this."
         )
         return
-
-    detector = onnxruntime.InferenceSession(
-        str(out_dir / "ch_PP-OCRv4_det.onnx"), providers=["CPUExecutionProvider"]
-    )
-    det_in = detector.get_inputs()[0].shape
-    det_out = detector.get_outputs()[0].shape
-    if det_in[1] != 3:
-        raise SystemExit("detector takes " + str(det_in[1]) + " channels, expected 3")
-    if det_out[1] != 1:
+    except Exception as error:  # noqa: BLE001 - onnxruntime raises several types
+        # A refusal, not a traceback -- the same handling its twin gained when
+        # round 1 asked that script for tests and the happy path came back as
+        # an unhandled exception instead of a verdict. Reaching here means the
+        # converter produced bytes that are not loadable ONNX at all, which
+        # deserves a sentence rather than a stack trace.
         raise SystemExit(
-            "detector emits " + str(det_out[1])
-            + " channels, expected a 1-channel probability map"
-        )
+            "the converted recogniser is not loadable as ONNX: " + str(error)
+        ) from error
 
-    recogniser = onnxruntime.InferenceSession(
-        str(out_dir / "ch_PP-OCRv4_rec.onnx"), providers=["CPUExecutionProvider"]
-    )
     rec_in = recogniser.get_inputs()[0].shape
     rec_out = recogniser.get_outputs()[0].shape
     if rec_in[1] != 3 or rec_in[2] != 48:
@@ -346,8 +394,77 @@ def check_shapes(out_dir: Path) -> None:
             + str(EXPECTED_RECOGNISER_CLASSES) + ". The dictionary and the model "
             "are no longer a matching pair -- see UP-TAKE I-333."
         )
-    print("  detector    " + str(det_in) + " -> " + str(det_out))
     print("  recogniser  " + str(rec_in) + " -> " + str(rec_out))
+
+
+def notice_listing(
+    detector_pins: dict[str, object],
+    produced: list[tuple[str, int, str]],
+) -> str:
+    """The licence notice's file listing: every shipped model, with its digest.
+
+    # Why this is a function and not four lines inside `main`
+
+    Round 2 of `PR #88`'s review found this logic, and `read_detector_pins`
+    beside it, covered by nothing: no test file for this script existed, and the
+    only thing that runs the code is a CI job needing a network download and a
+    `paddle2onnx` install, which asserts nothing about what it produced.
+
+    It is worth guarding because of what it is FOR. `ADR-0036` split the
+    acquisition in two, and this notice is the one artifact that still has to
+    name all three files. A listing built from what this script *produces* would
+    silently drop the detector from a LICENCE OBLIGATION, and nothing downstream
+    would say so: `cargo deny` walks the crate graph and sees no `.onnx` at all,
+    which is why the notice exists in the first place.
+
+    So the detector comes from the PINS and the rest from what was produced, and
+    the note beside each says which is which. Apache 2.0 section 4(b)
+    distinguishes modified files from unmodified ones, and one sentence covering
+    both would be half wrong.
+    """
+    entries = [
+        (
+            str(detector_pins["DETECTION_FILE_NAME"]),
+            int(detector_pins["DETECTION_SIZE"]),
+            str(detector_pins["DETECTION_SHA256"]),
+            "  (redistributed unchanged; acquired by acquire-ppocr-detector.py)",
+        )
+    ] + [(name, size, digest, "") for name, size, digest in produced]
+
+    return "\n".join(
+        "  " + name + "\n    sha256 " + digest + "\n    " + str(size) + " bytes" + note
+        for name, size, digest, note in entries
+    )
+
+
+def read_detector_pins() -> dict[str, object]:
+    """The detector's pins, read from the same Rust source everything else uses.
+
+    This script no longer acquires the detector (ADR-0036) but must still NAME
+    it in the licence notice, so it reads the constants rather than restating
+    them. One statement of a pinned fact, as everywhere else here.
+    """
+    source = (
+        Path(__file__).resolve().parent.parent
+        / "crates" / "uptake-assets" / "src" / "ppocr.rs"
+    )
+    if not source.is_file():
+        raise SystemExit("cannot find the detector's pins at " + str(source))
+    text = source.read_text(encoding="utf-8")
+    pins: dict[str, object] = {}
+    # DETECTION_URL joined the set for PR #88 round 10 FINDING 7: the notice
+    # must say where the detector came from, and the only honest source for
+    # that is the pin.
+    for name in ("DETECTION_FILE_NAME", "DETECTION_SHA256", "DETECTION_URL"):
+        value = rust_consts.string_const(text, name)
+        if value is None:
+            raise SystemExit("could not read `" + name + "` from " + str(source))
+        pins[name] = value
+    size = rust_consts.u64_const(text, "DETECTION_SIZE")
+    if size is None:
+        raise SystemExit("could not read `DETECTION_SIZE` from " + str(source))
+    pins["DETECTION_SIZE"] = size
+    return pins
 
 
 NOTICE_TEMPLATE = """Third-party notices for the model files distributed with UP-TAKE
@@ -366,19 +483,26 @@ PaddleOCR, by PaddlePaddle Authors, licensed under the Apache License 2.0.
 
     https://github.com/PaddlePaddle/PaddleOCR
     Dictionary taken at tag {tag}
-    Model archives from {upstream}
+    Recogniser archive from {upstream}
+    Detector from {detector_url}
 
 What was done to them
 ---------------------
 
-The .pdmodel and .pdiparams inference models from PaddleOCR's official PP-OCRv4
-release were converted to ONNX with paddle2onnx {converter} (Apache License 2.0)
-at opset {opset}. The weights are unchanged; the container format is not. The
-character dictionary is copied byte for byte.
+Apache 2.0 section 4(b) requires a notice that files were modified. Some of
+these were and some were not, so they are listed apart rather than under one
+sentence that would be half wrong.
 
-Apache 2.0 section 4(b) requires a derivative work to carry a notice that files
-were modified: the two .onnx files below are modified forms of PaddleOCR's
-released models in the sense described above.
+MODIFIED HERE. The recogniser's .pdmodel and .pdiparams from PaddleOCR's
+official PP-OCRv4 release were converted to ONNX with paddle2onnx {converter}
+(Apache License 2.0) at opset {opset}. The weights are unchanged; the container
+format is not. That conversion is UP-TAKE ADR-0034's choice, and its digest
+pins an artifact this project produced.
+
+REDISTRIBUTED UNCHANGED. The detector is PaddlePaddle's own ONNX build of
+PP-OCRv6, downloaded and verified byte for byte rather than converted here
+(UP-TAKE ADR-0036). The character dictionary is likewise copied byte for byte.
+Neither is modified in section 4(b)'s sense.
 
 Files
 -----
@@ -388,6 +512,80 @@ Files
 The full Apache License 2.0 text is at http://www.apache.org/licenses/LICENSE-2.0
 and is reproduced in PaddleOCR's own repository at the tag named above.
 """
+
+
+def write_notice(out_dir, detector_pins, produced) -> str:
+    """Writes `NOTICE-models.txt` and returns what it wrote.
+
+    # Why this is a function rather than eight lines inside `main()`
+
+    `PR #88` round 4, F2. Round 2 extracted `notice_listing()` and drilled the
+    FUNCTION; the reviewer drilled the CALL SITE instead and replaced the
+    listing with a constant string, leaving the suite 6/6 green. A notice naming
+    no file at all would have been written and nothing would have said so. The
+    staging NOTE below has the same shape: deleting it entirely was also 6/6.
+
+    Both now live here, where a test can call them without a network, without
+    `paddle2onnx` and without a conversion. `main()`'s remaining exposure is the
+    single call to this function.
+
+    ⚠️ **That last call is still unguarded, and this docstring is the
+    disclosure rather than a claim to have closed the class.** `main()` needs a
+    download and a converter, so it cannot run in the `web` job where this
+    suite runs, and a test that drives it would be a mock of the whole script.
+    The honest position is that the composition is tested and the wiring is
+    not. Recorded rather than left for the next reviewer to find again.
+    """
+    # ⚠️ **This check did not exist until `PR #88` round 1.** A comment in
+    # `ci.yml` justified the step ORDER by claiming this script "will say so if
+    # this file is not staged yet" -- describing a check that had been written,
+    # lost in an edit, and never noticed. The reviewer read the code, found
+    # nothing that could fire, and was right. Written rather than deleted,
+    # because the note is worth having.
+    # PR #88 round 6, BEHAVIOUR 1: the THIRD execute-site of the guarded
+    # construct, and it was unguarded while `rust_consts` was already
+    # imported in this file. Nothing is written outside `out_dir` here --
+    # the join feeds `.is_file()`, not a write -- but with a pin of
+    # "../escaped.onnx" the notice named a file that is not the staged file,
+    # and the NOTE that tells an operator the staging directory is
+    # incomplete was SILENCED by the same bad pin, because the escaped path
+    # existed. A guard covering two of three is the shape round 5 found one
+    # level up.
+    detector_name = rust_consts.plain_file_name(
+        str(detector_pins["DETECTION_FILE_NAME"]), "DETECTION_FILE_NAME"
+    )
+    detector_staged = (out_dir / detector_name).is_file()
+    if not detector_staged:
+        print(
+            "  NOTE: " + str(detector_pins["DETECTION_FILE_NAME"]) + " is named in"
+            " the notice but is not in " + str(out_dir) + " yet."
+        )
+        print(
+            "        It is acquired by scripts/acquire-ppocr-detector.py"
+            " (ADR-0036). The notice is correct either way; this is telling you"
+            " the staging directory is not complete."
+        )
+
+    listing = notice_listing(detector_pins, produced)
+    (out_dir / "NOTICE-models.txt").write_text(
+        NOTICE_TEMPLATE.format(
+            tag=PADDLEOCR_TAG,
+            upstream=UPSTREAM,
+            # PR #88 round 10, FINDING 7: the notice named the detector in its
+            # file list and pointed every artifact at bcebos.com, which is where
+            # the detector is NOT from. It is Baidu's own ONNX on HuggingFace
+            # (ADR-0036), and an Apache-2.0 section 4 notice that misstates the
+            # source of a redistributed file is the kind of wrong worth fixing.
+            # Read from the pin rather than restated.
+            detector_url=str(detector_pins["DETECTION_URL"]),
+            converter=EXPECTED_P2O_VERSION,
+            opset=OPSET_VERSION,
+            files=listing,
+        ),
+        encoding="utf-8",
+    )
+    print("  wrote " + str(out_dir / "NOTICE-models.txt"))
+    return (out_dir / "NOTICE-models.txt").read_text(encoding="utf-8")
 
 
 def main() -> int:
@@ -420,38 +618,65 @@ def main() -> int:
 
     print("Converting")
     produced = []
-    for archive_name, stem, output_name in (
-        ("ch_PP-OCRv4_det_infer.tar", "det", "ch_PP-OCRv4_det.onnx"),
-        ("ch_PP-OCRv4_rec_infer.tar", "rec", "ch_PP-OCRv4_rec.onnx"),
-    ):
-        model_dir = extract_model(payloads[archive_name], cache, stem)
-        blob = convert(converter, model_dir, out_dir / output_name)
-        produced.append((output_name, len(blob), digest_of(blob)))
-        print("  " + output_name + "  (" + str(len(blob)) + " bytes)")
+    # `PR #88` round 11, FINDING 1 (`I-373`): this converted straight into
+    # `--out` and called `check_shapes` afterwards, so a REFUSED recogniser and
+    # its dictionary were left sitting in the staging directory, with no licence
+    # notice beside them -- the half-updated state `acquire-ppocr-detector.py`
+    # names as the reason its own two-phase write exists.
+    #
+    # That is round 10's FINDING 4, fixed in the detector script in the very
+    # commit that left this one standing. The twin-defect shape, inside the fix
+    # for the first instance.
+    #
+    # Same fix as its twin: produce into a scratch directory, check THERE, and
+    # move into `--out` only once the check has passed.
+    scratch = Path(tempfile.mkdtemp(prefix="convert-ppocr-"))
+    try:
+        for archive_name, stem, output_name in (
+            # The DETECTOR IS NOT HERE. ADR-0036 takes it as Baidu's own
+            # published ONNX; scripts/acquire-ppocr-detector.py downloads and
+            # verifies it.
+            ("ch_PP-OCRv4_rec_infer.tar", "rec", "ch_PP-OCRv4_rec.onnx"),
+        ):
+            model_dir = extract_model(payloads[archive_name], cache, stem)
+            blob = convert(converter, model_dir, scratch / output_name)
+            produced.append((output_name, len(blob), digest_of(blob)))
+            print("  " + output_name + "  (" + str(len(blob)) + " bytes)")
 
-    dictionary = payloads["ppocr_keys_v1.txt"]
-    (out_dir / "ppocr_keys_v1.txt").write_bytes(dictionary)
-    produced.append(("ppocr_keys_v1.txt", len(dictionary), digest_of(dictionary)))
-    print("  ppocr_keys_v1.txt  (" + str(len(dictionary)) + " bytes, copied unchanged)")
+        dictionary = payloads["ppocr_keys_v1.txt"]
+        (scratch / "ppocr_keys_v1.txt").write_bytes(dictionary)
+        produced.append(("ppocr_keys_v1.txt", len(dictionary), digest_of(dictionary)))
+        print(
+            "  ppocr_keys_v1.txt  (" + str(len(dictionary))
+            + " bytes, copied unchanged)"
+        )
 
-    print("Checking the converted models against UP-TAKE's assumptions")
-    check_shapes(out_dir)
+        print("Checking the converted models against UP-TAKE's assumptions")
+        check_shapes(scratch)
 
-    listing = "\n".join(
-        "  " + name + "\n    sha256 " + digest + "\n    " + str(size) + " bytes"
-        for name, size, digest in produced
-    )
-    (out_dir / "NOTICE-models.txt").write_text(
-        NOTICE_TEMPLATE.format(
-            tag=PADDLEOCR_TAG,
-            upstream=UPSTREAM,
-            converter=EXPECTED_P2O_VERSION,
-            opset=OPSET_VERSION,
-            files=listing,
-        ),
-        encoding="utf-8",
-    )
-    print("  wrote " + str(out_dir / "NOTICE-models.txt"))
+        # Only now, and only what passed. Every name in `produced` was written
+        # into `scratch` above, so this loop stages exactly the checked set --
+        # it cannot stage a file the check never saw.
+        for name, _size, _digest in produced:
+            shutil.move(str(scratch / name), str(out_dir / name))
+            print("  staged " + str(out_dir / name))
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+    # The DETECTOR is added from the pins, not from `produced`, and that is the
+    # whole point of these four lines. `ADR-0036` moved it out of this script;
+    # a notice built only from what this script writes would have silently
+    # dropped it from a LICENCE OBLIGATION, which is the one kind of omission
+    # nothing downstream catches -- `cargo deny` walks the crate graph and sees
+    # no `.onnx` at all, which is why this file exists in the first place.
+    detector_pins = read_detector_pins()
+
+    # The detector is named in the notice but acquired elsewhere, so say plainly
+    # whether it is actually there. NOT a refusal: the two CI steps can legally
+    # run in either order, and a developer converting the recogniser alone is
+    # doing something reasonable.
+    #
+    write_notice(out_dir, detector_pins, produced)
 
     print("\nManifest values -- these are what belong in AssetManifest:")
     for name, size, digest in produced:

@@ -211,13 +211,27 @@ impl Asset {
     }
 }
 
-/// Windows device names that are not file names, whatever the extension.
+/// Windows device stems, refused with or without an extension.
 ///
-/// Opening `CON`, `NUL` or `COM1` on Windows reaches a **device**, not a file in
-/// the directory, and the rule applies whatever the extension -- so `NUL.onnx`
-/// is the null device too. An asset written to one is silently discarded, and
-/// then re-downloaded on every launch, because reading it back never matches
-/// the digest.
+/// Opening `NUL` reaches a **device**, not a file in the directory: the write
+/// succeeds, `is_file()` is false, reading back gives nothing, and the name is
+/// absent from the listing. An asset written there is silently discarded and
+/// re-fetched on every launch, because reading it back never matches the digest.
+///
+/// ⚠️ **THE "WHATEVER THE EXTENSION" HALF WAS FALSE AND IS CORRECTED.** This
+/// said `NUL.onnx` "is the null device too". It is not. Measured on Windows 11
+/// Pro 26200 (`PR #88` round 8, confirmed by a second probe): `NUL.onnx`,
+/// `nul.onnx`, `CON.txt`, `COM1.txt`, `LPT9.onnx` and `NUL.tar.gz` each take 35
+/// bytes, read 35 back, and appear in the directory listing. Only the BARE stem
+/// reaches a device, and even that is path-form dependent -- `CON` hits the
+/// device through a relative path and behaves as a file through an absolute
+/// one, while `NUL` hits it either way.
+///
+/// **The extension forms are still refused, on the honest reason rather than
+/// the false one.** The behaviour varies by path form, by API and by Windows
+/// version; a flat rule costs nothing and does not turn on which runtime opened
+/// the file. `scripts/rust_consts.py` states the same corrected version, and
+/// `name-guard-cases.tsv` is what holds the two to it.
 const RESERVED_DEVICE_NAMES: [&str; 22] = [
     "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
     "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
@@ -357,6 +371,224 @@ impl AssetManifest {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    // ---------------------------------------------------------------------
+    // The shared name-guard corpus (PR #88 rounds 6, 7 and 8)
+    //
+    // `rust_consts.plain_file_name` in Python duplicates `is_plain_file_name`
+    // here, because the Rust guards what the PRODUCT installs and the Python
+    // guards what the BUILD stages -- different languages, different processes,
+    // neither can call the other. Three rounds of review each found a different
+    // way for the two to diverge unnoticed:
+    //
+    //   round 6  the control read only the reserved-name LIST, not the rules
+    //   round 7  it read rules with a line-anchored regex, so a rule in the
+    //            trailing expression, behind an `else if`, or wrapped by
+    //            rustfmt was invisible
+    //   round 8  it stripped `!`, so it saw WHICH predicate a rule used and
+    //            never whether the rule was that predicate or its negation
+    //
+    // Every fix was correct and every one was incomplete one shape down,
+    // because reading Rust predicates with a Python regex is a parser problem
+    // solved without a parser. The founder chose to replace the approach rather
+    // than patch it a fourth time.
+    //
+    // So NOTHING PARSES ANYTHING NOW. This test runs the real guard over a
+    // systematic corpus and writes the verdicts to a committed file. The Python
+    // control reads that same file and asserts its own guard agrees, name for
+    // name. A rule added to either side changes a verdict, and whichever side
+    // did not get it goes red:
+    //
+    //   rule added to Rust, file not regenerated  -> THIS test fails
+    //   rule added to Rust, file regenerated      -> the Python control fails
+    //   rule added to Python only                 -> the Python control fails
+
+    // ⚠️ The third line was FALSE for one thing when it was written, and round 9
+    // drilled it: `RESERVED_DEVICE_NAMES` was restated on both sides and the
+    // corpus drew its device cases from the RUST list, so a stem added to the
+    // PYTHON list alone produced no corpus case and every control stayed green.
+    // Worse, the version before this one carried a list-agreement test that
+    // would have caught it, and replacing the approach deleted that check along
+    // with the parser it sat beside.
+    //
+    // There is no second list now. `scripts/rust_consts.py` READS this one, so
+    // "added to Python only" is not a state the device list can be in. The
+    // three lines above are about RULES, and for rules they hold -- a predicate
+    // added to either guard moves a verdict, which the drills exercise in both
+    // directions.
+    //
+    // The residual, stated rather than left to be found: a rule whose effect is
+    // invisible on every name in the corpus. That is why the corpus is
+    // generated systematically over the interesting character classes and
+    // positions rather than hand-listed.
+    // ---------------------------------------------------------------------
+
+    /// Where the generated verdicts live, relative to the crate root.
+    const CASES_FILE: &str = "name-guard-cases.tsv";
+
+    /// Characters probed beyond plain ASCII, and why each is here.
+    ///
+    /// The ASCII range is covered exhaustively in `corpus()` rather than
+    /// sampled. These are the ones outside it worth naming.
+    const BEYOND_ASCII: [char; 4] = [
+        '\u{a0}',    // non-breaking space: whitespace that is not ASCII
+        '\u{3000}',  // ideographic space: removed by `str::trim`, invisible to a byte scan
+        '\u{e9}',    // a non-ASCII letter
+        '\u{10000}', // outside the basic multilingual plane
+    ];
+
+    /// Every name both guards are checked against.
+    ///
+    /// Systematic rather than hand-listed: each interesting character is placed
+    /// at the start, the end, and the middle of an otherwise ordinary name, and
+    /// alone. A rule about any of those positions therefore moves a verdict.
+    fn corpus() -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+
+        // The structural cases.
+        for fixed in ["", ".", "..", "...", "a", "model.onnx", "MODEL.ONNX"] {
+            names.push(fixed.to_owned());
+        }
+
+        // EVERY ASCII code point, in every position, alone and in context, plus
+        // the non-ASCII characters above.
+        //
+        // Exhaustive rather than sampled, and that is not thoroughness for its
+        // own sake. The first version of this corpus hand-picked fourteen
+        // characters, and its own drill found that a Rust rule rejecting '|'
+        // and a Python rule rejecting a leading 'z' BOTH passed unnoticed,
+        // because no name carried either. A rule invisible on every name is the
+        // one residual this design has, so the corpus closes it by covering the
+        // whole range a file name is written in.
+        let probes: Vec<char> = (0u8..=127).map(char::from).chain(BEYOND_ASCII).collect();
+        for character in probes {
+            names.push(character.to_string());
+            names.push(format!("{character}model.onnx"));
+            names.push(format!("model.onnx{character}"));
+            names.push(format!("mo{character}del.onnx"));
+            names.push(format!("model{character}.onnx"));
+        }
+
+        // Every reserved device stem, bare and with extensions, in three cases.
+        for reserved in RESERVED_DEVICE_NAMES {
+            names.push((*reserved).to_owned());
+            names.push(reserved.to_lowercase());
+            names.push(format!("{reserved}.onnx"));
+            names.push(format!("{}.onnx", reserved.to_lowercase()));
+            names.push(format!("{reserved}x"));
+            names.push(format!("x{reserved}"));
+        }
+
+        // Lengths, because a bound is a plausible future rule.
+        for length in [1_usize, 2, 8, 64, 255, 256, 300] {
+            names.push("a".repeat(length));
+        }
+
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// TSV- and line-safe, and reversible. The Python side decodes the same way.
+    fn escape(name: &str) -> String {
+        let mut out = String::new();
+        for character in name.chars() {
+            match character {
+                '\\' => out.push_str("\\\\"),
+                '\t' => out.push_str("\\t"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                // '#' is escaped for the READER's sake, not the writer's:
+                // the Python control skips lines beginning with '#' to drop
+                // this file's header, and the corpus legitimately contains
+                // "#" and "#model.onnx". PR #88 round 10 found the file
+                // carrying 803 data rows while the control compared 801, so
+                // a Python-only rule about '#' passed unnoticed. Escaping it
+                // removes the collision rather than teaching the reader to
+                // tell a datum from a comment.
+                '#' => out.push_str("\\x23"),
+                c if (c as u32) < 0x20 || (c as u32) == 0x7f => {
+                    out.push_str(&format!("\\x{:02x}", c as u32));
+                }
+                c => out.push(c),
+            }
+        }
+        out
+    }
+
+    fn rendered_cases() -> String {
+        let mut lines = vec![
+            "# GENERATED by uptake-assets' the_name_guard_cases_file_is_current test.".to_owned(),
+            "# Do not hand-edit. Regenerate with:".to_owned(),
+            "#   UPTAKE_REGENERATE_NAME_GUARD=1 cargo test -p uptake-assets name_guard".to_owned(),
+            "# Read by scripts/control-rust-consts.py, which asserts the Python guard agrees."
+                .to_owned(),
+            "# name\\tverdict  (verdict is `plain` or `refused`)".to_owned(),
+            // DECLARED so the reader can prove it parsed all of it. Round
+            // 10's finding was a reader that silently dropped two rows; a
+            // count it must match turns any future drop into a refusal.
+            format!("# cases: {}", corpus().len()),
+        ];
+        for name in corpus() {
+            let verdict = if is_plain_file_name(&name) {
+                "plain"
+            } else {
+                "refused"
+            };
+            lines.push(format!("{}\t{}", escape(&name), verdict));
+        }
+        lines.join("\n") + "\n"
+    }
+
+    #[test]
+    fn the_name_guard_cases_file_is_current() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(CASES_FILE);
+        let rendered = rendered_cases();
+
+        // `== "1"`, not `is_ok()`. PR #88 round 9 FINDING 2: `is_ok()` is
+        // true for ANY value, so `UPTAKE_REGENERATE_NAME_GUARD=0` -- an
+        // operator instruction meaning OFF -- made the staleness gate
+        // report green and silently rewrite the committed file. Every
+        // piece of documentation spells the switch `=1`; this now agrees
+        // with them.
+        if std::env::var("UPTAKE_REGENERATE_NAME_GUARD").as_deref() == Ok("1") {
+            if let Err(error) = std::fs::write(&path, &rendered) {
+                panic!("could not write {}: {error}", path.display());
+            }
+            return;
+        }
+
+        let committed = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+            panic!(
+                "{} is missing ({error}).\nRegenerate it: \
+                 UPTAKE_REGENERATE_NAME_GUARD=1 cargo test -p uptake-assets name_guard",
+                path.display()
+            )
+        });
+
+        assert_eq!(
+            committed.replace("\r\n", "\n"),
+            rendered,
+            "\n{} is stale. The guard's behaviour changed and the file the Python \
+             control reads did not.\nRegenerate it: \
+             UPTAKE_REGENERATE_NAME_GUARD=1 cargo test -p uptake-assets name_guard\n\
+             Then expect scripts/control-rust-consts.py to go red until the Python \
+             guard implements the same rule -- that is the point.",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn the_corpus_covers_both_verdicts_and_is_not_degenerate() {
+        // A corpus that is all-refused or all-plain would let the control pass
+        // against a guard that answers a constant, which is the vacuous-control
+        // failure this repository keeps finding.
+        let names = corpus();
+        let refused = names.iter().filter(|n| !is_plain_file_name(n)).count();
+        let plain = names.len() - refused;
+        assert!(refused > 20, "only {refused} refused names in the corpus");
+        assert!(plain > 5, "only {plain} accepted names in the corpus");
+    }
 
     const ZEROS: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
@@ -537,11 +769,20 @@ mod tests {
     }
 
     #[test]
-    fn a_windows_device_name_is_refused_whatever_the_extension() {
-        // CON, NUL and friends are DEVICES on Windows, not files, and the rule
-        // survives an extension: "NUL.onnx" is the null device. An asset written
-        // to one is silently discarded and then re-fetched on every launch,
-        // because reading it back never matches the digest.
+    fn a_windows_device_stem_is_refused_with_or_without_an_extension() {
+        // ⚠️ THE FOURTH SITE of a claim corrected in the other three, and the
+        // one the correcting commit's own Enumeration command could not reach:
+        // it grepped for "null device too" and this line says "is the null
+        // device" (PR #88 round 9, FINDING 3).
+        //
+        // What is true: NUL reaches a device, and CON does through a relative
+        // path. What is NOT: "the rule survives an extension". NUL.onnx,
+        // AUX.dll and com9.txt are ordinary files -- measured, see
+        // RESERVED_DEVICE_NAMES above.
+        //
+        // The names below are all still refused and the rule is genuinely flat,
+        // because the behaviour is path-form and platform dependent and a flat
+        // rule costs nothing. Only the stated reason was wrong.
         for name in [
             "CON",
             "con",

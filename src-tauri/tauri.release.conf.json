@@ -1,13 +1,13 @@
 {
   "bundle": {
     "resources": {
-      "assets/onnxruntime.dll": "onnxruntime.dll",
       "assets/LICENSE-onnxruntime.txt": "LICENSE-onnxruntime.txt",
       "assets/ThirdPartyNotices-onnxruntime.txt": "ThirdPartyNotices-onnxruntime.txt",
-      "assets/models/ch_PP-OCRv4_det.onnx": "models/ch_PP-OCRv4_det.onnx",
+      "assets/models/NOTICE-models.txt": "models/NOTICE-models.txt",
+      "assets/models/PP-OCRv6_small_det.onnx": "models/PP-OCRv6_small_det.onnx",
       "assets/models/ch_PP-OCRv4_rec.onnx": "models/ch_PP-OCRv4_rec.onnx",
       "assets/models/ppocr_keys_v1.txt": "models/ppocr_keys_v1.txt",
-      "assets/models/NOTICE-models.txt": "models/NOTICE-models.txt"
+      "assets/onnxruntime.dll": "onnxruntime.dll"
     }
   }
 }

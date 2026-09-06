@@ -37,7 +37,7 @@ source must go red when it can no longer read it, not pass on nothing.
 What this deliberately does NOT do
 ----------------------------------
 
-It does not convert the PP-OCRv4 models -- that is `convert-ppocr-models.py`,
+It does not convert the PP-OCRv4 recogniser -- that is `convert-ppocr-models.py`,
 which has its own toolchain and its own pinned sources. Both write into the same
 staging directory and neither knows about the other.
 """
@@ -239,7 +239,12 @@ def main() -> int:
 
     with zipfile.ZipFile(_io.BytesIO(archive_bytes)) as archive:
         for key, member in MEMBERS.items():
-            name = str(pins[key + "_FILE_NAME"])
+            # Same guard as acquire-ppocr-detector.py: the pinned name is
+            # joined onto `out` below, and PR #88 round 4 F3 named this file
+            # as carrying the identical unvalidated pattern.
+            name = rust_consts.plain_file_name(
+                str(pins[key + "_FILE_NAME"]), key + "_FILE_NAME"
+            )
             path = root + "/" + member
             try:
                 extracted = archive.read(path)
