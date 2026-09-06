@@ -50,7 +50,9 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import shutil
 import sys
+import tempfile
 import urllib.request
 from pathlib import Path
 
@@ -319,14 +321,44 @@ def main() -> int:
     # it. Nothing that fails a check reaches the staging directory.
     check(data, str(pins["DETECTION_SHA256"]), int(pins["DETECTION_SIZE"]))
 
-    arguments.out.mkdir(parents=True, exist_ok=True)
-    target = arguments.out / file_name
-    target.write_bytes(data)
-    print("  wrote " + str(target) + "  (" + str(len(data)) + " bytes)")
-    # After the write, because onnxruntime loads from a path rather than from
-    # bytes. The digest already passed, so what is on disk is the pinned file;
-    # this is asserting what that file IS, not whether it arrived intact.
-    check_shape(target, required=arguments.require_onnxruntime)
+    # ...and that sentence is TRUE OF THE SHAPE CHECK TOO, which it was not.
+    #
+    # `PR #88` round 10, FINDING 4: this wrote the file and then called
+    # `check_shape`, so a wrong-shaped detector was left in the staging
+    # directory after the refusal. The ordering was explained honestly in a
+    # comment -- onnxruntime loads from a path, not from bytes -- but an honest
+    # explanation of a gap is not the same as not having one.
+    #
+    # So the model is written to a scratch directory, checked there, and moved
+    # into `--out` only once it has passed. `acquire-ppocr-recogniser.py` does
+    # the same for the same reason.
+    #
+    # ⚠️ **THIS HUNK IS A MERGE RESOLUTION AND BOTH SIDES CONTRIBUTED.**
+    # `PR #89` branched before round 10, so its copy of these lines still had
+    # the write-then-check order, with `required=` added to the call. Taking
+    # either side whole would have lost something: this branch's version
+    # reverts round 10's fix, and `PR #88`'s version drops `PR #89`'s flag.
+    # `test_a_FAILED_shape_check_stages_NOTHING` is what would have caught the
+    # first of those, and it passes here.
+    #
+    # The round-11 note that used to sit here -- saying this comment cited
+    # `acquire-ppocr-recogniser.py`, a script that was "NOT an ancestor of this
+    # branch" -- is deleted rather than kept, because the merge made it false:
+    # that script exists now, one directory listing away, and does exactly what
+    # the sentence says it does.
+    scratch = Path(tempfile.mkdtemp(prefix="acquire-det-"))
+    try:
+        probe = scratch / file_name
+        probe.write_bytes(data)
+        check_shape(probe, required=arguments.require_onnxruntime)
+
+        arguments.out.mkdir(parents=True, exist_ok=True)
+        target = arguments.out / file_name
+        target.write_bytes(data)
+        print("  wrote " + str(target) + "  (" + str(len(data)) + " bytes)")
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
     print("")
     print(
         "Verified against the pin in crates/uptake-assets/src/ppocr.rs."
