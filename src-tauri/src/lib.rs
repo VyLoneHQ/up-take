@@ -83,7 +83,16 @@ pub fn run() -> tauri::Result<()> {
             // `UPTAKE_DEV_RESHOW` like `dev_harness::log_summon`): this is the
             // only external signal that the guard's callback fired at all, and
             // the second process exits before it can log anything of its own.
-            #[cfg(debug_assertions)]
+            // ⚠️ NO LONGER `#[cfg(debug_assertions)]`, and that is a deliberate
+            // behaviour change rather than a lint dodge. Release clippy caught
+            // the re-export as unused, which is what surfaced the question.
+            //
+            // Judged per site, which is why part 2 of 1.15 exists rather than a
+            // mechanical sweep: this event is a LITERAL with no screen content,
+            // it is exactly what a support conversation wants ("it was already
+            // running"), and it fires only on a relaunch attempt, so it cannot
+            // flood the file. `I-42` is the record of release builds logging
+            // almost nothing; this is one line in the other direction.
             diagnostics::note("single-instance: relaunch detected, summoning the overlay");
             overlay::summon(app);
         }));
