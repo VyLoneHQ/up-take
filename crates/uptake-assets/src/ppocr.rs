@@ -120,7 +120,12 @@ pub const DICTIONARY_SIZE: u64 = 26_249;
 /// exactly why `ADR-0036` could swap it alone without touching this number.
 pub const RECOGNITION_CLASS_COUNT: usize = 6625;
 
-/// The manifest for PP-OCRv4, served from `base_url`.
+/// The manifest UP-TAKE ships, served from `base_url`.
+///
+/// ⚠️ This said "the manifest for PP-OCRv4" until `PR #88` round 11 (FINDING
+/// 5). `ADR-0036` made the DETECTOR a PP-OCRv6 build, so the manifest names
+/// two model generations and no single version describes it. The function name
+/// is a public rename with ripple and is deliberately left alone.
 ///
 /// `base_url` is joined with a single `/` and each asset's file name. It must be
 /// HTTPS; [`Asset::validate`] enforces that, and this function surfaces the

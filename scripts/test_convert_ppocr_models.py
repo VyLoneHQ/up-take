@@ -289,6 +289,147 @@ def test_write_notice_REFUSES_a_pin_that_is_not_a_plain_name(module) -> None:
             shutil.rmtree(out, ignore_errors=True)
 
 
+# ---------------------------------------------------------------------------
+# `PR #88` round 11, FINDING 1 (`I-373`): `main()` converted straight into
+# `--out` and ran `check_shapes` afterwards, so a refused recogniser stayed in
+# the staging directory. The reviewer also recorded WHY nothing caught it --
+# "nine tests and none of them touches `check_shapes` or `main()`'s ordering,
+# so nothing can go red on this". These three are that.
+#
+# They stub the network, the converter and the shape check, which is what lets
+# `main()` run end to end here at all: the real path needs a 10 MB download and
+# a `paddle2onnx` install, and this suite exists to run without either.
+# ---------------------------------------------------------------------------
+
+FAKE_ONNX = b"forty-two bytes standing in for a converted model"
+FAKE_DICT = b"a\nb\nc\n"
+
+
+def drive_main(module, *, refuse: bool) -> dict:
+    """Runs `main()` with every external dependency replaced.
+
+    `refuse=True` makes the shape check raise the way the real one does on a
+    wrong input shape. Records the directory the check was handed and what was
+    in it AT THAT MOMENT, because "the check ran" and "the check ran before
+    anything was staged" are different claims and only the second is the one
+    `I-373` is about.
+    """
+    root = Path(tempfile.mkdtemp(prefix="convert-test-main-"))
+    out = root / "staging"
+    cache = root / "cache"
+    seen: list[tuple[Path, list[str], list[str]]] = []
+    names = ("fetch", "load_converter", "extract_model", "convert", "check_shapes")
+    saved = {name: getattr(module, name) for name in names}
+    saved_argv = sys.argv
+
+    def fake_fetch(source, _cache):
+        return b"tar-bytes" if source.name.endswith(".tar") else FAKE_DICT
+
+    def fake_extract_model(_archive, _cache, stem):
+        directory = root / ("extracted-" + stem)
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory
+
+    def fake_convert(_converter, _model_dir, destination):
+        destination.write_bytes(FAKE_ONNX)
+        return FAKE_ONNX
+
+    def fake_check_shapes(directory, load=None):  # noqa: ARG001 - mirrors the seam
+        here = Path(directory)
+        already = sorted(q.name for q in out.iterdir()) if out.is_dir() else []
+        seen.append((here, sorted(q.name for q in here.iterdir()), already))
+        if refuse:
+            raise SystemExit(
+                "recogniser takes ['N', 1, 32, 'W'], expected [N, 3, 48, W]"
+            )
+
+    module.fetch = fake_fetch
+    module.load_converter = lambda: object()
+    module.extract_model = fake_extract_model
+    module.convert = fake_convert
+    module.check_shapes = fake_check_shapes
+    sys.argv = [
+        "convert-ppocr-models.py", "--out", str(out), "--cache", str(cache)
+    ]
+    code = None
+    refusal = None
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            try:
+                code = module.main()
+            except SystemExit as error:
+                refusal = str(error)
+    finally:
+        for name, value in saved.items():
+            setattr(module, name, value)
+        sys.argv = saved_argv
+
+    staged = sorted(q.name for q in out.iterdir()) if out.is_dir() else []
+    return {
+        "root": root, "out": out, "staged": staged,
+        "seen": seen, "code": code, "refusal": refusal,
+    }
+
+
+def test_a_FAILED_shape_check_stages_NOTHING(module) -> None:
+    """`I-373` itself. Round 11 drilled the refusal and found the model and the
+    dictionary both sitting in `--out` afterwards, with no licence notice
+    beside them."""
+    result = drive_main(module, refuse=True)
+    try:
+        assert result["refusal"] is not None, "the refusal did not propagate"
+        assert "recogniser takes" in result["refusal"], result["refusal"]
+        assert result["staged"] == [], (
+            "a refused conversion left " + str(result["staged"])
+            + " in the staging directory"
+        )
+    finally:
+        shutil.rmtree(result["root"], ignore_errors=True)
+
+
+def test_a_PASSING_shape_check_stages_the_model_and_the_dictionary(module) -> None:
+    """The other half, and it is not decoration: a `main()` that staged nothing
+    at all would pass the test above."""
+    result = drive_main(module, refuse=False)
+    try:
+        assert result["code"] == 0, "clean run returned " + str(result["code"])
+        for wanted in ("ch_PP-OCRv4_rec.onnx", "ppocr_keys_v1.txt"):
+            assert wanted in result["staged"], (
+                wanted + " was not staged; got " + str(result["staged"])
+            )
+        staged_model = result["out"] / "ch_PP-OCRv4_rec.onnx"
+        assert staged_model.read_bytes() == FAKE_ONNX, "staged the wrong bytes"
+    finally:
+        shutil.rmtree(result["root"], ignore_errors=True)
+
+
+def test_the_shape_check_runs_OUTSIDE_the_staging_directory(module) -> None:
+    """The ordering fix, stated as the property rather than as the code.
+
+    Without this, `main()` could stage the files, check them in place, and
+    delete them again on refusal -- which would pass the first test while
+    leaving the window `I-373` is about. The check must be handed a directory
+    that is NOT `--out`, and the files must already be in it."""
+    result = drive_main(module, refuse=False)
+    try:
+        assert len(result["seen"]) == 1, (
+            "check_shapes was called " + str(len(result["seen"])) + " times"
+        )
+        directory, contents, already_staged = result["seen"][0]
+        assert directory.resolve() != result["out"].resolve(), (
+            "the shape check was handed the staging directory itself"
+        )
+        assert "ch_PP-OCRv4_rec.onnx" in contents, (
+            "the check ran before the model was written; it saw " + str(contents)
+        )
+        assert already_staged == [], (
+            "the staging directory already held " + str(already_staged)
+            + " when the shape check ran"
+        )
+    finally:
+        shutil.rmtree(result["root"], ignore_errors=True)
+
+
 def main() -> int:
     module = load_module()
     tests = [value for name, value in globals().items() if name.startswith("test_")]

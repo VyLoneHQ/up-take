@@ -38,11 +38,13 @@ Five of seven area types are built.
   for the conversion you asked for most recently: convert two areas at once and the second one
   is what you paste, whichever finishes first.
   Two things worth knowing before you build this yourself. **The model files and the OCR
-  runtime are not in this repository**, because they are 31 MB of binaries that belong in a
-  release rather than in a git history. The installer carries them, and two scripts fetch and
-  verify them against pinned checksums first: `scripts/acquire-onnxruntime.py` and
-  `scripts/convert-ppocr-models.py`. Building the app itself needs neither. Building an
-  **installer** needs both, plus the config that packages them:
+  runtime are not in this repository**, because they are about 37 MB of binaries that belong
+  in a release rather than in a git history. The installer carries them, and three scripts put
+  them in place: `scripts/acquire-onnxruntime.py` and `scripts/acquire-ppocr-detector.py`
+  download and verify their bytes against pinned checksums before writing anything, and
+  `scripts/convert-ppocr-models.py` converts the text recogniser from PaddleOCR's own release,
+  checking its inputs against pinned checksums the same way. Building the app itself needs
+  none of them. Building an **installer** needs all three, plus the config that packages them:
   `pnpm tauri build --config src-tauri/tauri.release.conf.json`. And **there is no accuracy standard yet**:
   it misreads characters, and nothing in the project says what a good enough reading would be.
   Something does measure it now, which is new and is not the same as a standard:

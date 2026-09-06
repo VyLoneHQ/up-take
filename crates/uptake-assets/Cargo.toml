@@ -1,8 +1,8 @@
 # uptake-assets -- the checksummed acquisition of files UP-TAKE does not ship
-# in its binary: ONNX Runtime, and the PP-OCRv4 models.
+# in its binary: ONNX Runtime, the PP-OCRv6 detector and the PP-OCRv4 recogniser.
 #
 # Platform-independent by design, and for the same reason uptake-ocr is: it is
-# testable without a window, without a network, and without the ~31 MB of assets
+# testable without a window, without a network, and without the ~37 MB of assets
 # it exists to install. See the `fetch` module for the seam that makes that true.
 #
 # NO HTTP CLIENT DEPENDENCY HERE, and that is deliberate rather than unfinished.

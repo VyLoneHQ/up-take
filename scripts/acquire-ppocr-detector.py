@@ -306,8 +306,15 @@ def main() -> int:
     # explanation of a gap is not the same as not having one.
     #
     # So the model is written to a scratch directory, checked there, and moved
-    # into `--out` only once it has passed. `acquire-ppocr-recogniser.py` does
-    # the same for the same reason.
+    # into `--out` only once it has passed.
+    #
+    # ⚠️ This named `acquire-ppocr-recogniser.py` until `PR #88` round 11
+    # (FINDING 2). That file is on `PR #89` and is NOT an ancestor of this
+    # branch, so the sentence cited a script no reader here could open, in the
+    # same commit that quarantined `--require-onnxruntime` as PR #89's work.
+    # The twin that does the same thing on THIS branch is
+    # `convert-ppocr-models.py`, which gained the same two-phase write when
+    # round 11 found it had been left out of round 10's fix (`I-373`).
     scratch = Path(tempfile.mkdtemp(prefix="acquire-det-"))
     try:
         probe = scratch / file_name

@@ -278,8 +278,25 @@ mod tests {
     }
 
     #[test]
-    fn the_installer_payload_is_derived_and_not_hand_written() {
-        // The whole point of the function: it cannot disagree with the pins.
+    fn the_installer_payload_counts_every_pinned_member() {
+        // ⚠️ RENAMED by `PR #88` round 11 (FINDING 6). This was called
+        // `the_installer_payload_is_derived_and_not_hand_written` and its
+        // comment read "the whole point of the function: it cannot disagree
+        // with the pins". The reviewer drilled it: replacing the whole body of
+        // `installer_payload_bytes()` with the literal `37_212_782` leaves
+        // this test GREEN, because both sides of the assertion are then the
+        // same number. Any hand-written literal equal to today's total passes.
+        //
+        // What it DOES catch, drilled in the same round: a member going
+        // missing. Dropping `LICENCE_SIZE` and `NOTICES_SIZE` -- round 4's F6
+        // exactly -- turns it red, and that is the regression the function was
+        // written for. So the check earns its place under the narrower name.
+        //
+        // Nothing in Rust can assert that a `const fn`'s body is an expression
+        // rather than a literal, which is why this is a rename and not a
+        // stronger test. The property "the total tracks the pins" is held by
+        // review, not by the suite, and saying so is better than a name that
+        // implies otherwise.
         assert_eq!(
             installer_payload_bytes(),
             RUNTIME_SIZE

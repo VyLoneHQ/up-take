@@ -88,7 +88,7 @@ jobs:
 
       # The bundle checker's own tests (I-346). Synthetic assets and a synthetic
       # pins file in a temp directory, with the module's tables rebound at them,
-      # so they need none of the 31 MB this job does not have. Here for the same
+      # so they need none of the ~37 MB this job does not have. Here for the same
       # reason as the two steps above it: a fast Python run on a Linux runner
       # that is already required, so it costs no new check to register in branch
       # protection and no queue time on the Windows runners.
@@ -265,16 +265,24 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # ADR-0035: the ONNX Runtime and the PP-OCRv4 models ship INSIDE the
+      # ADR-0035: the ONNX Runtime, the PP-OCRv6 detector and the PP-OCRv4
+      # recogniser ship INSIDE the
       # installer, and `bundle.resources` in tauri.release.conf.json names them
       # (merged in with --config at the build step below; it is deliberately NOT
       # in tauri.conf.json, because tauri-build validates resource paths at
       # compile time). They
-      # are ~31 MB of binaries acquired rather than committed, so a checkout
-      # alone cannot build a bundle and these two steps are what make it
-      # possible. Each verifies every byte against a pinned SHA-256 before
-      # writing (ADR-0032 decision 2), so a tampered or moved upstream artifact
-      # fails the build rather than reaching an installer.
+      # are ~37 MB of binaries acquired rather than committed (37,212,782 B
+      # exactly; `installer_payload_bytes()` derives it from the six pins, so
+      # do not hand-write it here), so a checkout alone cannot build a bundle
+      # and these THREE steps are what make it possible.
+      #
+      # Every byte that arrives over the network is checked against a pinned
+      # SHA-256 before it is used (ADR-0032 decision 2), so a tampered or moved
+      # upstream artifact fails the build rather than reaching an installer.
+      # ⚠️ Stated that way deliberately, since round 11 FINDING 3 found the
+      # earlier wording ("Each verifies every byte before writing") untrue of
+      # the converter: its OUTPUT digest is a result recorded in the manifest,
+      # not a precondition, and that script's own docstring says why.
       #
       # The build is DELIBERATELY not made to work without them. An installer
       # with no runtime and no models is one whose OCR reports itself
@@ -325,7 +333,7 @@ jobs:
       # `--config` MERGES the release-only bundle resources into the base
       # config. They are deliberately not in `tauri.conf.json`: `tauri-build`
       # validates resource paths at COMPILE time, so putting them there makes
-      # every `cargo check`/`clippy`/`test` require 31 MB of acquired assets.
+      # every `cargo check`/`clippy`/`test` require ~37 MB of acquired assets.
       - name: Build application
         run: pnpm tauri build --config src-tauri/tauri.release.conf.json
 

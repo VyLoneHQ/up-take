@@ -13,8 +13,17 @@ What it does
 
 Downloads two upstream files over HTTPS, verifies each against a pinned SHA-256
 before using it, converts the recogniser to ONNX, copies the dictionary
-unchanged, and prints the digests of what came out. Nothing is written outside
-the output directory, and a digest mismatch stops the run.
+unchanged, and prints the digests of what came out. A digest mismatch stops the
+run.
+
+**Nothing that fails a check reaches the output directory.** The conversion
+happens in a scratch directory, the shape check runs THERE, and the results are
+moved into `--out` only once they have passed. This sentence used to read
+"nothing is written outside the output directory" and was doing double duty as
+a staging guarantee it did not hold: `PR #88` round 11 FINDING 1 (`I-373`)
+drilled a refused recogniser sitting in the staging directory. The scratch
+directory is now the one thing written outside `--out`, and it is removed on
+every path.
 
 ⚠️ **THE DETECTOR IS NOT HERE, as of ADR-0036.** It is PaddlePaddle's own ONNX
 build of PP-OCRv6, downloaded and verified by
@@ -95,8 +104,10 @@ import hashlib
 import importlib.util
 import io
 import os
+import shutil
 import sys
 import tarfile
+import tempfile
 import urllib.request
 from pathlib import Path
 
@@ -311,31 +322,60 @@ def convert(converter, model_dir: Path, destination: Path) -> bytes:
     return blob
 
 
-def check_shapes(out_dir: Path) -> None:
-    """Opens both models in ONNX Runtime and asserts the shapes UP-TAKE assumes.
+def onnxruntime_session(path: Path):
+    """Opens `path` with onnxruntime. The default loader for [`check_shapes`].
+
+    Separated out so [`check_shapes`] takes it as a seam, exactly as
+    `acquire-ppocr-detector.py` does and for the reason round 3 of `PR #88`
+    found there: a guard whose refusal branch executes in no job at all is a
+    guard nothing can go red on. With this seam a stub loader drives every
+    branch below with no `onnxruntime`, no model and no file.
+    """
+    import onnxruntime  # noqa: PLC0415
+
+    return onnxruntime.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+
+
+def check_shapes(directory: Path, load=onnxruntime_session) -> None:
+    """Opens the converted RECOGNISER and asserts the shapes UP-TAKE assumes.
+
+    ⚠️ This summary said "both models" until `PR #88` round 11 (FINDING 4). It
+    did open two, until this branch moved the detector out with `ADR-0036`; the
+    body was corrected and the line a reader sees first was not.
+
+    ⚠️ `directory` is NOT the staging directory, and the parameter was renamed
+    from `out_dir` to say so. It is the scratch directory [`main`] converts
+    into: a check that runs after the file is staged cannot keep anything out
+    of the staging directory, which is round 11 FINDING 1 (`I-373`).
 
     Skipped with a loud line if onnxruntime is absent, rather than failing: the
     conversion is this script's job and the check is a bonus. A SILENT skip
     would be the defect -- a check that can vanish without saying so reports
     green forever.
     """
+    # The DETECTOR's shape check is not here. It MOVED to
+    # scripts/acquire-ppocr-detector.py with the detector itself (ADR-0036) --
+    # moved rather than dropped, because it is the check that proves Baidu's
+    # ONNX fits this pipeline, and it matters more on bytes we did not produce
+    # than on bytes we did.
     try:
-        import onnxruntime  # noqa: PLC0415
+        recogniser = load(directory / "ch_PP-OCRv4_rec.onnx")
     except ImportError:
         print(
             "  NOT CHECKED: onnxruntime is not installed, so the converted "
             "models' shapes were not verified. Install it to enable this."
         )
         return
+    except Exception as error:  # noqa: BLE001 - onnxruntime raises several types
+        # A refusal, not a traceback -- the same handling its twin gained when
+        # round 1 asked that script for tests and the happy path came back as
+        # an unhandled exception instead of a verdict. Reaching here means the
+        # converter produced bytes that are not loadable ONNX at all, which
+        # deserves a sentence rather than a stack trace.
+        raise SystemExit(
+            "the converted recogniser is not loadable as ONNX: " + str(error)
+        ) from error
 
-    # The DETECTOR's shape check is not here. It MOVED to
-    # scripts/acquire-ppocr-detector.py with the detector itself (ADR-0036) --
-    # moved rather than dropped, because it is the check that proves Baidu's
-    # ONNX fits this pipeline, and it matters more on bytes we did not produce
-    # than on bytes we did.
-    recogniser = onnxruntime.InferenceSession(
-        str(out_dir / "ch_PP-OCRv4_rec.onnx"), providers=["CPUExecutionProvider"]
-    )
     rec_in = recogniser.get_inputs()[0].shape
     rec_out = recogniser.get_outputs()[0].shape
     if rec_in[1] != 3 or rec_in[2] != 48:
@@ -570,23 +610,50 @@ def main() -> int:
 
     print("Converting")
     produced = []
-    for archive_name, stem, output_name in (
-        # The DETECTOR IS NOT HERE. ADR-0036 takes it as Baidu's own published
-        # ONNX; scripts/acquire-ppocr-detector.py downloads and verifies it.
-        ("ch_PP-OCRv4_rec_infer.tar", "rec", "ch_PP-OCRv4_rec.onnx"),
-    ):
-        model_dir = extract_model(payloads[archive_name], cache, stem)
-        blob = convert(converter, model_dir, out_dir / output_name)
-        produced.append((output_name, len(blob), digest_of(blob)))
-        print("  " + output_name + "  (" + str(len(blob)) + " bytes)")
+    # `PR #88` round 11, FINDING 1 (`I-373`): this converted straight into
+    # `--out` and called `check_shapes` afterwards, so a REFUSED recogniser and
+    # its dictionary were left sitting in the staging directory, with no licence
+    # notice beside them -- the half-updated state `acquire-ppocr-detector.py`
+    # names as the reason its own two-phase write exists.
+    #
+    # That is round 10's FINDING 4, fixed in the detector script in the very
+    # commit that left this one standing. The twin-defect shape, inside the fix
+    # for the first instance.
+    #
+    # Same fix as its twin: produce into a scratch directory, check THERE, and
+    # move into `--out` only once the check has passed.
+    scratch = Path(tempfile.mkdtemp(prefix="convert-ppocr-"))
+    try:
+        for archive_name, stem, output_name in (
+            # The DETECTOR IS NOT HERE. ADR-0036 takes it as Baidu's own
+            # published ONNX; scripts/acquire-ppocr-detector.py downloads and
+            # verifies it.
+            ("ch_PP-OCRv4_rec_infer.tar", "rec", "ch_PP-OCRv4_rec.onnx"),
+        ):
+            model_dir = extract_model(payloads[archive_name], cache, stem)
+            blob = convert(converter, model_dir, scratch / output_name)
+            produced.append((output_name, len(blob), digest_of(blob)))
+            print("  " + output_name + "  (" + str(len(blob)) + " bytes)")
 
-    dictionary = payloads["ppocr_keys_v1.txt"]
-    (out_dir / "ppocr_keys_v1.txt").write_bytes(dictionary)
-    produced.append(("ppocr_keys_v1.txt", len(dictionary), digest_of(dictionary)))
-    print("  ppocr_keys_v1.txt  (" + str(len(dictionary)) + " bytes, copied unchanged)")
+        dictionary = payloads["ppocr_keys_v1.txt"]
+        (scratch / "ppocr_keys_v1.txt").write_bytes(dictionary)
+        produced.append(("ppocr_keys_v1.txt", len(dictionary), digest_of(dictionary)))
+        print(
+            "  ppocr_keys_v1.txt  (" + str(len(dictionary))
+            + " bytes, copied unchanged)"
+        )
 
-    print("Checking the converted models against UP-TAKE's assumptions")
-    check_shapes(out_dir)
+        print("Checking the converted models against UP-TAKE's assumptions")
+        check_shapes(scratch)
+
+        # Only now, and only what passed. Every name in `produced` was written
+        # into `scratch` above, so this loop stages exactly the checked set --
+        # it cannot stage a file the check never saw.
+        for name, _size, _digest in produced:
+            shutil.move(str(scratch / name), str(out_dir / name))
+            print("  staged " + str(out_dir / name))
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
 
     # The DETECTOR is added from the pins, not from `produced`, and that is the
     # whole point of these four lines. `ADR-0036` moved it out of this script;
