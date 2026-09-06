@@ -84,7 +84,7 @@ pub fn run() -> tauri::Result<()> {
             // only external signal that the guard's callback fired at all, and
             // the second process exits before it can log anything of its own.
             #[cfg(debug_assertions)]
-            tracing::info!(target: "up-take", "single-instance: relaunch detected, summoning the overlay");
+            diagnostics::note("single-instance: relaunch detected, summoning the overlay");
             overlay::summon(app);
         }));
     }
@@ -171,7 +171,7 @@ pub fn run() -> tauri::Result<()> {
                     | WindowEvent::ScaleFactorChanged { .. }
             ) && let Err(error) = overlay::sync_bounds(window.app_handle())
             {
-                tracing::warn!(target: "up-take", %error, "overlay: could not re-sync after a window event");
+                diagnostics::trouble("overlay: could not re-sync after a window event", &error);
             }
         })
         .setup(|app| {
@@ -181,15 +181,13 @@ pub fn run() -> tauri::Result<()> {
             //
             // A failure here is deliberately not fatal and is reported through
             // the channel that still works -- see `diagnostics::init`.
-            match diagnostics::init() {
-                Ok(directory) => tracing::info!(
-                    target: "up-take",
-                    logs = %directory.display(),
-                    "UP-TAKE starting"
-                ),
-                Err(error) => eprintln!(
+            // `init` logs its own success, including the log path -- see its
+            // docs. Only the failure needs handling here, and it cannot be
+            // logged, because the thing that failed is the log.
+            if let Err(error) = diagnostics::init() {
+                eprintln!(
                     "diagnostics: no log file this run ({error}); continuing, because a capture tool that will not start without its own log is worse than one without a log"
-                ),
+                );
             }
 
             // Recorded here because `setup` runs on the event-loop thread, so
@@ -268,10 +266,9 @@ pub fn run() -> tauri::Result<()> {
             // alive.
             #[cfg(windows)]
             if let Err(error) = overlay_wndproc::install(app.handle()) {
-                tracing::warn!(
-                    target: "up-take",
-                    %error,
-                    "display-watch: display changes while the overlay is visible will not be tracked"
+                diagnostics::trouble(
+                    "display-watch: display changes while the overlay is visible will not be tracked",
+                    &error,
                 );
             }
             // ADR-0019: permanent, one-time exclusion from every capture API.
@@ -280,7 +277,7 @@ pub fn run() -> tauri::Result<()> {
             // reason to refuse to start.
             #[cfg(windows)]
             if let Err(error) = overlay::exclude_from_capture(app.handle()) {
-                tracing::warn!(target: "up-take", %error, "overlay");
+                diagnostics::trouble("overlay", &error);
             }
             // Registered before the tray: architecture §4's mitigation is
             // telling the user a failed registration, and that still holds

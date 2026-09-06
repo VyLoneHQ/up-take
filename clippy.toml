@@ -1,0 +1,30 @@
+# The `tracing` macros are banned outside `src-tauri/src/diagnostics.rs`.
+#
+# WHY, and it is a privacy rule rather than a style one: `architecture.md`
+# section 4's threat table puts "captured screen content" first, and a log file
+# on a user's disk is that same asset sitting somewhere they did not ask for it.
+# The rule is that recognised text, pixels, saved file names and window titles
+# never reach a log.
+#
+# Holding that rule needs to be structural. `PR #94` rounds 1 to 3 tried holding
+# it with a test that scanned the crate's source for forbidden identifiers
+# reaching a logging macro; it was walked past EIGHT times and went red once on
+# correct code, and every fix grew the parser until the next round found more.
+# Ten BEHAVIOUR findings across three rounds, all of them in that scanner.
+#
+# So the property is held by construction instead: every log line UP-TAKE emits
+# is written in ONE file, which a human reads, and the helpers there take
+# `&'static str` -- a literal cannot contain what was on a screen at runtime.
+# This list is what confines them to that file, and CI runs clippy as
+# `-D warnings`, so it is an error rather than advice.
+#
+# ⚠️ `eprintln!` is NOT here yet. 68 remain in this crate and part 2 of task
+# 1.15 is where they go; the ban widens with them. Adding it today would need
+# 68 `#[allow]`s, which is worse than the gap it closes.
+disallowed-macros = [
+  { path = "tracing::error", reason = "log through crate::diagnostics, so every log line lives in one reviewable file (task 1.15)" },
+  { path = "tracing::warn", reason = "log through crate::diagnostics, so every log line lives in one reviewable file (task 1.15)" },
+  { path = "tracing::info", reason = "log through crate::diagnostics, so every log line lives in one reviewable file (task 1.15)" },
+  { path = "tracing::debug", reason = "log through crate::diagnostics, so every log line lives in one reviewable file (task 1.15)" },
+  { path = "tracing::trace", reason = "log through crate::diagnostics, so every log line lives in one reviewable file (task 1.15)" },
+]

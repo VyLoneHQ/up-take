@@ -249,7 +249,7 @@ pub(crate) fn copy_text_to_clipboard(app: &AppHandle, area: AreaId, text: &str, 
         outcome,
         REPORT_EVERY_ACTION.load(Ordering::SeqCst),
     ) {
-        tracing::info!(target: "up-take", "{line}");
+        crate::diagnostics::measurement(&line);
     }
 }
 
@@ -780,13 +780,15 @@ pub(crate) fn capture_into_area(app: &AppHandle, id: AreaId, bounds: Rect) {
             match crate::captures::still_holds(&app, id, version) {
                 Some(fresh) => {
                     if let Err(error) = crate::overlay::emit_pin(&app, fresh) {
-                        tracing::warn!(target: "up-take", %error, "output: pinned the capture but could not announce it");
+                        crate::diagnostics::trouble(
+                            "output: pinned the capture but could not announce it",
+                            &error,
+                        );
                     }
                 }
-                None => tracing::warn!(
-                    target: "up-take",
-                    area = ?id,
-                    "output: the capture was dropped before it could be announced"
+                None => crate::diagnostics::trouble_for_area(
+                    "output: the capture was dropped before it could be announced",
+                    id,
                 ),
             }
             // Recorded before the `?`s below, so a failure *inside* publishing is
@@ -1103,7 +1105,10 @@ fn frozen_or_live(retake: Retake, split: &mut Split) -> Result<(RgbaBitmap, Vec<
 pub(crate) fn clear_magnification(app: &AppHandle, id: AreaId) {
     cancel_magnification(app, id);
     if let Err(error) = crate::overlay::emit_unpin(app, id) {
-        tracing::warn!(target: "up-take", %error, "output: dropped the pinned pixels but could not announce it");
+        crate::diagnostics::trouble(
+            "output: dropped the pinned pixels but could not announce it",
+            &error,
+        );
     }
 }
 
@@ -1316,7 +1321,7 @@ pub(crate) fn init_report_verbosity() {
         Err(std::env::VarError::NotPresent) => None,
         Err(std::env::VarError::NotUnicode(_)) => Some(NOT_UNICODE.to_string()),
     };
-    tracing::info!(target: "up-take", "{}", apply_report_verbosity(raw.as_deref()));
+    crate::diagnostics::measurement(&apply_report_verbosity(raw.as_deref()));
 }
 
 /// Applies the variable and returns the line to print. Separated from the env
@@ -1400,7 +1405,7 @@ fn report(action: &str, started: Instant, split: &Split, outcome: Result<(), Str
         outcome,
         REPORT_EVERY_ACTION.load(Ordering::SeqCst),
     ) {
-        tracing::info!(target: "up-take", "{line}");
+        crate::diagnostics::measurement(&line);
     }
 }
 

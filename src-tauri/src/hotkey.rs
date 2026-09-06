@@ -186,7 +186,11 @@ fn report_failure(app: &AppHandle, label: &str, error: &str) {
     // mechanics are shared (task 1.15).
     crate::diagnostics::report_failure(
         app,
-        &format!("hotkey: {label} could not be registered: {error}"),
+        // A literal, by type. The label and the OS error are both safe, but
+        // `source` is what goes in the LOG and its type says only a literal
+        // may -- see `diagnostics::report_failure`. Both appear in the dialog
+        // below, which the user reads and no file keeps.
+        "hotkey: a combination could not be registered",
         "UP-TAKE — hotkey unavailable",
         &detail,
     );

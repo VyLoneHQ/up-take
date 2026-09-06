@@ -4484,12 +4484,10 @@ dependencies = [
  "tauri-plugin-global-shortcut",
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
  "uptake-assets",
  "uptake-capture",
  "uptake-core",
+ "uptake-log",
  "uptake-ocr",
  "windows-capture",
  "windows-sys 0.61.2",
@@ -4521,6 +4519,15 @@ version = "0.1.0"
 dependencies = [
  "proptest",
  "serde",
+]
+
+[[package]]
+name = "uptake-log"
+version = "0.1.0"
+dependencies = [
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
 ]
 
 [[package]]

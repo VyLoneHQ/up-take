@@ -1,0 +1,33 @@
+[package]
+name = "uptake-log"
+description = "The ONLY crate permitted to call the tracing macros. Every log line UP-TAKE writes is in src/lib.rs, and the signatures there are the privacy rule."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+
+# ⚠️ THIS OVERRIDE IS THE WHOLE POINT OF THE CRATE EXISTING.
+#
+# `clippy.toml` bans the `tracing` macros across the workspace so that logging
+# cannot be scattered. That ban admits no local exception: measured on
+# 2026-09-06, `#[allow(clippy::disallowed_macros)]` is ignored on a macro
+# invocation ("the built-in attribute `allow` will be ignored, since it's
+# applied to the macro invocation"), and it does not suppress the lint at
+# function or module level either, because it is reported at the expansion site.
+#
+# A lint LEVEL, unlike lint configuration, is per crate. So the permission is a
+# crate boundary: this one may call them, nothing else can, and the boundary is
+# enforced by the compiler rather than by anyone remembering.
+#
+# It also has no `tauri` dependency on purpose -- the dialog half of
+# diagnostics stays in `src-tauri`, so this crate is testable with no window.
+[lints.clippy]
+disallowed_macros = "allow"
