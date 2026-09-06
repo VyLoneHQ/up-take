@@ -30,6 +30,7 @@ Run: `python3 scripts/test_convert_ppocr_models.py`
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import shutil
 import sys
 import tempfile
@@ -428,6 +429,157 @@ def test_the_shape_check_runs_OUTSIDE_the_staging_directory(module) -> None:
         )
     finally:
         shutil.rmtree(result["root"], ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# `PR #88` round 12, the BEHAVIOUR finding, and it is the same class one turn
+# later: round 11's fix gave `check_shapes` a `load` seam AND a docstring saying
+# the seam meant "a stub loader drives every branch below with no onnxruntime,
+# no model and no file" -- and shipped no test that uses it. Every test above
+# stubs `check_shapes` out wholesale to drive `main()`'s ordering, so the
+# function's own branches ran nowhere.
+#
+# Drilled by round 12, and reproduced here before fixing. With the suite at
+# 12/12 the following each left it GREEN:
+#
+#   both shape refusals deleted                        12/12 passed
+#   the unloadable-ONNX refusal deleted                12/12 passed
+#   the loud onnxruntime-absent skip made SILENT       12/12 passed
+#
+# The third is not in round 12's report; it turned up running the drill. It is
+# the one this function's own docstring calls "the defect" in as many words.
+#
+# `acquire-ppocr-detector.py`'s twin `check_shape` has had five such tests since
+# round 3 found exactly this hole in exactly that function. The seam was copied
+# across and the tests that make a seam worth having were not, in the commit
+# whose subject was "in BOTH scripts". These are that, mirrored one for one.
+# ---------------------------------------------------------------------------
+
+
+class _StubSession:
+    """Stands in for an onnxruntime InferenceSession, shapes only."""
+
+    def __init__(self, shape_in, shape_out) -> None:
+        self._in = shape_in
+        self._out = shape_out
+
+    def get_inputs(self):
+        return [type("I", (), {"shape": self._in})()]
+
+    def get_outputs(self):
+        return [type("O", (), {"shape": self._out})()]
+
+
+def _loader(shape_in, shape_out):
+    return lambda path: _StubSession(shape_in, shape_out)
+
+
+# What `PaddleEngine::recognise_crop` feeds and reads: [N, 3, 48, W] in, and a
+# last dimension equal to EXPECTED_RECOGNISER_CLASSES out.
+REC_IN = ["N", 3, 48, "W"]
+REC_OUT = ["N", "T", 6625]
+
+
+def test_a_correctly_shaped_recogniser_is_accepted(module) -> None:
+    """The control that stops every test below passing vacuously."""
+    assert module.EXPECTED_RECOGNISER_CLASSES == REC_OUT[-1], (
+        "this suite's expected class count drifted from the script's"
+    )
+    with contextlib.redirect_stdout(io.StringIO()):
+        module.check_shapes(Path("nowhere"), load=_loader(REC_IN, REC_OUT))
+
+
+def test_the_wrong_input_CHANNELS_are_REFUSED(module) -> None:
+    try:
+        module.check_shapes(
+            Path("nowhere"), load=_loader(["N", 1, 48, "W"], REC_OUT)
+        )
+    except SystemExit as exit_:
+        assert "expected [N, 3, 48, W]" in str(exit_), str(exit_)
+        return
+    raise AssertionError("a 1-channel input was accepted by check_shapes")
+
+
+def test_the_wrong_input_HEIGHT_is_REFUSED(module) -> None:
+    """48 is the recogniser's fixed crop height. A model taking 32 is a
+    different model, and the digest cannot say so."""
+    try:
+        module.check_shapes(
+            Path("nowhere"), load=_loader(["N", 3, 32, "W"], REC_OUT)
+        )
+    except SystemExit as exit_:
+        assert "expected [N, 3, 48, W]" in str(exit_), str(exit_)
+        return
+    raise AssertionError("a 32-high input was accepted by check_shapes")
+
+
+def test_a_MISMATCHED_CLASS_COUNT_is_REFUSED(module) -> None:
+    """`I-333`: the dictionary and the model are a matching pair, and this is
+    the check that keeps them one."""
+    try:
+        module.check_shapes(
+            Path("nowhere"), load=_loader(REC_IN, ["N", "T", 96])
+        )
+    except SystemExit as exit_:
+        assert "classes" in str(exit_), str(exit_)
+        assert "I-333" in str(exit_), "refused without naming the pairing rule"
+        return
+    raise AssertionError("a 96-class recogniser was accepted by check_shapes")
+
+
+def test_an_unloadable_model_is_REFUSED_rather_than_swallowed(module) -> None:
+    """A load failure here means the CONVERTER produced something that is not
+    ONNX. That is a refusal with a sentence, not a traceback."""
+
+    def explode(path):
+        raise RuntimeError("not an ONNX file")
+
+    try:
+        module.check_shapes(Path("nowhere"), load=explode)
+    except SystemExit as exit_:
+        assert "not loadable as ONNX" in str(exit_), str(exit_)
+        return
+    raise AssertionError("an unloadable model was accepted by check_shapes")
+
+
+def test_a_missing_onnxruntime_skips_LOUDLY_and_does_not_refuse(module) -> None:
+    """The one branch that must NOT raise, and must still announce itself.
+
+    The function's docstring: "A SILENT skip would be the defect -- a check that
+    can vanish without saying so reports green forever." Nothing held it to that
+    until now; deleting the print left the suite 12/12."""
+
+    def missing(path):
+        raise ImportError("No module named 'onnxruntime'")
+
+    stdout = io.StringIO()
+    with contextlib.redirect_stdout(stdout):
+        module.check_shapes(Path("nowhere"), load=missing)
+    assert "NOT CHECKED" in stdout.getvalue(), (
+        "skipped silently, which is the whole failure"
+    )
+
+
+def test_the_default_loader_is_the_real_one(module) -> None:
+    """A seam whose default drifted would make every test above a fiction."""
+    signature = inspect.signature(module.check_shapes)
+    assert signature.parameters["load"].default is module.onnxruntime_session
+
+
+def test_check_shapes_reads_the_file_out_of_the_directory_it_is_GIVEN(module) -> None:
+    """The seam and the staging fix meet here: `check_shapes` takes a directory
+    and must look inside THAT one, or the scratch-directory ordering buys
+    nothing."""
+    seen = []
+
+    def record(path):
+        seen.append(Path(path))
+        return _StubSession(REC_IN, REC_OUT)
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        module.check_shapes(Path("some") / "scratch", load=record)
+    assert len(seen) == 1, "the loader was called " + str(len(seen)) + " times"
+    assert seen[0] == Path("some") / "scratch" / "ch_PP-OCRv4_rec.onnx", seen[0]
 
 
 def main() -> int:

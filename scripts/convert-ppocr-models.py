@@ -330,6 +330,14 @@ def onnxruntime_session(path: Path):
     found there: a guard whose refusal branch executes in no job at all is a
     guard nothing can go red on. With this seam a stub loader drives every
     branch below with no `onnxruntime`, no model and no file.
+
+    ⚠️ **That last sentence was ASPIRATIONAL when it was written**, and round 12
+    caught it. Round 11's fix copied the seam across from the detector and did
+    not copy the tests that make a seam worth having, so for one round this
+    docstring described a drill that existed only in the other file. Deleting
+    both shape refusals, deleting the unloadable-ONNX refusal, or making the
+    skip silent each left the suite 12/12 green. It is true now:
+    `test_convert_ppocr_models.py` drives every branch below through `load`.
     """
     import onnxruntime  # noqa: PLC0415
 
