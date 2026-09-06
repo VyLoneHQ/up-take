@@ -1,10 +1,28 @@
 //! Task 1.15: structured logging, and the one place a failure reaches the user.
 //!
 //! This module implements section 5 of `SPECS/architecture.md` **in the
-//! private planning repository** -- the qualifier this crate uses everywhere
-//! else (`output.rs:5`, `freeze.rs`, `hotkey.rs`) and that round 2 of
-//! `PR #94` found missing here, where the bare path looks resolvable and is
-//! not. Its error contract:
+//! private planning repository** -- there is no `SPECS/` directory here, so a
+//! bare path reads as resolvable and is not. **This qualifier appears once, at
+//! this first mention; the citations below are bare, which is what the rest of
+//! the codebase does.**
+//!
+//! ⚠️ **THE SAME WRONG ENUMERATION, THREE TIMES, AND THIS IS THE THIRD.**
+//! Round 2 asked for a qualifier here and I wrote that `output.rs:5`,
+//! `freeze.rs` and `hotkey.rs` "all carry" one. Round 3 checked: they do not.
+//! I then "fixed" those three files -- and the enumeration behind THAT was
+//! wrong too. Measured properly:
+//!
+//! ```text
+//! grep -rn "architecture §\|architecture\.md" --include=*.rs --include=*.toml .
+//! ```
+//!
+//! **47 sites cite it bare and exactly one qualifies it**
+//! (`uptake-ocr/src/engine.rs:20`). Bare is the convention; qualifying is the
+//! exception. So the three edits are reverted -- they made two files
+//! inconsistent with forty-five others to satisfy a rule nobody follows -- and
+//! the claim is replaced by the count and the command that produced it.
+//!
+//! Its error contract:
 //! It did not invent that contract: the three error classes, the `thiserror` /
 //! `anyhow` split and the never-lose-the-capture rule were written down long
 //! before this file existed. What was missing was a destination.
@@ -49,7 +67,8 @@
 //! mechanism this module introduced was invisible to its own guard.** All
 //! three are closed. What is NOT closed, and what no source scan can close, is
 //! content bound to a name the list does not carry: `let payload = ocr_result`
-//! passes. That residual is `I-381` and its remedy is a type-level one.
+//! passes. That residual is UP-TAKE `I-381` -- qualified because AGENTIC-OS has an
+//! unrelated row of the same number -- and its remedy is type-level.
 //!
 //! # Where the file goes
 //!
@@ -290,6 +309,16 @@ mod tests {
         "report_failure(",
         "format!(",
         "format_args!(",
+        // ⚠️ THE ORIGINAL SINK, ABSENT UNTIL ROUND 3 FOUND IT. This whole
+        // feature exists because failures ended at `eprintln!`, 68 of them
+        // still remain in this crate, and the control guarding against leaks
+        // did not treat the very macro it is replacing as a place a leak could
+        // go. Drilled: `eprintln!("leak drill: {ocr_text}")` passed.
+        "eprintln!(",
+        "println!(",
+        "write!(",
+        "writeln!(",
+        "panic!(",
     ];
 
     /// ⚠️ THIS TEST IS THE PRIVACY RULE. The module docs only explain it.
@@ -303,47 +332,72 @@ mod tests {
     /// **What it still cannot see**, and no source scan can: content bound to
     /// a name that is not on `FORBIDDEN`. `let payload = ocr_result; info!(%payload)`
     /// passes. The list is the boundary of the guarantee, which is why the
-    /// remedy for that residual is a type-level one and is filed as `I-381`
-    /// rather than pretended away here.
+    /// remedy for that residual is a type-level one and is filed as UP-TAKE `I-381`
+    /// rather than pretended away here. ⚠️ Qualified with the project name
+    /// deliberately: AGENTIC-OS `I-381` is a different, unrelated row about
+    /// `SHARED_TIMEOUT_S`, and round 3 resolved the bare id to it.
     #[test]
     fn no_captured_content_reaches_a_log_macro() {
-        // ⚠️ THE WHOLE WORKSPACE, not just this crate.
+        // ⚠️ EVERY `.rs` IN THE WORKSPACE, discovered by walking rather than
+        // by assuming a layout.
         //
-        // Round 2 of `PR #94`'s review drilled the narrower version: it added
-        // `tracing` to `uptake-ocr` -- the crate that PRODUCES recognised text
-        // -- logged that text from it, and the control stayed green. The root
-        // `Cargo.toml`'s own comment for this change invites exactly that
-        // ("libraries emit events with fields"), so the crate most likely to
-        // grow the forbidden line was the one outside the scan.
+        // Round 2 made this walk `crates/*/src`, which fixed reading one crate
+        // and left two holes round 3 drilled: a crate whose `Cargo.toml` sets
+        // `[lib] path = "custom/lib.rs"` has no `src/` at all and contributed
+        // no root, and the `roots.len() >= 4` floor had a whole crate of slack
+        // so it noticed neither. Guessing at directory layout was the mistake;
+        // this walks the tree instead.
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
         let workspace = manifest.parent().expect("src-tauri has a parent");
-        let mut roots = vec![manifest.join("src")];
-        if let Ok(entries) = fs::read_dir(workspace.join("crates")) {
-            for entry in entries.flatten() {
-                let source = entry.path().join("src");
-                if source.is_dir() {
-                    roots.push(source);
-                }
-            }
-        }
-        // The count is asserted per ROOT, not in total: a total would stay
-        // healthy while one crate silently stopped being read.
-        assert!(
-            roots.len() >= 4,
-            "found only {} source roots, so the workspace walk is broken",
-            roots.len()
-        );
-
         let mut files = Vec::new();
-        for root in &roots {
-            let before = files.len();
-            collect_rust_files(root, &mut files);
+        collect_rust_files(workspace, &mut files);
+
+        // `examples/`, `tests/` and `benches/` are EXCLUDED, and it is a stated
+        // boundary rather than an accident of the walk. None of the three ships
+        // in an installer, so none can put a user's screen content on that
+        // user's disk -- which is the asset `architecture.md` section 4 names.
+        // It is the same reason `#[cfg(test)]` blocks are skipped, applied to
+        // the files that are test code in their entirety rather than in part.
+        //
+        // Concretely: `ocr_smoke.rs` PRINTS what OCR read, which is its whole
+        // purpose as a console tool, and `uptake-ocr/tests/threading.rs`
+        // formats a frame's dimensions. Both are correct, and a control that
+        // fired on them would be one somebody deletes.
+        //
+        // ⚠️ THIS IS A HOLE AND IT IS NAMED: a leak written into a `tests/`
+        // file is invisible here. Acceptable where the production case is not,
+        // for the reason above -- but acceptable is not the same as absent.
+        files.retain(|p| {
+            !p.components().any(|c| {
+                matches!(
+                    c.as_os_str().to_str(),
+                    Some("examples" | "tests" | "benches")
+                )
+            })
+        });
+
+        // Asserted PER CRATE, not in total. A total stays healthy while one
+        // crate silently stops being read, which is the failure round 2's
+        // `roots.len() >= 4` floor was meant to catch and did not.
+        for crate_name in [
+            "uptake-core",
+            "uptake-capture",
+            "uptake-ocr",
+            "uptake-assets",
+        ] {
             assert!(
-                files.len() > before,
-                "{} contributed no source files",
-                root.display()
+                files
+                    .iter()
+                    .any(|p| p.components().any(|c| c.as_os_str() == crate_name)),
+                "no source files found for {crate_name}, so the workspace walk is broken"
             );
         }
+        assert!(
+            files
+                .iter()
+                .any(|p| p.components().any(|c| c.as_os_str() == "src-tauri")),
+            "no source files found for src-tauri, so the workspace walk is broken"
+        );
         assert!(
             files.len() > 20,
             "the scan found only {} source files, so it is not reading the workspace",
@@ -418,9 +472,19 @@ mod tests {
                 continue;
             }
 
+            // ⚠️ THE EARLIEST SINK IN THE LINE, NOT THE FIRST ONE IN THE ARRAY.
+            //
+            // `find_map` returned on whichever SINKS entry matched first in
+            // ARRAY order, wherever it sat in the text. Round 3 drilled it:
+            // `tracing::info!(text = %ocr_text, note = "e.g. tracing::error!(x)")`
+            // anchored on the `tracing::error!` inside the string literal --
+            // index 0 of the array, late in the line -- so the unit began after
+            // the real leak and the scan passed a canonical single-line leak.
             let Some(sink) = SINKS
                 .iter()
-                .find_map(|s| trimmed.find(s).map(|i| i + s.len()))
+                .filter_map(|s| trimmed.find(s).map(|i| (i, i + s.len())))
+                .min_by_key(|(start, _)| *start)
+                .map(|(_, end)| end)
             else {
                 index += 1;
                 continue;
@@ -430,9 +494,8 @@ mod tests {
             // function entries include their `(`. Normalise, or `tracing::error!`
             // is handed a remainder that still holds its own opening paren and
             // can never balance -- which is what the bound above caught.
-            let rest = trimmed[sink..]
-                .strip_prefix('(')
-                .unwrap_or(&trimmed[sink..]);
+            let head = strip_line_comment(&trimmed[sink..]);
+            let rest = head.strip_prefix('(').unwrap_or(&head);
             let mut unit = String::from(rest);
             let mut cursor = index;
             let mut spanned = 0;
@@ -452,17 +515,43 @@ mod tests {
                 }
                 cursor += 1;
                 spanned += 1;
-                let next = lines[cursor].trim_start();
-                if next.starts_with("//") {
+                // ⚠️ A TRAILING comment counts too, not just a whole-line one.
+                // Round 3 drilled it: adding `// not text, just a plain
+                // trailing note` to a legitimate multi-line `tracing::warn!`
+                // in `lib.rs` turned this control RED on code that logs an
+                // error and nothing else. A false positive is as damaging as a
+                // miss -- it is how a control gets worked around.
+                let next = strip_line_comment(lines[cursor].trim_start());
+                if next.trim().is_empty() {
                     continue;
                 }
                 unit.push(' ');
-                unit.push_str(next);
+                unit.push_str(&next);
             }
             found.push((index + 1, fields_and_captures(&unit)));
             index += 1;
         }
         found
+    }
+
+    /// `line` with any trailing `//` comment removed, ignoring `//` inside a
+    /// string literal so a URL is not mistaken for a comment.
+    fn strip_line_comment(line: &str) -> String {
+        let bytes = line.as_bytes();
+        let mut i = 0;
+        let mut inside = false;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'\\' if inside => i += 1,
+                b'"' => inside = !inside,
+                b'/' if !inside && i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
+                    return line[..i].to_string();
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        line.to_string()
     }
 
     /// The index just past the attribute beginning at `from`, which may span
@@ -635,7 +724,7 @@ mod tests {
             }
             // A CHAR literal. Skipped because `push_captures` contains `'{'`
             // and `'}'`, and counting those as braces desynchronised
-            // `skip_braced_item` badly enough that the scan walked back into
+            // `skip_test_item` badly enough that the scan walked back into
             // the test module it had just skipped and tripped over its own
             // fixtures. Lifetimes (`&'a str`) look similar and must NOT be
             // consumed, so a closing quote within three bytes is required.
@@ -745,6 +834,15 @@ mod tests {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
+                // Build output and vendored trees are not this project's source
+                // and walking them is minutes, not milliseconds.
+                let name = entry.file_name();
+                if matches!(
+                    name.to_str(),
+                    Some("target" | ".git" | "node_modules" | "dist" | ".svelte-kit")
+                ) {
+                    continue;
+                }
                 collect_rust_files(&path, out);
             } else if path.extension().is_some_and(|e| e == "rs") {
                 out.push(path);
