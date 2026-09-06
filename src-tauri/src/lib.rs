@@ -2,6 +2,7 @@ mod captures;
 mod click_through;
 #[cfg(debug_assertions)]
 mod dev_harness;
+mod diagnostics;
 mod freeze;
 mod hotkey;
 mod ocr;
@@ -83,7 +84,7 @@ pub fn run() -> tauri::Result<()> {
             // only external signal that the guard's callback fired at all, and
             // the second process exits before it can log anything of its own.
             #[cfg(debug_assertions)]
-            eprintln!("single-instance: relaunch detected, summoning the overlay");
+            tracing::info!(target: "up-take", "single-instance: relaunch detected, summoning the overlay");
             overlay::summon(app);
         }));
     }
@@ -170,10 +171,27 @@ pub fn run() -> tauri::Result<()> {
                     | WindowEvent::ScaleFactorChanged { .. }
             ) && let Err(error) = overlay::sync_bounds(window.app_handle())
             {
-                eprintln!("overlay: could not re-sync after a window event: {error}");
+                tracing::warn!(target: "up-take", %error, "overlay: could not re-sync after a window event");
             }
         })
         .setup(|app| {
+            // FIRST, before anything that might want to report a failure.
+            // Task 1.15: everything below this line can use `tracing`; nothing
+            // above it can, which is why there is nothing above it.
+            //
+            // A failure here is deliberately not fatal and is reported through
+            // the channel that still works -- see `diagnostics::init`.
+            match diagnostics::init() {
+                Ok(directory) => tracing::info!(
+                    target: "up-take",
+                    logs = %directory.display(),
+                    "UP-TAKE starting"
+                ),
+                Err(error) => eprintln!(
+                    "diagnostics: no log file this run ({error});                      continuing, because a capture tool that will not start                      without its own log is worse than one without a log"
+                ),
+            }
+
             // Recorded here because `setup` runs on the event-loop thread, so
             // this is the identity every later summon is compared against.
             #[cfg(debug_assertions)]
@@ -250,8 +268,10 @@ pub fn run() -> tauri::Result<()> {
             // alive.
             #[cfg(windows)]
             if let Err(error) = overlay_wndproc::install(app.handle()) {
-                eprintln!(
-                    "display-watch: display changes while the overlay is visible will not be tracked: {error}"
+                tracing::warn!(
+                    target: "up-take",
+                    %error,
+                    "display-watch: display changes while the overlay is visible will not be tracked"
                 );
             }
             // ADR-0019: permanent, one-time exclusion from every capture API.
@@ -260,7 +280,7 @@ pub fn run() -> tauri::Result<()> {
             // reason to refuse to start.
             #[cfg(windows)]
             if let Err(error) = overlay::exclude_from_capture(app.handle()) {
-                eprintln!("overlay: {error}");
+                tracing::warn!(target: "up-take", %error, "overlay");
             }
             // Registered before the tray: architecture §4's mitigation is
             // telling the user a failed registration, and that still holds

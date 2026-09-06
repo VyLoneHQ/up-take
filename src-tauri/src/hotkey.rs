@@ -48,7 +48,6 @@
 //! `dev_harness` and any future off-thread caller do. See `dev_harness.rs`.
 
 use tauri::AppHandle;
-use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 use crate::overlay;
@@ -177,12 +176,14 @@ fn report_failure(app: &AppHandle, label: &str, error: &str) {
              with the details below.\n\n{error}"
         )
     };
-    eprintln!("hotkey: {label} could not be registered: {error}");
-    app.dialog()
-        .message(detail)
-        .kind(MessageDialogKind::Warning)
-        .title("UP-TAKE — hotkey unavailable")
-        .show(|_| {});
+    // As in `tray`: the tailored detail above stays here, the log-and-show
+    // mechanics are shared (task 1.15).
+    crate::diagnostics::report_failure(
+        app,
+        &format!("hotkey: {label} could not be registered: {error}"),
+        "UP-TAKE — hotkey unavailable",
+        &detail,
+    );
 }
 
 /// Whether a registration error is the "someone else holds this combination"

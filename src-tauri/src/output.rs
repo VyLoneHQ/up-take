@@ -229,12 +229,31 @@ pub(crate) fn copy_text_to_clipboard(app: &AppHandle, area: AreaId, text: &str, 
     if outcome.is_ok() {
         crate::overlay::emit_flash(app, area);
     }
+    // Task 1.15 / `F-35`. The flash above is suppressed on failure -- correctly,
+    // since it acknowledges something that did not happen -- and until now that
+    // left the user with NOTHING: no flash, no message, and an `eprintln!` that
+    // reaches no console in a release build. Pressing the key and getting
+    // silence is indistinguishable from pressing it and being ignored.
+    if let Err(reason) = &outcome {
+        crate::diagnostics::report_failure(
+            app,
+            "ocr: the recognised text did not reach the clipboard",
+            "UP-TAKE: could not copy the text",
+            &format!(
+                "UP-TAKE read the area but could not put the text on your clipboard,                  so your clipboard is unchanged.
+
+                 Trying again usually works. If it keeps happening, please report it                  with the detail below.
+
+{reason}"
+            ),
+        );
+    }
     for line in ocr_report_lines(
         started.elapsed().as_millis(),
         outcome,
         REPORT_EVERY_ACTION.load(Ordering::SeqCst),
     ) {
-        eprintln!("{line}");
+        tracing::info!(target: "up-take", "{line}");
     }
 }
 
@@ -765,11 +784,13 @@ pub(crate) fn capture_into_area(app: &AppHandle, id: AreaId, bounds: Rect) {
             match crate::captures::still_holds(&app, id, version) {
                 Some(fresh) => {
                     if let Err(error) = crate::overlay::emit_pin(&app, fresh) {
-                        eprintln!("output: pinned the capture but could not announce it: {error}");
+                        tracing::warn!(target: "up-take", %error, "output: pinned the capture but could not announce it");
                     }
                 }
-                None => eprintln!(
-                    "output: the capture for area {id:?} was dropped before it could be announced"
+                None => tracing::warn!(
+                    target: "up-take",
+                    area = ?id,
+                    "output: the capture was dropped before it could be announced"
                 ),
             }
             // Recorded before the `?`s below, so a failure *inside* publishing is
@@ -1086,7 +1107,7 @@ fn frozen_or_live(retake: Retake, split: &mut Split) -> Result<(RgbaBitmap, Vec<
 pub(crate) fn clear_magnification(app: &AppHandle, id: AreaId) {
     cancel_magnification(app, id);
     if let Err(error) = crate::overlay::emit_unpin(app, id) {
-        eprintln!("output: dropped the pinned pixels but could not announce it: {error}");
+        tracing::warn!(target: "up-take", %error, "output: dropped the pinned pixels but could not announce it");
     }
 }
 
@@ -1292,7 +1313,7 @@ pub(crate) fn init_report_verbosity() {
         Err(std::env::VarError::NotPresent) => None,
         Err(std::env::VarError::NotUnicode(_)) => Some(NOT_UNICODE.to_string()),
     };
-    eprintln!("{}", apply_report_verbosity(raw.as_deref()));
+    tracing::info!(target: "up-take", "{}", apply_report_verbosity(raw.as_deref()));
 }
 
 /// Applies the variable and returns the line to print. Separated from the env
@@ -1376,7 +1397,7 @@ fn report(action: &str, started: Instant, split: &Split, outcome: Result<(), Str
         outcome,
         REPORT_EVERY_ACTION.load(Ordering::SeqCst),
     ) {
-        eprintln!("{line}");
+        tracing::info!(target: "up-take", "{line}");
     }
 }
 
