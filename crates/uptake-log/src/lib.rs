@@ -42,6 +42,13 @@
 //! - **`eprintln!` is not banned yet.** 68 remain in `src-tauri`; part 2 of
 //!   `1.15` is where they go and the ban widens with them. Adding it today
 //!   would need 68 exceptions, which is worse than the gap.
+//! - **A crate-root `#![allow(clippy::disallowed_macros)]` waives the ban,
+//!   and no manifest changes.** Round 4 of `PR #94` drilled it: one line at
+//!   another crate's root and clippy goes green on a live leak. I had
+//!   written that the only escape was a `Cargo.toml` change; that was
+//!   false. clippy cannot prevent it -- a crate sets its own lint levels --
+//!   so `no_other_crate_waives_the_ban` looks for the string instead. That
+//!   is a text check, and it is deliberately the dumbest kind there is.
 //! - **[`trouble`] takes a `&dyn Display` cause.** A caller who builds a string
 //!   out of screen content and passes it defeats this. `&dyn Error` would fit
 //!   better but this codebase's errors are `String` throughout. It is one
@@ -243,33 +250,127 @@ mod tests {
         assert_eq!(log_directory(None), None);
     }
 
-    /// The privacy rule is held by the crate boundary and by these signatures.
-    /// This asserts the half a test can hold: that [`measurement`] is still the
-    /// only helper taking a runtime string.
+    /// The public surface is a FIXED LIST, so adding any helper fails until a
+    /// human edits this list and thinks about what it logs.
     ///
-    /// Deliberately a few lines over this file alone, not a parser over the
-    /// workspace. Rounds 1 to 3 of `PR #94` are the record of what the larger
-    /// version cost: eight bypasses and one false positive.
+    /// # Why a name set and not a signature scan
+    ///
+    /// The first version filtered lines starting with `pub fn ` and looked for
+    /// `: &str` on the same line. Round 4 of `PR #94` defeated it with an
+    /// ordinary wrapped signature -- `rustfmt`'s own canonical output for a
+    /// long one -- where the opening line carries no parameter and the
+    /// parameter line does not start with `pub fn `. It passed `cargo fmt
+    /// --check`, passed this test, and forwarded a runtime `&str` straight
+    /// into `tracing::info!`.
+    ///
+    /// That is the same class as the eight bypasses of the scanner this crate
+    /// replaced, in miniature: a check that must UNDERSTAND Rust to work. A
+    /// name set does not. `pub fn <name>` puts the name on the opening line
+    /// however the arguments wrap, so extracting names is robust where
+    /// extracting types is not -- and the thing worth gating is not the
+    /// signature's shape but whether a person decided this helper should
+    /// exist.
     #[test]
-    fn measurement_is_the_only_helper_taking_a_runtime_string() {
-        let signatures: Vec<&str> = include_str!("lib.rs")
+    fn the_public_surface_is_exactly_what_was_reviewed() {
+        // Every entry was read and its logging argued. `measurement` is the
+        // only one taking a runtime string, and the crate docs say why.
+        const REVIEWED: &[&str] = &[
+            "init",
+            "note",
+            "trouble",
+            "trouble_for",
+            "failure",
+            "measurement",
+        ];
+
+        let mut found: Vec<String> = include_str!("lib.rs")
             .lines()
             .map(str::trim)
-            .filter(|line| line.starts_with("pub fn "))
+            .filter_map(|line| line.strip_prefix("pub fn "))
+            .filter_map(|rest| rest.split(['(', '<']).next())
+            .map(str::to_string)
             .collect();
+        found.sort_unstable();
+
+        let mut expected: Vec<String> = REVIEWED.iter().map(|n| (*n).to_string()).collect();
+        expected.sort_unstable();
+
+        assert_eq!(
+            found, expected,
+            "the public surface of the only crate allowed to log has changed. \
+             Every entry here writes to a user's disk: read what the new one \
+             logs, satisfy yourself it cannot carry screen content, then add it \
+             to REVIEWED."
+        );
+    }
+
+    /// Nothing outside this crate may waive the ban.
+    ///
+    /// # Round 4's sharpest finding, and it broke my own argument
+    ///
+    /// I had written that "the only escape is a `Cargo.toml` change, which
+    /// review sees". That was FALSE. A single `#![allow(clippy::
+    /// disallowed_macros)]` at another crate's ROOT waives the ban entirely,
+    /// touches no manifest, and reads like any ordinary lint suppression.
+    /// Drilled by the reviewer: one line in `src-tauri/src/lib.rs` and clippy
+    /// went green on a live leak.
+    ///
+    /// clippy cannot stop that -- a crate may set its own lint levels. So this
+    /// is the one thing here that IS a text check, and it is deliberately the
+    /// simplest possible kind: does a string appear in a file. No parsing, no
+    /// literal tracking, no structure assumed, which is precisely what the
+    /// eight bypasses of the old scanner all exploited.
+    #[test]
+    fn no_other_crate_waives_the_ban() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("crates/uptake-log has a workspace root two levels up");
+
+        let mut offences = Vec::new();
+        let mut scanned = 0usize;
+        let mut stack = vec![workspace.to_path_buf()];
+        while let Some(directory) = stack.pop() {
+            let Ok(entries) = fs::read_dir(&directory) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = entry.file_name();
+                if path.is_dir() {
+                    if !matches!(
+                        name.to_str(),
+                        Some("target" | ".git" | "node_modules" | "dist" | ".svelte-kit")
+                    ) {
+                        stack.push(path);
+                    }
+                    continue;
+                }
+                let is_source = path.extension().is_some_and(|e| e == "rs" || e == "toml");
+                // This crate is the one that may.
+                let is_this_crate = path.components().any(|c| c.as_os_str() == "uptake-log");
+                if !is_source || is_this_crate {
+                    continue;
+                }
+                scanned += 1;
+                let Ok(text) = fs::read_to_string(&path) else {
+                    continue;
+                };
+                if text.contains("disallowed_macros") {
+                    offences.push(path.display().to_string());
+                }
+            }
+        }
 
         assert!(
-            signatures.len() >= 6,
-            "found only {} public helpers, so this is not reading the file",
-            signatures.len()
+            scanned > 20,
+            "only {scanned} files scanned, so this check is not reading the workspace"
         );
-
-        for signature in &signatures {
-            assert!(
-                !signature.contains(": &str") || signature.contains("fn measurement"),
-                "a new helper takes a runtime &str without being the one documented to: \
-                 {signature}"
-            );
-        }
+        assert!(
+            offences.is_empty(),
+            "only crates/uptake-log may waive the tracing ban; found `disallowed_macros` \
+             in:\n{}",
+            offences.join("\n")
+        );
     }
 }
