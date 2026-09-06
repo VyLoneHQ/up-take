@@ -191,7 +191,7 @@ pub(crate) fn copy_to_clipboard(app: &AppHandle, area: AreaId, bounds: Rect) {
     if outcome.is_ok() {
         crate::overlay::emit_flash(app, area);
     }
-    report("copy", started, &split, outcome);
+    report(Some(app), Action::Copy, started, &split, outcome);
 }
 
 /// Publishes recognised text to the clipboard (roadmap task **1.13**).
@@ -375,7 +375,7 @@ pub(crate) fn grab_monitor(app: &AppHandle) {
             split.publish_ms = publish.elapsed().as_millis();
             result
         });
-        report("grab", started, &split, outcome);
+        report(Some(&app), Action::Grab, started, &split, outcome);
     });
 }
 
@@ -472,7 +472,7 @@ pub(crate) fn save_to_file(app: &AppHandle, area: AreaId, bounds: Rect) {
     if outcome.is_ok() {
         crate::overlay::emit_flash(app, area);
     }
-    report("save", started, &split, outcome);
+    report(Some(app), Action::Save, started, &split, outcome);
 }
 
 /// Where the selection→clipboard time actually goes, per stage (ms).
@@ -707,7 +707,8 @@ pub(crate) fn frame_for_ocr(bounds: Rect) -> Result<RgbaBitmap, String> {
     let mut split = Split::default();
     let outcome = frame_or_crop(bounds, &mut split);
     report(
-        "ocr-frame",
+        None,
+        Action::Frame,
         started,
         &split,
         outcome.as_ref().map(|_| ()).map_err(Clone::clone),
@@ -798,7 +799,7 @@ pub(crate) fn capture_into_area(app: &AppHandle, id: AreaId, bounds: Rect) {
             split.publish_ms = publish.elapsed().as_millis();
             published
         });
-        report("capture", started, &split, outcome);
+        report(Some(&app), Action::Capture, started, &split, outcome);
     });
 }
 
@@ -1034,7 +1035,7 @@ fn magnify_once(app: &AppHandle, id: AreaId, retake: Retake, generation: u64) {
         };
         crate::overlay::emit_pin(app, fresh)
     });
-    report("magnify", started, &split, outcome);
+    report(Some(app), Action::Magnify, started, &split, outcome);
 }
 
 /// The frozen still if there is one, a live capture otherwise, sharpened when
@@ -1392,7 +1393,110 @@ fn verbosity_line(every_action: bool, debug_build: bool, raw: Option<&str>) -> S
 /// **Every action here is affected, not only `grab`.** `copy`, `save` and
 /// `capture` reach this function too, so the censored sample `I-42` measured on
 /// grabs was equally censoring the other three.
-fn report(action: &str, started: Instant, split: &Split, outcome: Result<(), String>) {
+/// Every action that reaches [`report`].
+///
+/// # ⚠️ THIS IS AN ENUM SO THE DIALOG CANNOT BE FORGOTTEN
+///
+/// Task 1.15 part 1 wired a failure dialog into `copy_text_to_clipboard` and
+/// left `copy_to_clipboard`, `save_to_file` and `capture_into_area` reporting to
+/// the log alone. `F-35` reads *"A failed Copy or Save is completely silent to
+/// the user in a release build"*, so the plain **Copy** it names FIRST was still
+/// silent, under a commit titled "A failed Copy is no longer silent". Round 5 of
+/// `PR #94` found it -- the first round to attack the feature rather than the
+/// guard, after four rounds in which every finding was in the guard.
+///
+/// Patching the three sites would have been the same shape again: a rule held by
+/// whoever remembers it. So the action is a VALUE now. [`report`] takes one,
+/// asks it whether the user should be told, and tells them. A new action does
+/// not compile until somebody writes down which kind it is.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Action {
+    /// The user pressed something and expects a result.
+    Copy,
+    Save,
+    Grab,
+    Capture,
+    /// Internal pipeline steps. A dialog here is noise, not news.
+    ///
+    /// `Magnify` re-renders repeatedly while an Upscale area is live, so a
+    /// dialog per failure is a storm; `Frame` has no `AppHandle` at all and its
+    /// failure already surfaces through the OCR path's own report.
+    Magnify,
+    Frame,
+}
+
+impl Action {
+    /// The word that appears in the budget line.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Copy => "copy",
+            Self::Save => "save",
+            Self::Grab => "grab",
+            Self::Capture => "capture",
+            Self::Magnify => "magnify",
+            // "ocr-frame", not "frame": this is the label the budget lines
+            // carried before the Action refactor, and a rig log is read by
+            // grepping for it.
+            Self::Frame => "ocr-frame",
+        }
+    }
+
+    /// Whether a failure is put in front of the user, and under what words.
+    ///
+    /// `None` is a decision, not an omission: see the variant docs.
+    const fn told_to_user(self) -> Option<(&'static str, &'static str, &'static str)> {
+        match self {
+            Self::Copy => Some((
+                "output: the capture did not reach the clipboard",
+                "UP-TAKE: could not copy",
+                "Your clipboard is unchanged, so whatever was on it is still there.",
+            )),
+            Self::Grab => Some((
+                "output: the monitor grab did not reach the clipboard",
+                "UP-TAKE: could not copy",
+                "Your clipboard is unchanged, so whatever was on it is still there.",
+            )),
+            Self::Save => Some((
+                "output: the capture was not written to disk",
+                "UP-TAKE: could not save",
+                "Nothing was written, so no file was created or overwritten.",
+            )),
+            Self::Capture => Some((
+                "output: the area did not receive its capture",
+                "UP-TAKE: could not capture",
+                "The area is unchanged and still shows what it showed before.",
+            )),
+            Self::Magnify | Self::Frame => None,
+        }
+    }
+}
+
+/// Records an action's outcome, and tells the user if the action was theirs.
+///
+/// `app` is `Option` because [`Action::Frame`] runs where there is no
+/// `AppHandle`. A test asserts every user-facing variant is only ever reported
+/// with one, so the `None` arm cannot silently swallow a message the user
+/// should have seen.
+fn report(
+    app: Option<&AppHandle>,
+    action: Action,
+    started: Instant,
+    split: &Split,
+    outcome: Result<(), String>,
+) {
+    if let (Err(reason), Some(app), Some((source, title, reassurance))) =
+        (&outcome, app, action.told_to_user())
+    {
+        crate::diagnostics::report_failure(
+            app,
+            source,
+            title,
+            &format!(
+                "UP-TAKE could not finish what you asked for.\n\n{reassurance}\n\nTrying again usually works. If it keeps happening, please report it with the detail below.\n\n{reason}"
+            ),
+        );
+    }
+    let action = action.label();
     let elapsed = started.elapsed().as_millis();
     // The split rides along with every budget line, not just the debug one:
     // the whole point (ADR-0022) is that "it was 320 ms" is not actionable and
@@ -1784,6 +1888,73 @@ fn unique_path(dir: &std::path::Path, stem: &str) -> PathBuf {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "a failed unwrap is a failed test")]
 mod tests {
+    /// Every user-facing action must be reported WITH an `AppHandle`.
+    ///
+    /// `report` takes `Option<&AppHandle>` because [`Action::Frame`] runs where
+    /// there is none. That `None` arm is the one way the dialog could go
+    /// missing again without anyone noticing, which is precisely what round 5
+    /// of `PR #94` found the previous shape doing. So the pairing is asserted:
+    /// an action that talks to the user, reported with no handle, is a bug.
+    #[test]
+    fn only_internal_actions_may_be_reported_without_a_handle() {
+        // Enumerated by hand because a `match` on every variant is what forces
+        // a new one to be classified rather than defaulted.
+        let all = [
+            Action::Copy,
+            Action::Save,
+            Action::Grab,
+            Action::Capture,
+            Action::Magnify,
+            Action::Frame,
+        ];
+
+        let user_facing: Vec<&str> = all
+            .iter()
+            .filter(|a| a.told_to_user().is_some())
+            .map(|a| a.label())
+            .collect();
+        assert_eq!(
+            user_facing,
+            vec!["copy", "save", "grab", "capture"],
+            "the set of actions that speak to the user changed. F-35 names Copy \
+             and Save; a new user-initiated action belongs in this list, and a \
+             new internal one does not."
+        );
+
+        // `Frame` is the only one reported without a handle, and it is internal.
+        assert!(
+            Action::Frame.told_to_user().is_none(),
+            "Frame is reported with None, so it must not be user-facing"
+        );
+    }
+
+    /// Each user-facing action says what the user still HAS.
+    ///
+    /// `F-35`'s second sentence is *"a failure part-way through publishing
+    /// destroys the clipboard they had"*, so after a failed Copy the question is
+    /// not what broke but whether their clipboard is gone. Every message answers
+    /// that, and this keeps it true as messages are edited.
+    #[test]
+    fn every_user_facing_action_says_what_survived() {
+        for action in [Action::Copy, Action::Save, Action::Grab, Action::Capture] {
+            let Some((source, title, reassurance)) = action.told_to_user() else {
+                panic!("these four are user-facing by the test above")
+            };
+            assert!(
+                source.starts_with("output: "),
+                "the logged source should name its subsystem: {source}"
+            );
+            assert!(
+                title.starts_with("UP-TAKE"),
+                "the dialog title should name the app: {title}"
+            );
+            assert!(
+                reassurance.contains("unchanged") || reassurance.contains("Nothing was written"),
+                "every message must tell the user what they still have: {reassurance}"
+            );
+        }
+    }
+
     use super::*;
 
     /// `CF_UNICODETEXT` is UTF-16 **little-endian** with a `u16` terminator.

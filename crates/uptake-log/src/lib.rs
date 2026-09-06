@@ -39,7 +39,19 @@
 //!
 //! # What is honestly NOT held
 //!
-//! - **`eprintln!` is not banned yet.** 68 remain in `src-tauri`; part 2 of
+//! - **`eprintln!` is not banned yet.** 68 remain in `src-tauri` -- the
+//!   figure is reproducible rather than remembered, and round 5 of
+//!   `PR #94` read 73 from a raw grep that also counts the word in
+//!   comments, five of which this crate's own docs added:
+//!
+//!   ```text
+//!   python -c "import pathlib; print(sum(l.strip().count('eprintln!') \
+//!     for f in pathlib.Path('src-tauri/src').rglob('*.rs') \
+//!     for l in f.read_text(encoding='utf-8').splitlines() \
+//!     if not l.strip().startswith('//')))"
+//!   ```
+//!
+//!   Part 2 of
 //!   `1.15` is where they go and the ban widens with them. Adding it today
 //!   would need 68 exceptions, which is worse than the gap.
 //! - **A crate-root `#![allow(clippy::disallowed_macros)]` waives the ban,
@@ -231,13 +243,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_log_directory_is_the_one_architecture_section_6_names() {
+    fn the_log_root_is_the_one_architecture_section_6_names() {
         let got = log_directory(Some(Path::new(r"C:\Users\someone\AppData\Local")))
             .expect("a directory when LOCALAPPDATA is set");
         assert_eq!(
             got,
             PathBuf::from(r"C:\Users\someone\AppData\Local\VyLone\UP-TAKE\logs"),
-            "the spec's row is VyLone\\UP-TAKE, not the Tauri identifier"
+            "the spec's row is the ROOT `VyLone\\UP-TAKE`, not the Tauri \
+             identifier. ⚠️ Section 6 shares that root across \"Database, logs, \
+             cache\" and does NOT itself name a `logs` subdirectory -- that \
+             segment is this crate's own, so the three uses do not collide. \
+             Round 5 of `PR #94` found the old test name claiming the spec \
+             named the whole path."
         );
     }
 
@@ -283,12 +300,21 @@ mod tests {
             "measurement",
         ];
 
+        // ⚠️ NOT `strip_prefix("pub fn ")`. Round 5 of `PR #94` added
+        // `pub unsafe fn leak(runtime_text: &str)` forwarding straight into
+        // `tracing::info!` and this test STAYED GREEN, because the line starts
+        // `pub unsafe fn`. `pub const fn` and `pub async fn` are the same hole.
+        //
+        // So: any line that begins `pub ` and contains ` fn `, with the name
+        // taken after the last ` fn `. That covers every qualifier Rust allows
+        // between them without needing to know what they are.
         let mut found: Vec<String> = include_str!("lib.rs")
             .lines()
             .map(str::trim)
-            .filter_map(|line| line.strip_prefix("pub fn "))
+            .filter(|line| line.starts_with("pub ") && line.contains(" fn "))
+            .filter_map(|line| line.rsplit(" fn ").next())
             .filter_map(|rest| rest.split(['(', '<']).next())
-            .map(str::to_string)
+            .map(|name| name.trim_start_matches("r#").to_string())
             .collect();
         found.sort_unstable();
 
@@ -302,6 +328,21 @@ mod tests {
              logs, satisfy yourself it cannot carry screen content, then add it \
              to REVIEWED."
         );
+
+        // A public item that is not a function at all would carry no name for
+        // the list to miss. This crate has none and should not grow one without
+        // somebody deciding to.
+        for forbidden in ["pub use ", "pub struct ", "pub trait ", "macro_rules!"] {
+            assert!(
+                !include_str!("lib.rs")
+                    .lines()
+                    .map(str::trim)
+                    .any(|line| line.starts_with(forbidden)),
+                "`{forbidden}` appeared in the only crate allowed to log. Its public \
+                 surface is meant to be a short list of functions; anything else needs \
+                 a decision, not a default."
+            );
+        }
     }
 
     /// Nothing outside this crate may waive the ban.
@@ -346,7 +387,11 @@ mod tests {
                     }
                     continue;
                 }
-                let is_source = path.extension().is_some_and(|e| e == "rs" || e == "toml");
+                // `.yml`/`.yaml` because a CI `env:` block can set RUSTFLAGS,
+                // and `.cargo/config.toml` is already covered by `toml`.
+                let is_source = path
+                    .extension()
+                    .is_some_and(|e| e == "rs" || e == "toml" || e == "yml" || e == "yaml");
                 // This crate is the one that may.
                 let is_this_crate = path.components().any(|c| c.as_os_str() == "uptake-log");
                 if !is_source || is_this_crate {
@@ -356,8 +401,23 @@ mod tests {
                 let Ok(text) = fs::read_to_string(&path) else {
                     continue;
                 };
-                if text.contains("disallowed_macros") {
-                    offences.push(path.display().to_string());
+                // ⚠️ NOT just the one spelling. Round 5 of `PR #94` waived the
+                // whole ban three ways with no occurrence of
+                // `disallowed_macros` anywhere: `#![allow(clippy::all)]`,
+                // `#![allow(warnings)]`, and `-A clippy::disallowed_macros` on
+                // RUSTFLAGS. Whitespace is squeezed first so
+                // `clippy :: disallowed_macros` cannot slip through either.
+                let squeezed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+                for waiver in [
+                    "disallowed_macros",
+                    "allow(clippy::all)",
+                    "allow(warnings)",
+                    "-Aclippy::",
+                    "--allowclippy::",
+                ] {
+                    if squeezed.contains(waiver) {
+                        offences.push(format!("{}  ({waiver})", path.display()));
+                    }
                 }
             }
         }
