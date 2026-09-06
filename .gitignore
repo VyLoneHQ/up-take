@@ -18,26 +18,35 @@ __pycache__/
 *.pyc
 
 # The OCR model files, their verified upstream downloads, and the generated
-# NOTICE. Written by TWO scripts, which is the part that used to be wrong here:
-# scripts/convert-ppocr-models.py converts the recogniser and the dictionary,
-# and scripts/acquire-ppocr-detector.py DOWNLOADS the detector already in ONNX
-# from Baidu (ADR-0036). Saying "converted ... by convert-ppocr-models.py" told
-# a reader the wrong provenance for one of the three.
+# NOTICE. NOTHING IS CONVERTED ANY MORE: scripts/acquire-ppocr-detector.py and
+# scripts/acquire-ppocr-recogniser.py both DOWNLOAD Baidu's own ONNX and verify
+# it (ADR-0036 for the detector, ADR-0037 for the recogniser), and
+# scripts/write-model-notice.py generates the NOTICE from the pins.
 #
-# NEVER committed. ADR-0034 decided we convert the official release ourselves,
-# and ADR-0003 sets the licence this repository ships under, GPL-3.0-or-later
-# with a CLA: ~21 MB of third-party
+# ⚠️ This named scripts/convert-ppocr-models.py as converting "the recogniser
+# and the dictionary" until 2026-09-06. That script is DELETED -- ADR-0037 took
+# the recogniser to Baidu's ONNX too, so it converted nothing UP-TAKE ships.
+# The paragraph directly below still describes correcting this same block's
+# provenance claim at PR #88 round 10; this is the third time this block has
+# been wrong about which scripts exist, and the second time it was wrong about
+# the word "converts".
+#
+# NEVER committed. ADR-0034's conversion route is superseded by ADR-0036 and
+# ADR-0037, and ADR-0003 sets the licence this repository ships under,
+# GPL-3.0-or-later with a CLA: ~31 MB of third-party
 # model weights do not belong in its history, where they would be permanent.
 # The manifest in crates/uptake-assets/src/ppocr.rs carries their digests, which
 # is the part that IS ours to version.
 /dist
 
 # The staging directory the installer packages: the ONNX Runtime DLL, its two
-# notice files, and the OCR models. ~37 MB of binaries that are ACQUIRED rather
-# than committed -- `scripts/acquire-onnxruntime.py`,
-# `scripts/acquire-ppocr-detector.py` and `scripts/convert-ppocr-models.py`
+# notice files, and the OCR models. ~47.6 MB of binaries that are ACQUIRED
+# rather than committed -- `scripts/acquire-onnxruntime.py`,
+# `scripts/acquire-ppocr-detector.py` and `scripts/acquire-ppocr-recogniser.py`
 # each verify every byte against a pinned SHA-256 before writing here, which is
-# ADR-0032 decision 2.
+# ADR-0032 decision 2. The exact figure is 47,608,523 B, and
+# `installer_payload_bytes()` derives it from the six pins -- do not hand-write
+# a total here, which is how the "~31 MB" below went stale in the first place.
 #
 # ⚠️ This block said "the converted PP-OCRv4 models", named TWO scripts, and
 # said ~31 MB. All three were stale, and it sits eleven lines below the block

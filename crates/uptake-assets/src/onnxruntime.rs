@@ -278,7 +278,20 @@ mod tests {
     }
 
     #[test]
-    fn the_installer_payload_is_derived_and_not_hand_written() {
+    fn the_installer_payload_counts_every_pinned_member() {
+        // ⚠️ RENAMED by PR #88 round 11 (FINDING 6), REVERTED by PR #89's
+        // levelling on 2026-09-06, and restored here. It was called
+        // `the_installer_payload_is_derived_and_not_hand_written`, and round 11
+        // drilled that name false: replacing the whole body of
+        // `installer_payload_bytes()` with the literal `47_608_523` leaves this
+        // test GREEN, because both sides of the assertion are then the same
+        // number. Any hand-written literal equal to today's total passes.
+        //
+        // What it DOES catch, drilled in the same round: a member going
+        // missing. Dropping LICENCE_SIZE and NOTICES_SIZE turns it red, and
+        // that is the regression the function was written for. Nothing in Rust
+        // can assert that a const fn's body is an expression rather than a
+        // literal, so the narrower name is the honest one.
         // The whole point of the function: it cannot disagree with the pins.
         assert_eq!(
             installer_payload_bytes(),
@@ -292,7 +305,7 @@ mod tests {
     }
 
     #[test]
-    fn the_installer_payload_stays_inside_adr_0035s_hard_fail() {
+    fn the_installer_payload_stays_inside_adr_0037s_hard_fail() {
         // ADR-0035 set a < 35 MB target and a 40 MB HARD FAIL. Until now both
         // were sentences in a decision record, and a doc comment carrying a
         // hand-copied total went 5.15 MB stale across ADR-0036's detector swap
@@ -312,7 +325,8 @@ mod tests {
         const HARD_FAIL: u64 = 60_000_000;
         assert!(
             installer_payload_bytes() < HARD_FAIL,
-            "installer payload is {} bytes, past ADR-0035's {} byte hard fail;              moving this line needs a decision record, not a bigger constant",
+            "installer payload is {} bytes, past ADR-0037's {} byte hard fail; \
+             moving this line needs a decision record, not a bigger constant",
             installer_payload_bytes(),
             HARD_FAIL
         );
