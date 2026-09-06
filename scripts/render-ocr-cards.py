@@ -78,12 +78,37 @@ except ImportError:  # pragma: no cover - the message is the whole handling
 #                and the l/1 confusion are both already-observed failures.
 #   terminal  -- small light-on-dark monospace, which is the case that failed
 #                worst at the rig.
+#
+# The two German keys below are NOT in the default set -- see DEFAULT_TEXT_KEYS.
+#
+#   german    -- umlauts and the eszett, which is the character class roadmap
+#                `1.33` uses to RULE OUT `en_PP-OCRv4_rec`: that dictionary is
+#                95 characters and cannot represent `ä`, `ö` or `ß`. Until this
+#                key existed the harness scored a recogniser that cannot spell
+#                German exactly as well as one that can, so the measurement
+#                could not see the constraint the decision rests on.
+#   rechnung  -- the same case as `invoice` in Austrian form: comma decimal,
+#                full stop as the thousands separator, and the euro sign. The
+#                founder is Austrian and this is the string he would actually
+#                point the product at.
 TEXTS: dict[str, str] = {
     "letters": "The quick brown fox jumps over the lazy dog",
     "digits": "0123456789 0123456789",
     "invoice": "Invoice 2026-09-04 Total: 1,284.50 EUR",
     "terminal": "error[E0308]: mismatched types",
+    "german": "Größe 42 Straße Häuser Öl Übung grün weiß schön",
+    "rechnung": "Rechnung 2026-09-05 Betrag: 1.284,50 EUR Umsatzsteuer",
 }
+
+#: The keys the grid renders when `--texts` is not given.
+#:
+#: German is deliberately EXCLUDED from the default. Adding it to the grid would
+#: take the set from 192 cards to 288 and move every headline figure this
+#: project has recorded -- CER 0.140, exact 66.7 %, empty 7.8 % on 2026-09-05 --
+#: so a before/after comparison across the recogniser swap would be measuring
+#: two different card sets. Render German with `--texts german,rechnung --out
+#: dist/cards-de` and report it as its own population.
+DEFAULT_TEXT_KEYS: tuple[str, ...] = ("letters", "digits", "invoice", "terminal")
 
 # Font pixel sizes. 7 is here because the founder read 7 px text successfully at
 # the rig, which falsified the resolution hypothesis and is worth keeping under
@@ -283,7 +308,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--texts",
-        default=",".join(TEXTS),
+        default=",".join(DEFAULT_TEXT_KEYS),
         help=f"comma-separated text keys from {sorted(TEXTS)}",
     )
     parser.add_argument(

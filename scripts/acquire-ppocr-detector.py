@@ -18,12 +18,16 @@ Baidu publishing PP-OCRv6 as ONNX under its own name is a different thing, and
 `ADR-0034` never considered it. So the split is deliberate:
 
     detector    -> downloaded here, digest pins BAIDU's artifact
-    recogniser  -> converted by convert-ppocr-models.py, digest pins OURS
-    dictionary  -> copied byte for byte by that same script
+    recogniser  -> downloaded by acquire-ppocr-recogniser.py, digest pins THEIRS
+    dictionary  -> extracted from the recogniser's inference.yml by that
+                   same script, so its digest pins OUR extraction
 
-⚠️ **A reader of `convert-ppocr-models.py` will find it covers only two of the
-three files.** That is stated in its header too. Two acquisition mechanisms
-where there was one is the cost `ADR-0036` accepted knowingly.
+⚠️ **`convert-ppocr-models.py` is GONE.** This paragraph used to warn that it
+covered only two of the three files. `ADR-0037` took the recogniser to Baidu's
+own ONNX on 2026-09-05, which left that script converting nothing UP-TAKE
+ships, and `scripts/write-model-notice.py` took over the one job it still did.
+Two acquisition steps where there was one is the cost `ADR-0036` accepted
+knowingly, and `ADR-0037` made it uniform rather than mixed.
 
 What a digest mismatch means here, and what it does not
 ------------------------------------------------------
@@ -199,7 +203,7 @@ def onnxruntime_session(path: Path):
     return onnxruntime.InferenceSession(str(path), providers=["CPUExecutionProvider"])
 
 
-def check_shape(path: Path, load=onnxruntime_session) -> None:
+def check_shape(path: Path, load=onnxruntime_session, *, required: bool = False) -> None:
     """Refuses a detector whose tensor shapes are not what this pipeline feeds.
 
     # Why a byte check is not enough here, and was enough before
@@ -213,7 +217,7 @@ def check_shape(path: Path, load=onnxruntime_session) -> None:
 
     So the shape contract is asserted: three input channels (RGB, normalised)
     and a single-channel probability map out, which is what DB post-processing
-    consumes. This check MOVED here from `convert-ppocr-models.py` along with
+    consumes. This check MOVED here from the conversion script along with
     the detector, and it matters more on bytes we did not produce than on the
     ones we did.
 
@@ -222,6 +226,14 @@ def check_shape(path: Path, load=onnxruntime_session) -> None:
     saying so reports green forever. The absence arrives as an `ImportError`
     out of `load`, which is why that except arm comes first.
 
+    **`required` makes the skip a refusal**, and CI passes it. `PR #89` round 1
+    F4 found this construction on BOTH acquisition scripts: the guard was live
+    in the build job only because an unrelated step happened to install
+    onnxruntime in it, and a comment proposing to delete that step would have
+    turned the check into a permanent green printing `NOT CHECKED` into a log
+    nobody reads. A flag the job carries beats a sentence the next editor has to
+    remember.
+
     `load` is a seam, not a convenience: it is what makes every branch below
     reachable from a test with no `onnxruntime` installed. See
     [`onnxruntime_session`].
@@ -229,9 +241,17 @@ def check_shape(path: Path, load=onnxruntime_session) -> None:
     try:
         session = load(path)
     except ImportError:
+        if required:
+            raise SystemExit(
+                "onnxruntime is not installed and --require-onnxruntime was"
+                " given, so the detector's shapes could not be verified."
+                "\nThis flag is passed by CI precisely so the check cannot"
+                " become a silent pass. Install it, or drop the flag knowingly."
+            ) from None
         print(
             "  NOT CHECKED: onnxruntime is not installed, so the detector's"
-            " shapes were not verified. Install it to enable this."
+            " shapes were not verified. Install it to enable this, or pass"
+            " --require-onnxruntime to make the absence a refusal."
         )
         return
     except Exception as error:  # noqa: BLE001 - onnxruntime raises several types
@@ -271,6 +291,12 @@ def main() -> int:
         default=None,
         help="verify this file instead of downloading; checked identically",
     )
+    parser.add_argument(
+        "--require-onnxruntime",
+        action="store_true",
+        help="treat a missing onnxruntime as a refusal rather than a skip;"
+        " passed by CI so the shape check cannot become a silent pass",
+    )
     arguments = parser.parse_args()
 
     pins = read_pins()
@@ -295,34 +321,36 @@ def main() -> int:
     # it. Nothing that fails a check reaches the staging directory.
     check(data, str(pins["DETECTION_SHA256"]), int(pins["DETECTION_SIZE"]))
 
-    # ...and that sentence is TRUE OF THE SHAPE CHECK TOO now, which it was not.
+    # ...and that sentence is TRUE OF THE SHAPE CHECK TOO, which it was not.
     #
     # `PR #88` round 10, FINDING 4: this wrote the file and then called
     # `check_shape`, so a wrong-shaped detector was left in the staging
-    # directory after the refusal. The claim above, and the same words in
-    # `ci.yml` and in this file's own test docstring, were false for exactly the
-    # check this pull request adds. The ordering was explained honestly in a
+    # directory after the refusal. The ordering was explained honestly in a
     # comment -- onnxruntime loads from a path, not from bytes -- but an honest
     # explanation of a gap is not the same as not having one.
     #
     # So the model is written to a scratch directory, checked there, and moved
-    # into `--out` only once it has passed.
+    # into `--out` only once it has passed. `acquire-ppocr-recogniser.py` does
+    # the same for the same reason.
     #
-    # ⚠️ This named `acquire-ppocr-recogniser.py` until `PR #88` round 11
-    # (FINDING 2). That file is on `PR #89` and is NOT an ancestor of this
-    # branch, so the sentence cited a script no reader here could open, in the
-    # same commit that quarantined `--require-onnxruntime` as PR #89's work.
-    # The twin that does the same thing on THIS branch is
-    # `convert-ppocr-models.py`, which gained the same two-phase write when
-    # round 11 found it had been left out of round 10's fix (`I-373`).
+    # ⚠️ **THIS HUNK IS A MERGE RESOLUTION AND BOTH SIDES CONTRIBUTED.**
+    # `PR #89` branched before round 10, so its copy of these lines still had
+    # the write-then-check order, with `required=` added to the call. Taking
+    # either side whole would have lost something: this branch's version
+    # reverts round 10's fix, and `PR #88`'s version drops `PR #89`'s flag.
+    # `test_a_FAILED_shape_check_stages_NOTHING` is what would have caught the
+    # first of those, and it passes here.
+    #
+    # The round-11 note that used to sit here -- saying this comment cited
+    # `acquire-ppocr-recogniser.py`, a script that was "NOT an ancestor of this
+    # branch" -- is deleted rather than kept, because the merge made it false:
+    # that script exists now, one directory listing away, and does exactly what
+    # the sentence says it does.
     scratch = Path(tempfile.mkdtemp(prefix="acquire-det-"))
     try:
         probe = scratch / file_name
         probe.write_bytes(data)
-        # `--require-onnxruntime` is PR #89's, not this branch's; the skip
-        # arm here is still a skip. Kept out deliberately rather than
-        # imported, so this pull request carries only its own change.
-        check_shape(probe)
+        check_shape(probe, required=arguments.require_onnxruntime)
 
         arguments.out.mkdir(parents=True, exist_ok=True)
         target = arguments.out / file_name

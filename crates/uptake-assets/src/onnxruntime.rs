@@ -53,7 +53,7 @@ pub const ARCHIVE_URL: &str = "https://github.com/microsoft/onnxruntime/releases
 /// The archive's SHA-256, probed on 2026-09-02 by downloading it.
 ///
 /// ⚠️ **Nothing polls this URL, and that is intended behaviour rather than a
-/// fault.** `scripts/convert-ppocr-models.py` says the same about its own
+/// fault.** `scripts/write-model-notice.py` says the same about its own
 /// upstream and it is worth saying here too: if Microsoft ever replaced this
 /// release asset in place, no probe in either repository would notice. The
 /// acquisition script would go red the next time it ran, and that red is the
@@ -279,24 +279,20 @@ mod tests {
 
     #[test]
     fn the_installer_payload_counts_every_pinned_member() {
-        // ⚠️ RENAMED by `PR #88` round 11 (FINDING 6). This was called
-        // `the_installer_payload_is_derived_and_not_hand_written` and its
-        // comment read "the whole point of the function: it cannot disagree
-        // with the pins". The reviewer drilled it: replacing the whole body of
-        // `installer_payload_bytes()` with the literal `37_212_782` leaves
-        // this test GREEN, because both sides of the assertion are then the
-        // same number. Any hand-written literal equal to today's total passes.
+        // ⚠️ RENAMED by PR #88 round 11 (FINDING 6), REVERTED by PR #89's
+        // levelling on 2026-09-06, and restored here. It was called
+        // `the_installer_payload_is_derived_and_not_hand_written`, and round 11
+        // drilled that name false: replacing the whole body of
+        // `installer_payload_bytes()` with the literal `47_608_523` leaves this
+        // test GREEN, because both sides of the assertion are then the same
+        // number. Any hand-written literal equal to today's total passes.
         //
         // What it DOES catch, drilled in the same round: a member going
-        // missing. Dropping `LICENCE_SIZE` and `NOTICES_SIZE` -- round 4's F6
-        // exactly -- turns it red, and that is the regression the function was
-        // written for. So the check earns its place under the narrower name.
-        //
-        // Nothing in Rust can assert that a `const fn`'s body is an expression
-        // rather than a literal, which is why this is a rename and not a
-        // stronger test. The property "the total tracks the pins" is held by
-        // review, not by the suite, and saying so is better than a name that
-        // implies otherwise.
+        // missing. Dropping LICENCE_SIZE and NOTICES_SIZE turns it red, and
+        // that is the regression the function was written for. Nothing in Rust
+        // can assert that a const fn's body is an expression rather than a
+        // literal, so the narrower name is the honest one.
+        // The whole point of the function: it cannot disagree with the pins.
         assert_eq!(
             installer_payload_bytes(),
             RUNTIME_SIZE
@@ -309,39 +305,27 @@ mod tests {
     }
 
     #[test]
-    fn the_installer_payload_stays_inside_adr_0035s_hard_fail() {
-        // ADR-0035 set a < 35 MB target and a 40 MB HARD FAIL, and until this
-        // function existed both were sentences in a decision record.
+    fn the_installer_payload_stays_inside_adr_0037s_hard_fail() {
+        // ADR-0035 set a < 35 MB target and a 40 MB HARD FAIL. Until now both
+        // were sentences in a decision record, and a doc comment carrying a
+        // hand-copied total went 5.15 MB stale across ADR-0036's detector swap
+        // -- landing past the target with nothing going red (PR #88 round 3,
+        // F2). This is the check that would have caught it.
         //
-        // ⚠️ THIS CHECK WOULD NOT HAVE CAUGHT THE INCIDENT IT NAMES, and the
-        // comment used to claim it would. Round 3's F2 was a hand-copied total
-        // going stale and "landing past the TARGET with nothing going red";
-        // this asserts the HARD FAIL. PR #88 round 10, FINDING 3 -- a check
-        // described by the failure it does not detect.
+        // The TARGET is deliberately not asserted here: a payload past the
+        // target is a decision, and the hard fail is the line that must not
+        // move without one.
         //
-        // The target is still not asserted, and that is deliberate: a payload
-        // past it is a decision, not a defect. What was missing is the payload
-        // being past it RIGHT NOW with nothing saying so. It is said here:
-        //
-        //   payload at this head   37,212,782 B = 37.21 MB
-        //   ADR-0035 target        < 35 MB      EXCEEDED by 2.21 MB
-        //   ADR-0035 hard fail     40 MB        2.79 MB of headroom left
-        //
-        // ADR-0036's own consequences estimate "roughly 34.4 MB". The derived
-        // figure is 37.21 MB, so that estimate is 2.8 MB light and this
-        // function is the authoritative number.
-        //
-        // ⚠️ UNIT MISMATCH, stated rather than papered over: this sums
-        // UNCOMPRESSED asset bytes and excludes the application binary, while
-        // ADR-0035's 40 MB is an INSTALLER size and its 29.2 MB figure included
-        // the app. The two are not the same quantity. Comparing them is
-        // conservative -- the installer compresses to less than its payload --
-        // but it is not like for like, and a future round should either measure
-        // the artifact or restate the bar in payload terms.
-        const HARD_FAIL: u64 = 40_000_000;
+        // ⚠️ RAISED 2026-09-05 to 60 MB by ADR-0037, which is the decision
+        // record this test's own message demanded. It fired when both models
+        // became the PP-OCRv6 small tier, said "moving
+        // this line needs a decision record, not a bigger constant", and the
+        // record was written before this constant moved. That order is the
+        // whole point of the check.
+        const HARD_FAIL: u64 = 60_000_000;
         assert!(
             installer_payload_bytes() < HARD_FAIL,
-            "installer payload is {} bytes, past ADR-0035's {} byte hard fail; \
+            "installer payload is {} bytes, past ADR-0037's {} byte hard fail; \
              moving this line needs a decision record, not a bigger constant",
             installer_payload_bytes(),
             HARD_FAIL
