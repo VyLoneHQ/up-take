@@ -153,8 +153,14 @@ pub fn install(app: &AppHandle) {
 
 /// Tells the user the hotkey is unavailable, and what to do about it.
 ///
-/// Shown as a dialog rather than logged because there is still nowhere else for
-/// it to go. Task 1.5's tray is *not* that place: it can summon the overlay,
+/// Shown as a dialog AND logged. ⚠️ This said "rather than logged because
+/// there is still nowhere else for it to go" until task 1.15 built the
+/// somewhere -- and 1.15's own module doc quoted this exact sentence as the
+/// thing it made false while leaving the sentence standing, which is the
+/// fixed-the-instance-left-the-class shape this project keeps paying for.
+/// Found by round 1 of `PR #94`'s review. The dialog is still the part that
+/// reaches a user who has no console; the log is what a support conversation
+/// can refer to a week later. Task 1.5's tray is *not* that place: it can summon the overlay,
 /// but it cannot tell the user that a combination they are already pressing
 /// belongs to another application — a tray icon says nothing until it is
 /// clicked, and the user with a shadowed hotkey has no reason to click it.

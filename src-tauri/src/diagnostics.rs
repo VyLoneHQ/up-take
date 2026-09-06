@@ -30,10 +30,22 @@
 //!
 //! This is the one rule in this file that a well-meaning future change is
 //! likely to break, because logging the recognised text is *obviously useful*
-//! when debugging OCR. So it is not left to care: `tests::no_captured_content_
-//! reaches_a_log_macro` reads this crate's own source and fails on a logging
-//! macro whose arguments name a value carrying screen content. That test is
-//! the rule; this paragraph is only its explanation.
+//! when debugging OCR. So it is not left to care:
+//! `tests::no_captured_content_reaches_a_log_macro` reads this crate's own
+//! source and fails when a value carrying screen content reaches a sink. That
+//! test is the rule; this paragraph is only its explanation.
+//!
+//! ⚠️ **AND ITS LIMIT IS STATED, because the first version of this paragraph
+//! overclaimed and round 1 of `PR #94` proved it.** That review laundered
+//! recognised text past the guard three ways: a call split across lines, a raw
+//! string whose embedded quotes desynchronised the literal tracker, and -- the
+//! sharp one -- `format!` on one line and [`report_failure`] on the next, so
+//! the only macro the scan could see was this module's own
+//! `tracing::error!(source, detail)`, two generic parameter names. **The
+//! mechanism this module introduced was invisible to its own guard.** All
+//! three are closed. What is NOT closed, and what no source scan can close, is
+//! content bound to a name the list does not carry: `let payload = ocr_result`
+//! passes. That residual is `I-381` and its remedy is a type-level one.
 //!
 //! # Where the file goes
 //!
@@ -222,40 +234,75 @@ mod tests {
         assert_eq!(log_directory(None), None);
     }
 
+    /// Names that hold content off the user's screen in this crate.
+    ///
+    /// A name added here costs nothing. A name MISSING from here is how the
+    /// rule fails quietly, so the list is deliberately broad and matches on
+    /// argument text rather than on types.
+    const FORBIDDEN: &[&str] = &[
+        "text",
+        "recognised",
+        "recognized",
+        "pixels",
+        "bitmap",
+        "rgba",
+        "png",
+        "dib",
+        "frame",
+        "crop",
+        "clipboard_text",
+        "ocr_text",
+    ];
+
+    /// Everything that can put a value somewhere it outlives the moment.
+    ///
+    /// # Why this is not just the `tracing` macros
+    ///
+    /// Round 1 of `PR #94`'s review drilled the first version of this control
+    /// and laundered recognised text straight past it: build the string with
+    /// `format!` on one line, hand the resulting local to
+    /// [`report_failure`] on the next. The macro scan saw
+    /// `tracing::error!(target: "up-take", source, detail)` inside
+    /// `report_failure` -- two generic parameter names, neither forbidden --
+    /// and passed. **The abstraction this module introduced as its central
+    /// mechanism was invisible to its own guard.**
+    ///
+    /// A source scan cannot follow a value through a binding, so it does not
+    /// try. It forbids BUILDING the string instead: `format!` is on this list,
+    /// and interpolating screen content into one has no legitimate use in this
+    /// crate. Measured rather than assumed before choosing that rule -- the
+    /// whole of `src-tauri/src` contains no such `format!` today.
+    const SINKS: &[&str] = &[
+        "tracing::error!",
+        "tracing::warn!",
+        "tracing::info!",
+        "tracing::debug!",
+        "tracing::trace!",
+        "error!(",
+        "warn!(",
+        "info!(",
+        "debug!(",
+        "trace!(",
+        "report_failure(",
+        "format!(",
+        "format_args!(",
+    ];
+
     /// ⚠️ THIS TEST IS THE PRIVACY RULE. The module docs only explain it.
     ///
-    /// It reads this crate's own source and fails if a `tracing` macro is
-    /// handed a value that carries content off the user's screen. Written
-    /// because "do not log the recognised text" is exactly the instruction a
-    /// future session cannot be relied on to remember (`OS-F46`), and because
-    /// logging it is the obvious thing to reach for when OCR misreads
-    /// something.
+    /// # What it can see, stated precisely because the first version overclaimed
     ///
-    /// It is deliberately a source scan and not a runtime assertion: the
-    /// failure it prevents is a line of code being written, and by the time
-    /// such a line runs the content is already in the file.
+    /// It reads this crate's source, joins each call into one logical unit,
+    /// discards prose, and fails if a [`SINKS`] entry is handed an identifier
+    /// from [`FORBIDDEN`].
+    ///
+    /// **What it still cannot see**, and no source scan can: content bound to
+    /// a name that is not on `FORBIDDEN`. `let payload = ocr_result; info!(%payload)`
+    /// passes. The list is the boundary of the guarantee, which is why the
+    /// remedy for that residual is a type-level one and is filed as `I-381`
+    /// rather than pretended away here.
     #[test]
     fn no_captured_content_reaches_a_log_macro() {
-        // Identifiers that hold screen content in this crate. A name added
-        // here costs nothing; a name missing from here is how the rule fails
-        // quietly, so the list is deliberately broad and matches on the
-        // ARGUMENT TEXT rather than on types.
-        const FORBIDDEN: &[&str] = &[
-            "text",
-            "recognised",
-            "recognized",
-            "pixels",
-            "bitmap",
-            "rgba",
-            "png",
-            "dib",
-            "frame",
-            "crop",
-            "clipboard_text",
-            "ocr_text",
-        ];
-
-        let mut offences = Vec::new();
         let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut files = Vec::new();
         collect_rust_files(&source_root, &mut files);
@@ -265,25 +312,16 @@ mod tests {
             files.len()
         );
 
+        let mut offences = Vec::new();
         for file in &files {
             let source = fs::read_to_string(file).expect("a readable source file");
-            for (number, line) in source.lines().enumerate() {
-                let trimmed = line.trim_start();
-                // Comments and doc comments talk ABOUT the rule constantly,
-                // including in this very file.
-                if trimmed.starts_with("//") {
-                    continue;
-                }
-                let Some(rest) = logging_macro_arguments(trimmed) else {
-                    continue;
-                };
-                let checkable = fields_and_captures(rest);
+            for (line_number, unit) in logical_calls(&source) {
                 for needle in FORBIDDEN {
-                    if field_name_matches(&checkable, needle) {
+                    if field_name_matches(&unit, needle) {
                         offences.push(format!(
-                            "{}:{} logs `{needle}`: {trimmed}",
+                            "{}:{line_number} puts `{needle}` into a sink: {}",
                             file.display(),
-                            number + 1
+                            unit.trim()
                         ));
                     }
                 }
@@ -298,72 +336,261 @@ mod tests {
         );
     }
 
-    /// The argument text of a `tracing` macro call, if the line is one.
-    fn logging_macro_arguments(line: &str) -> Option<&str> {
-        for macro_name in [
-            "tracing::error!",
-            "tracing::warn!",
-            "tracing::info!",
-            "tracing::debug!",
-            "tracing::trace!",
-            "error!(",
-            "warn!(",
-            "info!(",
-            "debug!(",
-            "trace!(",
-        ] {
-            if let Some(index) = line.find(macro_name) {
-                return Some(&line[index + macro_name.len()..]);
+    /// Every sink call in `source`, as `(line number, checkable argument text)`.
+    ///
+    /// Joins continuation lines until the call's parentheses balance, because
+    /// round 1's drill split a macro across three lines and walked straight
+    /// through a scan that read one physical line at a time.
+    /// How many continuation lines a call may span before the scan gives up.
+    ///
+    /// Not decoration. The first version of the accumulator had no bound, and
+    /// when it met a line it could not balance -- the `SINKS` array literal in
+    /// this very file, whose entries are the sink NAMES -- it swallowed the
+    /// rest of the file into one unit and reported every forbidden word in it.
+    /// A runaway parse must stop, and it must stop loudly rather than by
+    /// silently dropping the call.
+    const MAX_CONTINUATION_LINES: usize = 40;
+
+    fn logical_calls(source: &str) -> Vec<(usize, String)> {
+        let lines: Vec<&str> = source.lines().collect();
+        let mut found = Vec::new();
+        let mut index = 0;
+        while index < lines.len() {
+            let trimmed = lines[index].trim_start();
+
+            // ⚠️ TEST CODE IS SKIPPED, and that is a decision with a cost.
+            //
+            // A test module legitimately contains the very lines this control
+            // forbids: `the_privacy_scan_can_actually_fail` is nothing BUT
+            // deliberate leak examples, and this module's own `SINKS` list
+            // spells out every sink name. Scanning them makes the control fire
+            // on itself, which is what the first version did.
+            //
+            // The cost: a leak written inside a `#[cfg(test)]` block is
+            // invisible here. That is acceptable in a way the production case
+            // is not -- test code does not run in a user's installed build and
+            // has no user's screen to read -- but it is a hole and is named
+            // rather than left for a reviewer to find.
+            if trimmed.starts_with("#[cfg(test)]") {
+                index = skip_braced_item(&lines, index);
+                continue;
             }
+            if trimmed.starts_with("//") {
+                index += 1;
+                continue;
+            }
+
+            let Some(sink) = SINKS
+                .iter()
+                .find_map(|s| trimmed.find(s).map(|i| i + s.len()))
+            else {
+                index += 1;
+                continue;
+            };
+
+            // SINKS is not uniform: the macro entries stop at `!` and the
+            // function entries include their `(`. Normalise, or `tracing::error!`
+            // is handed a remainder that still holds its own opening paren and
+            // can never balance -- which is what the bound above caught.
+            let rest = trimmed[sink..]
+                .strip_prefix('(')
+                .unwrap_or(&trimmed[sink..]);
+            let mut unit = String::from(rest);
+            let mut cursor = index;
+            let mut spanned = 0;
+            while depth(&unit) > 0 && cursor + 1 < lines.len() {
+                if spanned >= MAX_CONTINUATION_LINES {
+                    // Loud, not silent. An unbalanced call is a parse this
+                    // scan does not understand, and a control that quietly
+                    // skips what it cannot read reports green forever.
+                    panic!(
+                        "the privacy scan could not balance the call starting at line {}: {}",
+                        index + 1,
+                        lines[index].trim()
+                    );
+                }
+                cursor += 1;
+                spanned += 1;
+                let next = lines[cursor].trim_start();
+                if next.starts_with("//") {
+                    continue;
+                }
+                unit.push(' ');
+                unit.push_str(next);
+            }
+            found.push((index + 1, fields_and_captures(&unit)));
+            index += 1;
         }
-        None
+        found
     }
 
-    /// The part of a macro call that can carry DATA, with prose removed.
+    /// The index just past the `{ ... }` item beginning at or after `from`.
+    fn skip_braced_item(lines: &[&str], from: usize) -> usize {
+        let mut index = from;
+        let mut depth = 0i32;
+        let mut opened = false;
+        while index < lines.len() {
+            for c in strip_literals(lines[index]).chars() {
+                match c {
+                    '{' => {
+                        depth += 1;
+                        opened = true;
+                    }
+                    '}' => depth -= 1,
+                    _ => {}
+                }
+            }
+            index += 1;
+            if opened && depth <= 0 {
+                return index;
+            }
+        }
+        index
+    }
+
+    /// Unbalanced open parentheses in `text`, ignoring string literals.
+    fn depth(text: &str) -> i32 {
+        let mut depth = 1; // the sink's own `(` was consumed by the caller
+        for c in strip_literals(text).chars() {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+        }
+        depth
+    }
+
+    /// `text` with every string literal removed entirely.
+    fn strip_literals(text: &str) -> String {
+        scan_literals(text, false)
+    }
+
+    /// The part of a call that can carry DATA, with prose removed.
     ///
     /// # Why this is not just the raw argument text
     ///
-    /// The first version of this control matched the whole argument string and
-    /// immediately fired on
+    /// The first version matched everything and immediately fired on
     /// `tracing::warn!(%error, "output: dropped the pinned pixels ...")` --
     /// the word `pixels` in an English sentence, not a field carrying a pixel
-    /// buffer. That is a false positive on the project's own correct code, and
-    /// a control that cries wolf is one somebody deletes. So string literals
-    /// are stripped.
+    /// buffer. A control that cries wolf is one somebody deletes.
     ///
     /// # ...but NOT their captures
     ///
     /// `tracing::info!("{line}")` interpolates the variable `line`. Dropping
     /// the literal whole would blind the control to exactly the case where a
-    /// message is built from captured content. So `{...}` spans inside a
-    /// literal are KEPT while the prose around them is discarded.
-    fn fields_and_captures(arguments: &str) -> String {
+    /// message is BUILT from captured content, which is round 1's laundering
+    /// drill. So `{...}` spans inside a literal are kept.
+    fn fields_and_captures(text: &str) -> String {
+        scan_literals(text, true)
+    }
+
+    /// Shared literal-aware walk. Handles `"..."`, escapes, and raw strings
+    /// (`r"..."`, `r#"..."#`), which round 1 desynchronised with an odd number
+    /// of embedded quotes to walk a live field past the scanner.
+    fn scan_literals(text: &str, keep_captures: bool) -> String {
+        let bytes = text.as_bytes();
         let mut out = String::new();
-        let mut inside_literal = false;
-        let mut chars = arguments.chars().peekable();
-        while let Some(c) = chars.next() {
-            match c {
-                '\\' if inside_literal => {
-                    // Skip the escaped character so an escaped quote does not
-                    // read as the end of the literal.
-                    let _ = chars.next();
+        let mut i = 0;
+        while i < bytes.len() {
+            // A raw string opener: `r` then zero or more `#` then `"`.
+            if bytes[i] == b'r' && !preceded_by_identifier(bytes, i) {
+                let mut hashes = 0;
+                let mut j = i + 1;
+                while j < bytes.len() && bytes[j] == b'#' {
+                    hashes += 1;
+                    j += 1;
                 }
-                '"' => inside_literal = !inside_literal,
-                '{' if inside_literal => {
-                    out.push(' ');
-                    for inner in chars.by_ref() {
-                        if inner == '}' {
-                            break;
-                        }
-                        out.push(inner);
+                if j < bytes.len() && bytes[j] == b'"' {
+                    let closer = String::from("\"") + &"#".repeat(hashes);
+                    let rest = &text[j + 1..];
+                    let end = rest.find(&closer).map_or(text.len(), |k| j + 1 + k);
+                    if keep_captures {
+                        push_captures(&text[j + 1..end], &mut out);
                     }
-                    out.push(' ');
+                    i = end + closer.len();
+                    continue;
                 }
-                _ if inside_literal => {}
-                _ => out.push(c),
             }
+            // A CHAR literal. Skipped because `push_captures` contains `'{'`
+            // and `'}'`, and counting those as braces desynchronised
+            // `skip_braced_item` badly enough that the scan walked back into
+            // the test module it had just skipped and tripped over its own
+            // fixtures. Lifetimes (`&'a str`) look similar and must NOT be
+            // consumed, so a closing quote within three bytes is required.
+            if bytes[i] == b'\''
+                && let Some(end) = char_literal_end(bytes, i)
+            {
+                i = end + 1;
+                continue;
+            }
+            if bytes[i] == b'"' {
+                let mut j = i + 1;
+                while j < bytes.len() {
+                    if bytes[j] == b'\\' {
+                        j += 2;
+                        continue;
+                    }
+                    if bytes[j] == b'"' {
+                        break;
+                    }
+                    j += 1;
+                }
+                let end = j.min(bytes.len());
+                if keep_captures {
+                    push_captures(&text[i + 1..end], &mut out);
+                }
+                i = end + 1;
+                continue;
+            }
+            out.push(bytes[i] as char);
+            i += 1;
         }
         out
+    }
+
+    /// The index of a char literal's closing quote, if `i` opens one.
+    ///
+    /// `None` for a lifetime, which shares the opening byte and has no closer.
+    fn char_literal_end(bytes: &[u8], i: usize) -> Option<usize> {
+        // `'x'`
+        if i + 2 < bytes.len() && bytes[i + 1] != b'\\' && bytes[i + 2] == b'\'' {
+            return Some(i + 2);
+        }
+        // `'\n'`, `'\''`, `'\\'`
+        if i + 3 < bytes.len() && bytes[i + 1] == b'\\' && bytes[i + 3] == b'\'' {
+            return Some(i + 3);
+        }
+        None
+    }
+
+    /// Whether the byte before `i` could continue an identifier, so `r` in
+    /// `char_reader` is not read as a raw-string opener.
+    fn preceded_by_identifier(bytes: &[u8], i: usize) -> bool {
+        i > 0 && is_identifier_byte(bytes[i - 1])
+    }
+
+    /// Appends every `{...}` capture found in a literal's body.
+    fn push_captures(body: &str, out: &mut String) {
+        let mut chars = body.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c != '{' {
+                continue;
+            }
+            // `{{` is an escaped brace, not a capture.
+            if chars.peek() == Some(&'{') {
+                let _ = chars.next();
+                continue;
+            }
+            out.push(' ');
+            for inner in chars.by_ref() {
+                if inner == '}' {
+                    break;
+                }
+                out.push(inner);
+            }
+            out.push(' ');
+        }
     }
 
     /// Whether `needle` appears in `arguments` as a whole identifier.
@@ -404,40 +631,70 @@ mod tests {
         }
     }
 
+    /// The control above passing means nothing unless it can fail, and round 1
+    /// of `PR #94`'s review found three ways it could not. Each is asserted
+    /// here by name so a later simplification cannot quietly reopen one.
     #[test]
     fn the_privacy_scan_can_actually_fail() {
-        // `no_captured_content_reaches_a_log_macro` passing means nothing
-        // unless it can fail. Round 12 of PR #88 is this project's record of a
-        // guard that was documented as drilled and drilled by nothing.
-        assert!(field_name_matches(
-            r#"target: "up-take", text = %recognised"#,
-            "text"
-        ));
-        assert!(field_name_matches("pixels = ?buffer", "pixels"));
-        // ...and that it does NOT fire on a word that merely contains one.
+        // The plain case.
+        let calls = logical_calls("tracing::info!(text = %recognised);");
+        assert!(calls.iter().any(|(_, u)| field_name_matches(u, "text")));
+
+        // BYPASS 1, round 1: a call split across lines. The first version read
+        // one physical line and saw nothing.
+        let multi = "tracing::info!(\n    text = %text\n);";
+        assert!(
+            logical_calls(multi)
+                .iter()
+                .any(|(_, u)| field_name_matches(u, "text")),
+            "a multi-line macro call must be joined before scanning"
+        );
+
+        // BYPASS 2, round 1: a raw string with an odd number of embedded
+        // quotes desynchronised the literal tracker, hiding the live field
+        // that followed it.
+        let raw = "tracing::info!(a = r#\"she said \" odd quote\"#, text = %text);";
+        assert!(
+            logical_calls(raw)
+                .iter()
+                .any(|(_, u)| field_name_matches(u, "text")),
+            "a raw string must not desynchronise the literal tracker"
+        );
+
+        // BYPASS 3, round 1: laundering through a wrapper. Closed by refusing
+        // to let the string be BUILT.
+        let laundered = "let leaked = format!(\"recognised text was: {text}\");";
+        assert!(
+            logical_calls(laundered)
+                .iter()
+                .any(|(_, u)| field_name_matches(u, "text")),
+            "format! must be a sink, or content can be laundered into one"
+        );
+
+        // ...and prose is still not data: the real line that made the first
+        // version fire on this project's own correct code.
+        let prose = r#"tracing::warn!(%error, "output: dropped the pinned pixels but could not announce it");"#;
+        assert!(
+            !logical_calls(prose)
+                .iter()
+                .any(|(_, u)| field_name_matches(u, "pixels")),
+            "an English message is not a field"
+        );
+
+        // A word that merely contains a forbidden one is not one.
         assert!(!field_name_matches("context = %detail", "text"));
         assert!(!field_name_matches("subtext_length = 4", "text"));
-        // Prose is not data: the real line that made the first version of this
-        // control fire on correct code.
-        assert!(!field_name_matches(
-            &fields_and_captures(
-                r#"target: "up-take", %error, "output: dropped the pinned pixels but could not announce it""#
-            ),
-            "pixels"
-        ));
-        // ...but a capture INSIDE a message still counts, which is the case
-        // stripping literals could have blinded.
-        assert!(field_name_matches(
-            &fields_and_captures(r#"target: "up-take", "read {text} from the area""#),
-            "text"
-        ));
-        // And a field beside prose is still seen.
-        assert!(field_name_matches(
-            &fields_and_captures(r#"pixels = ?buffer, "a harmless message""#),
-            "pixels"
-        ));
-        // The macro detector, likewise, in both directions.
-        assert!(logging_macro_arguments(r#"tracing::info!(a = 1);"#).is_some());
-        assert!(logging_macro_arguments("let text = ocr()?;").is_none());
+
+        // `{{` is an escaped brace, not a capture.
+        let escaped = "tracing::info!(\"a literal {{text}} brace\");";
+        assert!(
+            !logical_calls(escaped)
+                .iter()
+                .any(|(_, u)| field_name_matches(u, "text")),
+            "`{{{{` is an escaped brace and carries no value"
+        );
+
+        // An identifier ending in `r` is not a raw-string opener.
+        assert!(strip_literals("let char_reader = 1;").contains("char_reader"));
     }
 }

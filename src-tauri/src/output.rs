@@ -240,11 +240,7 @@ pub(crate) fn copy_text_to_clipboard(app: &AppHandle, area: AreaId, text: &str, 
             "ocr: the recognised text did not reach the clipboard",
             "UP-TAKE: could not copy the text",
             &format!(
-                "UP-TAKE read the area but could not put the text on your clipboard,                  so your clipboard is unchanged.
-
-                 Trying again usually works. If it keeps happening, please report it                  with the detail below.
-
-{reason}"
+                "UP-TAKE read the area but could not put the text on your clipboard, so your clipboard is unchanged.\n\nTrying again usually works. If it keeps happening, please report it with the detail below.\n\n{reason}"
             ),
         );
     }
@@ -1283,11 +1279,18 @@ fn stage_line(split: &Split) -> String {
 /// reproduced inside the fix written to escape `I-11`, which is why this table is
 /// here rather than in a commit message.
 ///
-/// **Launched from Explorer or the installed shortcut there is no console at all,
-/// and then this announcement disappears along with everything it announces.**
-/// That restores exactly the ambiguity it exists to remove, and no line can fix
-/// it because the missing thing is the sink. Roadmap 1.15 (structured logging) is
-/// where that stops being true. State it rather than let a rig operator find it.
+/// **Launched from Explorer or the installed shortcut there was no console at
+/// all, and this announcement disappeared along with everything it announced.**
+/// That restored exactly the ambiguity it exists to remove, and no line could
+/// fix it because the missing thing was the sink.
+///
+/// ✅ **Task 1.15 built the sink, and this comment predicted its own
+/// obsolescence without anything acting on it.** The line below is
+/// `tracing::info!` now and reaches
+/// `%LOCALAPPDATA%\VyLone\UP-TAKE\logs` in every build. Corrected by round 1
+/// of `PR #94`'s review, which noticed that the change converting this very
+/// function's sink left the paragraph describing the old limitation two lines
+/// above it.
 pub(crate) fn init_report_verbosity() {
     // What no test covers is the ENV READ, and only the read: the three-way match
     // below maps `VarError` onto the argument, and the decision it feeds is
