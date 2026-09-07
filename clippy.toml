@@ -1,0 +1,59 @@
+# The `tracing` macros are banned outside `crates/uptake-log`.
+#
+# WHY, and it is a privacy rule rather than a style one: `architecture.md`
+# section 4's threat table (private planning repository) puts "captured screen
+# content" first, and a log file on a user's disk is that same asset sitting
+# somewhere they did not ask for it. Recognised text, pixels, saved file names
+# and window titles must never reach one.
+#
+# Holding that needs to be structural. `PR #94` rounds 1 to 3 tried holding it
+# with a test that scanned the crate's source for forbidden identifiers reaching
+# a logging macro; it was walked past EIGHT times and went red once on correct
+# code, and every fix grew the parser until the next round found more. Ten
+# BEHAVIOUR findings across three rounds, all in that scanner. So the property is
+# held by a crate boundary the compiler enforces instead: `crates/uptake-log` is
+# the only crate that may call these, its `[lints.clippy]` allows them for itself
+# alone, and CI runs clippy as `-D warnings` in both debug and release.
+#
+# ⚠️ THE LIST BELOW IS ENUMERATED FROM THE CRATE, NOT REMEMBERED.
+#
+# Round 4 found the first version of this file naming five paths -- the five
+# convenience macros -- and drilled `tracing::event!` straight past it with a
+# runtime string. `event!` is the generic macro those five wrap, so banning the
+# wrappers and not the wrapped was the whole gap.
+#
+# Re-derived by reading the installed crate rather than from memory:
+#
+#   grep -oE "^macro_rules! [a-z_]+" ~/.cargo/registry/src/*/tracing-0.1.44/src/macros.rs
+#
+# Everything that can carry a VALUE into a log is listed. The span macros are
+# included because span fields are recorded too, and `instrument` because it
+# records a function's ARGUMENTS automatically -- `#[instrument] fn
+# recognise(text: &str)` would log the text without anyone writing a log call at
+# all, which is the subtlest route of the lot. The enablement macros
+# (`enabled!`, `level_enabled!`, `event_enabled!`, `span_enabled!`) are NOT
+# listed: they return a bool and record nothing.
+#
+# ⚠️ `eprintln!` is NOT here yet. 68 remain in `src-tauri` and part 2 of task
+# 1.15 is where they go; the ban widens with them. Adding it today would need 68
+# exceptions, which is worse than the gap it closes.
+disallowed-macros = [
+  # The event macros. `event!` is the generic one the rest wrap.
+  { path = "tracing::event", reason = "log through uptake-log, so every log line lives in one reviewable file (task 1.15)" },
+  { path = "tracing::error", reason = "log through uptake-log, so every log line lives in one reviewable file (task 1.15)" },
+  { path = "tracing::warn", reason = "log through uptake-log, so every log line lives in one reviewable file (task 1.15)" },
+  { path = "tracing::info", reason = "log through uptake-log, so every log line lives in one reviewable file (task 1.15)" },
+  { path = "tracing::debug", reason = "log through uptake-log, so every log line lives in one reviewable file (task 1.15)" },
+  { path = "tracing::trace", reason = "log through uptake-log, so every log line lives in one reviewable file (task 1.15)" },
+
+  # The span macros. A span's fields are recorded exactly as an event's are.
+  { path = "tracing::span", reason = "span fields are recorded too; log through uptake-log (task 1.15)" },
+  { path = "tracing::error_span", reason = "span fields are recorded too; log through uptake-log (task 1.15)" },
+  { path = "tracing::warn_span", reason = "span fields are recorded too; log through uptake-log (task 1.15)" },
+  { path = "tracing::info_span", reason = "span fields are recorded too; log through uptake-log (task 1.15)" },
+  { path = "tracing::debug_span", reason = "span fields are recorded too; log through uptake-log (task 1.15)" },
+  { path = "tracing::trace_span", reason = "span fields are recorded too; log through uptake-log (task 1.15)" },
+
+  # Records a function's ARGUMENTS as span fields, with no log call written.
+  { path = "tracing::instrument", reason = "it records function arguments automatically, so it can log screen content with no log call written at all (task 1.15)" },
+]

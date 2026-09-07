@@ -48,7 +48,6 @@
 //! `dev_harness` and any future off-thread caller do. See `dev_harness.rs`.
 
 use tauri::AppHandle;
-use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 use crate::overlay;
@@ -154,8 +153,14 @@ pub fn install(app: &AppHandle) {
 
 /// Tells the user the hotkey is unavailable, and what to do about it.
 ///
-/// Shown as a dialog rather than logged because there is still nowhere else for
-/// it to go. Task 1.5's tray is *not* that place: it can summon the overlay,
+/// Shown as a dialog AND logged. ⚠️ This said "rather than logged because
+/// there is still nowhere else for it to go" until task 1.15 built the
+/// somewhere -- and 1.15's own module doc quoted this exact sentence as the
+/// thing it made false while leaving the sentence standing, which is the
+/// fixed-the-instance-left-the-class shape this project keeps paying for.
+/// Found by round 1 of `PR #94`'s review. The dialog is still the part that
+/// reaches a user who has no console; the log is what a support conversation
+/// can refer to a week later. Task 1.5's tray is *not* that place: it can summon the overlay,
 /// but it cannot tell the user that a combination they are already pressing
 /// belongs to another application — a tray icon says nothing until it is
 /// clicked, and the user with a shadowed hotkey has no reason to click it.
@@ -177,12 +182,18 @@ fn report_failure(app: &AppHandle, label: &str, error: &str) {
              with the details below.\n\n{error}"
         )
     };
-    eprintln!("hotkey: {label} could not be registered: {error}");
-    app.dialog()
-        .message(detail)
-        .kind(MessageDialogKind::Warning)
-        .title("UP-TAKE — hotkey unavailable")
-        .show(|_| {});
+    // As in `tray`: the tailored detail above stays here, the log-and-show
+    // mechanics are shared (task 1.15).
+    crate::diagnostics::report_failure(
+        app,
+        // A literal, by type. The label and the OS error are both safe, but
+        // `source` is what goes in the LOG and its type says only a literal
+        // may -- see `diagnostics::report_failure`. Both appear in the dialog
+        // below, which the user reads and no file keeps.
+        "hotkey: a combination could not be registered",
+        "UP-TAKE — hotkey unavailable",
+        &detail,
+    );
 }
 
 /// Whether a registration error is the "someone else holds this combination"

@@ -4,8 +4,10 @@
 //! quitting is a tray action, full stop. This module is therefore the only
 //! place in the app that calls [`AppHandle::exit`].
 //!
-//! Which is exactly why a failure here is reported to the user rather than
-//! logged. The overlay window is `visible: false`, `skipTaskbar: true` and
+//! Which is exactly why a failure here is reported to the user, and since
+//! task 1.15, logged as well. ⚠️ This said "rather than logged" until then;
+//! corrected by round 1 of `PR #94`'s review, which found the sentence still
+//! standing in a file that same change had edited. The overlay window is `visible: false`, `skipTaskbar: true` and
 //! `decorations: false`, and the startup `overlay::show` is debug-only — so a
 //! release build whose tray did not come up has no tray, no taskbar entry, no
 //! window and no quit command (the startup `overlay::summon` is debug-only).
@@ -18,7 +20,6 @@
 use tauri::AppHandle;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
 use crate::{hotkey, overlay};
 
@@ -50,7 +51,6 @@ pub fn install(app: &AppHandle) {
 /// during `setup`, before the event loop starts, so a blocking dialog would
 /// deadlock the startup it is reporting on.
 fn report_failure(app: &AppHandle, error: &str) {
-    eprintln!("tray: could not create the tray icon: {error}");
     let detail = format!(
         "UP-TAKE has no tray icon, so it has no menu and no Quit command.\n\n\
          {} still summons and dismisses the overlay, so the app is usable. \
@@ -59,11 +59,15 @@ fn report_failure(app: &AppHandle, error: &str) {
          with the details below.\n\n{error}",
         hotkey::SUMMON_LABEL
     );
-    app.dialog()
-        .message(detail)
-        .kind(MessageDialogKind::Warning)
-        .title("UP-TAKE — tray unavailable")
-        .show(|_| {});
+    // The tailored message above is this module's; the log-and-show mechanics
+    // are shared with `hotkey` through `diagnostics` (task 1.15), which is the
+    // half that was duplicated.
+    crate::diagnostics::report_failure(
+        app,
+        "tray: could not create the tray icon",
+        "UP-TAKE — tray unavailable",
+        &detail,
+    );
 }
 
 /// Builds the tray icon and its menu.
