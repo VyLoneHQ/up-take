@@ -138,10 +138,81 @@ def test_the_german_keys_carry_the_characters_they_exist_for(module) -> None:
         )
 
 
-def test_no_text_contains_a_tab_or_newline(module) -> None:
+def test_no_text_contains_a_tab(module) -> None:
     """A tab shifts every manifest column after it, silently."""
     for key, text in module.TEXTS.items():
-        assert "\t" not in text and "\n" not in text, key + " would break cards.tsv"
+        assert "\t" not in text, key + " would break cards.tsv"
+
+
+def test_no_manifest_text_contains_a_newline(module) -> None:
+    """The invariant that MOVED on 2026-09-07 rather than being dropped.
+
+    This test used to forbid a newline anywhere in `TEXTS`, which is why the
+    corpus was single-line and why the harness could not see `I-387`.
+    Multi-line texts are allowed now; what must still hold is that the MANIFEST
+    form carries no newline, because `write_manifest` refuses one and is right
+    to.
+    """
+    for key, text in module.TEXTS.items():
+        rendered = module.manifest_text(text)
+        assert "\n" not in rendered, key + " would break cards.tsv"
+        assert "\t" not in rendered, key + " would break cards.tsv"
+
+
+def test_the_corpus_actually_contains_multi_line_text(module) -> None:
+    """The whole point of `I-387`: a fixture that CAN contain the failure.
+
+    A floor rather than an exact set, so adding a case does not go red -- but a
+    corpus that silently loses its multi-line cards does.
+    """
+    assert len(module.MULTILINE_TEXT_KEYS) >= 3, (
+        "the corpus has lost its multi-line cards, which is the state that made "
+        "I-387 invisible to every figure this harness ever produced"
+    )
+    for key in module.MULTILINE_TEXT_KEYS:
+        assert "\n" in module.TEXTS[key], (
+            key + " is in MULTILINE_TEXT_KEYS and has one line"
+        )
+
+
+def test_multiline_keys_are_derived_not_hand_listed(module) -> None:
+    """`MULTILINE_TEXT_KEYS` must agree with `TEXTS` by construction."""
+    expected = tuple(key for key, text in module.TEXTS.items() if "\n" in text)
+    assert module.MULTILINE_TEXT_KEYS == expected
+
+
+def test_the_multi_line_set_spreads_its_line_counts(module) -> None:
+    """Different line counts rather than three cards of the same shape.
+
+    If reading degrades with the number of lines, a spread shows WHERE. Cards
+    that all had the same count would only show THAT.
+    """
+    counts = {module.TEXTS[key].count("\n") + 1 for key in module.MULTILINE_TEXT_KEYS}
+    assert len(counts) >= 3, "line counts are " + repr(sorted(counts))
+
+
+def test_multi_line_keys_stay_out_of_the_default_grid(module) -> None:
+    """The rule German already follows, for the same reason.
+
+    Including them would move every headline figure recorded to date, so a
+    before/after across a later change would compare two different card sets.
+    """
+    for key in module.MULTILINE_TEXT_KEYS:
+        assert key not in module.DEFAULT_TEXT_KEYS, key + " would move the baseline"
+
+
+def test_manifest_text_collapses_every_run_of_whitespace(module) -> None:
+    """It must reduce to what the Rust harness's `normalise` reduces to.
+
+    That function is `text.split_whitespace().collect().join(" ")` applied to
+    BOTH sides of the comparison, so anything left behind here is a mismatch the
+    engine would be blamed for.
+    """
+    assert module.manifest_text("a\nb") == "a b"
+    assert module.manifest_text("a\n\nb") == "a b"
+    assert module.manifest_text("  a \t b  ") == "a b"
+    assert module.manifest_text("a\r\nb") == "a b"
+    assert module.manifest_text("one") == "one"
 
 
 def main() -> int:

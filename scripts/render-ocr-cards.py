@@ -98,7 +98,52 @@ TEXTS: dict[str, str] = {
     "terminal": "error[E0308]: mismatched types",
     "german": "Größe 42 Straße Häuser Öl Übung grün weiß schön",
     "rechnung": "Rechnung 2026-09-05 Betrag: 1.284,50 EUR Umsatzsteuer",
+    # ---- MULTI-LINE, added 2026-09-07 for `I-387` ----------------------------
+    #
+    # The founder read one short line at the rig and said so: *"it can still not
+    # read more than 1 short line of text"*. Every figure this harness had ever
+    # produced was silent about that, because until today `TEXTS` was six
+    # strings and NOT ONE contained a newline -- 192 cards were those six across
+    # sizes, polarities and fonts. A fixture that cannot contain the failure
+    # cannot measure it, which is `I-367`'s shape for the second time.
+    #
+    # Line counts are 2, 4 and 6 rather than "several": if reading degrades with
+    # the number of lines, a spread shows WHERE, and a single 5-line card would
+    # only show THAT.
+    "wrapped": (
+        "The quick brown fox jumps over the lazy dog\n"
+        "and then lies down beside it in the sun"
+    ),
+    "paragraph": (
+        "Screen capture should not need five applications.\n"
+        "Place an area, choose what it does, and leave it\n"
+        "where it is. The area stays until you remove it,\n"
+        "which is the whole idea."
+    ),
+    "receipt": (
+        "Invoice 2026-09-07\n"
+        "Subtotal: 1,070.42 EUR\n"
+        "Tax (20%): 214.08 EUR\n"
+        "Total: 1,284.50 EUR\n"
+        "Paid by card ending 4417\n"
+        "Thank you for your business"
+    ),
+    "absatz": (
+        "Rechnung 2026-09-07\n"
+        "Zwischensumme: 1.070,42 EUR\n"
+        "Umsatzsteuer (20%): 214,08 EUR\n"
+        "Gesamtbetrag: 1.284,50 EUR"
+    ),
 }
+
+#: The keys whose text spans more than one line.
+#:
+#: Derived rather than listed, so a text that gains or loses a newline cannot
+#: fall out of step with a hand-maintained tuple. `I-64`'s shape -- a set stated
+#: in two places and true in one -- is what this avoids.
+MULTILINE_TEXT_KEYS: tuple[str, ...] = tuple(
+    key for key, text in TEXTS.items() if "\n" in text
+)
 
 #: The keys the grid renders when `--texts` is not given.
 #:
@@ -109,6 +154,18 @@ TEXTS: dict[str, str] = {
 #: two different card sets. Render German with `--texts german,rechnung --out
 #: dist/cards-de` and report it as its own population.
 DEFAULT_TEXT_KEYS: tuple[str, ...] = ("letters", "digits", "invoice", "terminal")
+
+#: ⚠️ The multi-line keys are EXCLUDED from the default grid for the same reason
+#: German is, and the reason is comparability rather than doubt about their
+#: value. Adding them would move every headline figure this project has recorded
+#: -- CER 0.018, exact 87.0 %, empty 0.0 % on 2026-09-05 -- so a before/after
+#: across any later change would be comparing two different card sets.
+#:
+#: Render them as their own population and report them as one:
+#:
+#:     python scripts/render-ocr-cards.py --texts wrapped,paragraph,receipt \
+#:         --out dist/cards-multiline
+#:     python scripts/render-ocr-cards.py --texts absatz --out dist/cards-de-multiline
 
 # Font pixel sizes. 7 is here because the founder read 7 px text successfully at
 # the rig, which falsified the resolution hypothesis and is worth keeping under
@@ -200,6 +257,31 @@ COLUMNS = (
     "height",
     "text",
 )
+
+
+def manifest_text(text: str) -> str:
+    """The ground truth as one manifest line: newlines become single spaces.
+
+    # Why this loses nothing
+
+    `write_manifest` REFUSES a field containing a newline, and it is right to --
+    a newline in a TSV shifts every row after it. That refusal is why the corpus
+    was single-line until 2026-09-07.
+
+    Collapsing is safe here because the Rust harness already compares
+    `text.split_whitespace().join(" ")` on BOTH sides
+    (`crates/uptake-ocr/examples/ocr_accuracy.rs::normalise`), precisely so that
+    "a card whose text wrapped differently would otherwise score as wrong for a
+    reason that is not a reading error". So the stored form is what the
+    comparison reduces to anyway, and a multi-line reading of a multi-line card
+    scores exactly as it should.
+
+    ⚠️ **This means the manifest cannot tell you WHERE the engine broke lines**,
+    only which words it read. That is a real limit of this measurement and it is
+    stated rather than discovered: if line placement ever becomes the question,
+    the manifest needs an escaped column and the harness a second comparison.
+    """
+    return " ".join(text.split())
 
 
 def write_manifest(cards: list[dict[str, object]], path: Path) -> None:
@@ -348,7 +430,7 @@ def main() -> int:
                     cards.append(
                         {
                             "file": name,
-                            "text": text,
+                            "text": manifest_text(text),
                             "text_key": text_key,
                             "font": font_key,
                             "font_file": FONTS[font_key],
