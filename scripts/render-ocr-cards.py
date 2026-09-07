@@ -102,10 +102,21 @@ TEXTS: dict[str, str] = {
     #
     # The founder read one short line at the rig and said so: *"it can still not
     # read more than 1 short line of text"*. Every figure this harness had ever
-    # produced was silent about that, because until today `TEXTS` was six
-    # strings and NOT ONE contained a newline -- 192 cards were those six across
-    # sizes, polarities and fonts. A fixture that cannot contain the failure
-    # cannot measure it, which is `I-367`'s shape for the second time.
+    # produced was silent about that, because until today NOT ONE string in
+    # `TEXTS` contained a newline -- the 192-card default grid is
+    # `DEFAULT_TEXT_KEYS`, FOUR single-line texts across 6 sizes, 2 polarities
+    # and 4 fonts, and the two German strings beside them are single-line too.
+    # A fixture that cannot contain the failure cannot measure it, which is
+    # `I-367`'s shape for the second time.
+    #
+    # ⚠️ An earlier revision of this comment said *"`TEXTS` was six strings ...
+    # 192 cards were those six"*, which is arithmetic that never worked: six
+    # texts is 288 cards, as the German note 40 lines below has said all along.
+    # Corrected on `PR #95`'s first review round, which caught it by RUNNING the
+    # generator rather than by reading it. The claim it was supporting -- that
+    # no card had more than one line -- was true; the number attached to it was
+    # not, and the same wrong sentence reached this file, the commit message,
+    # the pull request and `BACKLOG.md` `I-387`.
     #
     # Line counts are 2, 4 and 6 rather than "several": if reading degrades with
     # the number of lines, a spread shows WHERE, and a single 5-line card would

@@ -13,8 +13,9 @@ The decision rested on a property the measurement could not see.
 The German keys close that. These tests defend the two things about them that
 would fail SILENTLY if a later change got them wrong.
 
-1. **The default grid stays 192 cards.** Every figure this project has recorded
-   -- CER 0.140, exact 66.7 %, empty 7.8 % -- is over that set. Adding German to
+1. **The default grid stays 192 cards.** Every headline figure this project has
+   recorded is over that set -- CER 0.018, exact 87.0 %, empty 0.0 % as of the
+   `ADR-0037` PP-OCRv6 swap (2026-09-05). Adding German to
    the default would take it to 288 and make a before/after comparison across
    the recogniser swap a comparison of two different card sets, with nothing
    announcing it. `DEFAULT_TEXT_KEYS` is the guard and this is its test.
