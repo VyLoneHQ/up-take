@@ -37,10 +37,16 @@ more buttons.
      Projects/UP-TAKE/ROADMAP-AUDIT.md section 1 and is owed the founder's confirmation (Q-31), so no
      tool is named here and no comparison is claimed as won. -->
 
-It is for two people: the ordinary Windows user, who should never have to learn a keyboard chord to
-get something out of it, and the enthusiast who wants the desktop to work differently and will learn
-anything. The first is who it is written for. The second is who is building it.
-<!-- source: ADR-0038 decision 6, from answers A2 and A7. -->
+It is for three people, in this order: the ordinary Windows user, who should never have to learn a
+keyboard chord to get something out of it; the enthusiast who wants the desktop to work differently
+and will learn anything; and the person who watches, plays and browses on the screen and wants that
+to look and feel better. The first is who it is written for. The second is who is building it. The
+third is who the sharpening and the fullscreen work are for.
+<!-- source: ADR-0038 decision 6, from answers A2, A7 and A19 (the founder's own name for the third
+     is "the digital-content-enjoyer"; this file says what that person does rather than the label).
+     The third was added on 2026-09-08 after this file first said two. The rows for the third are
+     ROADMAP 1.30, 1.35, 2.12, 2.13 and 2.14, none built, which is why the sentence says "are for"
+     and not "does" (P-6). -->
 
 We believe in quality over quantity, while making sure no important functionality is missing.
 <!-- source: PRODUCT-VISION.md section 1, the founder's own mindset sentence, carried verbatim. -->
