@@ -14,7 +14,7 @@ on an assumption that is about to change is work nobody gets to keep.
 ## What state the project is in
 
 Five of seven area types are built and there is no release yet. The
-[README](README.md) says what runs today. Text extraction has code now, and the README says what
+[README](README.md) says what runs today and what the product is meant to be. Text extraction has code now, and the README says what
 is still missing from it. If you are looking for the read aloud or AI description features, those
 are designed and not written, so there is no code there to improve.
 <!-- source: STATUS.md Phase 1; ROADMAP.md task 1.26 and Phase 2; README.md. This count is a
@@ -30,9 +30,15 @@ are designed and not written, so there is no code there to improve.
 the right to also use the contribution under other licence terms, including commercial ones. The CLA
 explains it in plain language and is short.
 
-The reason is stated in the open rather than buried: UP-TAKE core is GPL-3.0-or-later, and a paid
-tier built on the same codebase is planned for a later phase. That tier does not exist today. The
-CLA is what keeps it possible without a relicensing scramble later.
+The reason is stated in the open rather than buried. UP-TAKE is free and complete, and there is no
+paid tier and no plan for one. The CLA exists so that the project can change its licence terms later
+if it ever has to, for instance if the way it is funded has to be reopened, without tracking down
+every past contributor for permission: one unreachable person would otherwise freeze that
+permanently. It protects a fallback, not a product.
+<!-- source: ADR-0010 (free and complete, no Pro tier, 2026-07-21); ADR-0017 (software may be sold,
+     which needs no CLA); LEGAL-AND-COMMERCE.md section 2, "still required after ADR-0010, for a
+     different reason". This paragraph said "a paid tier built on the same codebase is planned for a
+     later phase" until 2026-09-08, seven weeks after ADR-0010 removed it. -->
 
 **To sign, comment on your first pull request** saying you have read the CLA and accept it. There is
 no bot. That comment is the record and it covers everything you send afterwards.
@@ -40,8 +46,8 @@ no bot. That comment is the record and it covers everything you send afterwards.
      bot would prompt automatically. None is installed, checked against the repository's workflows,
      configuration and webhooks. -->
 
-<!-- source: ROADMAP.md Phase 3 (Commercial, unstarted); ADR-0003 (the licence). The previous
-     wording said VyLone "also ships" a Pro tier, present tense. Nothing ships. -->
+<!-- source: ADR-0003 (the licence and the CLA). An earlier wording said VyLone "also ships" a Pro
+     tier, present tense, then "is planned for a later phase"; both are gone, see the paragraph above. -->
 
 ## Development setup
 

@@ -31,8 +31,9 @@ Until then it is written by hand.
   sharpens the piece of screen under it in place, without magnifying it, as a still rather than a
   live view; and an OCR area that reads the text under it, shows what it read in place, and puts
   that text on the clipboard so it can be pasted straight into something else. The
-  installer carries the OCR runtime and the models; they are not in this repository, and two
-  checksummed scripts fetch them before a build can bundle them.
+  installer carries the OCR runtime and the models; they are not in this repository, and three
+  checksummed scripts fetch them before a build can bundle them. (This said "two" scripts until
+  2026-09-08; there are three, one each for the runtime, the detector and the recogniser.)
 - Freeze the screen while placing an area, with `Ctrl+Space`.
 - The overlay is excluded from screen capture, so other recording tools do not see it.
 

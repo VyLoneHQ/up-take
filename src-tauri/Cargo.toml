@@ -1,6 +1,6 @@
 [package]
 name = "up-take"
-description = "AI-powered screen intelligence overlay for Windows. Capture, OCR, understand — locally."
+description = "UP-TAKE - a precisely engineered quality-of-life tool that streamlines your existing workflows. Pin any part of your Windows screen as an area that stays while you work; free, local, GPL-3.0-or-later."
 version.workspace = true
 authors.workspace = true
 edition.workspace = true

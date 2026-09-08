@@ -5,9 +5,11 @@ body:
   - type: markdown
     attributes:
       value: |
-        UP-TAKE is deliberately scoped to do a small number of things exceptionally well rather than
-        chase feature parity with tools like ShareX. Requests that fit the "intentional capture, not
-        surveillance" and "local-first" principles are the best fit.
+        UP-TAKE - a precisely engineered quality-of-life tool that streamlines your existing workflows.
+        Everything it does is an area, a property of an area, or an action on one, and for each thing
+        it does it has to be the best way to do that thing. Requests that fit that shape, and the
+        "intentional capture, not surveillance" and "local-first" principles, are the best fit. It does
+        not chase feature parity with other tools.
 
   - type: textarea
     id: problem

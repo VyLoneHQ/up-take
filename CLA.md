@@ -22,9 +22,13 @@ distribute your contributions **and such derivative works**, under **any license
 including proprietary and commercial licenses**, in addition to the project's current open-source
 license (GPL-3.0-or-later).
 
-Plainly stated: this is what lets VyLone offer a commercial ("Pro") version of UP-TAKE that includes
-your contribution, while the open-source version stays GPL-3.0. Without this, merging your patch would
-freeze the project's ability to relicense anything, including for its own commercial tier.
+Plainly stated: UP-TAKE is free and complete, and there is no paid version and no plan for one. This
+grant exists so that the project can change its licence terms later if it ever has to, without
+tracking down every past contributor for permission; without it, merging your patch would freeze
+the project's ability to relicense anything, permanently, on one unreachable person. It protects a
+fallback, not a product, and the open-source version stays GPL-3.0-or-later either way.
+<!-- source: ADR-0010 (no Pro tier, 2026-07-21) and LEGAL-AND-COMMERCE.md section 2. This paragraph
+     described a commercial "Pro" version of UP-TAKE until 2026-09-08. -->
 
 ## 3. Your representations
 

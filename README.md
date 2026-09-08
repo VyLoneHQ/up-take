@@ -1,5 +1,9 @@
 # UP-TAKE
 
+**UP-TAKE - a precisely engineered quality-of-life tool that streamlines your existing workflows.**
+<!-- source: the headline, the founder's own sentence, ADR-0039 (accepted 2026-09-08). It is quoted
+     here and never reworded: a rewording is an amendment to that record, not an edit to this file. -->
+
 UP-TAKE is a Windows overlay that pins parts of your screen as areas and leaves them there. You
 summon it with a hotkey and drag a box over anything. That box stays where you put it for as long as
 UP-TAKE is running.
@@ -14,6 +18,33 @@ It is free and open source under GPL-3.0, so it stays that way.
 **Nothing is installable yet.** There is no release, no installer and no download. What follows is
 what actually runs today if you build it yourself.
 
+## What it is meant to be
+
+The area is the product. You place one anywhere on your screen, it stays while UP-TAKE runs, and its
+type decides what it does: keep a still, tint, read text, sharpen a video, and later record, describe
+what is in it, or hold a running application. The types are what makes an area useful, and nothing in
+UP-TAKE is meant to exist outside one.
+<!-- source: ADR-0038 decisions 1 and 3 (the area-system is the product; everything UP-TAKE does is an
+     area, a property of an area, or an action on one), from the founder's answers A4 and A10 in
+     Projects/UP-TAKE/HEADLINE-INTERVIEW.md. "later record, describe, hold an application" are ROADMAP
+     2.14, 2.15 and 1.35, none built; the sentence says "later" for that reason (P-6). -->
+
+The bar it is held to is the founder's: for each thing UP-TAKE does, it has to be the best way to do
+that thing, or it has not succeeded. Where it can beat the tool you use for that job today, it is
+because the area stays, sits over live content and works with the other areas, not because it has
+more buttons.
+<!-- source: ADR-0038 decision 2, from answers A6 and A11. The comparison per type is
+     Projects/UP-TAKE/ROADMAP-AUDIT.md section 1 and is owed the founder's confirmation (Q-31), so no
+     tool is named here and no comparison is claimed as won. -->
+
+It is for two people: the ordinary Windows user, who should never have to learn a keyboard chord to
+get something out of it, and the enthusiast who wants the desktop to work differently and will learn
+anything. The first is who it is written for. The second is who is building it.
+<!-- source: ADR-0038 decision 6, from answers A2 and A7. -->
+
+We believe in quality over quantity, while making sure no important functionality is missing.
+<!-- source: PRODUCT-VISION.md section 1, the founder's own mindset sentence, carried verbatim. -->
+
 ## What works today
 
 Five of seven area types are built.
@@ -24,15 +55,21 @@ Five of seven area types are built.
      count was never updated, so the front page of a public repository under-reported what
      was built for ten days. Update it in the same change that ships a type. -->
 
-- **A plain pinned region.** A box you place and keep. Move it, resize it, dismiss it.
+- **A plain pinned region.** A box you place and keep. Move it, resize it, dismiss it. Scroll over
+  it to zoom what it shows; scrolling back stops at normal size, so zooming out is always a way
+  back rather than a way to get lost.
+  <!-- source: ROADMAP.md task 1.25 (merged 2026-08-13, PR #54); PRODUCT-VISION.md section 3.4 for
+       the 1x floor. -->
 - **A screenshot area.** Captures what is under it and keeps the still, pinned inside the area.
   Copy it or save it to a file.
 - **A tint area.** A warm translucent wash you leave over part of the screen and go on working
-  underneath. Clicks fall straight through it, which is the point. That is also why you cannot
-  move it by dragging its middle yet: its border and its close control are its handle.
-  <!-- source: ROADMAP.md task 1.23 (merged 2026-08-12, PR #53, a59181a). The move limitation is
-       that row's own "ships degraded and knowingly" note; the fix is task 1.17(b2), which is
-       blocked on ADR-0028. Do not drop this sentence before b2 lands. -->
+  underneath. Clicks fall straight through it, which is the point, and it is also why dragging its
+  middle would drag whatever is under it instead. It moves by a bar that appears when you hover
+  just above its top edge, or by holding `Win+Shift` and dragging anywhere on it.
+  <!-- source: ROADMAP.md task 1.23 (merged 2026-08-12, PR #53); the bar is 1.17(b2) (ADR-0028,
+       PR #70, merged 2026-08-26) and the chord is 1.17(c) (PR #72, merged 2026-08-27). This bullet
+       said the area could not be moved by its middle "yet" and that its border was its whole handle
+       until 2026-09-08, twelve days after both fixes merged. -->
 - **An OCR area.** Reads the text under it, shows you what it read in the area itself, and puts
   that text on your clipboard, so the next thing you do can be a paste. It takes the clipboard
   for the conversion you asked for most recently: convert two areas at once and the second one
@@ -115,6 +152,9 @@ Around those:
 - **A three state model.** The hotkey toggles between placing areas and using your machine normally.
   Areas stay on screen either way.
   <!-- source: ADR-0012 (overlay interaction model) -->
+- **Change an area's type from its own menu.** Right-click an area and pick a type from the submenu;
+  it becomes that type in place.
+  <!-- source: ROADMAP.md tasks 1.27 (PR #55, merged 2026-08-14) and 1.28 (PR #59, merged 2026-08-18). -->
 - **Freeze while you place.** `Ctrl+Space` holds the screen still so something about to disappear
   does not have to be caught in time. It is late by roughly 350 ms by default, which matters for
   anything moving fast. There is a faster path behind a setting that is off by default because it
@@ -145,17 +185,29 @@ Around those:
 ## What is designed and not built
 
 Two more area types: record, and describe the image. Areas that work on each other are the
-goal and are not a feature yet.
-<!-- source: PRODUCT-VISION.md section 3.1; ROADMAP.md Phase 2 (analysis) and BACKLOG.md I-64
-     (Record and Analysis have no roadmap row at all); BACKLOG.md I-3 (composition unscheduled).
-     This said "Three more" and listed "read the text" until 2026-09-02: roadmap 1.26 moved the
-     OCR area into "what works today", with the two caveats stated there. -->
+goal and are not a feature yet. And an area that holds a running application, so that a fullscreen
+app fills the area instead of the monitor: decided for the first release on 2026-09-08, and gated on
+three measurements before it may ship, none of which has been taken.
+<!-- source: PRODUCT-VISION.md section 3.1; ROADMAP.md 2.14 (Record) and 2.15 (Analysis), rows since
+     2026-09-08; 1.36 (composition, blocked on OPEN-QUESTIONS.md Q-22); 1.35 (hosting, ADR-0040,
+     gates 1 to 3, and ADR-0029 for the spike that measured what it costs). This said Record and
+     Analysis had "no roadmap row at all" until 2026-09-08, which was true until that day. -->
 
-Text extraction, reading aloud and AI description are all in that list. If you came here for those,
-they are the destination and not the current state.
+Reading aloud and AI description are in that list. If you came here for those, they are the
+destination and not the current state.
+<!-- This sentence named text extraction as unbuilt until 2026-09-08; the OCR area shipped on
+     2026-09-02 and the paragraph above it was corrected then while this one was not. -->
 
 ## Why it exists
 
+- **One system instead of a pile of tools.** The founder already had a tool for each of these jobs
+  and built this so they would work as one system and stop costing him installs, licences, settings
+  pages and privacy questions. That is the reason it exists. It is not a claim that UP-TAKE replaces
+  anything you use today: it has to earn that one area at a time, and the section above says how far
+  it has got.
+  <!-- source: Projects/UP-TAKE/HEADLINE-INTERVIEW.md A8 (his words, verbatim there); ADR-0039
+       decision 4 (consolidation is the reason and a consequence, never the pitch); ADR-0009, whose
+       foreclosure of the "replaces N apps" pitch stands. Do not turn this bullet into that pitch. -->
 - **It captures when you ask it to.** There is no continuous background recording and no
   plan for one.
   <!-- source: PRODUCT-VISION.md section 3.5; ADR-0026 (freeze is explicit, PLACEMENT only) -->
