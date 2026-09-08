@@ -35,8 +35,9 @@ paid tier and no plan for one. The CLA exists so that the project can change its
 if it ever has to, for instance if the way it is funded has to be reopened, without tracking down
 every past contributor for permission: one unreachable person would otherwise freeze that
 permanently. It protects a fallback, not a product.
-<!-- source: ADR-0010 (free and complete, no Pro tier, 2026-07-21); ADR-0017 (software may be sold,
-     which needs no CLA); LEGAL-AND-COMMERCE.md section 2, "still required after ADR-0010, for a
+<!-- source: ADR-0010 (free and complete, no Pro tier, 2026-07-21); ADR-0017 (software may be sold;
+     selling GPL-licensed software needs no CLA, which is the GPL's own term rather than that
+     record's claim); LEGAL-AND-COMMERCE.md section 2, "still required after ADR-0010, for a
      different reason". This paragraph said "a paid tier built on the same codebase is planned for a
      later phase" until 2026-09-08, seven weeks after ADR-0010 removed it. -->
 

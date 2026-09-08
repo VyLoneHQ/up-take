@@ -3108,8 +3108,9 @@ pub(crate) const fn captures_on_create(kind: AreaType) -> bool {
 /// roadmap 1.26 -- `Ocr` have behaviour on the screen today; `Record` and
 /// `Analysis` are modelled and have none, so offering them would ship two rows
 /// that turn a working area into a rectangle indistinguishable from a bug.
-/// **`Record` and `Analysis` have no roadmap row at all**, so they are not
-/// merely unbuilt, they are unplanned (UP-TAKE `I-64`).
+/// `Record` and `Analysis` are unbuilt and, since 2026-09-08, planned: roadmap
+/// rows 2.14 and 2.15 exist for them, which closed UP-TAKE `I-64`. (This said
+/// they had no roadmap row at all, which was true until that day.)
 ///
 /// **The counts here have moved twice and both moves are the same event.**
 /// `Upscale` left the unbuilt list on 2026-08-21 and `Ocr` on 2026-09-02, each
