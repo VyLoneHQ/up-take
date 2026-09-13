@@ -1,11 +1,22 @@
-//! Measures what the real PP-OCRv4 pipeline reads against text of known content.
+//! Measures what the real OCR pipeline reads against text of known content.
+//!
+//! ⚠️ This line named the pipeline "PP-OCRv4" until 2026-09-13. `ADR-0036` and
+//! `ADR-0037` moved the detector and the recogniser to `PP-OCRv6_small` in
+//! September, and this file's own options below already describe v6. No
+//! version is named here now, so a model change cannot make the line false.
 //!
 //! Roadmap task `1.32`, `BACKLOG.md` `I-351`. The pipeline has returned text
-//! since `1.31` and `1.26` puts that text in front of a user, and **nothing has
-//! ever measured whether it is right**. `I-341` (no OCR accuracy bar exists)
-//! cannot be answered before something does: a bar cannot be set on a pipeline
-//! nobody has measured, and a number picked without one is a bar chosen to be
-//! passed.
+//! since `1.31` and `1.26` puts that text in front of a user, and until this
+//! harness **nothing had measured whether it is right**. That is why the
+//! accuracy bar came after the measurement: a bar set on a pipeline nobody has
+//! measured is a number chosen to be passed. The founder set it on 2026-09-08
+//! from this harness's figures (`SPECS/quality-bars.md` section 1, "OCR
+//! accuracy"; the question was `I-341`, then `Q-13`). Its real-screen half is
+//! still unmeasured, and the rendered cards here are an upper bound on it.
+//!
+//! ⚠️ This said `I-341` "(no OCR accuracy bar exists)" and "cannot be
+//! answered" for five days after the bar was set. Found by the independent
+//! review of the README change that corrected the same sentence there.
 //!
 //! # What it measures, and what each number does not mean
 //!
