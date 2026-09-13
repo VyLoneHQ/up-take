@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """Render OCR ground-truth cards: known text, at known sizes, polarities and fonts.
 
-Roadmap task 1.32, BACKLOG.md I-351. The pipeline has returned text since 1.31
-and nothing has ever measured whether the text is right. I-341 cannot be
-answered before something does, because an accuracy bar cannot be set on an
-unmeasured pipeline.
+Roadmap task 1.32, BACKLOG.md I-351. The pipeline has returned text since 1.31,
+and until these cards existed nothing had measured whether the text is right.
+That is why the accuracy bar came after the measurement: a bar set on an
+unmeasured pipeline is a guess. The founder set it on 2026-09-08 from the
+figures these cards produce (SPECS/quality-bars.md section 1, "OCR accuracy";
+the question was I-341, then Q-13). Its real-screen half is still unmeasured.
+
+This said I-341 "cannot be answered before something does" for five days after
+the bar was set. Found by the independent review of the README change that
+corrected the same claim there.
 
 WHAT THIS IS NOT
 ----------------
