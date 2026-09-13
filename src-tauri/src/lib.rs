@@ -57,6 +57,13 @@ use uptake_core::area::AreaStore;
 /// is a lost session.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() -> tauri::Result<()> {
+    // Roadmap 1.35 gate 1's measurement switch, first so it precedes every
+    // window: the overlay declared in `tauri.conf.json` is created on this
+    // thread, and a window takes its DPI hosting behaviour from its thread at
+    // creation. Off unless `UPTAKE_DEV_DPI_HOSTING` is set. See `dev_harness`.
+    #[cfg(all(debug_assertions, windows))]
+    dev_harness::apply_dpi_hosting();
+
     let mut builder = tauri::Builder::default();
 
     // Registered before every other plugin, deliberately: plugins initialize

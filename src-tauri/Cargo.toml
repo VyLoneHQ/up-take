@@ -59,6 +59,10 @@ windows-sys = { workspace = true, features = [
   "Win32_System_LibraryLoader",
   "Win32_System_Memory",
   "Win32_System_SystemInformation",
+  # dev_harness.rs: SetThreadDpiHostingBehavior, for roadmap 1.35 gate 1's
+  # measurement (UPTAKE_DEV_DPI_HOSTING). Debug builds call it; release builds
+  # link the feature and call nothing.
+  "Win32_UI_HiDpi",
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
 ] }
