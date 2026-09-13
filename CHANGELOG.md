@@ -19,6 +19,8 @@ Until then it is written by hand.
   per-region click-through.
 - Multi-monitor support including mixed DPI, portrait displays and negative coordinates.
 - A global summon hotkey, `Win+Shift+U`, with conflict handling.
+- Starting the app opens the overlay ready to place an area. Before this, only a development build
+  did that, and an installed build started hidden with just a tray icon.
 - A whole screen grab, `Win+Shift+G`, copying the monitor under the cursor to the clipboard without
   summoning the overlay. It goes through the same capture call the freeze uses when its fast path is
   off, so expect the same lateness.
@@ -38,7 +40,8 @@ Until then it is written by hand.
 - The overlay is excluded from screen capture, so other recording tools do not see it.
 
 <!-- source: STATUS.md Phase 1 (1A merged, 1B partial, 1D partial); ROADMAP.md tasks 1.1 to 1.9f,
-     plus 1.23 (Filter), 1.24 and 1.29 (Upscale; 1.29 and ADR-0031 are what make the entry say
+     plus 1.34 and ADR-0044 decisions 1 and 3 (the entry about starting the app),
+     1.23 (Filter), 1.24 and 1.29 (Upscale; 1.29 and ADR-0031 are what make the entry say
      "sharpens" rather than "magnified", reversing 1.24 on the founder's verdict), 1.26 and 1.31
      (the OCR area and the pipeline behind it; ADR-0035 and BACKLOG.md I-337 are the source of
      the sentence about where the runtime and the models live. That sentence said "not packaged

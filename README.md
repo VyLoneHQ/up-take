@@ -241,8 +241,12 @@ pnpm install
 pnpm tauri dev
 ```
 
-`Win+Shift+U` summons the overlay once it is running. `Win+Shift+G` copies the monitor under your
-cursor to the clipboard without summoning anything.
+Starting it opens the overlay ready to place an area. `Esc` hands the screen back to your apps, and
+`Win+Shift+U` switches back to placing. `Win+Shift+G` copies the monitor under your cursor to the
+clipboard without summoning anything.
+<!-- source: ROADMAP.md 1.34 and ADR-0044 decision 1 (a hand launch enters Placement). A launch with
+     Windows stays hidden under decision 2, but there is no autostart yet, so every launch is a hand
+     launch today. Revisit this sentence when 1.14 adds one. -->
 
 ## When there is a release
 
