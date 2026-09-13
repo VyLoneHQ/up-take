@@ -87,9 +87,10 @@ Five of seven area types are built.
   `scripts/acquire-ppocr-detector.py` and `scripts/acquire-ppocr-recogniser.py`.
   Building the app itself needs none of them. Building an
   **installer** needs all three, plus the config that packages them:
-  `pnpm tauri build --config src-tauri/tauri.release.conf.json`. And **there is no accuracy standard yet**:
-  it misreads characters, and nothing in the project says what a good enough reading would be.
-  Something does measure it now, which is new and is not the same as a standard:
+  `pnpm tauri build --config src-tauri/tauri.release.conf.json`. And **it misreads characters.**
+  Its accuracy bar, set on 2026-09-08, is a character error rate of 0.02 or less on rendered test
+  cards and 0.05 or less on ordinary text read off a real screen. The real-screen half has not been
+  measured yet. The measurement that exists covers the cards:
   `cargo run --release -p uptake-ocr --example ocr_accuracy` scores the pipeline against text of
   known content rendered by `scripts/render-ocr-cards.py`. On 192 rendered cards at the shipping
   settings it reads with a **0.018 character error rate, 87 % of cards exactly right, and no
@@ -117,10 +118,14 @@ Five of seven area types are built.
        BACKLOG.md I-337, whose packaging work is what the sentence above describes -- the first
        caveat is now about where the binaries live and how a build gets them, not about
        packaging being absent. ⚠️ Written in the branch that does that work, so I-337 is still
-       marked open in BACKLOG.md as this is read; close it on the merge, not before. BACKLOG.md
-       I-341 (no OCR accuracy bar exists, lane C). Delete the second caveat when I-341 is
-       answered, and not before -- the harness measuring the pipeline does NOT answer it, and
-       the sentence is written to keep those two apart. ROADMAP.md 1.32 with BACKLOG.md I-351
+       marked open in BACKLOG.md as this is read; close it on the merge, not before. The
+       accuracy-bar sentences: SPECS/quality-bars.md section 1, row "OCR accuracy", set by the
+       founder on 2026-09-08 (OPEN-QUESTIONS.md Q-13, which absorbed BACKLOG.md I-341). This
+       caveat said "there is no accuracy standard yet" for five days after that row was set,
+       because the instruction here was to delete it "when I-341 is answered" and nothing
+       watched for the answer. The card figures below meet the card bar; the real-screen bar is
+       the one that constrains and nobody has measured it, which is why the sentence says so
+       and does not call the bar met. ROADMAP.md 1.32 with BACKLOG.md I-351
        are the source of the harness sentence, and BACKLOG.md I-363 of the three figures:
        `ocr_accuracy` on this workstation, 2026-09-04, drop_score 0.5, det_thresh 0.2,
        box_thresh 0.4 -- 192 cards, CER 0.018, exact 87.0 %, empty 0.0 %, measured
