@@ -2016,10 +2016,11 @@ pub fn overlay_dismiss_focused(app: AppHandle) -> Result<(), String> {
 
 /// IPC surface: the frontend requests the current state on mount.
 ///
-/// A webview that loaded *after* the last transition — the debug startup show,
-/// or a dev reload — would otherwise render no indicator and no areas until the
-/// next change. This re-emits both the current state and the area set so the
-/// overlay is correct immediately.
+/// A webview that loaded *after* the last transition (the startup show, which
+/// `setup` can fire before the page has mounted, or a dev reload) would
+/// otherwise render no indicator and no areas until the next change. This
+/// re-emits both the current state and the area set so the overlay is correct
+/// immediately.
 #[tauri::command]
 pub fn overlay_request_state(app: AppHandle) -> Result<(), String> {
     let cell = app.state::<Mutex<OverlayState>>();

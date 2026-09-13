@@ -302,11 +302,25 @@ pub fn run() -> tauri::Result<()> {
             // `hotkey::install` does rather than logging into a void. See the
             // `tray` module docs.
             tray::install(app.handle());
-            // Dev builds still summon the overlay at startup so `pnpm tauri dev`
-            // demonstrates something without a keypress, and because CI never
-            // exercises the dev path (friction F-7). This lands in Placement;
-            // Esc/the hotkey hand control back, the tray and hotkey bring it up.
-            #[cfg(debug_assertions)]
+            // A hand launch enters Placement, in every build (roadmap 1.34,
+            // ADR-0044 decisions 1 and 3). This used to sit under
+            // `#[cfg(debug_assertions)]`, so `pnpm tauri dev` landed in
+            // Placement and an installed build landed in Hidden with only a
+            // tray icon: the one startup a user gets was the one no developer
+            // saw (`I-354`). It stays last in `setup`, after the hotkey and the
+            // tray, which are the two ways back up once Esc has put the overlay
+            // away.
+            //
+            // It also agrees with a relaunch now: the single-instance callback
+            // above already summons, so launching UP-TAKE gives the same answer
+            // whether or not it was running.
+            //
+            // NOT the whole of ADR-0044. A launch *with Windows* must stay
+            // Hidden, recognised only by an argument the autostart registration
+            // itself passes, never inferred from the environment (decision 2).
+            // There is no autostart in this codebase yet, so every launch that
+            // reaches this line is a hand launch. Roadmap 1.14 builds the
+            // registration and adds that check here (`I-391`).
             overlay::summon(app.handle());
             Ok(())
         })
