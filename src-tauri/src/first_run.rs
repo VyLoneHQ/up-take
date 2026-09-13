@@ -198,7 +198,7 @@ pub fn overlay_report_coach(
     let Some(live) = guard.as_mut() else {
         return;
     };
-    if let Some(layout) = accepted(live.generation, generation, panel, next, skip) {
+    if let Some(layout) = accepted(live.generation, generation, live.monitor, panel, next, skip) {
         live.layout = Some(layout);
     }
 }
@@ -305,19 +305,37 @@ fn hit_in(layout: Layout, point: Point) -> Option<Option<CoachButton>> {
     layout.panel.contains(point).then_some(None)
 }
 
-/// The layout a report describes, or `None` when it answers an older emit.
+/// The layout a report describes, or `None` when it cannot be used.
+///
+/// Refused when it answers an older emit, or when no coach is shown. Otherwise
+/// **clipped rather than trusted**: the panel to the monitor the coach is drawn
+/// on, and each button to the panel. A report is WebView input, and a press on
+/// the coach is swallowed by the mouse hook, in Living as well as Placement, so
+/// an unclipped report is a rectangle of the desktop where clicks stop reaching
+/// the user's apps. Clipping bounds that to the one monitor the coach belongs
+/// on. A panel with no part on its monitor, or a `Next` with no part on the
+/// panel, is refused outright; a `Skip` with no part on the panel is dropped.
+///
+/// Reaching it with a hostile rectangle needs script running in the overlay
+/// WebView already, which is why this is hardening rather than a fix. Raised by
+/// the security review of roadmap 1.18 as defence in depth.
 fn accepted(
     current: u64,
     reported: u64,
+    monitor: Option<Rect>,
     panel: (i32, i32, u32, u32),
     next: (i32, i32, u32, u32),
     skip: Option<(i32, i32, u32, u32)>,
 ) -> Option<Layout> {
+    if current != reported {
+        return None;
+    }
     let rect = |(x, y, width, height): (i32, i32, u32, u32)| Rect::new(x, y, width, height);
-    (current == reported).then(|| Layout {
-        panel: rect(panel),
-        next: rect(next),
-        skip: skip.map(rect),
+    let panel = rect(panel).intersection(monitor?)?;
+    Some(Layout {
+        panel,
+        next: rect(next).intersection(panel)?,
+        skip: skip.and_then(|skip| rect(skip).intersection(panel)),
     })
 }
 
@@ -377,9 +395,62 @@ mod tests {
 
     #[test]
     fn a_report_for_an_older_emit_is_refused() {
+        let monitor = Some(Rect::new(0, 0, 100, 100));
         let rect = (0, 0, 10, 10);
-        assert_eq!(accepted(5, 4, rect, rect, None), None);
-        assert!(accepted(5, 5, rect, rect, None).is_some());
+        assert_eq!(accepted(5, 4, monitor, rect, rect, None), None);
+        assert!(accepted(5, 5, monitor, rect, rect, None).is_some());
+    }
+
+    #[test]
+    fn a_report_while_no_coach_is_shown_is_refused() {
+        let rect = (0, 0, 10, 10);
+        assert_eq!(accepted(5, 5, None, rect, rect, None), None);
+    }
+
+    #[test]
+    fn a_report_is_clipped_to_the_coach_monitor_and_its_buttons_to_the_panel() {
+        // The hardening, drilled with the report the security review described:
+        // a panel covering the whole four-monitor virtual desktop. Clipped, it
+        // can swallow clicks on the coach's own monitor and nowhere else.
+        let monitor = Rect::new(0, 0, 1920, 1080);
+        let Some(layout) = accepted(
+            1,
+            1,
+            Some(monitor),
+            (-1080, -500, 10_000, 10_000),
+            (400, 160, 80, 30),
+            Some((-5000, 160, 40, 30)),
+        ) else {
+            panic!("a report overlapping its monitor is usable once clipped")
+        };
+        assert_eq!(layout.panel, monitor);
+        assert_eq!(layout.next, Rect::new(400, 160, 80, 30));
+        assert_eq!(
+            layout.skip, None,
+            "a Skip with no part on the panel is dropped"
+        );
+        assert_eq!(hit_in(layout, Point::new(2500, 500)), None);
+    }
+
+    #[test]
+    fn a_report_with_nothing_on_its_monitor_or_a_next_off_the_panel_is_refused() {
+        let monitor = Some(Rect::new(0, 0, 1920, 1080));
+        let panel = (100, 100, 500, 200);
+        assert_eq!(
+            accepted(
+                1,
+                1,
+                monitor,
+                (5000, 5000, 10, 10),
+                (5000, 5000, 5, 5),
+                None
+            ),
+            None
+        );
+        assert_eq!(
+            accepted(1, 1, monitor, panel, (900, 900, 80, 30), None),
+            None
+        );
     }
 
     #[test]
