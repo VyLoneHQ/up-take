@@ -348,6 +348,30 @@ export interface MenuPayload {
 }
 
 /**
+ * The first-run coach as Rust asks for it drawn (roadmap 1.18, ADR-0043).
+ *
+ * Rust owns the tour: which step, whether it shows, which monitor it belongs
+ * on. This side draws the panel and reports back where it drew it, because
+ * only the WebView knows how tall wrapped prose is. See
+ * `src-tauri/src/first_run.rs` for why the geometry flows this way round.
+ */
+export interface CoachView {
+  /** 1 to 4. */
+  step: number;
+  /** Whether the overlay is in Living, which changes step 3's closing line. */
+  living: boolean;
+  /** The monitor the panel belongs on, physical px. */
+  monitor: PhysRect;
+  /** Echoed back with the layout report, so Rust can refuse a stale one. */
+  generation: number;
+}
+
+/** The payload of `overlay://coach`; `coach` is null when nothing is shown. */
+export interface CoachPayload {
+  coach: CoachView | null;
+}
+
+/**
  * A magnification as the badge prints it: `2×`, `1.25×`, `3.5×`.
  *
  * **Trailing zeros are dropped rather than padded to a fixed width.** The
@@ -649,6 +673,53 @@ export function physRectToCss(
 ): CssRect | null {
   if (rect === null) return null;
   return physRectsToCss([rect], origin, dpr)[0] ?? null;
+}
+
+/**
+ * The inverse of {@link physRectToCss}: a rect in the overlay's CSS viewport,
+ * as physical virtual-desktop pixels.
+ *
+ * Used for the first-run coach's layout report (roadmap 1.18), and it has to
+ * be THE inverse rather than a second derivation: Rust hit-tests presses
+ * against what this returns, so a rect off by the origin would put a button
+ * somewhere the user is not aiming. The round trip is tested.
+ *
+ * Rounded outward, so a button is never a pixel smaller as a target than it
+ * looks. Returns null for a `dpr` the forward conversion also refuses.
+ */
+export function cssRectToPhys(
+  rect: CssRect,
+  origin: Origin,
+  dpr: number,
+): PhysRect | null {
+  if (!Number.isFinite(dpr) || dpr <= 0) return null;
+  const [ox, oy] = origin;
+  const left = Math.floor(rect.x * dpr + ox);
+  const top = Math.floor(rect.y * dpr + oy);
+  const right = Math.ceil((rect.x + rect.width) * dpr + ox);
+  const bottom = Math.ceil((rect.y + rect.height) * dpr + oy);
+  return [left, top, Math.max(0, right - left), Math.max(0, bottom - top)];
+}
+
+/**
+ * Tells Rust where the coach's panel and buttons were drawn. Never throws, for
+ * the reason {@link escapeOverlay} does not: the coach is on screen either
+ * way, and a rejection here would be an unhandled promise in a render effect.
+ */
+export async function reportCoachLayout(
+  invoke: Invoke,
+  generation: number,
+  panel: PhysRect,
+  next: PhysRect,
+  skip: PhysRect | null,
+): Promise<boolean> {
+  try {
+    await invoke('overlay_report_coach', { generation, panel, next, skip });
+    return true;
+  } catch (error) {
+    console.error('Failed to report the coach layout:', error);
+    return false;
+  }
 }
 
 /**

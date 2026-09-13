@@ -1,8 +1,10 @@
 mod captures;
 mod click_through;
+mod config;
 #[cfg(debug_assertions)]
 mod dev_harness;
 mod diagnostics;
+mod first_run;
 mod freeze;
 mod hotkey;
 mod ocr;
@@ -149,7 +151,8 @@ pub fn run() -> tauri::Result<()> {
                     overlay::overlay_report_freeze_latency,
                     overlay::overlay_report_scale,
                     overlay::overlay_dismiss_focused,
-                    overlay::overlay_request_state
+                    overlay::overlay_request_state,
+                    first_run::overlay_report_coach
                 ]
             }
             #[cfg(not(debug_assertions))]
@@ -160,7 +163,8 @@ pub fn run() -> tauri::Result<()> {
                     overlay::overlay_toggle_freeze,
                     overlay::overlay_report_latency,
                     overlay::overlay_dismiss_focused,
-                    overlay::overlay_request_state
+                    overlay::overlay_request_state,
+                    first_run::overlay_report_coach
                 ]
             }
         })
@@ -302,6 +306,10 @@ pub fn run() -> tauri::Result<()> {
             // `hotkey::install` does rather than logging into a void. See the
             // `tray` module docs.
             tray::install(app.handle());
+            // Whether this session runs the first-run tour (roadmap 1.18). Before
+            // the summon below, so the summon's own transition is the tour's
+            // first event and the coach is on screen with the overlay.
+            first_run::init();
             // A hand launch enters Placement, in every build (roadmap 1.34,
             // ADR-0044 decisions 1 and 3). This used to sit under
             // `#[cfg(debug_assertions)]`, so `pnpm tauri dev` landed in

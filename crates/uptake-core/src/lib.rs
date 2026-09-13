@@ -46,6 +46,7 @@
 
 pub mod area;
 pub mod bitmap;
+pub mod first_run;
 pub mod geometry;
 pub mod interaction;
 pub mod sharpen;

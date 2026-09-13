@@ -307,6 +307,12 @@ enum Gesture {
     /// A press on a row of the open area menu, resolved the same way. The hit
     /// names which of the two lists the row is in (roadmap 1.28).
     MenuItem { hit: MenuHit },
+    /// A press on the first-run coach (roadmap 1.18): on one of its buttons,
+    /// resolved on release like a menu row, or on the panel around them, which
+    /// does nothing and must not fall through to what is underneath the panel.
+    Coach {
+        button: Option<crate::first_run::CoachButton>,
+    },
     /// A press that has already done its job and must do nothing more on
     /// release: closing an open menu by clicking away from it, or landing on
     /// menu padding between rows. It still exists as a gesture so the release is
@@ -1609,7 +1615,10 @@ fn pump_hover(app: &AppHandle, state: &mut PumpState) {
         // The chord is read here and passed down, so `overlay` stays a module about
         // areas. Two `GetAsyncKeyState` calls, on the ticks where the pointer is
         // resolved at all.
-        let pointer = (!menu_open && !gesture_live)
+        // The first-run coach, when it is drawn here on step 3, hides what is
+        // under it from the hover for the reason an open menu does.
+        let on_coach = crate::first_run::hit(point).is_some();
+        let pointer = (!menu_open && !gesture_live && !on_coach)
             .then(|| overlay::living_pointer_at(app, point, move_chord_held()));
         // Whether the hover is chrome-only travels with it, because the frontend
         // spends one id on two meanings: draw the control, and light the area to
@@ -1722,9 +1731,21 @@ fn pump_hover(app: &AppHandle, state: &mut PumpState) {
     }
 
     let menu_open = lock(&MENU).is_some();
+    let coach = crate::first_run::hit(point);
     let (shape, hovered_area) = if menu_open {
         (
             if menu_item.is_some() {
+                CursorShape::Hand
+            } else {
+                CursorShape::Cross
+            },
+            None,
+        )
+    } else if let Some(button) = coach {
+        // Over the first-run coach no area is hovered, because a press lands on
+        // the coach and not on the area under it.
+        (
+            if button.is_some() {
                 CursorShape::Hand
             } else {
                 CursorShape::Cross
@@ -1768,8 +1789,10 @@ const fn gesture_cursor(gesture: Gesture) -> CursorShape {
         Gesture::Create => CursorShape::Cross,
         Gesture::Move { .. } => CursorShape::Move,
         Gesture::Resize { resize, .. } => CursorShape::for_handle(Handle::Resize(resize)),
-        Gesture::Close { .. } | Gesture::MenuItem { .. } => CursorShape::Hand,
-        Gesture::Inert => CursorShape::Cross,
+        Gesture::Close { .. } | Gesture::MenuItem { .. } | Gesture::Coach { button: Some(_) } => {
+            CursorShape::Hand
+        }
+        Gesture::Coach { button: None } | Gesture::Inert => CursorShape::Cross,
     }
 }
 
@@ -1796,7 +1819,11 @@ fn dragged_area() -> Option<u64> {
     }
     match (*lock(&GESTURE))? {
         Gesture::Move { id, .. } | Gesture::Resize { id, .. } => Some(id.get()),
-        Gesture::Create | Gesture::Close { .. } | Gesture::MenuItem { .. } | Gesture::Inert => None,
+        Gesture::Create
+        | Gesture::Close { .. }
+        | Gesture::MenuItem { .. }
+        | Gesture::Coach { .. }
+        | Gesture::Inert => None,
     }
 }
 
@@ -2389,6 +2416,7 @@ fn handle_mouse(wparam: WPARAM, lparam: LPARAM) -> bool {
             // strictly worse than not claiming at all.
             Mode::Living => {
                 let claimed = lock(&MENU).is_some()
+                    || crate::first_run::hit(point).is_some()
                     || APP
                         .get()
                         .is_some_and(|app| pointer_target(app, point).is_some());
@@ -2446,7 +2474,10 @@ fn handle_mouse(wparam: WPARAM, lparam: LPARAM) -> bool {
         WM_RBUTTONUP if RIGHT_PENDING.swap(false, Ordering::SeqCst) => {
             // Opened on *release*, not on press: a menu that appears under a
             // still-held button is one the same gesture can dismiss by accident.
+            // Not over the first-run coach: the menu would open for whatever
+            // area sits under the panel, which the user cannot see.
             if mode() != Mode::Hidden
+                && crate::first_run::hit(point).is_none()
                 && let Some(app) = APP.get()
             {
                 open_menu(app, point);
@@ -2571,6 +2602,16 @@ fn living_lbutton_down(point: Point) -> bool {
         // The click that dismisses a menu does not also act on what it landed
         // on (the standard contract), so it is swallowed even when it sits
         // over the user's app.
+        LEFT_PENDING.store(true, Ordering::SeqCst);
+        return true;
+    }
+    // The first-run coach is drawn in Living on step 3 (roadmap 1.18), and a
+    // press on it is the coach's for the reason a press on an open menu is the
+    // menu's: it is UP-TAKE's chrome over the user's apps, and letting it
+    // through would click whatever is under a button the user was aiming at.
+    if let Some(button) = crate::first_run::hit(point) {
+        *lock(&GESTURE) = Some(Gesture::Coach { button });
+        DRAGGING.store(true, Ordering::SeqCst);
         LEFT_PENDING.store(true, Ordering::SeqCst);
         return true;
     }
@@ -2813,6 +2854,12 @@ fn classify_press(point: Point) -> Gesture {
         if close_menu(app) {
             return Gesture::Inert;
         }
+        // The first-run coach (roadmap 1.18) is above every area and all empty
+        // overlay, and below an open menu, which the lines above have already
+        // dealt with. A press on it never starts a drag.
+        if let Some(button) = crate::first_run::hit(point) {
+            return Gesture::Coach { button };
+        }
         if let Some((id, bounds, handle)) = overlay::area_handle_at(app, point) {
             return match handle {
                 Handle::Close => Gesture::Close {
@@ -2915,6 +2962,12 @@ fn finish_gesture(release: Point) {
             control.contains(release) && overlay::dismiss_area(app, id)
         }
         Gesture::MenuItem { hit } => return activate_menu_item(app, hit, release),
+        Gesture::Coach { button } => {
+            if let Some(button) = button {
+                crate::first_run::activate(app, button, release);
+            }
+            return;
+        }
         Gesture::Inert => return,
     };
     if changed && let Err(error) = overlay::emit_areas(app) {
@@ -3203,7 +3256,12 @@ fn gesture_rect(gesture: Gesture, pointer: Point) -> Option<(i32, i32, u32, u32)
                 interaction::settle_resize(resized, resize, &monitors)
             }
         }
-        Gesture::Close { .. } | Gesture::MenuItem { .. } | Gesture::Inert => return None,
+        Gesture::Close { .. }
+        | Gesture::MenuItem { .. }
+        | Gesture::Coach { .. }
+        | Gesture::Inert => {
+            return None;
+        }
     };
     Some(overlay::as_tuple(rect))
 }

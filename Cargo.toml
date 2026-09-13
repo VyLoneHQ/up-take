@@ -41,6 +41,10 @@ uptake-assets = { path = "crates/uptake-assets" }
 uptake-log = { path = "crates/uptake-log" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The settings file (`architecture.md` section 6, first written by roadmap
+# 1.18). Already in the shipped Windows graph at this major through
+# `tauri-utils`, so this adds a direct edge and no new crate.
+toml = "1"
 # Task 1.15, the structured-logging half of `architecture.md` section 5's
 # error contract: libraries emit events with fields and the application decides
 # where they go, which is what lets a release build write a file without every

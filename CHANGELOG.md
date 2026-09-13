@@ -21,6 +21,10 @@ Until then it is written by hand.
 - A global summon hotkey, `Win+Shift+U`, with conflict handling.
 - Starting the app opens the overlay ready to place an area. Before this, only a development build
   did that, and an installed build started hidden with just a tray icon.
+- A first-run tour, taught on the overlay itself rather than in a separate window. Four steps: draw
+  an area, give one a type, hand the screen back and take it again, and a sheet of every shortcut.
+  Each of the first three moves on when you do the thing it describes. It runs until you finish or
+  skip it, and a settings file under `%APPDATA%\VyLone\UP-TAKE` remembers that you did.
 - A whole screen grab, `Win+Shift+G`, copying the monitor under the cursor to the clipboard without
   summoning the overlay. It goes through the same capture call the freeze uses when its fast path is
   off, so expect the same lateness.
