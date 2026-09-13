@@ -22,7 +22,14 @@
  * - Step 4's settings button and its two sentences about Settings are left out
  *   until roadmap 1.14 builds Settings, so the tour never points at a window
  *   that does not exist.
+ * - Step 2 names the `O` type with the product's own label, "OCR", where the
+ *   mockup said "Text": the area menu and the type bar both say "OCR", and a
+ *   tour that taught a different word for the same thing would be wrong on the
+ *   first right-click. Found by the independent review of 1.18. Whether the
+ *   product should say "Text" everywhere is a separate question.
  */
+
+import { KIND_LABELS } from './overlay-state';
 
 /** "Step 2 of 4". */
 export function progress(step: number, total: number): string {
@@ -62,28 +69,31 @@ export interface TypeRow {
 export const TYPES = {
   title: 'Press a key first, then drag',
   body: 'The key decides what kind of area you get. The colour tells you which kind it is without you having to remember.',
+  // The names are the product's own labels, read from `KIND_LABELS`, which the
+  // type bar uses and which match the area menu's. The tour teaches what the
+  // user will then see on the area itself, so it may not have a word of its own.
   rows: [
     {
       key: 'S',
-      name: 'Screenshot',
+      name: KIND_LABELS.screenshot,
       does: 'Pins a still of the region into the area',
       tone: 'accent',
     },
     {
       key: 'F',
-      name: 'Filter',
+      name: KIND_LABELS.filter,
       does: 'A warm tint you go on working underneath',
       tone: 'filter',
     },
     {
       key: 'U',
-      name: 'Upscale',
+      name: KIND_LABELS.upscale,
       does: 'Re-takes the region and sharpens it in place',
       tone: 'upscale',
     },
     {
       key: 'O',
-      name: 'Text',
+      name: KIND_LABELS.ocr,
       does: 'Reads the text in the region so you can copy it',
       tone: 'text',
     },

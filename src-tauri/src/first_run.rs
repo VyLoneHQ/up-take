@@ -282,8 +282,11 @@ fn cursor_monitor(app: &AppHandle) -> Rect {
 }
 
 /// Records completion off the calling thread. The last `Next` or a `Skip`
-/// arrives inside the `WH_MOUSE_LL` callback, where file I/O would count
-/// against `LowLevelHooksTimeout` (F-33's class).
+/// arrives inside the `WH_MOUSE_LL` callback, and time spent there counts
+/// against `LowLevelHooksTimeout`: Windows removes a hook that overruns it,
+/// silently, which is why every other slow action on that path is spawned too
+/// (see `activate_menu_item`). File I/O is not bounded by anything this app
+/// controls.
 fn record_completion() {
     std::thread::spawn(|| match config::mark_first_run_completed() {
         Ok(()) => diagnostics::note("first run: the tour is over and recorded"),

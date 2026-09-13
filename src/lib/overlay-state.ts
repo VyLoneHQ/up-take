@@ -432,13 +432,16 @@ export interface AreaFrame {
  * here are checked against the Rust source by a test that already exists, and
  * only the *words* are new.
  *
- * # The words are placeholders and 1.18 owns them
+ * # The words are shared with the first-run tour
  *
- * ADR-0028 leaves *"what the type label says"* deliberately open and assigns it
- * to roadmap 1.18, because the same words have to teach the model in the
- * tutorial. These match `conversion_label`'s spelling in `placement.rs` for the
- * four types that have behaviour, so the bar and the area menu do not call the
- * same type two different things today.
+ * ADR-0028 left *"what the type label says"* open and assigned it to roadmap
+ * 1.18, because the same words have to teach the model in the tutorial. 1.18's
+ * tour now reads its type names from here (`coach-copy.ts`, pinned by
+ * `coach-copy.test.ts`), so the tour, the bar and the area menu say one word
+ * for each type. These match `conversion_label`'s spelling in `placement.rs`
+ * for the four types that have behaviour. Whether `ocr` should read "Text" for
+ * the ordinary user, as the 1.18 mockup had it, is an open naming question and
+ * would change all three at once.
  */
 export const KIND_LABELS: Record<AreaKind, string> = {
   default: 'Default',

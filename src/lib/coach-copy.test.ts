@@ -2,7 +2,12 @@ import { describe, expect, it } from 'vitest';
 
 import hotkeyRs from '../../src-tauri/src/hotkey.rs?raw';
 import { BUTTONS, DRAW, MODES, progress, REFERENCE, TYPES } from './coach-copy';
-import { armedTypeForKey, isFreezeKey, isRemoveKey } from './overlay-state';
+import {
+  armedTypeForKey,
+  isFreezeKey,
+  isRemoveKey,
+  KIND_LABELS,
+} from './overlay-state';
 import { isDismissKey } from './regions';
 
 /**
@@ -92,5 +97,20 @@ describe('the coach copy is public writing', () => {
 
   it('counts steps the way the coach prints them', () => {
     expect(progress(2, 4)).toBe('Step 2 of 4');
+  });
+});
+
+describe('the tour calls each type what the rest of the product calls it', () => {
+  it('names every type row with the label the type bar and menu use', () => {
+    // The independent review of 1.18: the tour said "Text" for the type the
+    // menu and the bar call "OCR". The rows read `KIND_LABELS` now; this pins
+    // that, through the key, so a row whose key and name point at different
+    // types fails as well as a row with a word of its own.
+    for (const row of TYPES.rows) {
+      const kind = armedTypeForKey(press(row.key.toLowerCase()));
+      expect(kind, `${row.key} arms nothing`).not.toBeNull();
+      if (kind === null) continue;
+      expect(row.name, `the ${row.key} row`).toBe(KIND_LABELS[kind]);
+    }
   });
 });
