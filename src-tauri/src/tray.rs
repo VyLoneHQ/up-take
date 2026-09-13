@@ -8,9 +8,13 @@
 //! task 1.15, logged as well. ⚠️ This said "rather than logged" until then;
 //! corrected by round 1 of `PR #94`'s review, which found the sentence still
 //! standing in a file that same change had edited. The overlay window is `visible: false`, `skipTaskbar: true` and
-//! `decorations: false`, and the startup `overlay::show` is debug-only — so a
-//! release build whose tray did not come up has no tray, no taskbar entry, no
-//! window and no quit command (the startup `overlay::summon` is debug-only).
+//! `decorations: false`. Since roadmap 1.34 a launch does show it, in
+//! Placement, but the first `Esc` hands the screen back, and with no areas
+//! that is Hidden. So a release build whose tray did not come up is, one
+//! keypress after launch, a process with no tray, no taskbar entry, no window
+//! and no quit command. ⚠️ This said the startup summon was debug-only, which
+//! was true until 1.34 and made the same conclusion sound unconditional; it
+//! now holds from the first `Esc` rather than from launch.
 //! `eprintln!` reaches nobody there (`main.rs`
 //! sets `windows_subsystem = "windows"`), which would leave that user with a
 //! process they cannot close and no idea why. Same reasoning as
