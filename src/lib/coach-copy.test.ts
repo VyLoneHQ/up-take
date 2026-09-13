@@ -85,7 +85,9 @@ describe('the reference sheet names the keys the app actually binds', () => {
 describe('the coach copy is public writing', () => {
   it('carries no em dash or en dash (P-1)', () => {
     const strings = JSON.stringify({ BUTTONS, DRAW, TYPES, MODES, REFERENCE });
-    expect(strings).not.toMatch(/[–—]/);
+    // Escaped rather than typed: the literal characters would put two dashes
+    // into this file, which is the thing the test exists to keep out.
+    expect(strings).not.toMatch(/[\u2013\u2014]/);
   });
 
   it('counts steps the way the coach prints them', () => {
