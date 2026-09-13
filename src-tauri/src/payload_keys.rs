@@ -765,12 +765,14 @@ mod tests {
              not the crate.",
             dir.display()
         );
-        // The two modules whose tests call `assert_payload_coverage`. A third
-        // name here is a module whose payloads nothing pins: give it a coverage
-        // test of its own, and add it here in the same change.
+        // The modules whose tests call `assert_payload_coverage`. A name that
+        // appears here and not in this list is a module whose payloads nothing
+        // pins: give it a coverage test of its own, and add it here in the same
+        // change. `config.rs` is on it for types that go to disk, which its test
+        // exempts by name with a reason.
         assert_eq!(
             emitting,
-            vec!["overlay.rs", "placement.rs"],
+            vec!["config.rs", "first_run.rs", "overlay.rs", "placement.rs"],
             "a module declares a Serialize type and no `assert_payload_coverage` \
              call names it. `I-67`: a payload key is reachable by no other guard \
              in this repository."

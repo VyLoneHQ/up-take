@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { onMount } from 'svelte';
 import { SvelteMap } from 'svelte/reactivity';
+import Coach from '$lib/Coach.svelte';
 import { overflowFade } from '$lib/overflow-fade';
 import {
   type ActiveMonitorPayload,
@@ -13,6 +14,8 @@ import {
   areaFramesCss,
   armAreaType,
   armedTypeForKey,
+  type CoachPayload,
+  type CoachView,
   dismissFocusedArea,
   escapeOverlay,
   type FlashPayload,
@@ -35,6 +38,7 @@ import {
   type PhysRect,
   type PinPayload,
   physRectToCss,
+  reportCoachLayout,
   reportFreezeLatency,
   reportLatency,
   type SelectionPayload,
@@ -67,6 +71,9 @@ let hoveredArea: number | null = $state(null);
 // highlight. Rust's call, not this side's. See `HoverPayload.chromeOnly`.
 let hoverChromeOnly = $state(false);
 let menu: MenuView | null = $state(null);
+// The first-run coach (roadmap 1.18), or null when Rust is not showing it.
+// Whether it shows in the current state is Rust's call, like the menu's.
+let coach: CoachView | null = $state(null);
 // What the next drag will make, or null for Default (ADR-0018 §3). Rust owns
 // this — arming is placement state living beside the mouse hook — and re-emits
 // the state whenever it changes.
@@ -331,6 +338,9 @@ onMount(() => {
   const unlistenMenu = listen<MenuPayload>('overlay://menu', (event) => {
     menu = event.payload.menu;
   });
+  const unlistenCoach = listen<CoachPayload>('overlay://coach', (event) => {
+    coach = event.payload.coach;
+  });
 
   // Request the current state only *after* the listeners are registered.
   // `listen` resolves once the backend has recorded the subscription; requesting
@@ -347,6 +357,7 @@ onMount(() => {
     unlistenSelection,
     unlistenHover,
     unlistenMenu,
+    unlistenCoach,
   ]);
   void ready.then(() => invoke('overlay_request_state'));
   return () => {
@@ -585,6 +596,18 @@ onMount(() => {
       class="selection"
       style="transform: translate3d({selectionFrame.x}px, {selectionFrame.y}px, 0); width: {selectionFrame.width}px; height: {selectionFrame.height}px"
     ></div>
+  {/if}
+
+  <!-- The first-run coach, drawn before the menu so an open menu paints over
+       it, which matches the precedence the hook gives the two presses. -->
+  {#if coach}
+    <Coach
+      {coach}
+      {origin}
+      {dpr}
+      report={(generation, panel, next, skip) =>
+        void reportCoachLayout(invoke, generation, panel, next, skip)}
+    />
   {/if}
 
   {#if menuFrame}

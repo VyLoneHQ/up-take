@@ -106,6 +106,19 @@
 //! exercised. A green here means a scale-only difference drives the resync, and
 //! nothing more.
 //!
+//! ## `UPTAKE_DEV_FIRST_RUN`
+//!
+//! Runs the first-run tour (roadmap 1.18) whatever the settings file says. The
+//! tour records its completion in the real `%APPDATA%\VyLone\UP-TAKE\config.toml`,
+//! so a developer who has finished it once never sees it again, and deleting a
+//! file under `%APPDATA%` to look at a screen is the step nobody remembers to
+//! undo. Finishing a forced tour still records completion: the switch changes
+//! whether the tour starts, not what finishing it does.
+//!
+//! ```text
+//! UPTAKE_DEV_FIRST_RUN=1 pnpm tauri dev
+//! ```
+//!
 //! ## `UPTAKE_DEV_REPORT`, and it is NOT in this module
 //!
 //! **The fifth switch lives in [`crate::output`], not here, and this section
@@ -150,6 +163,15 @@ const PACING_VAR: &str = "UPTAKE_DEV_PACING";
 /// Environment variable holding the monitor-cache perturbation delay, in
 /// seconds. See [`schedule_monitor_perturb`].
 const MONITOR_PERTURB_VAR: &str = "UPTAKE_DEV_MONITOR_PERTURB";
+
+/// Environment variable that, when set, runs the first-run tour whatever the
+/// settings file says. See the module docs.
+const FIRST_RUN_VAR: &str = "UPTAKE_DEV_FIRST_RUN";
+
+/// Whether to run the first-run tour this session regardless of the stored flag.
+pub fn first_run_forced() -> bool {
+    env::var(FIRST_RUN_VAR).is_ok()
+}
 
 /// Whether gesture instrumentation is on this run.
 ///

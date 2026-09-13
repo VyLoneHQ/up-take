@@ -782,3 +782,95 @@ describe('an area outside chrome appears with its hover and not otherwise', () =
     expect(container.querySelectorAll('.area.hovered')).toHaveLength(0);
   });
 });
+
+/**
+ * Roadmap 1.18's frontend half. Rust decides whether the coach shows and at
+ * which step; the page's job is to draw it when told and to report where it
+ * drew it, because Rust hit-tests the buttons against that report. A coach that
+ * rendered and never reported would look right and ignore every click, so the
+ * report is asserted as well as the panel.
+ */
+describe('the first-run coach draws what Rust sends and reports where it drew it', () => {
+  function coach(overrides: Record<string, unknown> = {}) {
+    return {
+      step: 1,
+      living: false,
+      monitor: PRIMARY,
+      generation: 7,
+      ...overrides,
+    };
+  }
+
+  async function reports() {
+    const { invoke } = await import('@tauri-apps/api/core');
+    return vi
+      .mocked(invoke)
+      .mock.calls.filter(([command]) => command === 'overlay_report_coach')
+      .map(([, args]) => args as Record<string, unknown>);
+  }
+
+  test('no coach payload, no coach', async () => {
+    const { container } = await mount();
+    await emit('overlay://state', state());
+    expect(container.querySelectorAll('.coach')).toHaveLength(0);
+  });
+
+  test('a coach is drawn at the step Rust names, and reported under its generation', async () => {
+    const { invoke } = await import('@tauri-apps/api/core');
+    vi.mocked(invoke).mockClear();
+    const { container } = await mount();
+    await emit('overlay://state', state());
+    await emit('overlay://coach', {
+      coach: coach({ step: 2, generation: 11 }),
+    });
+
+    expect(container.querySelector('.coach .count')?.textContent).toBe(
+      'Step 2 of 4',
+    );
+    const sent = await reports();
+    expect(sent.at(-1)?.generation).toBe(11);
+    // Steps before the last carry Skip, so the report carries its rectangle.
+    expect(sent.at(-1)?.skip).not.toBeNull();
+  });
+
+  test('the last step has no Skip, and says so in its report', async () => {
+    const { invoke } = await import('@tauri-apps/api/core');
+    vi.mocked(invoke).mockClear();
+    const { container } = await mount();
+    await emit('overlay://state', state());
+    await emit('overlay://coach', {
+      coach: coach({ step: 4, generation: 12 }),
+    });
+
+    expect(container.querySelectorAll('.coach .skip')).toHaveLength(0);
+    expect(container.querySelector('.coach .finish')?.textContent).toBe(
+      'Start using UP-TAKE',
+    );
+    expect((await reports()).at(-1)?.skip).toBeNull();
+  });
+
+  test('step three closes differently in Living, which is where its lesson happens', async () => {
+    const { container } = await mount();
+    await emit('overlay://state', state());
+    await emit('overlay://coach', { coach: coach({ step: 3 }) });
+    const placing = container.querySelector('.coach .footer-note')?.textContent;
+
+    await emit('overlay://coach', {
+      coach: coach({ step: 3, living: true, generation: 8 }),
+    });
+    const living = container.querySelector('.coach .footer-note')?.textContent;
+
+    expect(living).not.toBe(placing);
+    expect(living).toContain('Living');
+  });
+
+  test('a null payload takes the coach away', async () => {
+    const { container } = await mount();
+    await emit('overlay://state', state());
+    await emit('overlay://coach', { coach: coach() });
+    expect(container.querySelectorAll('.coach')).toHaveLength(1);
+
+    await emit('overlay://coach', { coach: null });
+    expect(container.querySelectorAll('.coach')).toHaveLength(0);
+  });
+});
