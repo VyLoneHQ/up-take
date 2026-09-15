@@ -2035,30 +2035,45 @@ pub fn overlay_dismiss_focused(app: AppHandle) -> Result<(), String> {
 ///
 /// **It also gives the page the keyboard when the overlay is in Placement**
 /// (UP-TAKE `I-405`). A hand launch summons the overlay during `setup`, before
-/// WebView2 has created the page. The window takes the foreground then, and
-/// wry hands focus on to a page that does not exist yet, so the type keys,
-/// `Ctrl+Space` and `Esc` reached nothing. [`show`] asks the WINDOW for focus,
-/// and tao skips a window that is already in the foreground, so nothing
-/// repaired it until the hotkey hid the overlay and summoned it again. The page
-/// calling this is the first moment it provably exists, so focus is given to
-/// the page itself here.
+/// WebView2 has created the page, and the type keys, `Ctrl+Space` and `Esc`
+/// then reached nothing until the hotkey hid the overlay and summoned it again.
+///
+/// The cause below was read from the dependencies' source and has NOT been
+/// observed on the rig, so each half says where it was read:
+///
+/// - `tao` 0.35.3, `src/platform_impl/windows/window.rs`, `Window::set_focus`
+///   returns without acting when the window is already the foreground window.
+///   [`show`] asks the WINDOW for focus, so once the overlay is in front, every
+///   later request does nothing.
+/// - `wry` 0.55.1, `src/webview2/mod.rs`, moves focus into the page when its
+///   parent window receives `WM_SETFOCUS` (`MoveFocus` on the WebView2
+///   controller). A `WM_SETFOCUS` that arrives before the controller exists has
+///   nothing to move.
+///
+/// The page calling this command is the first moment it provably exists, so
+/// focus is given to the page itself here.
 #[tauri::command]
 pub fn overlay_request_state(app: AppHandle) -> Result<(), String> {
     let cell = app.state::<Mutex<OverlayState>>();
     let state = *lock(&cell);
     emit_state(&app, state)?;
     crate::first_run::emit(&app);
-    if takes_keyboard_on_mount(state) {
-        focus_page(&app);
-    }
+    on_page_mounted(state, || focus_page(&app));
     emit_areas(&app)
 }
 
-/// Whether the page takes the keyboard once it has mounted: in Placement only,
-/// where the keys act. In Living and Hidden the keyboard belongs to the user's
-/// own applications, and taking it there would be the overlay stealing input.
-const fn takes_keyboard_on_mount(state: OverlayState) -> bool {
-    matches!(state, OverlayState::Placement)
+/// What the overlay does for a page that has just mounted: in Placement, and
+/// only there, it gives the page the keyboard through `focus`. In Living and
+/// Hidden the keyboard belongs to the user's own applications, and taking it
+/// there would be the overlay stealing input.
+///
+/// The focus action is a parameter so a test can count it. The one line in
+/// [`overlay_request_state`] that calls this is the only part of the fix no test
+/// reaches, because it needs a running app.
+fn on_page_mounted(state: OverlayState, focus: impl FnOnce()) {
+    if matches!(state, OverlayState::Placement) {
+        focus();
+    }
 }
 
 /// Moves keyboard focus into the overlay's page, window first.
@@ -2088,14 +2103,23 @@ mod tests {
 
     use crate::payload_keys::{assert_keys, assert_payload_coverage};
 
-    /// `I-405`: only Placement takes the keyboard when the page mounts. A page
-    /// that took it in Living would take typing away from the application the
-    /// user is working in, which is worse than the bug this fixes.
+    /// `I-405`: a page that mounts in Placement is given the keyboard, and one
+    /// that mounts in Living or Hidden never is, because there typing belongs to
+    /// the user's own application. Counted through the focus action itself, so
+    /// dropping the call fails here; the first version of this test checked only
+    /// a predicate and stayed green with the call removed (round 1 of the review
+    /// of up-take PR #104).
     #[test]
-    fn only_placement_takes_the_keyboard_when_the_page_mounts() {
-        assert!(takes_keyboard_on_mount(OverlayState::Placement));
-        assert!(!takes_keyboard_on_mount(OverlayState::Living));
-        assert!(!takes_keyboard_on_mount(OverlayState::Hidden));
+    fn a_mounted_page_takes_the_keyboard_in_placement_only() {
+        for (state, expected, name) in [
+            (OverlayState::Placement, 1, "placement"),
+            (OverlayState::Living, 0, "living"),
+            (OverlayState::Hidden, 0, "hidden"),
+        ] {
+            let mut calls = 0;
+            on_page_mounted(state, || calls += 1);
+            assert_eq!(calls, expected, "{name}");
+        }
     }
 
     /// Every payload this module emits, and the keys the frontend indexes it
