@@ -230,23 +230,26 @@ export interface OcrPayload {
 /**
  * What an area shows for a given OCR state.
  *
- * The recognised text is returned unchanged; every other state gets a sentence.
+ * The recognised text is returned unchanged; every other state gets a sentence,
+ * in the user's language (roadmap 1.38). A reason Rust gives for `unavailable`
+ * or `failed` is shown as it arrives, in the language it was produced in, the
+ * same way a failure dialog shows its reason.
  * **`empty` is a success and reads like one** -- an area drawn over a picture
  * legitimately has no text in it, and wording that as a failure would teach the
  * user to ignore the message that matters.
  */
-export function ocrLine(payload: OcrPayload): string {
+export function ocrLine(language: Language, payload: OcrPayload): string {
   switch (payload.status) {
     case 'working':
-      return 'Reading…';
+      return text(language, 'ocr.reading');
     case 'text':
       return payload.detail ?? '';
     case 'empty':
-      return 'No text found';
+      return text(language, 'ocr.empty');
     case 'unavailable':
-      return payload.detail ?? 'OCR is unavailable';
+      return payload.detail ?? text(language, 'ocr.unavailable');
     case 'failed':
-      return payload.detail ?? 'OCR failed';
+      return payload.detail ?? text(language, 'ocr.failed');
     default:
       // Unreachable while this union matches `Status::as_str`, and deliberately
       // not `never`-asserted into a crash: a Rust-side status this build does

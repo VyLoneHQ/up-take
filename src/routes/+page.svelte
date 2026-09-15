@@ -432,7 +432,7 @@ onMount(() => {
              as the first cut did — it reads as "every screen is armed" and
              buries the single fact it exists to convey. -->
         {#if armed && i === activeMonitor}
-          <span class="armed-badge">{armed}</span>
+          <span class="armed-badge">{labels[armed]}</span>
         {/if}
         <!-- FROZEN goes on every monitor THAT IS SHOWING A STILL, and the
              qualifier is the whole of it. The armed badge above is one fact
@@ -533,7 +533,7 @@ onMount(() => {
                   recognition.status === 'failed'}
                 use:overflowFade
               >
-                {ocrLine(recognition)}
+                {ocrLine(language, recognition)}
               </div>
             {/if}
           {/if}

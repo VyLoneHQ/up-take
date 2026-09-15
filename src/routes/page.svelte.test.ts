@@ -689,6 +689,20 @@ describe('an area outside chrome appears with its hover and not otherwise', () =
     expect(bar.style.transform).toBe('translate3d(100px, 300px, 0)');
   });
 
+  test('the armed badge names the type the way the rest of the product does, not by its wire name', async () => {
+    // Roadmap 1.38, round 2 of up-take PR #102's review: the badge printed Rust's
+    // wire name (`screenshot`), which no translation reaches. It is uppercased by
+    // CSS, so in English the two looked identical on screen; the text node is
+    // where they differ, and where a German label would have been missing.
+    const { container } = await mount();
+    await emit('overlay://state', state({ armed: 'screenshot' }));
+    await emit('overlay://active-monitor', { index: 0 });
+
+    expect(container.querySelector('.armed-badge')?.textContent).toBe(
+      'Screenshot',
+    );
+  });
+
   test('the bar says what type the area is', async () => {
     // D3: a label and nothing clickable. The words are 1.18's to settle; that
     // the bar carries the AREA'S type rather than a fixed string is not.

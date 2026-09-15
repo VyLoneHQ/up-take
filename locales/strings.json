@@ -200,6 +200,26 @@
       "de": "eingefroren",
       "de_from": "286e8983"
     },
+    "ocr.reading": {
+      "en": "Reading…",
+      "de": "Wird gelesen…",
+      "de_from": "6aad8485"
+    },
+    "ocr.empty": {
+      "en": "No text found",
+      "de": "Kein Text gefunden",
+      "de_from": "97d3a349"
+    },
+    "ocr.unavailable": {
+      "en": "OCR is unavailable",
+      "de": "OCR ist nicht verfügbar",
+      "de_from": "2319d6f3"
+    },
+    "ocr.failed": {
+      "en": "OCR failed",
+      "de": "OCR fehlgeschlagen",
+      "de_from": "e295c20c"
+    },
     "coach.progress": {
       "en": "Step {step} of {total}",
       "de": "Schritt {step} von {total}",
