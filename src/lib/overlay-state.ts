@@ -7,6 +7,7 @@
  */
 
 import type { CssRect, Invoke } from './regions';
+import { type Language, text } from './strings';
 
 /** Which of the three interaction states the overlay is in (ADR-0012). */
 export type OverlayStateName = 'hidden' | 'placement' | 'living';
@@ -229,23 +230,26 @@ export interface OcrPayload {
 /**
  * What an area shows for a given OCR state.
  *
- * The recognised text is returned unchanged; every other state gets a sentence.
+ * The recognised text is returned unchanged; every other state gets a sentence,
+ * in the user's language (roadmap 1.38). A reason Rust gives for `unavailable`
+ * or `failed` is shown as it arrives, in the language it was produced in, the
+ * same way a failure dialog shows its reason.
  * **`empty` is a success and reads like one** -- an area drawn over a picture
  * legitimately has no text in it, and wording that as a failure would teach the
  * user to ignore the message that matters.
  */
-export function ocrLine(payload: OcrPayload): string {
+export function ocrLine(language: Language, payload: OcrPayload): string {
   switch (payload.status) {
     case 'working':
-      return 'Reading…';
+      return text(language, 'ocr.reading');
     case 'text':
       return payload.detail ?? '';
     case 'empty':
-      return 'No text found';
+      return text(language, 'ocr.empty');
     case 'unavailable':
-      return payload.detail ?? 'OCR is unavailable';
+      return payload.detail ?? text(language, 'ocr.unavailable');
     case 'failed':
-      return payload.detail ?? 'OCR failed';
+      return payload.detail ?? text(language, 'ocr.failed');
     default:
       // Unreachable while this union matches `Status::as_str`, and deliberately
       // not `never`-asserted into a crash: a Rust-side status this build does
@@ -442,16 +446,23 @@ export interface AreaFrame {
  * for the four types that have behaviour. Whether `ocr` should read "Text" for
  * the ordinary user, as the 1.18 mockup had it, is an open naming question and
  * would change all three at once.
+ *
+ * # In the user's language
+ *
+ * Since roadmap 1.38 the words come from `locales/strings.json`, the file the
+ * Rust menu reads too, in the language Rust chose.
  */
-export const KIND_LABELS: Record<AreaKind, string> = {
-  default: 'Default',
-  screenshot: 'Screenshot',
-  record: 'Record',
-  ocr: 'OCR',
-  upscale: 'Upscale',
-  analysis: 'Analysis',
-  filter: 'Filter',
-};
+export function kindLabels(language: Language): Record<AreaKind, string> {
+  return {
+    default: text(language, 'kind.default'),
+    screenshot: text(language, 'kind.screenshot'),
+    record: text(language, 'kind.record'),
+    ocr: text(language, 'kind.ocr'),
+    upscale: text(language, 'kind.upscale'),
+    analysis: text(language, 'kind.analysis'),
+    filter: text(language, 'kind.filter'),
+  };
+}
 
 /** One drawable row. */
 export interface MenuItemFrame {
@@ -479,6 +490,9 @@ export interface MenuFrame {
  * Returns nothing when the `dpr` is unusable, matching {@link physRectsToCss} —
  * an area drawn at a `NaN` position is worse than an area not drawn, because it
  * still cannot be clicked but now also hides what is underneath.
+ *
+ * `labels` are the type names in the user's language, from {@link kindLabels}.
+ * The page passes them; the English default is for tests that do not care.
  */
 export function areaFramesCss(
   areas: readonly AreaView[],
@@ -487,6 +501,7 @@ export function areaFramesCss(
   hoveredId: number | null,
   draggedId: number | null = null,
   hoverChromeOnly = false,
+  labels: Readonly<Record<AreaKind, string>> = kindLabels('en'),
 ): AreaFrame[] {
   const rects = physRectsToCss(
     areas.map((area) => area.rect),
@@ -537,7 +552,7 @@ export function areaFramesCss(
     // user is concerned (all of an area's outside chrome), and a hover that
     // revealed two of the three would read as chrome failing to draw.
     showBar: area.id === hoveredId && area.id !== draggedId,
-    label: KIND_LABELS[area.kind],
+    label: labels[area.kind],
     source: area.id === draggedId,
   }));
 }

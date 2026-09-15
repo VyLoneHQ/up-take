@@ -50,10 +50,13 @@ tauri-plugin-single-instance = "2"
 #   - output.rs: the clipboard (Win32_System_DataExchange), GlobalAlloc
 #     (Win32_System_Memory), and GetLocalTime (Win32_System_SystemInformation)
 #     for the output pipeline (task 1.9).
+#   - strings.rs: GetUserDefaultUILanguage (Win32_Globalization), the
+#     display language UP-TAKE's words follow (roadmap 1.38).
 # tao already pulls windows-sys transitively; this makes the usage explicit and
 # feature-gated to exactly what we call.
 windows-sys = { workspace = true, features = [
   "Win32_Foundation",
+  "Win32_Globalization",
   "Win32_Graphics_Gdi",
   "Win32_System_DataExchange",
   "Win32_System_LibraryLoader",

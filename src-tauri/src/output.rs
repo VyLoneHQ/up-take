@@ -238,9 +238,10 @@ pub(crate) fn copy_text_to_clipboard(app: &AppHandle, area: AreaId, text: &str, 
         crate::diagnostics::report_failure(
             app,
             "ocr: the recognised text did not reach the clipboard",
-            "UP-TAKE: could not copy the text",
-            &format!(
-                "UP-TAKE read the area but could not put the text on your clipboard, so your clipboard is unchanged.\n\nTrying again usually works. If it keeps happening, please report it with the detail below.\n\n{reason}"
+            crate::strings::text(crate::strings::Text::OcrCopyTitle),
+            &crate::strings::fill(
+                crate::strings::Text::OcrCopyDetail,
+                &[("reason", reason.as_str())],
             ),
         );
     }
@@ -1444,27 +1445,32 @@ impl Action {
     /// Whether a failure is put in front of the user, and under what words.
     ///
     /// `None` is a decision, not an omission: see the variant docs.
-    const fn told_to_user(self) -> Option<(&'static str, &'static str, &'static str)> {
+    ///
+    /// The logged source stays an English literal, because it goes in the log
+    /// rather than in front of the user; the title and reassurance are in the
+    /// user's language (roadmap 1.38).
+    fn told_to_user(self) -> Option<(&'static str, &'static str, &'static str)> {
+        use crate::strings::{Text, text};
         match self {
             Self::Copy => Some((
                 "output: the capture did not reach the clipboard",
-                "UP-TAKE: could not copy",
-                "Your clipboard is unchanged, so whatever was on it is still there.",
+                text(Text::OutputCopyTitle),
+                text(Text::OutputClipboardUnchanged),
             )),
             Self::Grab => Some((
                 "output: the monitor grab did not reach the clipboard",
-                "UP-TAKE: could not copy",
-                "Your clipboard is unchanged, so whatever was on it is still there.",
+                text(Text::OutputCopyTitle),
+                text(Text::OutputClipboardUnchanged),
             )),
             Self::Save => Some((
                 "output: the capture was not written to disk",
-                "UP-TAKE: could not save",
-                "Nothing was written, so no file was created or overwritten.",
+                text(Text::OutputSaveTitle),
+                text(Text::OutputNothingWritten),
             )),
             Self::Capture => Some((
                 "output: the area did not receive its capture",
-                "UP-TAKE: could not capture",
-                "The area is unchanged and still shows what it showed before.",
+                text(Text::OutputCaptureTitle),
+                text(Text::OutputAreaUnchanged),
             )),
             Self::Magnify | Self::Frame => None,
         }
@@ -1491,8 +1497,9 @@ fn report(
             app,
             source,
             title,
-            &format!(
-                "UP-TAKE could not finish what you asked for.\n\n{reassurance}\n\nTrying again usually works. If it keeps happening, please report it with the detail below.\n\n{reason}"
+            &crate::strings::fill(
+                crate::strings::Text::OutputFailed,
+                &[("reassurance", reassurance), ("reason", reason.as_str())],
             ),
         );
     }
