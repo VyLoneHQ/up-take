@@ -71,8 +71,12 @@ describe('the fingerprint', () => {
 });
 
 describe('the catalogue', () => {
-  it('names exactly the languages the code ships', () => {
-    expect(catalogue.languages).toEqual([...LANGUAGES]);
+  it('lists English first, once, because every lookup falls back to it', () => {
+    // The language list is the catalogue's alone (roadmap 1.38: a third
+    // language is a change to that file), so this pins only what the code
+    // relies on: English leads, and no code appears twice.
+    expect(LANGUAGES[0]).toBe('en');
+    expect(new Set(LANGUAGES).size).toBe(LANGUAGES.length);
   });
 
   it('has every language for every string, and no field it does not expect', () => {

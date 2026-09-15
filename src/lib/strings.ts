@@ -15,18 +15,22 @@
 
 import catalogue from '../../locales/strings.json';
 
-/** A language UP-TAKE ships. */
-export type Language = 'en' | 'de';
+/** A language code the catalogue carries, such as `en` or `pt-BR`. */
+export type Language = string;
 
-/** Every language, English first because it is the fallback. */
-export const LANGUAGES: readonly Language[] = ['en', 'de'];
+/**
+ * Every language, in the catalogue's own order, English first because it is the
+ * fallback. Read from the catalogue, so a language added there needs no change
+ * here.
+ */
+export const LANGUAGES: readonly Language[] = catalogue.languages;
 
 /** A key in the catalogue. Typed, so a misspelt key fails `svelte-check`. */
 export type TextKey = keyof typeof catalogue.strings;
 
-/** Whether a value from Rust names a language UP-TAKE ships. */
+/** Whether a value from Rust names a language the catalogue carries. */
 export function isLanguage(value: unknown): value is Language {
-  return typeof value === 'string' && (LANGUAGES as string[]).includes(value);
+  return typeof value === 'string' && LANGUAGES.includes(value);
 }
 
 /** A string in a language, falling back to English. */

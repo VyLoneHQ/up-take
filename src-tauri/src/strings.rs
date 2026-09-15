@@ -6,22 +6,30 @@
 //! through `src/lib/strings.ts`. One file for both sides, so the menu Rust
 //! builds and the tour the page draws cannot drift into two vocabularies.
 //!
+//! # A new language is a change to that file alone
+//!
+//! The list of languages is the catalogue's own `languages` field, and nothing
+//! here names a language except English, the fallback. Adding one means adding
+//! its code to that list and its text to every entry; the suite then refuses
+//! the catalogue until every entry has it.
+//!
 //! # How a stale translation is caught
 //!
-//! Each German entry records a fingerprint of the English it was translated
-//! from (`de_from`). `src/lib/strings.test.ts` recomputes it, so changing an
-//! English string fails the suite until someone updates the German or confirms
-//! it still fits. Checking only that both languages have every key would stay
-//! green while the German kept saying the old thing.
+//! Each translation records a fingerprint of the English it was made from
+//! (`de_from` for German). `src/lib/strings.test.ts` recomputes it, so changing
+//! an English string fails the suite until someone updates the translation or
+//! confirms it still fits. Checking only that every language has every key
+//! would stay green while a translation kept saying the old thing.
 //!
 //! # Which language
 //!
-//! Windows' display language, read once at startup: German for any German
-//! locale, English for everything else. Roadmap 1.14's Language setting is the
+//! Windows' display language, read once at startup, matched against the
+//! catalogue: its locale name exactly (`pt-BR`), then its primary language
+//! (`de` for `de-AT`), then English. Roadmap 1.14's Language setting is the
 //! override a user will get; until then a debug build honours
-//! `UPTAKE_DEV_LANGUAGE=de` or `=en` so the German can be looked at without
-//! changing Windows. Tests always read English, so an assertion on a label does
-//! not depend on the machine running it.
+//! `UPTAKE_DEV_LANGUAGE=de` so a translation can be looked at without changing
+//! Windows. Tests always read English, so an assertion on a label does not
+//! depend on the machine running it.
 //!
 //! # Never fails
 //!
@@ -35,53 +43,13 @@ use std::sync::OnceLock;
 /// The catalogue, compiled into the binary.
 const CATALOGUE: &str = include_str!("../../locales/strings.json");
 
+/// The language every lookup falls back to, and the one the catalogue lists
+/// first.
+const FALLBACK: &str = "en";
+
 /// The debug-only override, for looking at a language without changing Windows.
 #[cfg(any(test, debug_assertions))]
 const DEV_VAR: &str = "UPTAKE_DEV_LANGUAGE";
-
-/// A language UP-TAKE ships.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Language {
-    /// English, the source language and the fallback for every other locale.
-    English,
-    /// German, for every German locale Windows reports.
-    German,
-}
-
-impl Language {
-    /// Every language the catalogue must carry.
-    #[cfg(any(test, debug_assertions))]
-    pub const ALL: [Self; 2] = [Self::English, Self::German];
-
-    /// The code the catalogue and the page use.
-    #[must_use]
-    pub const fn code(self) -> &'static str {
-        match self {
-            Self::English => "en",
-            Self::German => "de",
-        }
-    }
-
-    /// The language a code names, if UP-TAKE ships it.
-    #[cfg(any(test, debug_assertions))]
-    fn from_code(code: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|language| language.code() == code)
-    }
-
-    /// The language for a Windows `LANGID`. The low ten bits are the primary
-    /// language, and `0x07` is German whether the sublanguage is Germany,
-    /// Austria, Switzerland, Luxembourg or Liechtenstein.
-    #[must_use]
-    pub const fn from_langid(id: u16) -> Self {
-        if id & 0x03ff == 0x07 {
-            Self::German
-        } else {
-            Self::English
-        }
-    }
-}
 
 macro_rules! texts {
     ($($(#[$doc:meta])* $variant:ident => $key:literal,)*) => {
@@ -173,75 +141,126 @@ texts! {
 
 type Table = HashMap<String, HashMap<String, String>>;
 
-fn table() -> &'static Table {
-    static TABLE: OnceLock<Table> = OnceLock::new();
-    TABLE.get_or_init(|| parse(CATALOGUE))
+/// The catalogue as parsed: its language codes, in order, and its strings by
+/// key, then language.
+struct Catalogue {
+    languages: Vec<String>,
+    strings: Table,
 }
 
-/// Reads the catalogue's `strings` object into key, then language, then text.
-/// Anything that is not that shape is skipped rather than refused.
-fn parse(json: &str) -> Table {
+fn catalogue() -> &'static Catalogue {
+    static PARSED: OnceLock<Catalogue> = OnceLock::new();
+    PARSED.get_or_init(|| parse(CATALOGUE))
+}
+
+/// Reads the catalogue. Anything that is not the expected shape is skipped
+/// rather than refused, so the worst a broken file can do is show keys.
+fn parse(json: &str) -> Catalogue {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
-        return Table::new();
+        return Catalogue {
+            languages: Vec::new(),
+            strings: Table::new(),
+        };
     };
-    let Some(strings) = value.get("strings").and_then(serde_json::Value::as_object) else {
-        return Table::new();
-    };
-    strings
-        .iter()
-        .map(|(key, entry)| {
-            let texts = entry
-                .as_object()
-                .map(|fields| {
-                    fields
-                        .iter()
-                        .filter_map(|(field, text)| {
-                            text.as_str().map(|text| (field.clone(), text.to_owned()))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            (key.clone(), texts)
+    let languages = value
+        .get("languages")
+        .and_then(serde_json::Value::as_array)
+        .map(|codes| {
+            codes
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .collect()
         })
-        .collect()
+        .unwrap_or_default();
+    let strings = value
+        .get("strings")
+        .and_then(serde_json::Value::as_object)
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|(key, entry)| {
+                    let texts = entry
+                        .as_object()
+                        .map(|fields| {
+                            fields
+                                .iter()
+                                .filter_map(|(field, text)| {
+                                    text.as_str().map(|text| (field.clone(), text.to_owned()))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    (key.clone(), texts)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Catalogue { languages, strings }
 }
 
-/// The language UP-TAKE shows, decided once.
+/// The catalogue language for a locale name such as `de-AT`: the name itself if
+/// the catalogue carries it, then its primary language, then English. Compared
+/// without regard to case, and `_` is accepted where Windows would write `-`.
+fn pick<'a>(locale: &str, available: &'a [String]) -> &'a str {
+    let wanted = locale.trim();
+    let primary = wanted.split(['-', '_']).next().unwrap_or_default();
+    available
+        .iter()
+        .find(|code| code.eq_ignore_ascii_case(wanted))
+        .or_else(|| {
+            available
+                .iter()
+                .find(|code| !primary.is_empty() && code.eq_ignore_ascii_case(primary))
+        })
+        .map_or(FALLBACK, String::as_str)
+}
+
+/// The language UP-TAKE shows, as a catalogue code, decided once.
 #[must_use]
-pub fn language() -> Language {
-    static LANGUAGE: OnceLock<Language> = OnceLock::new();
-    *LANGUAGE.get_or_init(detect)
+pub fn language() -> &'static str {
+    static LANGUAGE: OnceLock<&'static str> = OnceLock::new();
+    LANGUAGE.get_or_init(detect)
 }
 
 #[cfg(test)]
-const fn detect() -> Language {
-    Language::English
+const fn detect() -> &'static str {
+    FALLBACK
 }
 
 #[cfg(not(test))]
-fn detect() -> Language {
+fn detect() -> &'static str {
+    let available = &catalogue().languages;
     #[cfg(debug_assertions)]
-    if let Some(forced) = std::env::var(DEV_VAR)
-        .ok()
-        .as_deref()
-        .and_then(Language::from_code)
-    {
-        return forced;
+    if let Ok(forced) = std::env::var(DEV_VAR) {
+        return pick(&forced, available);
     }
-    system()
+    system_locale().map_or(FALLBACK, |locale| pick(&locale, available))
 }
 
+/// Windows' display language as a locale name, such as `de-AT`.
 #[cfg(all(not(test), windows))]
-fn system() -> Language {
+fn system_locale() -> Option<String> {
+    use windows_sys::Win32::Globalization::{GetUserDefaultUILanguage, LCIDToLocaleName};
+
+    // LOCALE_NAME_MAX_LENGTH, the terminator included.
+    let mut name = [0u16; 85];
+    let capacity = i32::try_from(name.len()).ok()?;
     // SAFETY: takes no arguments and only reads the user's display language
     // setting; it has no failure return.
-    let id = unsafe { windows_sys::Win32::Globalization::GetUserDefaultUILanguage() };
-    Language::from_langid(id)
+    let id = unsafe { GetUserDefaultUILanguage() };
+    // SAFETY: `name` is writable for `capacity` UTF-16 units, and the call
+    // writes at most that many, the terminator included. A LANGID is a valid
+    // LCID with the default sort.
+    let written = unsafe { LCIDToLocaleName(u32::from(id), name.as_mut_ptr(), capacity, 0) };
+    // The count includes the terminator, and 0 means the call failed.
+    let length = usize::try_from(written).ok()?.checked_sub(1)?;
+    String::from_utf16(name.get(..length)?).ok()
 }
 
 #[cfg(all(not(test), not(windows)))]
-const fn system() -> Language {
-    Language::English
+const fn system_locale() -> Option<String> {
+    None
 }
 
 /// A string in the current language.
@@ -252,14 +271,14 @@ pub fn text(text: Text) -> &'static str {
 
 /// A string in a given language, falling back to English, then to the key.
 #[must_use]
-pub fn text_in(language: Language, text: Text) -> &'static str {
+pub fn text_in(language: &str, text: Text) -> &'static str {
     let key = text.key();
-    let Some(entry) = table().get(key) else {
+    let Some(entry) = catalogue().strings.get(key) else {
         return key;
     };
     entry
-        .get(language.code())
-        .or_else(|| entry.get(Language::English.code()))
+        .get(language)
+        .or_else(|| entry.get(FALLBACK))
         .map_or(key, String::as_str)
 }
 
@@ -302,42 +321,44 @@ fn substitute(template: &str, values: &[(&str, &str)]) -> String {
 /// Rust decides and the page follows, so the menu Rust builds and the tour the
 /// page draws are always in the same language.
 #[tauri::command]
-#[must_use]
 pub fn overlay_language() -> &'static str {
-    language().code()
+    language()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CATALOGUE, DEV_VAR, Language, Text, parse, substitute, table, text, text_in};
+    use super::{
+        CATALOGUE, DEV_VAR, FALLBACK, Text, catalogue, parse, pick, substitute, text, text_in,
+    };
 
     #[test]
-    fn the_catalogue_parses_and_is_not_empty() {
+    fn the_catalogue_parses_and_lists_english_first() {
         let parsed = parse(CATALOGUE);
         assert!(
-            parsed.len() >= Text::ALL.len(),
+            parsed.strings.len() >= Text::ALL.len(),
             "the catalogue holds {} strings and Rust alone names {}",
-            parsed.len(),
+            parsed.strings.len(),
             Text::ALL.len()
         );
+        assert_eq!(parsed.languages.first().map(String::as_str), Some(FALLBACK));
     }
 
-    /// Every string Rust shows exists in every language, and a lookup never
-    /// falls back to the key. A missing German entry would otherwise show
-    /// English silently.
+    /// Every string Rust shows exists in every language the catalogue lists,
+    /// and a lookup never falls back to the key. A missing translation would
+    /// otherwise show English silently.
     #[test]
-    fn every_rust_string_exists_in_every_language() {
+    fn every_rust_string_exists_in_every_catalogue_language() {
         for &item in Text::ALL {
-            let entry = table()
+            let entry = catalogue()
+                .strings
                 .get(item.key())
                 .unwrap_or_else(|| panic!("{} is not in locales/strings.json", item.key()));
-            for language in Language::ALL {
-                let found = entry.get(language.code()).map(String::as_str);
+            for language in &catalogue().languages {
+                let found = entry.get(language).map(String::as_str);
                 assert!(
                     found.is_some_and(|text| !text.is_empty()),
-                    "{} has no {} text",
-                    item.key(),
-                    language.code()
+                    "{} has no {language} text",
+                    item.key()
                 );
                 assert_ne!(text_in(language, item), item.key());
             }
@@ -354,31 +375,59 @@ mod tests {
     }
 
     #[test]
-    fn tests_read_english() {
+    fn tests_read_english_and_an_unknown_language_falls_back_to_it() {
         assert_eq!(text(Text::MenuDismiss), "Dismiss");
-        assert_eq!(text_in(Language::German, Text::MenuDismiss), "Entfernen");
+        assert_eq!(text_in("de", Text::MenuDismiss), "Entfernen");
+        assert_eq!(text_in("xx", Text::MenuDismiss), "Dismiss");
+    }
+
+    /// The pass condition of roadmap 1.38: a third language is a change to the
+    /// catalogue and not to this code. A catalogue carrying French is parsed,
+    /// listed, picked for a French locale and looked up, with nothing here
+    /// knowing French exists.
+    #[test]
+    fn a_third_language_needs_only_the_catalogue() {
+        let parsed = parse(
+            r#"{"languages": ["en", "de", "fr"],
+                "strings": {"menu.dismiss": {"en": "Dismiss", "de": "Entfernen", "fr": "Fermer"}}}"#,
+        );
+        assert_eq!(parsed.languages, ["en", "de", "fr"]);
+        assert_eq!(pick("fr-CA", &parsed.languages), "fr");
+        assert_eq!(
+            parsed
+                .strings
+                .get("menu.dismiss")
+                .and_then(|entry| entry.get("fr")),
+            Some(&"Fermer".to_owned())
+        );
     }
 
     #[test]
-    fn every_german_locale_reads_german_and_nothing_else_does() {
-        // de-DE, de-CH, de-AT, de-LU, de-LI.
-        for id in [0x0407, 0x0807, 0x0c07, 0x1007, 0x1407] {
-            assert_eq!(Language::from_langid(id), Language::German, "{id:#06x}");
+    fn a_locale_picks_its_exact_name_then_its_primary_language_then_english() {
+        let available: Vec<String> = ["en", "de", "pt-BR", "pt"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        for (locale, expected) in [
+            ("de-AT", "de"),
+            ("de-CH", "de"),
+            ("de_DE", "de"),
+            ("DE", "de"),
+            ("pt-BR", "pt-BR"),
+            ("pt-PT", "pt"),
+            ("en-GB", "en"),
+            ("fr-FR", FALLBACK),
+            ("", FALLBACK),
+            ("-", FALLBACK),
+        ] {
+            assert_eq!(pick(locale, &available), expected, "{locale:?}");
         }
-        // en-US, en-GB, fr-FR, nl-NL, and an id whose low byte is 7 while its
-        // primary language (the low ten bits, 0x107) is not German.
-        for id in [0x0409, 0x0809, 0x040c, 0x0413, 0x0107] {
-            assert_eq!(Language::from_langid(id), Language::English, "{id:#06x}");
-        }
+        assert_eq!(pick("de-AT", &[]), FALLBACK);
     }
 
     #[test]
-    fn the_dev_override_knows_exactly_the_shipped_codes() {
+    fn the_dev_override_is_named_as_a_dev_switch() {
         assert!(DEV_VAR.starts_with("UPTAKE_DEV_"));
-        assert_eq!(Language::from_code("de"), Some(Language::German));
-        assert_eq!(Language::from_code("en"), Some(Language::English));
-        assert_eq!(Language::from_code("fr"), None);
-        assert_eq!(Language::from_code("DE"), None);
     }
 
     #[test]
