@@ -1,5 +1,5 @@
 # uptake-assets -- the checksummed acquisition of files UP-TAKE does not ship
-# in its binary: ONNX Runtime, the PP-OCRv6 detector and the PP-OCRv4 recogniser.
+# in its binary: ONNX Runtime and the PP-OCRv6_small detector and recogniser.
 #
 # Platform-independent by design, and for the same reason uptake-ocr is: it is
 # testable without a window, without a network, and without the ~37 MB of assets
@@ -18,7 +18,7 @@
 
 [package]
 name = "uptake-assets"
-description = "Checksummed acquisition and atomic installation of the ONNX Runtime and PP-OCRv4 model files. No platform APIs, no HTTP client."
+description = "Checksummed acquisition and atomic installation of the ONNX Runtime and PP-OCRv6_small model files. No platform APIs, no HTTP client."
 version.workspace = true
 authors.workspace = true
 edition.workspace = true

@@ -1,4 +1,5 @@
-//! PP-OCRv4 behind the [`crate::engine::Engine`] seam -- roadmap 1.11.
+//! PaddleOCR's PP-OCRv6_small behind the [`crate::engine::Engine`] seam --
+//! roadmap 1.11, which built it for PP-OCRv4.
 //!
 //! `architecture.md` section 3.2's pipeline, one module per stage:
 //!
@@ -91,7 +92,7 @@ impl Default for PaddleOptions {
     }
 }
 
-/// PP-OCRv4, loaded and resident.
+/// PP-OCRv6_small, loaded and resident.
 ///
 /// Constructed on the worker thread and never moved off it -- see
 /// [`crate::engine::Engine`]'s note on `&mut self`.

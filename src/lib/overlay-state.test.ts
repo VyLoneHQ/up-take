@@ -535,7 +535,7 @@ describe('ocrLine', () => {
   });
 
   it('returns the recognised text unchanged', () => {
-    // Unchanged including its line breaks: PP-OCRv4 returns blocks in reading
+    // Unchanged including its line breaks: the engine returns blocks in reading
     // order and the area renders them `pre-wrap`, so reflowing here would merge
     // two columns into one sentence.
     // Built rather than written as a literal so the newline in this test is

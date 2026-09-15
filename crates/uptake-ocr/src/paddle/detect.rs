@@ -1,6 +1,7 @@
 //! Turning DB's probability map into text boxes.
 //!
-//! PP-OCRv4's detector is a Differentiable Binarization network. It does not
+//! The detector (PP-OCRv6_small, as PP-OCRv4 before it) is a Differentiable
+//! Binarization network. It does not
 //! emit boxes: it emits one `float` per pixel, the probability that the pixel is
 //! inside a text region, on a map the same size as the resized input. Everything
 //! that turns that into quads is here, and **none of it needs ONNX Runtime** --
