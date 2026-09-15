@@ -490,3 +490,60 @@ fn perturb_delay() -> Option<Duration> {
 // per-region click-through machinery. The lesson it embodied — print both
 // sides of an IPC boundary before trusting either — is recorded in ADR-0011
 // and survives in the frontend's own conversion fail-safes.)
+
+/// `I-405` diagnostic: prints, for one moment, whether Windows reports the
+/// overlay as the foreground window and which window holds keyboard focus on the
+/// overlay's thread. On in every debug build, because the bug it measures is the
+/// first seconds of an ordinary `pnpm tauri dev` launch, where no variable has
+/// been set. Throwaway, removed with the fix it exists to find.
+#[cfg(windows)]
+pub fn log_focus(app: &AppHandle, moment: &str) {
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GUITHREADINFO, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo,
+        GetWindowThreadProcessId,
+    };
+
+    fn class_of(hwnd: HWND) -> String {
+        if hwnd.is_null() {
+            return "none".to_string();
+        }
+        let mut name = [0u16; 128];
+        // SAFETY: `name` is writable for the 128 units passed as its length.
+        let written = unsafe { GetClassNameW(hwnd, name.as_mut_ptr(), 128) };
+        usize::try_from(written)
+            .ok()
+            .and_then(|length| name.get(..length))
+            .map_or_else(|| "unreadable".to_string(), String::from_utf16_lossy)
+    }
+
+    let Ok(window) = crate::overlay::overlay_window(app) else {
+        eprintln!("focus-debug [{moment}]: no overlay window");
+        return;
+    };
+    let Ok(handle) = window.hwnd() else {
+        eprintln!("focus-debug [{moment}]: no overlay window handle");
+        return;
+    };
+    let overlay: HWND = handle.0;
+    // SAFETY: reads window-manager state only.
+    let foreground = unsafe { GetForegroundWindow() };
+    // SAFETY: `overlay` is a live window this process owns; a null out-pointer
+    // asks for the thread id alone.
+    let thread = unsafe { GetWindowThreadProcessId(overlay, std::ptr::null_mut()) };
+    // SAFETY: an all-zero GUITHREADINFO is a valid value; cbSize is set below.
+    let mut info: GUITHREADINFO = unsafe { std::mem::zeroed() };
+    info.cbSize = u32::try_from(size_of::<GUITHREADINFO>()).unwrap_or(0);
+    // SAFETY: `info` is a valid, sized GUITHREADINFO for the call to fill.
+    let read = unsafe { GetGUIThreadInfo(thread, &raw mut info) } != 0;
+    let (focus, active) = if read {
+        (class_of(info.hwndFocus), class_of(info.hwndActive))
+    } else {
+        ("unreadable".to_string(), "unreadable".to_string())
+    };
+    eprintln!(
+        "focus-debug [{moment}]: foreground is the overlay: {} (foreground class: {}) | on the overlay's thread, keyboard focus: {focus}, active window: {active}",
+        foreground == overlay,
+        class_of(foreground),
+    );
+}

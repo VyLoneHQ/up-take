@@ -1974,10 +1974,18 @@ pub fn overlay_toggle_freeze(app: AppHandle) {
 /// deleted.
 #[tauri::command]
 pub fn overlay_arm_type(app: AppHandle, kind: String) -> Result<(), String> {
+    // I-405 diagnostic, debug builds only: did the key reach Rust at all?
+    #[cfg(debug_assertions)]
+    eprintln!("focus-debug: an arm request for '{kind}' reached Rust");
     let Some(kind) = armable_type(&kind) else {
         return Err(format!("{kind} is not an armable area type"));
     };
     let state = *lock(&app.state::<Mutex<OverlayState>>());
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "focus-debug: ... and the overlay was in placement: {}",
+        state == OverlayState::Placement
+    );
     if state != OverlayState::Placement {
         return Err("arming is only meaningful in placement".to_string());
     }
@@ -2058,7 +2066,24 @@ pub fn overlay_request_state(app: AppHandle) -> Result<(), String> {
     let state = *lock(&cell);
     emit_state(&app, state)?;
     crate::first_run::emit(&app);
+    #[cfg(all(debug_assertions, windows))]
+    crate::dev_harness::log_focus(
+        &app,
+        if matches!(state, OverlayState::Placement) {
+            "page mounted in placement, before focusing the page"
+        } else {
+            "page mounted, not in placement"
+        },
+    );
     on_page_mounted(state, || focus_page(&app));
+    #[cfg(all(debug_assertions, windows))]
+    {
+        let later = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            crate::dev_harness::log_focus(&later, "500 ms after the page mounted");
+        });
+    }
     emit_areas(&app)
 }
 
