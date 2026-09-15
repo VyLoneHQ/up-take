@@ -1974,10 +1974,18 @@ pub fn overlay_toggle_freeze(app: AppHandle) {
 /// deleted.
 #[tauri::command]
 pub fn overlay_arm_type(app: AppHandle, kind: String) -> Result<(), String> {
+    // I-405 diagnostic, debug builds only: did the key reach Rust at all?
+    #[cfg(debug_assertions)]
+    eprintln!("focus-debug: an arm request for '{kind}' reached Rust");
     let Some(kind) = armable_type(&kind) else {
         return Err(format!("{kind} is not an armable area type"));
     };
     let state = *lock(&app.state::<Mutex<OverlayState>>());
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "focus-debug: ... and the overlay was in placement: {}",
+        state == OverlayState::Placement
+    );
     if state != OverlayState::Placement {
         return Err("arming is only meaningful in placement".to_string());
     }
@@ -2032,13 +2040,86 @@ pub fn overlay_dismiss_focused(app: AppHandle) -> Result<(), String> {
 /// otherwise render no indicator and no areas until the next change. This
 /// re-emits both the current state and the area set so the overlay is correct
 /// immediately.
+///
+/// **It also gives the page the keyboard when the overlay is in Placement**
+/// (UP-TAKE `I-405`). A hand launch summons the overlay during `setup`, before
+/// WebView2 has created the page, and the type keys, `Ctrl+Space` and `Esc`
+/// then reached nothing until the hotkey hid the overlay and summoned it again.
+///
+/// The cause below was read from the dependencies' source and has NOT been
+/// observed on the rig, so each half says where it was read:
+///
+/// - `tao` 0.35.3, `src/platform_impl/windows/window.rs`, `Window::set_focus`
+///   returns without acting when the window is already the foreground window.
+///   [`show`] asks the WINDOW for focus, so once the overlay is in front, every
+///   later request does nothing.
+/// - `wry` 0.55.1, `src/webview2/mod.rs`, moves focus into the page when its
+///   parent window receives `WM_SETFOCUS` (`MoveFocus` on the WebView2
+///   controller). A `WM_SETFOCUS` that arrives before the controller exists has
+///   nothing to move.
+///
+/// The page calling this command is the first moment it provably exists, so
+/// focus is given to the page itself here.
 #[tauri::command]
 pub fn overlay_request_state(app: AppHandle) -> Result<(), String> {
     let cell = app.state::<Mutex<OverlayState>>();
     let state = *lock(&cell);
     emit_state(&app, state)?;
     crate::first_run::emit(&app);
+    #[cfg(all(debug_assertions, windows))]
+    crate::dev_harness::log_focus(
+        &app,
+        if matches!(state, OverlayState::Placement) {
+            "page mounted in placement, before focusing the page"
+        } else {
+            "page mounted, not in placement"
+        },
+    );
+    on_page_mounted(state, || focus_page(&app));
+    #[cfg(all(debug_assertions, windows))]
+    {
+        let later = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            crate::dev_harness::log_focus(&later, "500 ms after the page mounted");
+        });
+    }
     emit_areas(&app)
+}
+
+/// What the overlay does for a page that has just mounted: in Placement, and
+/// only there, it gives the page the keyboard through `focus`. In Living and
+/// Hidden the keyboard belongs to the user's own applications, and taking it
+/// there would be the overlay stealing input.
+///
+/// The focus action is a parameter so a test can count it. The one line in
+/// [`overlay_request_state`] that calls this is the only part of the fix no test
+/// reaches, because it needs a running app.
+fn on_page_mounted(state: OverlayState, focus: impl FnOnce()) {
+    if matches!(state, OverlayState::Placement) {
+        focus();
+    }
+}
+
+/// Moves keyboard focus into the overlay's page, window first.
+///
+/// The window call is a no-op when the overlay already has the foreground,
+/// which is the startup case; it is kept for the case where it does not. The
+/// page call is the one that matters: it moves WebView2's own focus. A failure
+/// is logged rather than returned, because the state and the areas the page
+/// asked for still have to reach it.
+fn focus_page(app: &AppHandle) {
+    let focused = overlay_window(app).and_then(|window| {
+        window
+            .set_focus()
+            .map_err(|error| format!("could not focus the overlay window: {error}"))?;
+        let page: &tauri::Webview = window.as_ref();
+        page.set_focus()
+            .map_err(|error| format!("could not focus the overlay page: {error}"))
+    });
+    if let Err(error) = focused {
+        crate::diagnostics::trouble("overlay", &error);
+    }
 }
 
 #[cfg(test)]
@@ -2046,6 +2127,25 @@ mod tests {
     use super::*;
 
     use crate::payload_keys::{assert_keys, assert_payload_coverage};
+
+    /// `I-405`: a page that mounts in Placement is given the keyboard, and one
+    /// that mounts in Living or Hidden never is, because there typing belongs to
+    /// the user's own application. Counted through the focus action itself, so
+    /// dropping the call fails here; the first version of this test checked only
+    /// a predicate and stayed green with the call removed (round 1 of the review
+    /// of up-take PR #104).
+    #[test]
+    fn a_mounted_page_takes_the_keyboard_in_placement_only() {
+        for (state, expected, name) in [
+            (OverlayState::Placement, 1, "placement"),
+            (OverlayState::Living, 0, "living"),
+            (OverlayState::Hidden, 0, "hidden"),
+        ] {
+            let mut calls = 0;
+            on_page_mounted(state, || calls += 1);
+            assert_eq!(calls, expected, "{name}");
+        }
+    }
 
     /// Every payload this module emits, and the keys the frontend indexes it
     /// with (`I-67`).

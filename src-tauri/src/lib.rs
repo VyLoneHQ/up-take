@@ -179,6 +179,12 @@ pub fn run() -> tauri::Result<()> {
             if window.label() != overlay::WINDOW_LABEL {
                 return;
             }
+            // I-405 diagnostic, debug builds only: every focus change of the overlay.
+            #[cfg(all(debug_assertions, windows))]
+            if let WindowEvent::Focused(focused) = event {
+                eprintln!("focus-debug: overlay window event Focused({focused})");
+                dev_harness::log_focus(window.app_handle(), "on that Focused event");
+            }
             // Each of these can invalidate the overlay's fit — tao's
             // WM_DPICHANGED handler rescales the window's physical size, which
             // sync_bounds must undo. sync_bounds is self-converging, so the
@@ -337,6 +343,18 @@ pub fn run() -> tauri::Result<()> {
             // reaches this line is a hand launch. Roadmap 1.14 builds the
             // registration and adds that check here (`I-391`).
             overlay::summon(app.handle());
+            // I-405 diagnostic, debug builds only: the focus state through the first seconds.
+            #[cfg(all(debug_assertions, windows))]
+            {
+                dev_harness::log_focus(app.handle(), "right after the startup summon");
+                let later = app.handle().clone();
+                std::thread::spawn(move || {
+                    for (wait, moment) in [(1, "startup + 1 s"), (2, "startup + 3 s"), (3, "startup + 6 s")] {
+                        std::thread::sleep(std::time::Duration::from_secs(wait));
+                        dev_harness::log_focus(&later, moment);
+                    }
+                });
+            }
             Ok(())
         })
         // `build` + `run` rather than `run(context)` alone, to reach
