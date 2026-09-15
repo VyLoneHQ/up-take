@@ -1,8 +1,9 @@
 //! What must be acquired, and what each file must hash to.
 //!
 //! **The manifest is data, and that is the point.** ADR-0034 decided that the
-//! PP-OCRv4 ONNX models are produced by *our* conversion of PaddleOCR's official
-//! release rather than taken from a third party, and ADR-0032 decided the same
+//! PP-OCRv4 ONNX models were produced by *our* conversion of PaddleOCR's official
+//! release rather than taken from a third party (`ADR-0037` has since made both
+//! models Baidu's own PP-OCRv6_small ONNX), and ADR-0032 decided the same
 //! for ONNX Runtime. Both records require the identical discipline -- *"a
 //! documented, checksummed step: pinned SHA-256, verified before load, HTTPS
 //! only"* -- so both are described here by one type rather than by two
