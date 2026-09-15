@@ -1,8 +1,9 @@
 # UP-TAKE
 
-**UP-TAKE - a precisely engineered quality-of-life tool that streamlines your existing workflows.**
-<!-- source: the headline, the founder's own sentence, ADR-0039 (accepted 2026-09-08). It is quoted
-     here and never reworded: a rewording is an amendment to that record, not an edit to this file. -->
+**UP-TAKE - Grab, reshape and reuse anything on your screen**
+<!-- source: the headline, the founder's own sentence, ADR-0039 (accepted 2026-09-08; the sentence was
+     replaced by him on 2026-09-15). It is quoted here and never reworded: a rewording is an amendment
+     to that record, not an edit to this file. -->
 
 UP-TAKE is a Windows overlay that pins parts of your screen as areas and leaves them there. You
 summon it with a hotkey and drag a box over anything. That box stays where you put it for as long as
