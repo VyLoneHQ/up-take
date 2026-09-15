@@ -2032,13 +2032,54 @@ pub fn overlay_dismiss_focused(app: AppHandle) -> Result<(), String> {
 /// otherwise render no indicator and no areas until the next change. This
 /// re-emits both the current state and the area set so the overlay is correct
 /// immediately.
+///
+/// **It also gives the page the keyboard when the overlay is in Placement**
+/// (UP-TAKE `I-405`). A hand launch summons the overlay during `setup`, before
+/// WebView2 has created the page. The window takes the foreground then, and
+/// wry hands focus on to a page that does not exist yet, so the type keys,
+/// `Ctrl+Space` and `Esc` reached nothing. [`show`] asks the WINDOW for focus,
+/// and tao skips a window that is already in the foreground, so nothing
+/// repaired it until the hotkey hid the overlay and summoned it again. The page
+/// calling this is the first moment it provably exists, so focus is given to
+/// the page itself here.
 #[tauri::command]
 pub fn overlay_request_state(app: AppHandle) -> Result<(), String> {
     let cell = app.state::<Mutex<OverlayState>>();
     let state = *lock(&cell);
     emit_state(&app, state)?;
     crate::first_run::emit(&app);
+    if takes_keyboard_on_mount(state) {
+        focus_page(&app);
+    }
     emit_areas(&app)
+}
+
+/// Whether the page takes the keyboard once it has mounted: in Placement only,
+/// where the keys act. In Living and Hidden the keyboard belongs to the user's
+/// own applications, and taking it there would be the overlay stealing input.
+const fn takes_keyboard_on_mount(state: OverlayState) -> bool {
+    matches!(state, OverlayState::Placement)
+}
+
+/// Moves keyboard focus into the overlay's page, window first.
+///
+/// The window call is a no-op when the overlay already has the foreground,
+/// which is the startup case; it is kept for the case where it does not. The
+/// page call is the one that matters: it moves WebView2's own focus. A failure
+/// is logged rather than returned, because the state and the areas the page
+/// asked for still have to reach it.
+fn focus_page(app: &AppHandle) {
+    let focused = overlay_window(app).and_then(|window| {
+        window
+            .set_focus()
+            .map_err(|error| format!("could not focus the overlay window: {error}"))?;
+        let page: &tauri::Webview = window.as_ref();
+        page.set_focus()
+            .map_err(|error| format!("could not focus the overlay page: {error}"))
+    });
+    if let Err(error) = focused {
+        crate::diagnostics::trouble("overlay", &error);
+    }
 }
 
 #[cfg(test)]
@@ -2046,6 +2087,16 @@ mod tests {
     use super::*;
 
     use crate::payload_keys::{assert_keys, assert_payload_coverage};
+
+    /// `I-405`: only Placement takes the keyboard when the page mounts. A page
+    /// that took it in Living would take typing away from the application the
+    /// user is working in, which is worse than the bug this fixes.
+    #[test]
+    fn only_placement_takes_the_keyboard_when_the_page_mounts() {
+        assert!(takes_keyboard_on_mount(OverlayState::Placement));
+        assert!(!takes_keyboard_on_mount(OverlayState::Living));
+        assert!(!takes_keyboard_on_mount(OverlayState::Hidden));
+    }
 
     /// Every payload this module emits, and the keys the frontend indexes it
     /// with (`I-67`).
