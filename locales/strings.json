@@ -1,0 +1,389 @@
+{
+  "_about": [
+    "Every word UP-TAKE shows, in every language it ships (roadmap 1.38).",
+    "One entry per string, with its languages side by side, so a change to the English lands in the same diff as the translation it affects.",
+    "de_from is a fingerprint of the English the German was translated from. When the English changes, strings.test.ts fails until the German is updated or re-confirmed and de_from is set to the value the test prints.",
+    "Read by src-tauri/src/strings.rs (compiled in) and src/lib/strings.ts. Keys used by Rust are listed in strings.rs."
+  ],
+  "languages": [
+    "en",
+    "de"
+  ],
+  "strings": {
+    "menu.copy": {
+      "en": "Copy",
+      "de": "Kopieren",
+      "de_from": "658f3664"
+    },
+    "menu.save_image": {
+      "en": "Save image",
+      "de": "Bild speichern",
+      "de_from": "e8664805"
+    },
+    "menu.area_type": {
+      "en": "Area type",
+      "de": "Bereichstyp",
+      "de_from": "6366ea44"
+    },
+    "menu.type.default": {
+      "en": "Type: Default",
+      "de": "Typ: Standard",
+      "de_from": "d579adb8"
+    },
+    "menu.type.screenshot": {
+      "en": "Type: Screenshot",
+      "de": "Typ: Screenshot",
+      "de_from": "0b7e0ce3"
+    },
+    "menu.type.filter": {
+      "en": "Type: Filter",
+      "de": "Typ: Filter",
+      "de_from": "11264389"
+    },
+    "menu.type.upscale": {
+      "en": "Type: Upscale",
+      "de": "Typ: Upscale",
+      "de_from": "bd9b7a70"
+    },
+    "menu.type.ocr": {
+      "en": "Type: OCR",
+      "de": "Typ: OCR",
+      "de_from": "29d32bb1"
+    },
+    "menu.depth": {
+      "en": "Depth",
+      "de": "Tiefe",
+      "de_from": "d070218a"
+    },
+    "menu.depth.front": {
+      "en": "Always on top",
+      "de": "Immer im Vordergrund",
+      "de_from": "001a5dce"
+    },
+    "menu.depth.auto": {
+      "en": "Auto",
+      "de": "Automatisch",
+      "de_from": "126befb6"
+    },
+    "menu.depth.back": {
+      "en": "Always behind",
+      "de": "Immer im Hintergrund",
+      "de_from": "f569eaf0"
+    },
+    "menu.click_through": {
+      "en": "Click-through",
+      "de": "Durchklickbar",
+      "de_from": "17f0cb57"
+    },
+    "menu.dismiss": {
+      "en": "Dismiss",
+      "de": "Entfernen",
+      "de_from": "265915f3"
+    },
+    "tray.show": {
+      "en": "Show UP-TAKE ({hotkey})",
+      "de": "UP-TAKE anzeigen ({hotkey})",
+      "de_from": "e8a40950"
+    },
+    "tray.quit": {
+      "en": "Quit",
+      "de": "Beenden",
+      "de_from": "c7b3d356"
+    },
+    "tray.unavailable.title": {
+      "en": "UP-TAKE: tray unavailable",
+      "de": "UP-TAKE: Infobereich nicht verfügbar",
+      "de_from": "bfea6fa8"
+    },
+    "tray.unavailable.detail": {
+      "en": "UP-TAKE has no tray icon, so it has no menu and no Quit command.\n\n{hotkey} still summons and dismisses the overlay, so the app is usable. To close it, end `up-take.exe` from Task Manager.\n\nRestarting UP-TAKE usually clears this. If it persists, please report it with the details below.\n\n{error}",
+      "de": "UP-TAKE hat kein Symbol im Infobereich und damit kein Menü und keinen Befehl zum Beenden.\n\n{hotkey} blendet das Overlay weiterhin ein und aus, UP-TAKE ist also nutzbar. Zum Schließen beenden Sie `up-take.exe` im Task-Manager.\n\nEin Neustart von UP-TAKE behebt das meistens. Wenn es bestehen bleibt, melden Sie es bitte mit den Details unten.\n\n{error}",
+      "de_from": "b6d856dc"
+    },
+    "hotkey.unavailable.title": {
+      "en": "UP-TAKE: hotkey unavailable",
+      "de": "UP-TAKE: Tastenkombination nicht verfügbar",
+      "de_from": "d7d6f45a"
+    },
+    "hotkey.taken": {
+      "en": "Another application is already using {label}.\n\nClose that application, or change its shortcut, then restart UP-TAKE.",
+      "de": "Eine andere Anwendung verwendet bereits {label}.\n\nSchließen Sie diese Anwendung oder ändern Sie deren Tastenkombination, und starten Sie UP-TAKE dann neu.",
+      "de_from": "3e702b71"
+    },
+    "hotkey.refused": {
+      "en": "Windows refused to register {label}.\n\nRestarting UP-TAKE usually clears this. If it persists, please report it with the details below.\n\n{error}",
+      "de": "Windows hat die Registrierung von {label} abgelehnt.\n\nEin Neustart von UP-TAKE behebt das meistens. Wenn es bestehen bleibt, melden Sie es bitte mit den Details unten.\n\n{error}",
+      "de_from": "338c4ec9"
+    },
+    "output.copy.title": {
+      "en": "UP-TAKE: could not copy",
+      "de": "UP-TAKE: Kopieren fehlgeschlagen",
+      "de_from": "17a8b3bb"
+    },
+    "output.save.title": {
+      "en": "UP-TAKE: could not save",
+      "de": "UP-TAKE: Speichern fehlgeschlagen",
+      "de_from": "2e192f43"
+    },
+    "output.capture.title": {
+      "en": "UP-TAKE: could not capture",
+      "de": "UP-TAKE: Erfassen fehlgeschlagen",
+      "de_from": "937940f4"
+    },
+    "output.clipboard_unchanged": {
+      "en": "Your clipboard is unchanged, so whatever was on it is still there.",
+      "de": "Ihre Zwischenablage ist unverändert, der bisherige Inhalt ist also noch da.",
+      "de_from": "ccdafdaa"
+    },
+    "output.nothing_written": {
+      "en": "Nothing was written, so no file was created or overwritten.",
+      "de": "Es wurde nichts geschrieben, also wurde keine Datei erstellt oder überschrieben.",
+      "de_from": "8c6e84a2"
+    },
+    "output.area_unchanged": {
+      "en": "The area is unchanged and still shows what it showed before.",
+      "de": "Der Bereich ist unverändert und zeigt weiterhin, was er vorher gezeigt hat.",
+      "de_from": "93cc082f"
+    },
+    "output.failed": {
+      "en": "UP-TAKE could not finish what you asked for.\n\n{reassurance}\n\nTrying again usually works. If it keeps happening, please report it with the detail below.\n\n{reason}",
+      "de": "UP-TAKE konnte die gewünschte Aktion nicht abschließen.\n\n{reassurance}\n\nEin erneuter Versuch funktioniert meistens. Wenn es immer wieder passiert, melden Sie es bitte mit den Details unten.\n\n{reason}",
+      "de_from": "ce750713"
+    },
+    "output.ocr_copy.title": {
+      "en": "UP-TAKE: could not copy the text",
+      "de": "UP-TAKE: Text konnte nicht kopiert werden",
+      "de_from": "cdae7077"
+    },
+    "output.ocr_copy.detail": {
+      "en": "UP-TAKE read the area but could not put the text on your clipboard, so your clipboard is unchanged.\n\nTrying again usually works. If it keeps happening, please report it with the detail below.\n\n{reason}",
+      "de": "UP-TAKE hat den Bereich gelesen, konnte den Text aber nicht in Ihre Zwischenablage legen. Ihre Zwischenablage ist daher unverändert.\n\nEin erneuter Versuch funktioniert meistens. Wenn es immer wieder passiert, melden Sie es bitte mit den Details unten.\n\n{reason}",
+      "de_from": "c0ca8b92"
+    },
+    "kind.default": {
+      "en": "Default",
+      "de": "Standard",
+      "de_from": "19dc307e"
+    },
+    "kind.screenshot": {
+      "en": "Screenshot",
+      "de": "Screenshot",
+      "de_from": "d51a9351"
+    },
+    "kind.record": {
+      "en": "Record",
+      "de": "Aufnahme",
+      "de_from": "9f4565ec"
+    },
+    "kind.ocr": {
+      "en": "OCR",
+      "de": "OCR",
+      "de_from": "f421768f"
+    },
+    "kind.upscale": {
+      "en": "Upscale",
+      "de": "Upscale",
+      "de_from": "19625ac2"
+    },
+    "kind.analysis": {
+      "en": "Analysis",
+      "de": "Analyse",
+      "de_from": "0bee5743"
+    },
+    "kind.filter": {
+      "en": "Filter",
+      "de": "Filter",
+      "de_from": "f4a9c097"
+    },
+    "overlay.frozen": {
+      "en": "frozen",
+      "de": "eingefroren",
+      "de_from": "286e8983"
+    },
+    "coach.progress": {
+      "en": "Step {step} of {total}",
+      "de": "Schritt {step} von {total}",
+      "de_from": "59e691bc"
+    },
+    "coach.next": {
+      "en": "Next",
+      "de": "Weiter",
+      "de_from": "dce2da08"
+    },
+    "coach.skip": {
+      "en": "Skip",
+      "de": "Überspringen",
+      "de_from": "c197c7e2"
+    },
+    "coach.finish": {
+      "en": "Start using UP-TAKE",
+      "de": "UP-TAKE verwenden",
+      "de_from": "4f2dc3ac"
+    },
+    "coach.draw.title": {
+      "en": "Drag anywhere to draw an area",
+      "de": "Ziehen Sie irgendwo, um einen Bereich zu zeichnen",
+      "de_from": "3f022b7d"
+    },
+    "coach.draw.body": {
+      "en": "An area is a rectangle that stays on your screen and does something with whatever is underneath it. Everything UP-TAKE does is an area, a property of an area, or an action on one.",
+      "de": "Ein Bereich ist ein Rechteck, das auf Ihrem Bildschirm bleibt und etwas mit dem macht, was darunter liegt. Alles, was UP-TAKE tut, ist ein Bereich, eine Eigenschaft eines Bereichs oder eine Aktion auf einem Bereich.",
+      "de_from": "4fb002b0"
+    },
+    "coach.draw.prompt": {
+      "en": "Go ahead and draw one now. This guide waits for you and moves on by itself.",
+      "de": "Zeichnen Sie jetzt einen. Diese Anleitung wartet auf Sie und geht von selbst weiter.",
+      "de_from": "51a99de9"
+    },
+    "coach.draw.esc_hint": {
+      "en": "leaves at any time",
+      "de": "beendet jederzeit",
+      "de_from": "94c60425"
+    },
+    "coach.types.title": {
+      "en": "Press a key first, then drag",
+      "de": "Erst eine Taste drücken, dann ziehen",
+      "de_from": "5f94b1d9"
+    },
+    "coach.types.body": {
+      "en": "The key decides what kind of area you get. The colour tells you which kind it is without you having to remember.",
+      "de": "Die Taste bestimmt, welche Art von Bereich Sie bekommen. Die Farbe zeigt Ihnen, welche Art es ist, ohne dass Sie es sich merken müssen.",
+      "de_from": "b38d92c1"
+    },
+    "coach.types.screenshot": {
+      "en": "Pins a still of the region into the area",
+      "de": "Heftet ein Standbild der Region in den Bereich",
+      "de_from": "5ebfb054"
+    },
+    "coach.types.filter": {
+      "en": "A warm tint you go on working underneath",
+      "de": "Eine warme Tönung, unter der Sie weiterarbeiten",
+      "de_from": "f442de71"
+    },
+    "coach.types.upscale": {
+      "en": "Re-takes the region and sharpens it in place",
+      "de": "Erfasst die Region neu und schärft sie an Ort und Stelle",
+      "de_from": "46c3d12e"
+    },
+    "coach.types.ocr": {
+      "en": "Reads the text in the region so you can copy it",
+      "de": "Liest den Text in der Region, damit Sie ihn kopieren können",
+      "de_from": "7fb331a9"
+    },
+    "coach.types.footer": {
+      "en": "Drag with no key held and you get a plain area.",
+      "de": "Ohne gedrückte Taste entsteht ein einfacher Bereich.",
+      "de_from": "71ad6cba"
+    },
+    "coach.modes.title": {
+      "en": "Hand the screen back",
+      "de": "Den Bildschirm zurückgeben",
+      "de_from": "0a3de288"
+    },
+    "coach.modes.body": {
+      "en": "Your areas do not need UP-TAKE to be in the way. One chord gives your clicks back to whatever is underneath, and the areas stay exactly where you put them.",
+      "de": "Ihre Bereiche brauchen UP-TAKE nicht im Weg. Eine Tastenkombination gibt Ihre Klicks an das zurück, was darunter liegt, und die Bereiche bleiben genau dort, wo Sie sie platziert haben.",
+      "de_from": "9c08c442"
+    },
+    "coach.modes.chord_note": {
+      "en": "Switches between the two. Press it again whenever you want to place, move or remove an area.",
+      "de": "Wechselt zwischen beiden. Drücken Sie sie erneut, wann immer Sie einen Bereich platzieren, verschieben oder entfernen möchten.",
+      "de_from": "861ca923"
+    },
+    "coach.modes.placing.name": {
+      "en": "Placing",
+      "de": "Platzieren",
+      "de_from": "81b97e8f"
+    },
+    "coach.modes.placing.does": {
+      "en": "A blue frame round the screen. Your clicks go to UP-TAKE, so you can draw and arrange.",
+      "de": "Ein blauer Rahmen um den Bildschirm. Ihre Klicks gehen an UP-TAKE, damit Sie zeichnen und anordnen können.",
+      "de_from": "d40db330"
+    },
+    "coach.modes.living.name": {
+      "en": "Living",
+      "de": "Arbeiten",
+      "de_from": "4e4d9358"
+    },
+    "coach.modes.living.does": {
+      "en": "No frame. Your clicks go to your own apps. The areas keep doing their job.",
+      "de": "Kein Rahmen. Ihre Klicks gehen an Ihre eigenen Apps. Die Bereiche erledigen weiter ihre Aufgabe.",
+      "de_from": "e9745bc9"
+    },
+    "coach.modes.footer_placing": {
+      "en": "Press the chord now to try it.",
+      "de": "Drücken Sie die Tastenkombination jetzt, um es auszuprobieren.",
+      "de_from": "0463cc46"
+    },
+    "coach.modes.footer_living": {
+      "en": "You are in Living right now. Try clicking one of your apps, then press the chord again.",
+      "de": "Sie sind gerade im Modus Arbeiten. Klicken Sie eine Ihrer Apps an und drücken Sie dann die Tastenkombination erneut.",
+      "de_from": "21d3b328"
+    },
+    "coach.reference.title": {
+      "en": "That is the whole of it",
+      "de": "Das ist schon alles",
+      "de_from": "05201a6a"
+    },
+    "coach.reference.body": {
+      "en": "Everything else is a menu on an area. Right-click any area to change its type, pin it above or below, or throw it away.",
+      "de": "Alles Weitere ist ein Menü an einem Bereich. Klicken Sie mit der rechten Maustaste auf einen Bereich, um seinen Typ zu ändern, ihn nach vorne oder hinten zu legen oder ihn zu entfernen.",
+      "de_from": "398bbae8"
+    },
+    "coach.reference.anywhere": {
+      "en": "Anywhere",
+      "de": "Überall",
+      "de_from": "45bdffe0"
+    },
+    "coach.reference.summon": {
+      "en": "Placing or Living",
+      "de": "Platzieren oder Arbeiten",
+      "de_from": "37275009"
+    },
+    "coach.reference.grab": {
+      "en": "Copy this monitor",
+      "de": "Diesen Monitor kopieren",
+      "de_from": "1024868e"
+    },
+    "coach.reference.move_living": {
+      "en": "Move an area from Living",
+      "de": "Einen Bereich aus Arbeiten verschieben",
+      "de_from": "70576c3d"
+    },
+    "coach.reference.drag_key": {
+      "en": "drag",
+      "de": "ziehen",
+      "de_from": "b88c0d43"
+    },
+    "coach.reference.placing": {
+      "en": "While placing",
+      "de": "Beim Platzieren",
+      "de_from": "bcf56d6e"
+    },
+    "coach.reference.draw": {
+      "en": "Draw an area",
+      "de": "Einen Bereich zeichnen",
+      "de_from": "332ac7c3"
+    },
+    "coach.reference.type": {
+      "en": "Set the next area's type",
+      "de": "Den Typ des nächsten Bereichs festlegen",
+      "de_from": "288ea068"
+    },
+    "coach.reference.freeze": {
+      "en": "Freeze the screen",
+      "de": "Den Bildschirm einfrieren",
+      "de_from": "9aeec0fb"
+    },
+    "coach.reference.remove": {
+      "en": "Throw an area away",
+      "de": "Einen Bereich entfernen",
+      "de_from": "b706ce83"
+    },
+    "coach.reference.leave": {
+      "en": "Leave placing",
+      "de": "Platzieren beenden",
+      "de_from": "68696854"
+    }
+  }
+}

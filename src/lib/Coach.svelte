@@ -1,12 +1,5 @@
 <script lang="ts">
-import {
-  BUTTONS,
-  DRAW,
-  MODES,
-  progress,
-  REFERENCE,
-  TYPES,
-} from '$lib/coach-copy';
+import { coachCopy } from '$lib/coach-copy';
 import {
   type CoachView,
   cssRectToPhys,
@@ -14,6 +7,7 @@ import {
   type PhysRect,
   physRectToCss,
 } from '$lib/overlay-state';
+import type { Language } from '$lib/strings';
 
 // The first-run coach (roadmap 1.18, ADR-0043). Presentation only, like the
 // page that hosts it: Rust owns the tour and says which step to draw and on
@@ -32,9 +26,15 @@ interface Props {
     next: PhysRect,
     skip: PhysRect | null,
   ) => void;
+  /** The language Rust chose (roadmap 1.38). */
+  language: Language;
 }
 
-let { coach, origin, dpr, report }: Props = $props();
+let { coach, origin, dpr, report, language }: Props = $props();
+
+const { BUTTONS, DRAW, MODES, progress, REFERENCE, TYPES } = $derived(
+  coachCopy(language),
+);
 
 const STEPS = [1, 2, 3, 4];
 const LAST = STEPS.length;

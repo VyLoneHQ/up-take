@@ -170,17 +170,11 @@ pub fn install(app: &AppHandle) {
 /// loop has not started, so a blocking dialog would deadlock the startup it is
 /// reporting on.
 fn report_failure(app: &AppHandle, label: &str, error: &str) {
+    use crate::strings::{self, Text};
     let detail = if is_already_registered(error) {
-        format!(
-            "Another application is already using {label}.\n\n\
-             Close that application, or change its shortcut, then restart UP-TAKE."
-        )
+        strings::fill(Text::HotkeyTaken, &[("label", label)])
     } else {
-        format!(
-            "Windows refused to register {label}.\n\n\
-             Restarting UP-TAKE usually clears this. If it persists, please report it \
-             with the details below.\n\n{error}"
-        )
+        strings::fill(Text::HotkeyRefused, &[("label", label), ("error", error)])
     };
     // As in `tray`: the tailored detail above stays here, the log-and-show
     // mechanics are shared (task 1.15).
@@ -191,7 +185,7 @@ fn report_failure(app: &AppHandle, label: &str, error: &str) {
         // may -- see `diagnostics::report_failure`. Both appear in the dialog
         // below, which the user reads and no file keeps.
         "hotkey: a combination could not be registered",
-        "UP-TAKE — hotkey unavailable",
+        strings::text(Text::HotkeyUnavailableTitle),
         &detail,
     );
 }

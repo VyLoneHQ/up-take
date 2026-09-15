@@ -3186,11 +3186,12 @@ pub(crate) const fn captures_on_create(kind: AreaType) -> bool {
 ///
 /// Exhaustive rather than a `_` arm, so an eighth `AreaType` fails to compile
 /// here instead of defaulting to either answer.
-const fn conversion_label(kind: AreaType) -> Option<&'static str> {
+fn conversion_label(kind: AreaType) -> Option<&'static str> {
+    use crate::strings::{Text, text};
     match kind {
-        AreaType::Default => Some("Type: Default"),
-        AreaType::Screenshot => Some("Type: Screenshot"),
-        AreaType::Filter => Some("Type: Filter"),
+        AreaType::Default => Some(text(Text::MenuTypeDefault)),
+        AreaType::Screenshot => Some(text(Text::MenuTypeScreenshot)),
+        AreaType::Filter => Some(text(Text::MenuTypeFilter)),
         // Arrived with roadmap 1.24, which is what the doc above said would
         // happen: "this is one line on the day the behaviour lands". It has
         // behaviour now, so it earns the row.
@@ -3199,12 +3200,12 @@ const fn conversion_label(kind: AreaType) -> Option<&'static str> {
         // same change had rewritten to "1.26 for `Ocr`" fourteen lines up, so
         // half of it could no longer be found anywhere in the tree. A quotation
         // a reader can check has to survive the edit it describes.
-        AreaType::Upscale => Some("Type: Upscale"),
+        AreaType::Upscale => Some(text(Text::MenuTypeUpscale)),
         // Arrived with roadmap 1.26, on the same terms `Upscale` did: the doc
         // above promised "1.26 for `Ocr`" and this is that line. An OCR area
         // recognises its region and renders the text in place, so a conversion
         // into it leaves the user with an area that does something.
-        AreaType::Ocr => Some("Type: OCR"),
+        AreaType::Ocr => Some(text(Text::MenuTypeOcr)),
         AreaType::Record | AreaType::Analysis => None,
     }
 }
@@ -3561,6 +3562,7 @@ fn leaf(action: MenuAction, label: &'static str, checked: bool) -> MenuRow {
 
 /// The rows an area's menu shows, top to bottom.
 fn menu_rows(area: &overlay::AreaSummary) -> Vec<MenuRow> {
+    use crate::strings::{Text, text};
     // The toggle row switches to the opposite of the area's current input mode;
     // its tick shows the current state (ticked = pass-through).
     let toggled_input = match area.input {
@@ -3585,8 +3587,12 @@ fn menu_rows(area: &overlay::AreaSummary) -> Vec<MenuRow> {
     // movable in the same PR, so the moment arrived immediately, and the rig
     // found it on 2026-07-27. A predicted defect left in place is still a defect.
     if area.kind == AreaType::Screenshot {
-        rows.push(leaf(MenuAction::Copy, "Copy", false));
-        rows.push(leaf(MenuAction::SaveToFile, "Save image", false));
+        rows.push(leaf(MenuAction::Copy, text(Text::MenuCopy), false));
+        rows.push(leaf(
+            MenuAction::SaveToFile,
+            text(Text::MenuSaveImage),
+            false,
+        ));
     }
     // Type conversion (roadmap 1.27). It sits above Layer because it says what
     // the area *is*, where everything below says how it is placed or how it
@@ -3656,7 +3662,7 @@ fn menu_rows(area: &overlay::AreaSummary) -> Vec<MenuRow> {
         .collect();
     rows.push(MenuRow {
         action: MenuAction::OpenSubmenu,
-        label: "Area type",
+        label: text(Text::MenuAreaType),
         checked: false,
         children: types,
     });
@@ -3675,32 +3681,32 @@ fn menu_rows(area: &overlay::AreaSummary) -> Vec<MenuRow> {
     let layers: Vec<MenuRow> = vec![
         leaf(
             MenuAction::SetLayer(Layer::Front),
-            "Always on top",
+            text(Text::MenuDepthFront),
             area.layer == Layer::Front,
         ),
         leaf(
             MenuAction::SetLayer(Layer::Auto),
-            "Auto",
+            text(Text::MenuDepthAuto),
             area.layer == Layer::Auto,
         ),
         leaf(
             MenuAction::SetLayer(Layer::Back),
-            "Always behind",
+            text(Text::MenuDepthBack),
             area.layer == Layer::Back,
         ),
     ];
     rows.push(MenuRow {
         action: MenuAction::OpenSubmenu,
-        label: "Depth",
+        label: text(Text::MenuDepth),
         checked: false,
         children: layers,
     });
     rows.push(leaf(
         MenuAction::SetInput(toggled_input),
-        "Click-through",
+        text(Text::MenuClickThrough),
         area.input == Input::PassThrough,
     ));
-    rows.push(leaf(MenuAction::Dismiss, "Dismiss", false));
+    rows.push(leaf(MenuAction::Dismiss, text(Text::MenuDismiss), false));
     rows
 }
 

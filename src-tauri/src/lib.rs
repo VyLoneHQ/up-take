@@ -23,6 +23,7 @@ mod placement;
 // `uptake_capture::capture_region`, which is itself Windows-only, and the
 // modules that consume it are unconditional. The crate is Windows-only today.
 mod precapture;
+mod strings;
 mod tray;
 
 use std::sync::Mutex;
@@ -159,7 +160,8 @@ pub fn run() -> tauri::Result<()> {
                     overlay::overlay_report_scale,
                     overlay::overlay_dismiss_focused,
                     overlay::overlay_request_state,
-                    first_run::overlay_report_coach
+                    first_run::overlay_report_coach,
+                    strings::overlay_language
                 ]
             }
             #[cfg(not(debug_assertions))]
@@ -171,7 +173,8 @@ pub fn run() -> tauri::Result<()> {
                     overlay::overlay_report_latency,
                     overlay::overlay_dismiss_focused,
                     overlay::overlay_request_state,
-                    first_run::overlay_report_coach
+                    first_run::overlay_report_coach,
+                    strings::overlay_language
                 ]
             }
         })
