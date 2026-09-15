@@ -5,7 +5,9 @@
 //! Two decisions land on one piece of work. [`ADR-0032`] chose to load ONNX
 //! Runtime at run time from a path UP-TAKE places, rather than let a build fetch
 //! one from a CDN. [`ADR-0034`] chose to convert PaddleOCR's official PP-OCRv4
-//! release to ONNX ourselves, rather than take a third party's conversion. Both
+//! release to ONNX ourselves, rather than take a third party's conversion.
+//! (`ADR-0036` and `ADR-0037` later replaced both models with Baidu's own
+//! PP-OCRv6_small ONNX, so nothing is converted today.) Both
 //! records require the identical discipline, in the same words -- *"a documented,
 //! checksummed step: pinned SHA-256, verified before load, HTTPS only"* -- and
 //! both deferred the same question to roadmap `1.12`: whether these files ship

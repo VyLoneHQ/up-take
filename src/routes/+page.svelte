@@ -920,7 +920,7 @@ onMount(() => {
    The backdrop is the reason this is legible at all -- an OCR area holds no
    pixels of its own, so this text sits directly over whatever is underneath it,
    which is by definition a region dense with text. `pre-wrap` because the
-   engine's line breaks are part of what it read: PP-OCRv4 returns blocks in
+   engine's line breaks are part of what it read: it returns blocks in
    reading order, and reflowing them would merge two columns into one sentence.
 
    `pointer-events: none` like every other piece of area chrome. The overlay is

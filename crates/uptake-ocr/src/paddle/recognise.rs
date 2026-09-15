@@ -15,7 +15,8 @@ use uptake_core::bitmap::{BYTES_PER_PIXEL, RgbaBitmap};
 
 use super::quad::{PointF, Quad};
 
-/// The height every recogniser crop is scaled to. PP-OCRv4's `rec_image_shape`.
+/// The height every recogniser crop is scaled to. PP-OCRv6_small's recogniser
+/// declares a fixed input height of 48 in its model, as PP-OCRv4's did.
 ///
 /// The model's convolutions collapse the vertical axis entirely, so this is
 /// fixed by the architecture rather than chosen: a crop of a different height
@@ -199,8 +200,9 @@ impl CharacterDictionary {
     }
 
     /// Builds a dictionary the way PaddleOCR itself does, for a model exported
-    /// with `use_space_char: true` -- which is every PP-OCRv4 recogniser we
-    /// convert.
+    /// with `use_space_char: true`. PP-OCRv4's recognisers were, and so is
+    /// PP-OCRv6_small's: its 18,708 dictionary lines plus the space and the
+    /// blank are exactly its 18,710 output classes.
     ///
     /// # The space is APPENDED, not read
     ///

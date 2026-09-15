@@ -1719,8 +1719,9 @@ fn publish_clipboard_text(owner: HWND, utf16: &[u8]) -> Result<(), String> {
 /// with no error anywhere: the clipboard call succeeds, the flash fires, and
 /// the user gets a prefix of what is on screen. That is the quiet-wrong-answer
 /// shape this project keeps finding (`export_source`'s own header records the
-/// last one), so it is an error here instead. PP-OCRv4's dictionary cannot
-/// produce a NUL, which is exactly why nothing downstream would ever catch it.
+/// last one), so it is an error here instead. The shipped dictionary cannot
+/// produce a NUL (PP-OCRv6_small's holds none, checked 2026-09-15, and nor did
+/// PP-OCRv4's), which is exactly why nothing downstream would ever catch it.
 ///
 /// # Errors
 ///

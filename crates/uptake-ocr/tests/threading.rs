@@ -506,7 +506,7 @@ fn a_panicking_engine_ends_the_worker_instead_of_leaving_a_zombie() {
     // defect reached through a door that fix did not cover.**
     //
     // `Engine::recognise` and the closure that builds the engine are
-    // CALLER-SUPPLIED, and 1.11 puts an ONNX/PP-OCRv4 FFI binding behind them.
+    // CALLER-SUPPLIED, and 1.11 put an ONNX Runtime FFI binding behind them.
     // A panic there unwound straight out of the spawn closure, so neither the
     // STOPPED store nor `close` ran. The reviewer measured the result:
     // `is_running()` answered TRUE FOREVER, `submit` accepted 40 more requests,
