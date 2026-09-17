@@ -25,6 +25,7 @@ let facts = $state<Facts | null>(null);
 let pane = $state<PaneId>('general');
 let problem = $state('');
 let tourArmed = $state(false);
+let wasReset = $state(false);
 
 const view = $derived(
   settings && facts ? panes(language, settings, facts) : [],
@@ -91,6 +92,28 @@ async function replayTour() {
   tourArmed = true;
 }
 
+async function openSaveFolder() {
+  try {
+    await invoke('settings_open_save_folder');
+  } catch (error) {
+    problem = String(error);
+  }
+}
+
+/**
+ * Puts every setting back to what UP-TAKE ships.
+ *
+ * The defaults are RUST'S, fetched rather than written here: a second copy on
+ * this side would be a list that silently stops matching `Settings::default`
+ * the first time a default changes, and the user would be reset to something
+ * that was never shipped.
+ */
+async function resetDefaults() {
+  const defaults = await invoke<Settings>('settings_defaults');
+  commit(defaults);
+  wasReset = true;
+}
+
 onMount(() => {
   void (async () => {
     const chosen = await invoke('overlay_language');
@@ -109,7 +132,13 @@ onMount(() => {
   <title>{text(language, 'settings.title')}</title>
 </svelte:head>
 
-<div class="window">
+<!-- `opaque` when the acrylic backdrop did NOT apply. The panel is
+     translucent on purpose, because the blur behind it is what keeps it
+     readable; without the blur that same translucency is the founder's
+     complaint from the rig, so the window makes itself solid instead of
+     betting on an effect it cannot see. `facts` is null for the first frame,
+     and the safe reading of "not known yet" is opaque. -->
+<div class="window" class:opaque={!facts?.acrylic}>
   <!-- A slim title bar of our own (UI-UX.md §3.2), so the window belongs to the
        same product as the overlay rather than to Windows. `data-tauri-drag-region`
        is what makes an undecorated window movable. -->
@@ -148,7 +177,10 @@ onMount(() => {
           {/if}
           <div class="rows">
             {#each section.rows as row (row.id)}
-              <div class="row" class:stacked={row.shape === 'keys'}>
+              <div
+                class="row"
+                class:stacked={row.shape === 'keys' || row.shape === 'types'}
+              >
                 <div class="what">
                   {#if row.name}<span class="name">{row.name}</span>{/if}
                   {#if row.about}<span class="about">{row.about}</span>{/if}
@@ -204,6 +236,11 @@ onMount(() => {
                       <button
                         type="button"
                         class="quiet"
+                        onclick={openSaveFolder}>{row.open}</button
+                      >
+                      <button
+                        type="button"
+                        class="quiet"
                         onclick={() => chooseFolder(row)}>{row.choose}</button
                       >
                       {#if row.value}
@@ -217,7 +254,7 @@ onMount(() => {
                     </div>
                   {:else if row.shape === 'fact'}
                     <kbd class="fact">{row.value}</kbd>
-                  {:else if row.shape === 'action'}
+                  {:else if row.shape === 'action' && row.action === 'replay-tour'}
                     <button
                       type="button"
                       class="quiet"
@@ -227,8 +264,18 @@ onMount(() => {
                         ? text(language, 'settings.help.replay.armed')
                         : row.label}</button
                     >
-                  {:else if row.shape === 'keys'}
-                    <!-- Drawn by the stacked branch below. -->
+                  {:else if row.shape === 'action'}
+                    <button
+                      type="button"
+                      class="quiet"
+                      disabled={wasReset}
+                      onclick={resetDefaults}
+                      >{wasReset
+                        ? text(language, 'settings.reset.done')
+                        : row.label}</button
+                    >
+                  {:else if row.shape === 'keys' || row.shape === 'types'}
+                    <!-- Drawn by the stacked branches below. -->
                   {/if}
                 </div>
 
@@ -240,6 +287,18 @@ onMount(() => {
                       <dd>{key.does}</dd>
                     {/each}
                   </dl>
+                {:else if row.shape === 'types'}
+                  <h3 class="keys-heading">{row.heading}</h3>
+                  <ul class="types">
+                    {#each row.types as type (type.name)}
+                      <li>
+                        <span class="swatch" data-tone={type.tone}></span>
+                        <kbd>{type.key}</kbd>
+                        <span class="type-name">{type.name}</span>
+                        <span class="type-does">{type.does}</span>
+                      </li>
+                    {/each}
+                  </ul>
                 {/if}
               </div>
             {/each}
@@ -276,7 +335,7 @@ onMount(() => {
 .window {
   --accent: rgba(120, 180, 255, 0.9);
   --accent-bright: rgba(160, 210, 255, 1);
-  --panel: rgba(24, 28, 36, 0.96);
+  --panel: rgba(24, 28, 36, 0.76);
   --deep: rgb(12, 14, 18);
   --text: rgba(235, 240, 250, 0.95);
   --muted: rgba(235, 240, 250, 0.55);
@@ -296,6 +355,17 @@ onMount(() => {
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
 }
 
+/* Acrylic blurs what is behind the window, so the panel can be translucent
+   and still be read over a browser. When it did not apply, this is what stops
+   that translucency being the defect it was meant to fix. */
+.window.opaque {
+  --panel: rgb(24, 28, 36);
+  background: var(--panel);
+}
+.window.opaque .titlebar {
+  background: var(--deep);
+}
+
 .titlebar {
   display: flex;
   align-items: center;
@@ -304,7 +374,10 @@ onMount(() => {
   height: 34px;
   padding: 0 6px 0 12px;
   border-bottom: 1px solid var(--hairline);
-  background: var(--deep);
+  /* Translucent with the rest of the panel, so the frost is one surface
+     rather than a solid bar sitting on a blurred body. `.opaque` puts it
+     back to solid along with everything else. */
+  background: rgba(12, 14, 18, 0.55);
 }
 
 .product {
@@ -574,6 +647,48 @@ kbd {
 .keys dd {
   margin: 0;
   color: var(--muted);
+}
+
+/* The legend (UI-UX.md section 2: per-type colour carries information, and the
+   colour tells you what an area IS). The swatches are the overlay's own values,
+   and the two types that have no colour of their own yet show the placeholder
+   the mockups use. */
+.types {
+  width: 100%;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.types li {
+  display: grid;
+  grid-template-columns: 10px max-content max-content 1fr;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 0;
+}
+.swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+.swatch[data-tone='accent'] {
+  background: rgba(120, 180, 255, 0.9);
+}
+.swatch[data-tone='filter'] {
+  background: rgba(255, 186, 110, 0.85);
+}
+.swatch[data-tone='upscale'] {
+  background: rgba(160, 210, 255, 0.55);
+}
+.swatch[data-tone='text'] {
+  background: rgba(243, 201, 105, 0.75);
+}
+.type-name {
+  color: var(--text);
+}
+.type-does {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .problem {

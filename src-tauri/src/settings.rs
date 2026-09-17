@@ -154,6 +154,15 @@ pub struct Settings {
     pub save_directory: Option<PathBuf>,
     /// Whether taking a screenshot leaves Placement (`ADR-0023` section 2).
     pub leave_placing_after_screenshot: bool,
+    /// Whether a Screenshot area writes its picture to disk as it is drawn.
+    ///
+    /// **Off by default, and the default is the decision.** `output.rs`'s own
+    /// docs say Save is "a separate, explicit action (PRODUCT-VISION section 8)
+    /// -- does not also touch the clipboard", and a screen-reading tool that
+    /// writes files unasked is the behaviour that sentence exists to refuse.
+    /// On, it is the user saying they want the other thing, which is what a
+    /// setting is for. Asked for by the founder on the rig, 2026-09-17.
+    pub auto_save_screenshots: bool,
     /// Which monitors a freeze covers.
     pub freeze_covers: FreezeCovers,
     /// How a held picture is encoded on the display path.
@@ -177,6 +186,7 @@ impl Default for Settings {
             hand_launch_state: HandLaunchState::Placing,
             save_directory: None,
             leave_placing_after_screenshot: false,
+            auto_save_screenshots: false,
             freeze_covers: FreezeCovers::ThisMonitor,
             held_picture_quality: HeldPictureQuality::Fast,
             show_in_screen_recordings: false,
@@ -298,6 +308,10 @@ mod tests {
             "None means Pictures\\UP-TAKE"
         );
         assert!(!settings.leave_placing_after_screenshot, "ADR-0023 s2: off");
+        assert!(
+            !settings.auto_save_screenshots,
+            "PRODUCT-VISION s8: Save is explicit, so this is off"
+        );
         assert_eq!(settings.freeze_covers, FreezeCovers::ThisMonitor);
         assert_eq!(settings.held_picture_quality, HeldPictureQuality::Fast);
         assert!(!settings.show_in_screen_recordings, "ADR-0019: off");
@@ -353,6 +367,7 @@ mod tests {
                 "hand_launch_state",
                 "save_directory",
                 "leave_placing_after_screenshot",
+                "auto_save_screenshots",
                 "freeze_covers",
                 "held_picture_quality",
                 "show_in_screen_recordings",

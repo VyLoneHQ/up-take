@@ -674,6 +674,66 @@
       "en": "That change is in force now, but it could not be saved: {reason}",
       "de": "Die Änderung gilt jetzt, konnte aber nicht gespeichert werden: {reason}",
       "de_from": "6bc15cd8"
+    },
+    "settings.save_to.open": {
+      "en": "Open folder",
+      "de": "Ordner öffnen",
+      "de_from": "713a842f"
+    },
+    "settings.auto_save.name": {
+      "en": "Save a screenshot as soon as it is taken",
+      "de": "Screenshot sofort speichern",
+      "de_from": "785729c6"
+    },
+    "settings.auto_save.about": {
+      "en": "Writes the picture to the folder above the moment you draw the area, so you do not have to choose Save. It still goes to the clipboard either way.",
+      "de": "Schreibt das Bild in den Ordner oben, sobald du den Bereich ziehst, ohne dass du Speichern wählen musst. In die Zwischenablage kommt es ohnehin.",
+      "de_from": "0f6471ee"
+    },
+    "settings.reset.name": {
+      "en": "Back to the defaults",
+      "de": "Zurück zu den Standardwerten",
+      "de_from": "d1a43f6a"
+    },
+    "settings.reset.about": {
+      "en": "Puts every setting on every pane back the way UP-TAKE ships. Your areas and your pictures are not touched.",
+      "de": "Setzt alle Einstellungen auf allen Seiten auf den Auslieferungszustand zurück. Deine Bereiche und deine Bilder bleiben unberührt.",
+      "de_from": "11fad6b4"
+    },
+    "settings.reset.action": {
+      "en": "Reset",
+      "de": "Zurücksetzen",
+      "de_from": "0ac8a560"
+    },
+    "settings.reset.done": {
+      "en": "Done. Everything is back to the defaults.",
+      "de": "Erledigt. Alles steht wieder auf den Standardwerten.",
+      "de_from": "f2bce93d"
+    },
+    "settings.section.reset": {
+      "en": "Starting over",
+      "de": "Von vorn beginnen",
+      "de_from": "cb74fc69"
+    },
+    "settings.help.types": {
+      "en": "The area types",
+      "de": "Die Bereichstypen",
+      "de_from": "aef076dc"
+    },
+    "settings.help.types.about": {
+      "en": "Press the key, then drag. Press nothing and you get a Default area. The colour of an area tells you which type it is.",
+      "de": "Taste drücken, dann ziehen. Drückst du nichts, bekommst du einen Standardbereich. Die Farbe eines Bereichs zeigt dir seinen Typ.",
+      "de_from": "95d2c1e7"
+    },
+    "settings.help.types.default": {
+      "en": "A plain area. Scroll over it to magnify what is underneath.",
+      "de": "Ein einfacher Bereich. Scrolle darüber, um das Darunterliegende zu vergrößern.",
+      "de_from": "2e75ecc7"
+    },
+    "settings.help.types.nokey": {
+      "en": "no key",
+      "de": "keine Taste",
+      "de_from": "d73857d5"
     }
   }
 }

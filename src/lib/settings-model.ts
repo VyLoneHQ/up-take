@@ -39,7 +39,8 @@
  * settled here.
  */
 
-import { coachCopy, type KeyRow } from './coach-copy';
+import { coachCopy, type KeyRow, type TypeRow } from './coach-copy';
+import { kindLabels } from './overlay-state';
 import { type Language, type TextKey, text } from './strings';
 
 /** The four panes, in the sidebar's order (`UI-UX.md` section 3.2). */
@@ -72,6 +73,7 @@ export interface Settings {
   hand_launch_state: HandLaunchState;
   save_directory: string | null;
   leave_placing_after_screenshot: boolean;
+  auto_save_screenshots: boolean;
   freeze_covers: FreezeCovers;
   held_picture_quality: HeldPictureQuality;
   show_in_screen_recordings: boolean;
@@ -89,6 +91,7 @@ export interface Facts {
   opacity_range: [number, number];
   filter_range: [number, number];
   system_language: string;
+  acrylic: boolean;
 }
 
 /**
@@ -149,11 +152,23 @@ export type Row =
       placeholder: string;
       choose: string;
       reset: string;
+      /** Opens it in Explorer. Asked for on the rig, 2026-09-17. */
+      open: string;
       set: (value: string | null) => Settings;
     })
   | (Common & { shape: 'fact'; value: string })
-  | (Common & { shape: 'action'; label: string; action: 'replay-tour' })
-  | (Common & { shape: 'keys'; heading: string; keys: readonly KeyRow[] });
+  | (Common & {
+      shape: 'action';
+      label: string;
+      action: 'replay-tour' | 'reset-defaults';
+    })
+  | (Common & { shape: 'keys'; heading: string; keys: readonly KeyRow[] })
+  | (Common & {
+      shape: 'types';
+      heading: string;
+      /** One per area type, with the key that arms it and its colour. */
+      types: readonly TypeRow[];
+    });
 
 /** A labelled group of rows. */
 export interface Section {
@@ -185,7 +200,10 @@ export function panes(
     ...settings,
     ...patch,
   });
-  const reference = coachCopy(language).REFERENCE;
+  const copy = coachCopy(language);
+  const reference = copy.REFERENCE;
+  const types = copy.TYPES;
+  const kinds = kindLabels(language);
 
   return [
     {
@@ -270,7 +288,16 @@ export function panes(
               placeholder: facts.default_save_directory,
               choose: say('settings.save_to.choose'),
               reset: say('settings.save_to.reset'),
+              open: say('settings.save_to.open'),
               set: (value) => with_({ save_directory: value }),
+            },
+            {
+              shape: 'toggle',
+              id: 'auto-save',
+              name: say('settings.auto_save.name'),
+              about: say('settings.auto_save.about'),
+              value: settings.auto_save_screenshots,
+              set: (value) => with_({ auto_save_screenshots: value }),
             },
             {
               shape: 'toggle',
@@ -412,6 +439,44 @@ export function panes(
           ],
         },
         {
+          label: '',
+          rows: [
+            // The founder, on the rig 2026-09-17: the reference sheet's
+            // `S F U O -- Set the next area's type` row *"is not good"*. It
+            // names four keys and says nothing about what any of them gives
+            // you, which is fine as the last line of a tour somebody has just
+            // been walked through and useless as the thing they come back to.
+            //
+            // So the legend is the TOUR'S OWN step 2, read from `coachCopy`
+            // rather than written again here: the same keys, the same product
+            // labels from `kindLabels`, the same sentences, the same per-type
+            // colour. A second vocabulary for the same five types is the
+            // F-22/F-37 failure, and this is the third place ADR-0043
+            // decision 5 says that content has to appear.
+            //
+            // Default is added in front, because it is the one type the tour
+            // does not teach -- it has no key, it is what a plain drag gives
+            // you, and a legend that omitted it would be a legend of the
+            // exceptions.
+            {
+              shape: 'types',
+              id: 'type-legend',
+              name: '',
+              about: say('settings.help.types.about'),
+              heading: say('settings.help.types'),
+              types: [
+                {
+                  key: say('settings.help.types.nokey'),
+                  name: kinds.default,
+                  does: say('settings.help.types.default'),
+                  tone: 'accent',
+                },
+                ...types.rows,
+              ],
+            },
+          ],
+        },
+        {
           label: say('settings.section.learning'),
           rows: [
             {
@@ -421,6 +486,23 @@ export function panes(
               about: say('settings.help.replay.about'),
               label: say('settings.help.replay.action'),
               action: 'replay-tour',
+            },
+          ],
+        },
+        {
+          label: say('settings.section.reset'),
+          rows: [
+            // In Help rather than General, and last: it is the row somebody
+            // looks for when something is wrong, which is where they already
+            // are, and putting it under General would make it the second thing
+            // anyone sees on opening the window.
+            {
+              shape: 'action',
+              id: 'reset-defaults',
+              name: say('settings.reset.name'),
+              about: say('settings.reset.about'),
+              label: say('settings.reset.action'),
+              action: 'reset-defaults',
             },
           ],
         },

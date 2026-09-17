@@ -31,6 +31,7 @@ const INVENTORY: { pane: PaneId; id: string; shape: Row['shape'] }[] = [
   { pane: 'general', id: 'hotkey-summon', shape: 'fact' },
   { pane: 'general', id: 'hotkey-grab', shape: 'fact' },
   { pane: 'capture', id: 'save-directory', shape: 'folder' },
+  { pane: 'capture', id: 'auto-save', shape: 'toggle' },
   { pane: 'capture', id: 'leave-placing', shape: 'toggle' },
   { pane: 'capture', id: 'freeze-covers', shape: 'segmented' },
   { pane: 'capture', id: 'held-picture-quality', shape: 'segmented' },
@@ -46,6 +47,7 @@ const DEFAULTS: Settings = {
   hand_launch_state: 'placing',
   save_directory: null,
   leave_placing_after_screenshot: false,
+  auto_save_screenshots: false,
   freeze_covers: 'this_monitor',
   held_picture_quality: 'fast',
   show_in_screen_recordings: false,
@@ -62,6 +64,7 @@ const FACTS: Facts = {
   opacity_range: [10, 100],
   filter_range: [5, 60],
   system_language: 'de',
+  acrylic: true,
 };
 
 const view = (settings: Settings = DEFAULTS, facts: Facts = FACTS) =>
@@ -80,7 +83,12 @@ describe('the inventory', () => {
         section.rows
           // The Help pane's reference sheet and its replay button are not
           // settings; section 4 lists Help as one row, "the keybind reference".
-          .filter((each) => each.shape !== 'keys' && each.shape !== 'action')
+          .filter(
+            (each) =>
+              each.shape !== 'keys' &&
+              each.shape !== 'action' &&
+              each.shape !== 'types',
+          )
           .map((each) => ({
             pane: pane.id,
             id: each.id,
@@ -91,15 +99,57 @@ describe('the inventory', () => {
     expect(actual).toEqual(INVENTORY);
   });
 
-  it('puts the keybind reference and the tour replay in Help', () => {
+  it('puts the keybind reference, the type legend, the replay and the reset in Help', () => {
     // ADR-0043 decision 5: the tour's last step is the single source of the
     // reference, "reachable afterwards from Settings, Help", and the ADR's
-    // consequences add a way to replay the tour.
+    // consequences add a way to replay the tour. The legend and the reset are
+    // the founder's, from the rig on 2026-09-17.
     const help = view().find((pane) => pane.id === 'help');
     const shapes = help?.sections.flatMap((section) =>
       section.rows.map((each) => each.shape),
     );
-    expect(shapes).toEqual(['keys', 'keys', 'action']);
+    expect(shapes).toEqual(['keys', 'keys', 'types', 'action', 'action']);
+  });
+
+  it('builds the type legend from the tour rather than a second list', () => {
+    // The founder's words on the rig: the reference sheet's `S F U O` row
+    // "is not good". It names four keys and says what none of them does.
+    // The legend is step 2 of the tour, whose key names `coach-copy.test.ts`
+    // already checks against the handlers that bind them -- so reading it from
+    // there inherits that check instead of starting a second vocabulary.
+    const legend = row('type-legend');
+    if (legend.shape !== 'types') throw new Error('not the legend');
+
+    // Default first, because it is the one type the tour does not teach: it
+    // has no key and it is what a plain drag gives you.
+    expect(legend.types.map((each) => each.key)).toEqual([
+      'no key',
+      'S',
+      'F',
+      'U',
+      'O',
+    ]);
+    // Every row says what the type DOES, which is the whole complaint.
+    for (const each of legend.types) {
+      expect(each.does.length, each.name).toBeGreaterThan(10);
+      expect(each.name).toBeTruthy();
+    }
+    // Per-type colour carries information (UI-UX.md section 2), so no two
+    // types that are told apart by colour may share a tone by accident.
+    expect(new Set(legend.types.map((each) => each.tone)).size).toBeGreaterThan(
+      1,
+    );
+  });
+
+  it('offers a reset that does not carry its own copy of the defaults', () => {
+    // The row is an action, not a settings row: the values come from Rust's
+    // `settings_defaults`. A list on this side would stop matching
+    // `Settings::default` the first time a default changed, and Reset would
+    // put the user back to something that was never shipped.
+    const reset = row('reset-defaults');
+    if (reset.shape !== 'action') throw new Error('not an action');
+    expect(reset.action).toBe('reset-defaults');
+    expect(JSON.stringify(reset)).not.toContain('area_opacity_percent');
   });
 
   it('names the panes in the sidebar order section 3.2 gives', () => {
@@ -202,6 +252,9 @@ describe('a control', () => {
     expect(folder.placeholder).toBe(FACTS.default_save_directory);
     expect(folder.set(null).save_directory).toBeNull();
     expect(folder.set('D:\\Shots').save_directory).toBe('D:\\Shots');
+    // Open folder is a label on this row rather than a row of its own: it acts
+    // on the folder the row is about. Asked for on the rig, 2026-09-17.
+    expect(folder.open).toBeTruthy();
   });
 });
 

@@ -25,7 +25,11 @@
 //! here in [`settings_write`], because they need an `AppHandle` and because
 //! keeping them out of the store is what lets the store be tested without one.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use serde::Serialize;
+use tauri::utils::config::WindowEffectsConfig;
+use tauri::window::Effect;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 use crate::settings::{FILTER_RANGE, OPACITY_RANGE, Settings};
@@ -39,6 +43,13 @@ const CHANGED_EVENT: &str = "settings://changed";
 
 /// The window's size, from `UI-UX.md` section 3.2.
 const SIZE: (f64, f64) = (900.0, 620.0);
+
+/// Whether the acrylic backdrop applied to the window that is open.
+///
+/// Written by [`build`] and read by [`settings_facts`]. An atomic rather than
+/// a value passed to the page, because the page asks for its facts on mount
+/// and the window is built before the page exists.
+static ACRYLIC: AtomicBool = AtomicBool::new(false);
 
 /// The smallest the window may be dragged to.
 ///
@@ -79,6 +90,15 @@ pub struct Facts {
     /// out for itself and which is not the same as the language this process is
     /// running in once somebody has changed the setting.
     pub system_language: String,
+    /// Whether the window's acrylic backdrop actually applied.
+    ///
+    /// **The page needs this and cannot find it out.** With acrylic the panel
+    /// is deliberately translucent, because the blur behind it is what makes
+    /// that readable; without it the same translucency IS the founder's
+    /// complaint from the rig -- the apps underneath show through and the text
+    /// is hard to read. So the page raises its own opacity when this is false,
+    /// rather than the window betting on an effect that may not have applied.
+    pub acrylic: bool,
 }
 
 /// Opens the settings window, or brings it to the front if it is already open.
@@ -102,7 +122,7 @@ pub fn open(app: &AppHandle) {
 }
 
 fn build(app: &AppHandle) -> Result<(), String> {
-    WebviewWindowBuilder::new(app, WINDOW_LABEL, WebviewUrl::App("settings/".into()))
+    let window = WebviewWindowBuilder::new(app, WINDOW_LABEL, WebviewUrl::App("settings/".into()))
         .title(crate::strings::text(crate::strings::Text::SettingsTitle))
         .inner_size(SIZE.0, SIZE.1)
         .min_inner_size(MINIMUM_SIZE.0, MINIMUM_SIZE.1)
@@ -119,14 +139,61 @@ fn build(app: &AppHandle) -> Result<(), String> {
         // panel is a flash bright enough to be the first thing anyone reports.
         .visible(false)
         .build()
-        .map(|_| ())
-        .map_err(|error| format!("could not create the settings window: {error}"))
+        .map_err(|error| format!("could not create the settings window: {error}"))?;
+
+    // The apps behind the window are blurred, so the panel can be translucent
+    // and still be readable. **The founder's words on the rig, 2026-09-17:**
+    // *"the apps underneath should be blured, if not then the user has a hard
+    // time reading the text."*
+    //
+    // # Acrylic rather than Mica, and the difference matters here
+    //
+    // Mica samples the desktop WALLPAPER. Acrylic blurs what is actually
+    // behind the window, which is what was asked for: the point is the text
+    // on top of a browser staying readable, and Mica would leave that browser
+    // as sharp as it was.
+    //
+    // # Why the result is recorded rather than assumed
+    //
+    // This can fail -- an older Windows, a machine with transparency effects
+    // turned off in Settings, a remote session. The panel's translucency is
+    // only safe BECAUSE of the blur, so a silently unapplied effect would give
+    // the user exactly the unreadable window this is meant to fix, and worse
+    // than before. The page reads [`Facts::acrylic`] and makes itself opaque
+    // when it is false. Measured, not hoped for.
+    let applied = window
+        .set_effects(WindowEffectsConfig {
+            effects: vec![Effect::Acrylic],
+            state: None,
+            radius: Some(6.0),
+            color: None,
+        })
+        .is_ok();
+    ACRYLIC.store(applied, Ordering::SeqCst);
+    if !applied {
+        crate::diagnostics::note(
+            "settings: no acrylic backdrop on this machine; the window draws opaque instead",
+        );
+    }
+    Ok(())
 }
 
 /// The settings as they stand.
 #[tauri::command]
 pub fn settings_read() -> Settings {
     crate::settings::current()
+}
+
+/// The settings as UP-TAKE ships them.
+///
+/// The Reset button asks for these rather than carrying its own list. A second
+/// copy of the defaults on the page is a list that stops matching
+/// `Settings::default` the first time one changes, and the user who pressed
+/// Reset would be put back to something that was never shipped. Asked for by
+/// the founder on the rig, 2026-09-17.
+#[tauri::command]
+pub fn settings_defaults() -> Settings {
+    Settings::default()
 }
 
 /// The facts the window shows and cannot change.
@@ -142,7 +209,29 @@ pub fn settings_facts(app: AppHandle) -> Facts {
         opacity_range: OPACITY_RANGE,
         filter_range: FILTER_RANGE,
         system_language: crate::strings::system_language().to_string(),
+        acrylic: ACRYLIC.load(Ordering::SeqCst),
     }
+}
+
+/// Opens the folder Save writes to, in Explorer.
+///
+/// Creates it first. A button that opens nothing because nobody has saved yet
+/// is a button that looks broken, and the directory is one `Save` away from
+/// existing anyway -- `write_file` creates it on first use by the same rule.
+///
+/// # Errors
+///
+/// When the folder cannot be resolved or created, or the opener refuses it.
+#[tauri::command]
+pub fn settings_open_save_folder(app: AppHandle) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+
+    let folder = crate::output::save_directory(&app)?;
+    std::fs::create_dir_all(&folder)
+        .map_err(|error| format!("could not create {}: {error}", folder.display()))?;
+    app.opener()
+        .open_path(folder.to_string_lossy(), None::<&str>)
+        .map_err(|error| format!("could not open {}: {error}", folder.display()))
 }
 
 /// Stores `settings`, persists them, and applies the ones a running app can
@@ -316,6 +405,7 @@ mod tests {
                 opacity_range: (10, 100),
                 filter_range: (5, 60),
                 system_language: "en".to_string(),
+                acrylic: true,
             },
             &[
                 "summon_hotkey",
@@ -325,6 +415,7 @@ mod tests {
                 "opacity_range",
                 "filter_range",
                 "system_language",
+                "acrylic",
             ],
         );
     }

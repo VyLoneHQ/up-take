@@ -793,6 +793,25 @@ pub(crate) fn capture_into_area(app: &AppHandle, id: AreaId, bounds: Rect) {
                     id,
                 ),
             }
+            // Auto-save, if the user asked for it (roadmap 1.14, the founder on
+            // the rig 2026-09-17). Here rather than in a second worker because
+            // the png is already encoded at this point, so the whole cost is
+            // the write; and AFTER the pin is announced, for the reason the
+            // block above gives about the clipboard -- what the user can see
+            // comes first, and a full disk must not cost them the capture.
+            //
+            // Failures are logged and do not abort the capture, and they do not
+            // suppress the flash either: the area IS captured, which is what
+            // the flash acknowledges. A save that failed is reported through
+            // `report` below like any other.
+            if crate::settings::current().auto_save_screenshots
+                && let Err(error) = write_file(&app, &png)
+            {
+                crate::diagnostics::trouble(
+                    "output: the capture was pinned but auto-save could not write it",
+                    &error,
+                );
+            }
             // Recorded before the `?`s below, so a failure *inside* publishing is
             // not reported as "publish 0 ms".
             let published = dibv5_bytes(&bitmap)

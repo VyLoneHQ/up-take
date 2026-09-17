@@ -174,6 +174,8 @@ pub fn run() -> tauri::Result<()> {
                     settings_window::settings_facts,
                     settings_window::settings_choose_folder,
                     settings_window::settings_replay_tour,
+                    settings_window::settings_open_save_folder,
+                    settings_window::settings_defaults,
                     settings_window::settings_close
                 ]
             }
@@ -193,6 +195,8 @@ pub fn run() -> tauri::Result<()> {
                     settings_window::settings_facts,
                     settings_window::settings_choose_folder,
                     settings_window::settings_replay_tour,
+                    settings_window::settings_open_save_folder,
+                    settings_window::settings_defaults,
                     settings_window::settings_close
                 ]
             }
