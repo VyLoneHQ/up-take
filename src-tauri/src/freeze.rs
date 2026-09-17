@@ -1133,8 +1133,25 @@ pub(crate) struct FreezeReport {
 /// queue, so calling four of them concurrently is the same resource shape that
 /// one straddling capture already produces, not a new one.
 ///
-/// The overlay is permanently excluded from capture ([ADR-0019]), so a freeze
-/// never captures UP-TAKE's own chrome and re-freezing cannot compound it.
+/// ⛔ **THIS SAID THE OVERLAY IS *PERMANENTLY* EXCLUDED FROM CAPTURE, AND
+/// SINCE ROADMAP 1.14 THAT IS NOT TRUE.** [ADR-0019] always named a *Show
+/// UP-TAKE in screen recordings* setting and 1.14 ships it, so the exclusion is
+/// the default rather than a property of the window. Found by round 4 of
+/// `PR #105`'s independent review, as the **fourth** stale twin of one
+/// sentence.
+///
+/// **The correction is not only about the wording.** With that setting ON the
+/// affinity is `WDA_NONE`, and [`crate::capture`] is ignorant of the overlay by
+/// [ADR-0019] decision 1 -- deliberately, because that is what makes a
+/// self-containing mirror impossible to build rather than merely guarded
+/// against. So a freeze taken while the setting is on **does** include
+/// UP-TAKE's own chrome, and re-freezing **does** compound it.
+///
+/// That is the setting doing what it says, and it is still a poor picture. It
+/// is recorded rather than fixed here: making the freeze path suppress the
+/// affinity around its own capture is exactly the toggling decision 1 forbids,
+/// and it is not a call to take inside a doc comment. The default is
+/// unchanged, so nobody meets it without asking.
 ///
 /// [ADR-0019]: the private planning repo's
 /// `DECISIONS/ADR-0019-overlay-excluded-from-capture.md`
