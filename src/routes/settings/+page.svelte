@@ -691,6 +691,55 @@ kbd {
   font-size: 12px;
 }
 
+/* The scrollbar. WebView2 is Chromium, so the `::-webkit-scrollbar`
+   pseudo-elements are the ones that work here; `scrollbar-color` alone cannot
+   remove the stepper arrows, and those arrows are most of why the stock bar
+   reads as a Windows control sitting inside a dark panel.
+
+   Scoped to `.pane`, not global: this window has exactly one scrolling region,
+   and a global rule would be a claim about surfaces that do not exist yet. */
+.pane::-webkit-scrollbar {
+  width: 10px;
+}
+.pane::-webkit-scrollbar-track {
+  background: transparent;
+}
+.pane::-webkit-scrollbar-thumb {
+  border-radius: 5px;
+  /* Drawn inside a transparent border so the thumb is 6px of colour with
+     2px of air either side, rather than a bar hard against the window edge. */
+  border: 2px solid transparent;
+  background-clip: content-box;
+  background-color: rgba(235, 240, 250, 0.16);
+}
+.pane::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(235, 240, 250, 0.3);
+}
+.pane::-webkit-scrollbar-thumb:active {
+  background-color: var(--accent);
+}
+/* The stepper arrows at each end, and the square where two bars would meet. */
+.pane::-webkit-scrollbar-button,
+.pane::-webkit-scrollbar-corner {
+  display: none;
+}
+
+/* Keyboard focus, in the product's own accent rather than the platform's.
+   `:focus-visible` and not `:focus`, so a mouse click leaves no ring and a Tab
+   still does -- a focus indicator that is merely deleted is an accessibility
+   defect, and the stock one appearing after a click is what made it look like
+   one. */
+.tab:focus-visible,
+.quiet:focus-visible,
+.segment:focus-visible,
+.toggle:focus-visible,
+.close:focus-visible,
+.slider input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
 .problem {
   margin: 18px 0 0;
   padding: 10px 12px;

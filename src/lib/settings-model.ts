@@ -434,7 +434,25 @@ export function panes(
               name: '',
               about: '',
               heading: reference.placingHeading,
-              keys: reference.placing,
+              // The arming row is dropped HERE and nowhere else. It reads
+              // `S F U O -- Set the next area's type`, which is the line the
+              // founder called "not good" on the rig, and the legend four
+              // lines below now says the same thing properly. Leaving both
+              // would have the pane answer the same question twice, badly
+              // first.
+              //
+              // Filtered rather than removed from `coachCopy`: the tour still
+              // wants it. On the tour that line is a REMINDER of the step the
+              // user has just been walked through, with the four types fresh
+              // on the screen behind it; here there is no such step, which is
+              // exactly why it needed replacing.
+              //
+              // Matched on the string the catalogue gives, so a translation
+              // filters in its own language and a key that stops existing
+              // fails `strings.test.ts` rather than silently matching nothing.
+              keys: reference.placing.filter(
+                (each) => each.does !== say('coach.reference.type'),
+              ),
             },
           ],
         },

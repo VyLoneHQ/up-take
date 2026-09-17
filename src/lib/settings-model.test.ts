@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { coachCopy } from './coach-copy';
 import {
   allRows,
   type Facts,
@@ -109,6 +110,34 @@ describe('the inventory', () => {
       section.rows.map((each) => each.shape),
     );
     expect(shapes).toEqual(['keys', 'keys', 'types', 'action', 'action']);
+  });
+
+  it('drops the arming row from Help, because the legend replaced it', () => {
+    // The founder on the rig: `S F U O -- Set the next area's type` is
+    // "not good". The legend below it now answers that properly, so the Help
+    // pane must not ask the same question twice, badly first.
+    const keys = row('keys-placing');
+    if (keys.shape !== 'keys') throw new Error('not the key sheet');
+    const does = keys.keys.map((each) => each.does);
+
+    expect(does).not.toContain("Set the next area's type");
+    expect(keys.keys.map((each) => each.keys)).not.toContain('S F U O');
+    // Everything else survives. A filter that matched too much would leave a
+    // reference sheet quietly missing keys the app still honours.
+    expect(does).toEqual([
+      'Draw an area',
+      'Freeze the screen',
+      'Throw an area away',
+      'Leave placing',
+    ]);
+  });
+
+  it('keeps the arming row on the TOUR, which is a different question', () => {
+    // On the tour that line reminds the user of the step they were just walked
+    // through, with the four types on the screen behind it. Filtering it there
+    // too would be this fix overreaching.
+    const tour = coachCopy('en').REFERENCE.placing.map((each) => each.does);
+    expect(tour).toContain("Set the next area's type");
   });
 
   it('builds the type legend from the tour rather than a second list', () => {
