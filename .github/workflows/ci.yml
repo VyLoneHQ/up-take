@@ -301,7 +301,7 @@ jobs:
       # with no runtime and no models is one whose OCR reports itself
       # unavailable to every user, and that failure is far quieter than a red
       # CI step here.
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
