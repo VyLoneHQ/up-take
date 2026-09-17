@@ -2,6 +2,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { onMount } from 'svelte';
+import { createSaveQueue } from '$lib/save-queue';
 import {
   type Facts,
   languageFor,
@@ -31,16 +32,39 @@ const view = $derived(
 const showing = $derived(view.find((each) => each.id === pane) ?? view[0]);
 
 /**
- * Sends a changed settings object to Rust and keeps what it sent.
+ * The one thing that writes. At most one save in flight, newest value wins.
  *
- * **Optimistic, deliberately.** The control shows the new value at once and
+ * ⚠️ **`commit` used to `await invoke` directly**, and a slider's `input`
+ * event fires on every pixel of a drag -- so a drag started dozens of
+ * independent saves with nothing sequencing them, an older value could land
+ * after a newer one, and `config.toml` was rewritten once per pixel. Found by
+ * round 2 of `PR #105`'s independent review. `save-queue.ts` carries the
+ * argument and the tests that would fail against the old shape.
+ */
+const save = createSaveQueue<Settings>(
+  (next) => invoke('settings_write', { settings: next }),
+  (reason) => {
+    problem = reason;
+  },
+  async () => {
+    // The registration may have been written or removed by that save, so the
+    // fact the General pane shows about this machine is re-read rather than
+    // assumed to have followed.
+    facts = await invoke<Facts>('settings_facts');
+  },
+);
+
+/**
+ * Shows a change at once and queues it to be saved.
+ *
+ * **Optimistic, deliberately.** The control shows the new value immediately and
  * Rust is told after, because every one of these settings is in force the
  * moment the store is written and a control that waited for a disk write would
- * lag behind a slider. A save that could not reach the disk still takes effect
- * for this run, which is why the message below says *not saved* rather than
+ * lag behind a drag. A save that could not reach the disk still takes effect
+ * for this run, which is why the message is *not saved* rather than
  * *not changed*.
  */
-async function commit(next: Settings): Promise<void> {
+function commit(next: Settings): void {
   // The window re-renders in the chosen language at once. The overlay and the
   // native menus cannot: Rust decides its language once per process and hands
   // out `&'static str`, so a live switch there would half-translate the tray
@@ -51,15 +75,7 @@ async function commit(next: Settings): Promise<void> {
   }
   settings = next;
   problem = '';
-  try {
-    await invoke('settings_write', { settings: next });
-  } catch (error) {
-    problem = String(error);
-  }
-  // The registration may have been written or removed by that call, so the
-  // fact the General pane shows about this machine is re-read rather than
-  // assumed to have followed.
-  facts = await invoke<Facts>('settings_facts');
+  save(next);
 }
 
 async function chooseFolder(row: Extract<Row, { shape: 'folder' }>) {
@@ -67,7 +83,7 @@ async function chooseFolder(row: Extract<Row, { shape: 'folder' }>) {
   // grants the dialog plugin, so the WebView cannot open dialogs -- keeping it
   // that way is worth one command.
   const chosen = await invoke<string | null>('settings_choose_folder');
-  if (chosen) await commit(row.set(chosen));
+  if (chosen) commit(row.set(chosen));
 }
 
 async function replayTour() {
