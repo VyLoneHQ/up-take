@@ -793,6 +793,25 @@ pub(crate) fn capture_into_area(app: &AppHandle, id: AreaId, bounds: Rect) {
                     id,
                 ),
             }
+            // Auto-save, if the user asked for it (roadmap 1.14, the founder on
+            // the rig 2026-09-17). Here rather than in a second worker because
+            // the png is already encoded at this point, so the whole cost is
+            // the write; and AFTER the pin is announced, for the reason the
+            // block above gives about the clipboard -- what the user can see
+            // comes first, and a full disk must not cost them the capture.
+            //
+            // Failures are logged and do not abort the capture, and they do not
+            // suppress the flash either: the area IS captured, which is what
+            // the flash acknowledges. A save that failed is reported through
+            // `report` below like any other.
+            if crate::settings::current().auto_save_screenshots
+                && let Err(error) = write_file(&app, &png)
+            {
+                crate::diagnostics::trouble(
+                    "output: the capture was pinned but auto-save could not write it",
+                    &error,
+                );
+            }
             // Recorded before the `?`s below, so a failure *inside* publishing is
             // not reported as "publish 0 ms".
             let published = dibv5_bytes(&bitmap)
@@ -1840,15 +1859,29 @@ fn set_clipboard_png(png: &[u8]) -> Result<(), String> {
 // Save to file: Pictures\UP-TAKE\, timestamp naming, collision suffix.
 // ---------------------------------------------------------------------------
 
-/// Writes `png` to `Pictures\UP-TAKE\UP-TAKE_YYYY-MM-DD_HH-MM-SS.png`,
-/// creating the directory on first use and appending `_2`, `_3`, … on a
-/// same-second collision.
-fn write_file(app: &AppHandle, png: &[u8]) -> Result<(), String> {
+/// Where Save writes: the user's chosen folder, or `Pictures\UP-TAKE`.
+///
+/// **Resolved at the moment of the save, never stored** (roadmap 1.14). The
+/// default is a *rule* rather than a path, so a user whose Pictures folder
+/// moves (to OneDrive, most often) keeps saving where their pictures now
+/// are. Storing the resolved path at first run would have pinned them to the
+/// old one, silently, with the setting still reading as the default.
+pub(crate) fn save_directory(app: &AppHandle) -> Result<PathBuf, String> {
+    if let Some(chosen) = crate::settings::current().save_directory {
+        return Ok(chosen);
+    }
     let pictures = app
         .path()
         .picture_dir()
         .map_err(|error| format!("could not resolve the Pictures folder: {error}"))?;
-    let dir = pictures.join("UP-TAKE");
+    Ok(pictures.join("UP-TAKE"))
+}
+
+/// Writes `png` to `<the save folder>\UP-TAKE_YYYY-MM-DD_HH-MM-SS.png`,
+/// creating the directory on first use and appending `_2`, `_3`, … on a
+/// same-second collision.
+fn write_file(app: &AppHandle, png: &[u8]) -> Result<(), String> {
+    let dir = save_directory(app)?;
     fs::create_dir_all(&dir)
         .map_err(|error| format!("could not create {}: {error}", dir.display()))?;
     let path = unique_path(&dir, &timestamp_name());

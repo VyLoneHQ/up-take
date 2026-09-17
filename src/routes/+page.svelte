@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { onMount } from 'svelte';
 import { SvelteMap } from 'svelte/reactivity';
+import { appearanceStyle } from '$lib/appearance';
 import Coach from '$lib/Coach.svelte';
 import { overflowFade } from '$lib/overflow-fade';
 import {
@@ -50,7 +51,19 @@ import {
   toggleFreeze,
 } from '$lib/overlay-state';
 import { type CssRect, isDismissKey } from '$lib/regions';
+import type { Settings } from '$lib/settings-model';
 import { isLanguage, type Language, text } from '$lib/strings';
+
+// The two appearance settings (roadmap 1.14). Held as percentages, exactly as
+// they are stored and as the settings window shows them; `appearance.ts` turns
+// them into the alphas the stylesheet wants. Seeded with the shipped defaults
+// so the first frame is the approved look even if the read below is slow, and
+// so a build with no settings file draws correctly.
+let areaOpacityPercent = $state(40);
+let filterStrengthPercent = $state(16);
+const appearance = $derived(
+  appearanceStyle(areaOpacityPercent, filterStrengthPercent),
+);
 
 // Presentation only (architecture §1): the Rust side owns the state machine
 // (ADR-0012), the placement input (ADR-0014) and the area store; this component
@@ -373,6 +386,14 @@ onMount(() => {
     unlistenHover,
     unlistenMenu,
     unlistenCoach,
+    // Saved settings, so an appearance change is visible while the user is
+    // still looking at the slider (roadmap 1.14). The payload is the whole
+    // settings object; only the two appearance fields are read here, because
+    // the rest are Rust's to act on and it already has.
+    listen<Settings>('settings://changed', (event) => {
+      areaOpacityPercent = event.payload.area_opacity_percent;
+      filterStrengthPercent = event.payload.filter_strength_percent;
+    }),
   ]);
   void ready.then(async () => {
     try {
@@ -380,6 +401,14 @@ onMount(() => {
       if (isLanguage(chosen)) language = chosen;
     } catch {
       // English stays: a missing language is never a reason not to draw.
+    }
+    try {
+      const stored = await invoke<Settings>('settings_read');
+      areaOpacityPercent = stored.area_opacity_percent;
+      filterStrengthPercent = stored.filter_strength_percent;
+    } catch {
+      // The shipped defaults stay. An unreadable setting is never a reason
+      // not to draw, which is the same rule the language above follows.
     }
     await invoke('overlay_request_state');
   });
@@ -397,7 +426,11 @@ onMount(() => {
      ADR-0025: a click-through window receives no `WM_SETCURSOR`, so a CSS cursor
      on the overlay never applied at any position. Cursor feedback is a narrow
      `SetSystemCursor` override on the Rust side instead. -->
-<main class="overlay" class:active={showsTint(overlayState)}>
+<main
+  class="overlay"
+  class:active={showsTint(overlayState)}
+  style={appearance}
+>
   <!-- The frozen stills, first in the DOM so every piece of chrome below draws
        over them. Each one covers exactly its own monitor: a single desktop-wide
        image would be wrong on any mixed-DPI rig, and F-13's rule is that overlay
@@ -739,15 +772,21 @@ onMount(() => {
    Task 1.6 ships the Default type only (R-17); per-area chrome and the input
    routing that makes it interactive land in 1.6c. Never intercepts input — the
    overlay is click-through and stays that way. */
+/* The alphas are the shipped ones multiplied by `--area-solidity`, which is
+   `1` at the setting's default -- so the approved look is what an untouched
+   install draws, and `appearance.test.ts` is what holds that. The fallback in
+   each `var()` is the same `1`, so a frame drawn before the setting has been
+   read is the approved look too rather than a transparent one. Alpha above 1
+   clamps, which is what lets the top of the slider be fully solid. */
 .area {
   left: 0;
   top: 0;
   position: absolute;
   box-sizing: border-box;
-  border: 1.5px solid rgba(120, 180, 255, 0.9);
+  border: 1.5px solid rgba(120, 180, 255, calc(0.9 * var(--area-solidity, 1)));
   border-radius: 4px;
-  background: rgba(120, 180, 255, 0.06);
-  box-shadow: 0 0 6px rgba(120, 180, 255, 0.3);
+  background: rgba(120, 180, 255, calc(0.06 * var(--area-solidity, 1)));
+  box-shadow: 0 0 6px rgba(120, 180, 255, calc(0.3 * var(--area-solidity, 1)));
   pointer-events: none;
 }
 
@@ -771,8 +810,8 @@ onMount(() => {
    press on it would be honoured, which is what `chromeOnly` withholds. */
 .area.hovered {
   border-color: rgba(160, 210, 255, 1);
-  background: rgba(120, 180, 255, 0.12);
-  box-shadow: 0 0 10px rgba(120, 180, 255, 0.5);
+  background: rgba(120, 180, 255, calc(0.12 * var(--area-solidity, 1)));
+  box-shadow: 0 0 10px rgba(120, 180, 255, calc(0.5 * var(--area-solidity, 1)));
 }
 
 /* A Filter area (PRODUCT-VISION §3.1, key `F`): a warm translucent wash that
@@ -791,12 +830,15 @@ onMount(() => {
    are told apart at a glance, which is §2.1's per-type theming in its smallest
    form.
 
-   The strength is a placeholder and is not a design decision yet. Task 1.14
-   owns making it user-selectable, the same way it owns the freeze display
-   format, because a fixed wash that suits one screen suits few. */
+   ✅ **The strength is the user's since roadmap 1.14**, which is what this
+   paragraph said was owed: `--filter-alpha` is the *How strong a Filter area
+   is* row, and its default is the `0.16` that was written here. The border and
+   the glow are deliberately NOT scaled with it -- the wash is what the setting
+   is about, and an area whose border faded with its fill would lose the handle
+   `ADR-0028` makes load-bearing. */
 .area.filter {
   border-color: rgba(255, 186, 110, 0.85);
-  background: rgba(255, 170, 80, 0.16);
+  background: rgba(255, 170, 80, var(--filter-alpha, 0.16));
   box-shadow: 0 0 6px rgba(255, 170, 80, 0.25);
 }
 
@@ -806,7 +848,8 @@ onMount(() => {
    silently and the loser would become dead CSS that no test covers. */
 .area.filter.hovered {
   border-color: rgba(255, 205, 145, 1);
-  background: rgba(255, 170, 80, 0.24);
+  /* 1.5x the resting wash, which is what `0.24` was to `0.16`. */
+  background: rgba(255, 170, 80, calc(1.5 * var(--filter-alpha, 0.16)));
   box-shadow: 0 0 10px rgba(255, 170, 80, 0.45);
 }
 

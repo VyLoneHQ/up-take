@@ -772,7 +772,14 @@ mod tests {
         // exempts by name with a reason.
         assert_eq!(
             emitting,
-            vec!["config.rs", "first_run.rs", "overlay.rs", "placement.rs"],
+            vec![
+                "config.rs",
+                "first_run.rs",
+                "overlay.rs",
+                "placement.rs",
+                "settings.rs",
+                "settings_window.rs",
+            ],
             "a module declares a Serialize type and no `assert_payload_coverage` \
              call names it. `I-67`: a payload key is reachable by no other guard \
              in this repository."

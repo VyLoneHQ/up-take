@@ -59,9 +59,24 @@ about it. Also vylone.com, which has no security contact of its own yet.
        outbound connections, and a dependency check says nothing about what the WebView does. Write
        that probe before strengthening the prose to a measured claim. -->
 - **Captured screen content is never written to a log file.**
-- **The overlay is excluded from screen capture at the window level**, permanently and by design.
-  Other capture tools cannot see UP-TAKE's own rendering, and UP-TAKE never captures it either.
-  <!-- source: ADR-0019 (overlay excluded from capture) -->
+- **The overlay is excluded from screen capture at the window level, and that is the default.**
+  Other capture tools cannot see UP-TAKE's own rendering, and UP-TAKE does not capture it either.
+  **One setting changes it, and only you can turn it on:** *Show UP-TAKE in screen recordings*, in
+  Settings under Capture. With it on, the exclusion is lifted, UP-TAKE appears in recordings like
+  any other window, and a frozen screen taken while it is on contains the overlay. Nothing else
+  lifts the exclusion, and nothing lifts it on its own.
+  <!-- source: ADR-0019 (overlay excluded from capture), decision 1 for the affinity and decision 3
+       for the setting, which that ADR named from the start and roadmap 1.14 builds.
+
+       This said "permanently and by design" and "UP-TAKE never captures it either" until
+       2026-09-17. Both were true until the setting existed. Corrected rather than softened,
+       because this file is the one a reader is entitled to take at face value: somebody who read
+       "permanently", turned the setting on for a demo and was then captured by Teams would have
+       been misled by the document that exists to stop exactly that.
+
+       Found by the independent review of up-take PR #105. It was missed because the sweep that
+       found the same sentence in overlay.rs, freeze.rs and lib.rs was scoped to
+       `-- src-tauri/src README.md` and never looked here. -->
 - **Early builds are unsigned.** An unsigned installer raises a SmartScreen warning on Windows. When
   a release exists, a SHA-256 checksum and a VirusTotal link go out with it.
   <!-- source: STATUS.md B-4 (code signing approach) -->

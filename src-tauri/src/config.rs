@@ -1,11 +1,15 @@
 //! The settings file, `%APPDATA%\VyLone\UP-TAKE\config.toml`
 //! (`architecture.md` section 6).
 //!
-//! **It holds one fact today: whether the first-run tour has been completed**
-//! (roadmap 1.18). Roadmap 1.14 owns every setting a user sees and will grow
-//! this file. What is decided here is only the part 1.14 would otherwise have
-//! to undo: the location, the versioning, and what happens to a file this
-//! build cannot read.
+//! **It holds two things: whether the first-run tour has been completed**
+//! (roadmap 1.18) **and every setting the user can change** (roadmap 1.14).
+//! The setting fields themselves live in [`crate::settings`], not here: this
+//! module owns the file, that one owns the values and who reads them.
+//!
+//! ⚠️ This said *"one fact today"*, and that 1.14 *"will grow this file"*,
+//! until 1.14 grew it. What that sentence decided ahead of time -- the
+//! location, the versioning, and what happens to a file this build cannot read
+//! -- all held, and none of it had to be undone.
 //!
 //! # Section 6's three rules, and how each is kept
 //!
@@ -42,6 +46,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::settings::Settings;
+
 /// The schema this build reads and writes.
 pub const SCHEMA_VERSION: u32 = 1;
 
@@ -53,6 +59,8 @@ pub struct Config {
     pub schema_version: u32,
     /// The first-run tour's stored state.
     pub first_run: FirstRun,
+    /// Everything the user can change (roadmap 1.14).
+    pub settings: Settings,
 }
 
 impl Default for Config {
@@ -60,6 +68,7 @@ impl Default for Config {
         Self {
             schema_version: SCHEMA_VERSION,
             first_run: FirstRun::default(),
+            settings: Settings::default(),
         }
     }
 }
@@ -93,6 +102,22 @@ impl Loaded {
         match self {
             Self::Read(config) | Self::Newer(config) => config.first_run.completed,
             Self::Missing | Self::Unreadable(_) => false,
+        }
+    }
+
+    /// The settings this file holds.
+    ///
+    /// A file that could not be read holds nothing, so the shipped defaults
+    /// stand -- the same rule [`Self::first_run_completed`] follows, and for
+    /// the same reason. **A file from a newer build contributes the fields
+    /// this build knows**, because serde has already dropped the rest; what
+    /// that case must not do is write, and [`write_settings_at`] is where that
+    /// is refused.
+    #[must_use]
+    pub fn settings(&self) -> Settings {
+        match self {
+            Self::Read(config) | Self::Newer(config) => config.settings.clone(),
+            Self::Missing | Self::Unreadable(_) => Settings::default(),
         }
     }
 }
@@ -169,6 +194,24 @@ pub fn save_to(path: &Path, config: &Config) -> Result<(), String> {
 /// When the file was written by a newer build (it is left untouched), when an
 /// unreadable file cannot be moved aside, or when the save fails.
 pub fn mark_first_run_completed_at(path: &Path, now: u64) -> Result<(), String> {
+    set_first_run_completed_at(path, true, now)
+}
+
+/// Records the first-run tour as completed, or not, in the file at `path`.
+///
+/// **Clearing it is what `ADR-0043` decision 5's *show the tour again* does**,
+/// and it is the same write in the other direction rather than a second path:
+/// a separate "reset" that did not go through this read-modify-write would be
+/// the place a later field silently got dropped.
+///
+/// `now` names the backup an unreadable file is moved to, and is a parameter
+/// so a test can predict it.
+///
+/// # Errors
+///
+/// When the file was written by a newer build (it is left untouched), when an
+/// unreadable file cannot be moved aside, or when the save fails.
+pub fn set_first_run_completed_at(path: &Path, completed: bool, now: u64) -> Result<(), String> {
     let mut config = match load_from(path) {
         Loaded::Missing => Config::default(),
         Loaded::Read(config) => config,
@@ -190,7 +233,64 @@ pub fn mark_first_run_completed_at(path: &Path, now: u64) -> Result<(), String> 
         }
     };
     config.schema_version = SCHEMA_VERSION;
-    config.first_run.completed = true;
+    config.first_run.completed = completed;
+    save_to(path, &config)
+}
+
+/// Records the first-run tour as not yet seen, so it runs again.
+///
+/// # Errors
+///
+/// When there is no `%APPDATA%`, or for any reason
+/// [`set_first_run_completed_at`] gives.
+pub fn clear_first_run_completed() -> Result<(), String> {
+    let path =
+        path().ok_or_else(|| "APPDATA is not set, so there is nowhere to record it".to_string())?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    set_first_run_completed_at(&path, false, now)
+}
+
+/// Writes `settings` into the file at `path`, keeping everything else in it.
+///
+/// **Read-modify-write, never write-whole**, which is the same rule
+/// [`mark_first_run_completed_at`] follows: saving the settings must not reset
+/// the first-run tour, and a later build that adds a third block must not lose
+/// it to a save from this one. The fields this build does not know are still
+/// dropped -- serde cannot keep what it did not parse -- and that is exactly
+/// why a file from a newer schema is refused rather than merged.
+///
+/// # Errors
+///
+/// When the file was written by a newer UP-TAKE (it is left untouched), when
+/// an unreadable file cannot be moved aside, or when the save fails.
+pub fn write_settings_at(path: &Path, settings: &Settings) -> Result<(), String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    let mut config = match load_from(path) {
+        Loaded::Missing => Config::default(),
+        Loaded::Read(config) => config,
+        Loaded::Newer(_) => {
+            return Err(format!(
+                "{} was written by a newer UP-TAKE, so your settings were not saved to it",
+                path.display()
+            ));
+        }
+        Loaded::Unreadable(_) => {
+            let aside = path.with_extension(format!("toml.unreadable-{now}"));
+            fs::rename(path, &aside).map_err(|error| {
+                format!(
+                    "could not move the unreadable {} aside: {error}",
+                    path.display()
+                )
+            })?;
+            Config::default()
+        }
+    };
+    config.schema_version = SCHEMA_VERSION;
+    config.settings = settings.clone();
     save_to(path, &config)
 }
 
@@ -215,7 +315,8 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        Config, Loaded, SCHEMA_VERSION, load_from, mark_first_run_completed_at, parse, path_in,
+        Config, Loaded, SCHEMA_VERSION, Settings, load_from, mark_first_run_completed_at, parse,
+        path_in, set_first_run_completed_at, write_settings_at,
     };
     use crate::payload_keys::assert_payload_coverage;
 
@@ -343,6 +444,95 @@ mod tests {
         let _ = load_from(&path);
         assert_eq!(read(&path), "not [ toml");
         assert!(!dir.join("config.toml.tmp").exists());
+    }
+
+    #[test]
+    fn settings_written_to_the_file_are_read_back() {
+        let path = scratch("settings-roundtrip").join("config.toml");
+        let settings = Settings {
+            start_with_windows: true,
+            area_opacity_percent: 75,
+            ..Settings::default()
+        };
+        let Ok(()) = write_settings_at(&path, &settings) else {
+            panic!("could not write the settings")
+        };
+        assert_eq!(load_from(&path).settings(), settings);
+    }
+
+    #[test]
+    fn saving_the_settings_does_not_forget_the_tour() {
+        // Both blocks live in one file, so a save that wrote the whole struct
+        // from defaults would show the first-run tour again to everyone who
+        // changed a setting. Read-modify-write is what stops that, and this is
+        // the assertion that holds it.
+        let path = scratch("settings-keeps-tour").join("config.toml");
+        let Ok(()) = mark_first_run_completed_at(&path, 1) else {
+            panic!("could not record completion")
+        };
+        let Ok(()) = write_settings_at(
+            &path,
+            &Settings {
+                area_opacity_percent: 90,
+                ..Settings::default()
+            },
+        ) else {
+            panic!("could not write the settings")
+        };
+        let loaded = load_from(&path);
+        assert!(loaded.first_run_completed(), "the tour was forgotten");
+        assert_eq!(loaded.settings().area_opacity_percent, 90);
+    }
+
+    #[test]
+    fn showing_the_tour_again_does_not_forget_the_settings() {
+        // The same rule in the other direction: ADR-0043 decision 5's replay
+        // clears one field, not the file.
+        let path = scratch("tour-keeps-settings").join("config.toml");
+        let Ok(()) = write_settings_at(
+            &path,
+            &Settings {
+                area_opacity_percent: 90,
+                ..Settings::default()
+            },
+        ) else {
+            panic!("could not write the settings")
+        };
+        let Ok(()) = mark_first_run_completed_at(&path, 1) else {
+            panic!("could not record completion")
+        };
+        let Ok(()) = set_first_run_completed_at(&path, false, 2) else {
+            panic!("could not clear completion")
+        };
+        let loaded = load_from(&path);
+        assert!(!loaded.first_run_completed());
+        assert_eq!(loaded.settings().area_opacity_percent, 90);
+    }
+
+    #[test]
+    fn a_file_from_before_the_settings_existed_reads_as_the_defaults() {
+        // Every config.toml written by 1.18 looks like this. It must read, and
+        // it must read as the shipped defaults rather than as an error, which
+        // is what `#[serde(default)]` on the field buys and why adding a
+        // setting needs no schema bump.
+        let loaded = parse("schema_version = 1\n\n[first_run]\ncompleted = true\n");
+        assert!(matches!(loaded, Loaded::Read(_)), "{loaded:?}");
+        assert!(loaded.first_run_completed());
+        assert_eq!(loaded.settings(), Settings::default());
+    }
+
+    #[test]
+    fn a_newer_file_keeps_its_settings_when_a_save_is_refused() {
+        let path = scratch("newer-settings").join("config.toml");
+        let original = "schema_version = 99\nfrom_the_future = true\n";
+        let Ok(()) = fs::write(&path, original) else {
+            panic!("could not write the fixture")
+        };
+        assert!(
+            write_settings_at(&path, &Settings::default()).is_err(),
+            "a newer file was overwritten"
+        );
+        assert_eq!(read(&path), original);
     }
 
     #[test]

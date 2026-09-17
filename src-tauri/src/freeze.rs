@@ -343,12 +343,13 @@ pub(crate) fn warm_capture_enabled() -> bool {
 /// * **Cost.** Fewer monitors is less work, but the cost argument belongs to the
 ///   *sessions* and is measured there, not asserted here.
 ///
-/// # Task 1.14 owns the real setting
+/// # Task 1.14 owns the real setting, and now supplies it
 ///
-/// Same shape and same reason as [`WARM_CAPTURE`]: read once at startup from
-/// `UPTAKE_FREEZE_ALL_MONITORS` until the settings UI exists, with every reader
-/// routed through [`freeze_all_monitors_enabled`] so 1.14 replaces one line.
-/// This is the **fourth** setting 1.14 has inherited.
+/// ✅ **Done.** The value comes from [`crate::settings`], pushed in by
+/// [`set_freeze_scope`] on load and after every save; every reader still goes
+/// through [`freeze_all_monitors_enabled`], which is what made the swap one
+/// line as this comment predicted. `UPTAKE_FREEZE_ALL_MONITORS` survives as an
+/// override so a rig run can name a scope without clicking through a window.
 ///
 /// [ADR-0026]: the private planning repo's
 /// `DECISIONS/ADR-0026-freeze-on-demand-trigger.md`
@@ -367,18 +368,56 @@ static FREEZE_ALL_MONITORS: AtomicBool = AtomicBool::new(false);
 /// the id landed on the wrong event. The scope is the thing a rig operator is most
 /// likely to misattribute a number to, so it says which one it is on every run
 /// rather than only when something was set.
-pub(crate) fn init_freeze_scope() {
-    let all = std::env::var("UPTAKE_FREEZE_ALL_MONITORS")
-        .is_ok_and(|value| matches!(value.trim(), "1" | "true" | "on"));
-    FREEZE_ALL_MONITORS.store(all, Ordering::SeqCst);
+pub(crate) fn announce_freeze_scope() {
     eprintln!(
-        "freeze: scope is {} (UPTAKE_FREEZE_ALL_MONITORS)",
+        "freeze: scope is {} ({})",
         if freeze_all_monitors_enabled() {
             "EVERY monitor"
         } else {
             "the cursor's monitor"
+        },
+        if scope_override().is_some() {
+            "UPTAKE_FREEZE_ALL_MONITORS"
+        } else {
+            "the Freeze covers setting"
         }
     );
+}
+
+/// `UPTAKE_FREEZE_ALL_MONITORS` as a scope, when it is set to a value this
+/// build recognises.
+///
+/// **Both directions are recognised, not just the truthy one.** The variable
+/// used to be read with `is_ok_and`, so an unset variable and
+/// `UPTAKE_FREEZE_ALL_MONITORS=0` were the same answer -- harmless while the
+/// default was also false, and wrong the moment a stored setting can say
+/// otherwise: a rig operator pinning the narrow scope would have got whatever
+/// the machine's settings file happened to hold.
+fn scope_override() -> Option<bool> {
+    scope_from(&std::env::var("UPTAKE_FREEZE_ALL_MONITORS").ok()?)
+}
+
+/// The scope a value of that variable names, if it names one.
+///
+/// Split from [`scope_override`] so it can be tested without setting an
+/// environment variable: `std::env::set_var` is process-wide and these tests
+/// run in parallel, so a test that set it would decide another test's answer.
+fn scope_from(raw: &str) -> Option<bool> {
+    match raw.trim() {
+        "1" | "true" | "on" => Some(true),
+        "0" | "false" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+/// Stores which monitors a freeze covers, the environment override winning.
+///
+/// Called by [`crate::settings`] on load and after every save. Quiet: the
+/// startup announcement is [`announce_freeze_scope`], so a save does not print
+/// a line a rig log would read as a fresh measurement condition.
+pub(crate) fn set_freeze_scope(covers: crate::settings::FreezeCovers) {
+    let all = scope_override().unwrap_or(covers == crate::settings::FreezeCovers::EveryMonitor);
+    FREEZE_ALL_MONITORS.store(all, Ordering::SeqCst);
 }
 
 /// Whether a freeze covers every monitor. The only reader of
@@ -516,45 +555,71 @@ pub(crate) fn display_format() -> (ImageFormat, &'static str, &'static str) {
 /// silently fell back to the default would make a rig pass measure PNG while its
 /// operator wrote "JPEG" beside the number, which is `UT-F-46`'s defect exactly.
 /// So an unrecognised value is refused out loud rather than absorbed.
-pub(crate) fn init_display_format() {
-    let Ok(raw) = std::env::var("UPTAKE_FREEZE_FORMAT") else {
-        // The default states itself too. A reader of a rig log must be able to
-        // tell which format produced a number without knowing what the default
-        // was on the day the build was made.
-        eprintln!(
-            "freeze: display stills encode as {} (default, ADR-0027) — the DISPLAY path only; \
-             crops still come from the lossless bitmap",
-            display_format().2
-        );
-        return;
+pub(crate) fn announce_display_format() {
+    let source = match std::env::var("UPTAKE_FREEZE_FORMAT") {
+        Ok(raw) if format_override(&raw).is_some() => "UPTAKE_FREEZE_FORMAT",
+        // An unrecognised value has already been refused out loud by
+        // `set_display_format`, and what is in force is the setting.
+        _ => "the Held picture quality setting",
     };
-    let chosen = match raw.trim().to_ascii_lowercase().as_str() {
-        "png" => 0,
-        "jpeg" | "jpg" => 1,
-        "bmp" => 2,
-        _ => {
-            // The format is READ BACK rather than named, because naming it is
-            // how this line was wrong: it said "staying on png" while the
-            // default had become JPEG, so a mistyped variable would have told a
-            // rig operator PNG and handed them a JPEG number. That is `UT-F-46`
-            // exactly — the defect this function's own doc says it exists to
-            // prevent — and it survived because the sentence was written when
-            // PNG was still the default and was not re-read when 4c7440d
-            // changed it. No branch here may name a format it did not load.
-            eprintln!(
-                "freeze: ignoring UPTAKE_FREEZE_FORMAT={raw:?} — expected png, jpeg or bmp; \
-                 staying on {}",
-                display_format().2
-            );
-            return;
-        }
-    };
-    DISPLAY_FORMAT.store(chosen, Ordering::SeqCst);
     eprintln!(
-        "freeze: display stills encode as {} (UPTAKE_FREEZE_FORMAT) — the DISPLAY path only; \
+        "freeze: display stills encode as {} ({source}, ADR-0027). The DISPLAY path only; \
          crops still come from the lossless bitmap",
         display_format().2
     );
+}
+
+/// `UPTAKE_FREEZE_FORMAT` as a slot for [`DISPLAY_FORMAT`], when it names a
+/// format this build encodes.
+fn format_override(raw: &str) -> Option<u8> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "png" => Some(0),
+        "jpeg" | "jpg" => Some(1),
+        "bmp" => Some(2),
+        _ => None,
+    }
+}
+
+/// Stores how a held picture is encoded, the environment override winning.
+///
+/// Called by [`crate::settings`] on load and after every save. **BMP has no
+/// setting and is reachable only through the variable**, deliberately: it was
+/// measured (a flat 25 ms, and a fixed 14.7 MB per monitor) and rejected for
+/// shipping on the RAM, so it stays a measurement tool rather than becoming a
+/// third segment in a control `UI-UX.md` section 3.2 wants to stay simple.
+pub(crate) fn set_display_format(quality: crate::settings::HeldPictureQuality) {
+    let chosen = match std::env::var("UPTAKE_FREEZE_FORMAT") {
+        Ok(raw) => match format_override(&raw) {
+            Some(slot) => slot,
+            None => {
+                // The format is READ BACK rather than named, because naming it
+                // is how this line was wrong: it said "staying on png" while
+                // the default had become JPEG, so a mistyped variable would
+                // have told a rig operator PNG and handed them a JPEG number.
+                // That is `UT-F-46` exactly, the defect this function's own
+                // doc says it exists to prevent. No branch here may name a
+                // format it did not load, which is why the store happens first
+                // and the message reads it back.
+                DISPLAY_FORMAT.store(slot_for(quality), Ordering::SeqCst);
+                eprintln!(
+                    "freeze: ignoring UPTAKE_FREEZE_FORMAT={raw:?}: expected png, jpeg or bmp; \
+                     staying on {}",
+                    display_format().2
+                );
+                return;
+            }
+        },
+        Err(_) => slot_for(quality),
+    };
+    DISPLAY_FORMAT.store(chosen, Ordering::SeqCst);
+}
+
+/// The [`DISPLAY_FORMAT`] slot a quality setting means.
+const fn slot_for(quality: crate::settings::HeldPictureQuality) -> u8 {
+    match quality {
+        crate::settings::HeldPictureQuality::Fast => 1,
+        crate::settings::HeldPictureQuality::Exact => 0,
+    }
 }
 
 /// Starts or stops the held sessions to match `is_placement`.
@@ -1068,8 +1133,25 @@ pub(crate) struct FreezeReport {
 /// queue, so calling four of them concurrently is the same resource shape that
 /// one straddling capture already produces, not a new one.
 ///
-/// The overlay is permanently excluded from capture ([ADR-0019]), so a freeze
-/// never captures UP-TAKE's own chrome and re-freezing cannot compound it.
+/// ⛔ **THIS SAID THE OVERLAY IS *PERMANENTLY* EXCLUDED FROM CAPTURE, AND
+/// SINCE ROADMAP 1.14 THAT IS NOT TRUE.** [ADR-0019] always named a *Show
+/// UP-TAKE in screen recordings* setting and 1.14 ships it, so the exclusion is
+/// the default rather than a property of the window. Found by round 4 of
+/// `PR #105`'s independent review, as the **fourth** stale twin of one
+/// sentence.
+///
+/// **The correction is not only about the wording.** With that setting ON the
+/// affinity is `WDA_NONE`, and [`crate::capture`] is ignorant of the overlay by
+/// [ADR-0019] decision 1 -- deliberately, because that is what makes a
+/// self-containing mirror impossible to build rather than merely guarded
+/// against. So a freeze taken while the setting is on **does** include
+/// UP-TAKE's own chrome, and re-freezing **does** compound it.
+///
+/// That is the setting doing what it says, and it is still a poor picture. It
+/// is recorded rather than fixed here: making the freeze path suppress the
+/// affinity around its own capture is exactly the toggling decision 1 forbids,
+/// and it is not a call to take inside a doc comment. The default is
+/// unchanged, so nobody meets it without asking.
 ///
 /// [ADR-0019]: the private planning repo's
 /// `DECISIONS/ADR-0019-overlay-excluded-from-capture.md`
@@ -1271,6 +1353,73 @@ mod tests {
     use uptake_core::geometry::Size;
 
     use super::*;
+    use crate::settings::{FreezeCovers, HeldPictureQuality};
+
+    #[test]
+    fn the_quality_setting_names_the_format_adr_0027_chose() {
+        // Fast is JPEG and Exact is PNG. Named here because the mapping is the
+        // whole of what `UI-UX.md` section 3.2's "plain language over accurate
+        // jargon" rule hides from the user, and a slot swapped by accident
+        // would ship lossy stills to somebody who asked for Exact.
+        assert_eq!(slot_for(HeldPictureQuality::Fast), 1, "Fast is JPEG");
+        assert_eq!(slot_for(HeldPictureQuality::Exact), 0, "Exact is PNG");
+    }
+
+    #[test]
+    fn the_scope_override_reads_both_directions() {
+        // It used to be `is_ok_and`, so an unset variable and a variable set to
+        // `0` were the same answer. Harmless while the default was also false;
+        // wrong the moment a stored setting can say otherwise, because a rig
+        // operator pinning the narrow scope would have got whatever the
+        // machine's settings file happened to hold.
+        assert_eq!(scope_from("1"), Some(true));
+        assert_eq!(scope_from(" true "), Some(true));
+        assert_eq!(scope_from("on"), Some(true));
+        assert_eq!(scope_from("0"), Some(false));
+        assert_eq!(scope_from("false"), Some(false));
+        assert_eq!(scope_from("off"), Some(false));
+        // Unrecognised is not "off": it is "this variable says nothing", which
+        // is what lets the setting through rather than overriding it with a
+        // typo.
+        assert_eq!(scope_from("yes"), None);
+        assert_eq!(scope_from(""), None);
+    }
+
+    #[test]
+    fn an_unrecognised_format_is_not_read_as_a_format() {
+        assert_eq!(format_override("png"), Some(0));
+        assert_eq!(format_override("JPEG"), Some(1));
+        assert_eq!(format_override("jpg"), Some(1));
+        assert_eq!(format_override("bmp"), Some(2));
+        assert_eq!(format_override("webp"), None);
+        assert_eq!(format_override(""), None);
+    }
+
+    #[test]
+    fn the_setting_drives_the_scope_when_the_variable_is_unset() {
+        // Guarded rather than asserted unconditionally: this must not depend on
+        // the environment of the machine running it, and SETTING the variable
+        // here would reach every other test in the process, because
+        // `std::env::set_var` is process-wide and these run in parallel.
+        if std::env::var("UPTAKE_FREEZE_ALL_MONITORS").is_ok() {
+            return;
+        }
+        set_freeze_scope(FreezeCovers::EveryMonitor);
+        assert!(freeze_all_monitors_enabled());
+        set_freeze_scope(FreezeCovers::ThisMonitor);
+        assert!(!freeze_all_monitors_enabled());
+    }
+
+    #[test]
+    fn the_setting_drives_the_display_format_when_the_variable_is_unset() {
+        if std::env::var("UPTAKE_FREEZE_FORMAT").is_ok() {
+            return;
+        }
+        set_display_format(HeldPictureQuality::Exact);
+        assert_eq!(display_format().2, "png");
+        set_display_format(HeldPictureQuality::Fast);
+        assert_eq!(display_format().2, "jpeg");
+    }
 
     /// A bitmap whose every pixel encodes its own coordinates, so a crop taken
     /// from the wrong offset produces different bytes rather than

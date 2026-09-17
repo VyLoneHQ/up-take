@@ -188,11 +188,18 @@ Around those:
   display and negative coordinates. 4K at 150% and ultrawide are untested, because that hardware is
   not here.
   <!-- source: ROADMAP.md Phase 1A kill-criterion note; STATUS.md F-9 (M-2 and M-5 untestable) -->
-- **UP-TAKE does not appear in screen recordings.** The overlay is excluded from capture at the
-  window level, deliberately and permanently, so OBS, Teams, Discord and the Snipping Tool do not
-  see it. That is a privacy property first and a limitation second, and it does mean "send me a
-  screenshot of what you are seeing" does not work.
-  <!-- source: ADR-0019 (overlay excluded from capture), decisions 2 and 5 -->
+- **UP-TAKE does not appear in screen recordings, unless you ask it to.** The overlay is excluded
+  from capture at the window level, so OBS, Teams, Discord and the Snipping Tool do not see it.
+  That is a privacy property first and a limitation second, and it does mean "send me a screenshot
+  of what you are seeing" does not work. **There is a setting for when you need the other thing:**
+  *Show UP-TAKE in screen recordings*, off unless you turn it on.
+  <!-- source: ADR-0019 (overlay excluded from capture), decisions 2 and 5 for the property,
+       decision 3 for the setting.
+
+       This said "deliberately and permanently" until 2026-09-17. The default is unchanged, and an
+       earlier revision of this branch left the sentence alone on that reasoning. The independent
+       review was right that it is not enough: "permanently" is a claim about REVERSIBILITY, not
+       about the default, and roadmap 1.14 makes it reversible by design. -->
 
 ## What is designed and not built
 
@@ -251,8 +258,16 @@ Starting it opens the overlay ready to place an area. `Esc` hands the screen bac
 `Win+Shift+U` switches back to placing. `Win+Shift+G` copies the monitor under your cursor to the
 clipboard without summoning anything.
 <!-- source: ROADMAP.md 1.34 and ADR-0044 decision 1 (a hand launch enters Placement). A launch with
-     Windows stays hidden under decision 2, but there is no autostart yet, so every launch is a hand
-     launch today. Revisit this sentence when 1.14 adds one. -->
+     Windows stays hidden under decision 2.
+
+     This comment said "there is no autostart yet, so every launch is a hand launch today" and asked
+     to be revisited when 1.14 added one. 1.14 adds it: autostart.rs registers a Run-key value
+     carrying --autostart, which is the only thing decision 2 treats as a launch by Windows. The
+     sentence above needs no change, because a hand launch still lands in placing by default and
+     that is what it says.
+
+     Nothing is added here about starting with Windows until it has merged and shipped. P-6 is about
+     public copy in the present tense describing something that is not yet in anyone's hands. -->
 
 ## When there is a release
 

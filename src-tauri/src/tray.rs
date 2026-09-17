@@ -30,11 +30,19 @@ use crate::{hotkey, overlay};
 // Namespaced deliberately. `TrayIcon::register` pushes the `on_menu_event`
 // handler into `AppManager`'s *global* menu-event listener list, so this
 // closure is invoked for menu events from every menu in the app and matches on
-// the raw id string alone. A bare `"quit"` added by a later menu (task 1.14's
-// settings UI is the obvious candidate) would land in the `QUIT_ID` arm and
-// exit the app; the `_ => {}` fallback cannot prevent that, because the
-// collision is a match, not a miss.
+// the raw id string alone. A bare `"quit"` added by a later menu would land in
+// the `QUIT_ID` arm and exit the app; the `_ => {}` fallback cannot prevent
+// that, because the collision is a match, not a miss.
+//
+// ✅ The candidate this named -- 1.14's settings UI -- has arrived, and it
+// carries no native menu at all: the settings window draws its own controls in
+// the WebView, so there is no second `MenuItem` anywhere in the app and the
+// only ids in this list are the three below. The prediction was right about
+// the hazard and wrong about where it would come from, so the rule stands and
+// the example is struck: **namespace every id**, and the next native menu is
+// still the one to watch.
 const SHOW_ID: &str = "tray:show";
+const SETTINGS_ID: &str = "tray:settings";
 const QUIT_ID: &str = "tray:quit";
 
 /// Builds the tray icon and its menu, telling the user if it could not.
@@ -91,6 +99,17 @@ fn build(app: &AppHandle) -> Result<(), String> {
         None::<&str>,
     )
     .map_err(|e| format!("Could not build the Show menu item: {e}"))?;
+    // The tray is where Settings opens from (`UI-UX.md` section 3.3). It is
+    // the only always-available surface: the overlay is hidden most of the
+    // time, and when it is up it is a canvas rather than a chrome.
+    let settings = MenuItem::with_id(
+        app,
+        SETTINGS_ID,
+        strings::text(Text::TraySettings),
+        true,
+        None::<&str>,
+    )
+    .map_err(|e| format!("Could not build the Settings menu item: {e}"))?;
     let quit = MenuItem::with_id(
         app,
         QUIT_ID,
@@ -99,7 +118,8 @@ fn build(app: &AppHandle) -> Result<(), String> {
         None::<&str>,
     )
     .map_err(|e| format!("Could not build the Quit menu item: {e}"))?;
-    let menu = Menu::with_items(app, &[&show, &quit])
+    // Settings between Show and Quit, so the destructive item stays last.
+    let menu = Menu::with_items(app, &[&show, &settings, &quit])
         .map_err(|e| format!("Could not build the tray menu: {e}"))?;
 
     TrayIconBuilder::new()
@@ -123,6 +143,11 @@ fn build(app: &AppHandle) -> Result<(), String> {
                 eprintln!("tray: Show chosen from the menu");
                 // Summon into Placement (ADR-0012), the same as a relaunch.
                 overlay::summon(app);
+            }
+            SETTINGS_ID => {
+                #[cfg(debug_assertions)]
+                eprintln!("tray: Settings chosen from the menu");
+                crate::settings_window::open(app);
             }
             QUIT_ID => {
                 // The last line the app prints. `app.exit(0)` unwinds through

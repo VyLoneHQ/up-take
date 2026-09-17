@@ -23,13 +23,26 @@
 //!
 //! # Which language
 //!
-//! Windows' display language, read once at startup, matched against the
-//! catalogue: its locale name exactly (`pt-BR`), then its primary language
-//! (`de` for `de-AT`), then English. Roadmap 1.14's Language setting is the
-//! override a user will get; until then a debug build honours
-//! `UPTAKE_DEV_LANGUAGE=de` so a translation can be looked at without changing
-//! Windows. Tests always read English, so an assertion on a label does not
-//! depend on the machine running it.
+//! The Language setting first (roadmap 1.14), then Windows' display language,
+//! matched against the catalogue: its locale name exactly (`pt-BR`), then its
+//! primary language (`de` for `de-AT`), then English. A debug build honours
+//! `UPTAKE_DEV_LANGUAGE=de` ahead of both, so a translation can be looked at
+//! without touching either. Tests always read English, so an assertion on a
+//! label does not depend on the machine running it.
+//!
+//! # Decided once per run, and the setting says so
+//!
+//! [`language`] is a `OnceLock`: the first lookup fixes the answer for the
+//! process. So changing the Language setting takes effect at the next launch,
+//! and the settings window says that in as many words rather than leaving the
+//! user to discover it.
+//!
+//! **The alternative was re-reading the language on every lookup**, and it is
+//! not worth what it costs. Every string Rust has already handed out is a
+//! `&'static str` from the catalogue -- the tray menu's items are built once at
+//! startup and the area menu is rebuilt per open, so a live switch would give a
+//! half-translated tray until the next restart anyway. A restart is the honest
+//! version of what a live switch would half-do.
 //!
 //! # Never fails
 //!
@@ -107,8 +120,12 @@ texts! {
     MenuDismiss => "menu.dismiss",
     /// Tray menu: show the overlay. `{hotkey}` is the summon shortcut.
     TrayShow => "tray.show",
+    /// Tray menu: open the settings window.
+    TraySettings => "tray.settings",
     /// Tray menu: quit UP-TAKE.
     TrayQuit => "tray.quit",
+    /// The settings window's title bar.
+    SettingsTitle => "settings.title",
     /// Dialog title when the tray icon could not be created.
     TrayUnavailableTitle => "tray.unavailable.title",
     /// Dialog text when the tray icon could not be created. `{hotkey}`, `{error}`.
@@ -235,6 +252,11 @@ fn detect() -> &'static str {
     if let Ok(forced) = std::env::var(DEV_VAR) {
         return pick(&forced, available);
     }
+    // The user's choice beats the machine's. `None` is "whatever Windows
+    // says", which is the default and the case below.
+    if let Some(chosen) = crate::settings::current().language.code() {
+        return pick(chosen, available);
+    }
     system_locale().map_or(FALLBACK, |locale| pick(&locale, available))
 }
 
@@ -261,6 +283,37 @@ fn system_locale() -> Option<String> {
 #[cfg(all(not(test), not(windows)))]
 const fn system_locale() -> Option<String> {
     None
+}
+
+/// The catalogue language Windows' own display language resolves to,
+/// ignoring the stored setting and ignoring [`language`]'s cached answer.
+///
+/// # Why this exists rather than being read off `language()`
+///
+/// [`language`] is the language this process is *running in*, fixed at the
+/// first lookup. This is the language the Language setting's **Windows'
+/// language** choice means. They are the same at startup and they part company
+/// the moment somebody changes the setting, which is exactly when the settings
+/// window needs to know the second one: it re-renders itself in whatever the
+/// user just picked, and picking *Windows' language* has to resolve to
+/// something without restarting the app to find out what.
+///
+/// Reads the locale on every call. It is called once per language change in a
+/// window somebody has open, so caching it would be a lock for nothing.
+#[must_use]
+pub fn system_language() -> &'static str {
+    resolve_system()
+}
+
+#[cfg(test)]
+const fn resolve_system() -> &'static str {
+    FALLBACK
+}
+
+#[cfg(not(test))]
+fn resolve_system() -> &'static str {
+    let available = &catalogue().languages;
+    system_locale().map_or(FALLBACK, |locale| pick(&locale, available))
 }
 
 /// A string in the current language.

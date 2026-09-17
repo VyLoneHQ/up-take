@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "settings",
+  "description": "Capability for the settings window (roadmap 1.14). SEPARATE FROM THE OVERLAY'S ON PURPOSE: a capability lists the windows it applies to, and `default.json` lists only `overlay`, so a second window starts with NOTHING granted. That is what happened when 1.14 shipped without this file, and default.json's own description had already written down the failure mode: a generic 'not allowed by ACL' at the first plugin command. What it did NOT say, and what this file records, is that the symptom does not look like a permission error at all -- the window is created hidden and shows itself once the page has painted, so a denied `show` looks like the tray item doing nothing, and the second click works because the already-open branch calls `show` from RUST, where no ACL applies. Two clicks to open, and never draggable. Found by the founder on the rig, 2026-09-17. The permissions below are the two that page actually needs and nothing else: this window deliberately does not get `core:default`, which would hand a settings page the whole core surface for the sake of two commands.",
+  "windows": ["settings"],
+  "permissions": [
+    "core:window:allow-show",
+    "core:window:allow-start-dragging"
+  ]
+}

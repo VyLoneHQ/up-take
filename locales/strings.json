@@ -404,6 +404,336 @@
       "en": "Leave placing",
       "de": "Platzieren beenden",
       "de_from": "68696854"
+    },
+    "tray.settings": {
+      "en": "Settings",
+      "de": "Einstellungen",
+      "de_from": "4b058728"
+    },
+    "settings.title": {
+      "en": "UP-TAKE Settings",
+      "de": "UP-TAKE Einstellungen",
+      "de_from": "fcd525e1"
+    },
+    "settings.close": {
+      "en": "Close",
+      "de": "Schließen",
+      "de_from": "cd86acc3"
+    },
+    "settings.pane.general": {
+      "en": "General",
+      "de": "Allgemein",
+      "de_from": "5561fd0b"
+    },
+    "settings.pane.capture": {
+      "en": "Capture",
+      "de": "Aufnahme",
+      "de_from": "2fbb5e61"
+    },
+    "settings.pane.appearance": {
+      "en": "Appearance",
+      "de": "Darstellung",
+      "de_from": "31018b9f"
+    },
+    "settings.pane.help": {
+      "en": "Help",
+      "de": "Hilfe",
+      "de_from": "b89df01a"
+    },
+    "settings.section.startup": {
+      "en": "Starting up",
+      "de": "Starten",
+      "de_from": "1b880bae"
+    },
+    "settings.section.shortcuts": {
+      "en": "Shortcuts",
+      "de": "Tastenkürzel",
+      "de_from": "f09038a0"
+    },
+    "settings.section.saving": {
+      "en": "Saving",
+      "de": "Speichern",
+      "de_from": "d52892c3"
+    },
+    "settings.section.freezing": {
+      "en": "Freezing the screen",
+      "de": "Bildschirm einfrieren",
+      "de_from": "d27accc2"
+    },
+    "settings.section.privacy": {
+      "en": "Privacy",
+      "de": "Privatsphäre",
+      "de_from": "ebfa87e7"
+    },
+    "settings.section.areas": {
+      "en": "Areas",
+      "de": "Bereiche",
+      "de_from": "dc400635"
+    },
+    "settings.section.language": {
+      "en": "Language",
+      "de": "Sprache",
+      "de_from": "9a73db9b"
+    },
+    "settings.section.learning": {
+      "en": "Learning UP-TAKE",
+      "de": "UP-TAKE kennenlernen",
+      "de_from": "845f46d8"
+    },
+    "settings.start_with_windows.name": {
+      "en": "Start with Windows",
+      "de": "Mit Windows starten",
+      "de_from": "bf2098b8"
+    },
+    "settings.start_with_windows.about": {
+      "en": "UP-TAKE starts when you sign in and waits in the notification area. Off by default, because a tool that can read your screen should be something you switch on.",
+      "de": "UP-TAKE startet beim Anmelden und wartet im Infobereich. Standardmäßig aus – ein Werkzeug, das deinen Bildschirm lesen kann, sollte man bewusst einschalten.",
+      "de_from": "fbc457a1"
+    },
+    "settings.start_with_windows.missing": {
+      "en": "UP-TAKE is set to start with Windows, but the entry is not on this machine. Switch it off and on again to write it.",
+      "de": "UP-TAKE soll mit Windows starten, aber der Eintrag fehlt auf diesem Rechner. Schalte die Option aus und wieder ein, um ihn neu zu schreiben.",
+      "de_from": "5640254c"
+    },
+    "settings.hand_launch.name": {
+      "en": "When you open UP-TAKE yourself",
+      "de": "Wenn du UP-TAKE selbst öffnest",
+      "de_from": "79bf307e"
+    },
+    "settings.hand_launch.about": {
+      "en": "Starting with Windows always waits in the notification area, whatever this says.",
+      "de": "Beim Start mit Windows wartet UP-TAKE immer im Infobereich, unabhängig von dieser Einstellung.",
+      "de_from": "1ad8cf15"
+    },
+    "settings.hand_launch.placing": {
+      "en": "Start placing",
+      "de": "Platzieren",
+      "de_from": "f8f412b7"
+    },
+    "settings.hand_launch.hidden": {
+      "en": "Wait in the tray",
+      "de": "Im Infobereich warten",
+      "de_from": "8be2564c"
+    },
+    "settings.hotkey.fixed": {
+      "en": "Fixed in this version.",
+      "de": "In dieser Version fest vergeben.",
+      "de_from": "59c23282"
+    },
+    "settings.save_to.name": {
+      "en": "Save pictures to",
+      "de": "Bilder speichern unter",
+      "de_from": "c993b3d0"
+    },
+    "settings.save_to.about": {
+      "en": "Where Save writes. Left empty, UP-TAKE uses your Pictures folder, and follows it if it ever moves.",
+      "de": "Wohin Speichern schreibt. Bleibt das Feld leer, verwendet UP-TAKE deinen Bilder-Ordner – auch dann noch, wenn er später umzieht.",
+      "de_from": "ad63274e"
+    },
+    "settings.save_to.choose": {
+      "en": "Choose a folder",
+      "de": "Ordner wählen",
+      "de_from": "ebf1c409"
+    },
+    "settings.save_to.reset": {
+      "en": "Use my Pictures folder",
+      "de": "Bilder-Ordner verwenden",
+      "de_from": "b38915ff"
+    },
+    "settings.leave_placing.name": {
+      "en": "Leave placing after a screenshot",
+      "de": "Platzieren nach einem Screenshot verlassen",
+      "de_from": "1dbeedc7"
+    },
+    "settings.leave_placing.about": {
+      "en": "Hand the screen straight back once a Screenshot area is drawn, instead of staying in placing for the next one.",
+      "de": "Den Bildschirm sofort zurückgeben, sobald ein Screenshot-Bereich gezeichnet ist, statt für den nächsten im Platzieren zu bleiben.",
+      "de_from": "4dcc123d"
+    },
+    "settings.freeze_covers.name": {
+      "en": "Freezing covers",
+      "de": "Einfrieren umfasst",
+      "de_from": "7790148f"
+    },
+    "settings.freeze_covers.about": {
+      "en": "A freeze holds a picture of the screen so you can select something that will not sit still. Covering every monitor holds a picture of screens you were not looking at.",
+      "de": "Beim Einfrieren hält UP-TAKE ein Bild des Bildschirms fest, damit du etwas auswählen kannst, das nicht stillsteht. Alle Bildschirme zu umfassen hält auch Bilder von Schirmen fest, auf die du nicht geschaut hast.",
+      "de_from": "93c651f7"
+    },
+    "settings.freeze_covers.this": {
+      "en": "This monitor",
+      "de": "Diesen Bildschirm",
+      "de_from": "449eba53"
+    },
+    "settings.freeze_covers.every": {
+      "en": "Every monitor",
+      "de": "Alle Bildschirme",
+      "de_from": "dabb0042"
+    },
+    "settings.quality.name": {
+      "en": "Quality of a held picture",
+      "de": "Qualität des gehaltenen Bildes",
+      "de_from": "5619f399"
+    },
+    "settings.quality.about": {
+      "en": "Only what you see while the screen is held. What you copy or save is cut from the original either way, so this never costs you quality in the result.",
+      "de": "Betrifft nur das, was du siehst, solange der Bildschirm gehalten wird. Was du kopierst oder speicherst, wird ohnehin aus dem Original geschnitten – hier geht also nie Qualität im Ergebnis verloren.",
+      "de_from": "f82a46bb"
+    },
+    "settings.quality.fast": {
+      "en": "Fast",
+      "de": "Schnell",
+      "de_from": "853ab7cf"
+    },
+    "settings.quality.exact": {
+      "en": "Exact",
+      "de": "Genau",
+      "de_from": "66631844"
+    },
+    "settings.recordings.name": {
+      "en": "Show UP-TAKE in screen recordings",
+      "de": "UP-TAKE in Bildschirmaufnahmen zeigen",
+      "de_from": "c0e93cae"
+    },
+    "settings.recordings.about": {
+      "en": "Off by default, so UP-TAKE stays out of what you share and cannot record itself. Turn it on to show someone what you are doing with it.",
+      "de": "Standardmäßig aus, damit UP-TAKE nicht in dem auftaucht, was du teilst, und sich nicht selbst aufnimmt. Schalte es ein, um jemandem zu zeigen, wie du damit arbeitest.",
+      "de_from": "8da3213c"
+    },
+    "settings.opacity.name": {
+      "en": "How solid an area looks",
+      "de": "Wie kräftig ein Bereich wirkt",
+      "de_from": "0392aa6e"
+    },
+    "settings.opacity.about": {
+      "en": "The border and fill of every area you draw.",
+      "de": "Rahmen und Füllung jedes Bereichs, den du zeichnest.",
+      "de_from": "b8e680b0"
+    },
+    "settings.filter.name": {
+      "en": "How strong a Filter area is",
+      "de": "Wie stark ein Filterbereich ist",
+      "de_from": "2e291880"
+    },
+    "settings.filter.about": {
+      "en": "The warm wash a Filter area lays over what is underneath. You go on working under it either way.",
+      "de": "Der warme Schleier, den ein Filterbereich über das darunter legt. Du arbeitest in jedem Fall darunter weiter.",
+      "de_from": "0bf5c0d1"
+    },
+    "settings.language.name": {
+      "en": "Language",
+      "de": "Sprache",
+      "de_from": "9a73db9b"
+    },
+    "settings.language.about": {
+      "en": "This window changes at once. The overlay and its menus change the next time UP-TAKE starts.",
+      "de": "Dieses Fenster wechselt sofort. Das Overlay und seine Menüs wechseln beim nächsten Start von UP-TAKE.",
+      "de_from": "4d3f5de1"
+    },
+    "settings.language.system": {
+      "en": "Windows' language",
+      "de": "Sprache von Windows",
+      "de_from": "5cf22d2b"
+    },
+    "settings.language.english": {
+      "en": "English",
+      "de": "Englisch",
+      "de_from": "1b9ae0bb"
+    },
+    "settings.language.german": {
+      "en": "German",
+      "de": "Deutsch",
+      "de_from": "11100833"
+    },
+    "settings.help.about": {
+      "en": "Every key UP-TAKE listens for. This is the same sheet the tour ends on.",
+      "de": "Jede Taste, auf die UP-TAKE hört. Es ist dasselbe Blatt, mit dem die Einführung endet.",
+      "de_from": "2fcc4643"
+    },
+    "settings.help.replay.name": {
+      "en": "Show the tour again",
+      "de": "Einführung erneut zeigen",
+      "de_from": "c2c5e94b"
+    },
+    "settings.help.replay.about": {
+      "en": "The four steps you saw on the first run, taught on the overlay as before.",
+      "de": "Die vier Schritte vom ersten Start, wieder direkt auf dem Overlay erklärt.",
+      "de_from": "a6a0bad4"
+    },
+    "settings.help.replay.action": {
+      "en": "Show it again",
+      "de": "Erneut zeigen",
+      "de_from": "2c9da391"
+    },
+    "settings.help.replay.armed": {
+      "en": "It will run the next time the overlay opens.",
+      "de": "Sie läuft, sobald das Overlay das nächste Mal geöffnet wird.",
+      "de_from": "0475e8a4"
+    },
+    "settings.saved_but_not_stored": {
+      "en": "That change is in force now, but it could not be saved: {reason}",
+      "de": "Die Änderung gilt jetzt, konnte aber nicht gespeichert werden: {reason}",
+      "de_from": "6bc15cd8"
+    },
+    "settings.save_to.open": {
+      "en": "Open folder",
+      "de": "Ordner öffnen",
+      "de_from": "713a842f"
+    },
+    "settings.auto_save.name": {
+      "en": "Save a screenshot as soon as it is taken",
+      "de": "Screenshot sofort speichern",
+      "de_from": "785729c6"
+    },
+    "settings.auto_save.about": {
+      "en": "Writes the picture to the folder above the moment you draw the area, so you do not have to choose Save. It still goes to the clipboard either way.",
+      "de": "Schreibt das Bild in den Ordner oben, sobald du den Bereich ziehst, ohne dass du Speichern wählen musst. In die Zwischenablage kommt es ohnehin.",
+      "de_from": "0f6471ee"
+    },
+    "settings.reset.name": {
+      "en": "Back to the defaults",
+      "de": "Zurück zu den Standardwerten",
+      "de_from": "d1a43f6a"
+    },
+    "settings.reset.about": {
+      "en": "Puts every setting on every pane back the way UP-TAKE ships. Your areas and your pictures are not touched.",
+      "de": "Setzt alle Einstellungen auf allen Seiten auf den Auslieferungszustand zurück. Deine Bereiche und deine Bilder bleiben unberührt.",
+      "de_from": "11fad6b4"
+    },
+    "settings.reset.action": {
+      "en": "Reset",
+      "de": "Zurücksetzen",
+      "de_from": "0ac8a560"
+    },
+    "settings.reset.done": {
+      "en": "Done. Everything is back to the defaults.",
+      "de": "Erledigt. Alles steht wieder auf den Standardwerten.",
+      "de_from": "f2bce93d"
+    },
+    "settings.section.reset": {
+      "en": "Starting over",
+      "de": "Von vorn beginnen",
+      "de_from": "cb74fc69"
+    },
+    "settings.help.types": {
+      "en": "The area types",
+      "de": "Die Bereichstypen",
+      "de_from": "aef076dc"
+    },
+    "settings.help.types.about": {
+      "en": "Press the key, then drag. Press nothing and you get a Default area. The colour of an area tells you which type it is.",
+      "de": "Taste drücken, dann ziehen. Drückst du nichts, bekommst du einen Standardbereich. Die Farbe eines Bereichs zeigt dir seinen Typ.",
+      "de_from": "95d2c1e7"
+    },
+    "settings.help.types.default": {
+      "en": "A plain area. Scroll over it to magnify what is underneath.",
+      "de": "Ein einfacher Bereich. Scrolle darüber, um das Darunterliegende zu vergrößern.",
+      "de_from": "2e75ecc7"
+    },
+    "settings.help.types.nokey": {
+      "en": "no key",
+      "de": "keine Taste",
+      "de_from": "d73857d5"
     }
   }
 }
