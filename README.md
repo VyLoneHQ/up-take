@@ -188,11 +188,18 @@ Around those:
   display and negative coordinates. 4K at 150% and ultrawide are untested, because that hardware is
   not here.
   <!-- source: ROADMAP.md Phase 1A kill-criterion note; STATUS.md F-9 (M-2 and M-5 untestable) -->
-- **UP-TAKE does not appear in screen recordings.** The overlay is excluded from capture at the
-  window level, deliberately and permanently, so OBS, Teams, Discord and the Snipping Tool do not
-  see it. That is a privacy property first and a limitation second, and it does mean "send me a
-  screenshot of what you are seeing" does not work.
-  <!-- source: ADR-0019 (overlay excluded from capture), decisions 2 and 5 -->
+- **UP-TAKE does not appear in screen recordings, unless you ask it to.** The overlay is excluded
+  from capture at the window level, so OBS, Teams, Discord and the Snipping Tool do not see it.
+  That is a privacy property first and a limitation second, and it does mean "send me a screenshot
+  of what you are seeing" does not work. **There is a setting for when you need the other thing:**
+  *Show UP-TAKE in screen recordings*, off unless you turn it on.
+  <!-- source: ADR-0019 (overlay excluded from capture), decisions 2 and 5 for the property,
+       decision 3 for the setting.
+
+       This said "deliberately and permanently" until 2026-09-17. The default is unchanged, and an
+       earlier revision of this branch left the sentence alone on that reasoning. The independent
+       review was right that it is not enough: "permanently" is a claim about REVERSIBILITY, not
+       about the default, and roadmap 1.14 makes it reversible by design. -->
 
 ## What is designed and not built
 

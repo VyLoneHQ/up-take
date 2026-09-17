@@ -14,7 +14,7 @@
 //! already been wrong about its own count once -- it said three settings while
 //! the code and `ADR-0026`'s third amendment both said four.
 //!
-//! **Two of section 4's thirteen rows are not here, and their absence is
+//! **Two of section 4's fourteen rows are not here, and their absence is
 //! recorded rather than silent:** the two hotkey rows. A rebindable shortcut
 //! needs a control that captures a keystroke, and section 3.2 allows three
 //! control shapes -- a toggle, a segmented choice, a slider -- and says that

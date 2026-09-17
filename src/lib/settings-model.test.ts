@@ -25,7 +25,16 @@ import { LANGUAGES } from './strings';
  * code and `ADR-0026`'s third amendment both said four.
  */
 
-/** `UI-UX.md` section 4, transcribed. The two hotkey rows are `fact` here. */
+/**
+ * `UI-UX.md` section 4, transcribed. The two hotkey rows are `fact` here.
+ *
+ * ⚠️ **Transcribed means transcribed, and for six hours it did not.** The
+ * auto-save row was added to this list when the founder asked for it on the rig
+ * and to section 4 only after the independent review pointed out that a test
+ * claiming to transcribe a table listed a row the table did not have. The
+ * document is the check-list; when the two disagree, the document is what has
+ * to change first or this constant is just a second opinion.
+ */
 const INVENTORY: { pane: PaneId; id: string; shape: Row['shape'] }[] = [
   { pane: 'general', id: 'start-with-windows', shape: 'toggle' },
   { pane: 'general', id: 'hand-launch-state', shape: 'segmented' },
