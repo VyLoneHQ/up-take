@@ -200,8 +200,8 @@ struct Shared {
 /// take `&mut self` without any locking.
 ///
 /// **"Models load once at startup and stay resident"**: the engine is built by a
-/// closure that runs **on the worker thread**, not on the caller's. Loading a
-/// PP-OCRv4 model is slow, and building it in `spawn` would move that cost onto
+/// closure that runs **on the worker thread**, not on the caller's. Loading an
+/// OCR model is slow, and building it in `spawn` would move that cost onto
 /// whichever thread called it, which on the host is the one that must stay free.
 /// The engine is then kept and reused for every request; nothing reloads it.
 ///
@@ -400,7 +400,7 @@ impl Drop for Service {
 /// The worker used to store `STOPPED` and call `close` as ordinary statements
 /// after `run` returned. Neither runs when `run` **unwinds**, and unwinding is
 /// not hypothetical here: [`Engine::recognise`] and the `make_engine` closure are
-/// **caller-supplied code**, and 1.11 puts an ONNX/PP-OCRv4 FFI binding behind
+/// **caller-supplied code**, and 1.11 put an ONNX Runtime FFI binding behind
 /// exactly that trait. A panic there produced the worst state this module can be
 /// in, and the reviewer reproduced it: [`Service::is_running`] answered **`true`
 /// forever**, `submit` accepted **40 further requests**, and **zero** outcomes

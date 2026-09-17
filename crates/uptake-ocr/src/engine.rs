@@ -1,6 +1,7 @@
 //! The seam a recogniser plugs into, and the types that cross it.
 //!
-//! Task 1.11 puts PP-OCRv4 behind [`Engine`]. Nothing here knows that, and that
+//! Task 1.11 put PaddleOCR behind [`Engine`]: PP-OCRv4 then, PP-OCRv6_small since
+//! `ADR-0037`. Nothing here knows that, and that
 //! is the point: the thread in [`crate::service`] is written against this trait,
 //! so the recogniser can be replaced, stubbed in a test, or deferred entirely
 //! while the threading contract is proven.
@@ -125,7 +126,7 @@ pub struct TextBlock {
     pub bounds: Rect,
 }
 
-/// A recogniser. Task 1.11 implements this with PP-OCRv4.
+/// A recogniser. `paddle::PaddleEngine` implements this with PP-OCRv6_small.
 ///
 /// # Why `&mut self`
 ///

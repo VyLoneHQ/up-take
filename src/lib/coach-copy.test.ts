@@ -1,14 +1,15 @@
 import { describe, expect, it } from 'vitest';
 
 import hotkeyRs from '../../src-tauri/src/hotkey.rs?raw';
-import { BUTTONS, DRAW, MODES, progress, REFERENCE, TYPES } from './coach-copy';
+import { coachCopy } from './coach-copy';
 import {
   armedTypeForKey,
   isFreezeKey,
   isRemoveKey,
-  KIND_LABELS,
+  kindLabels,
 } from './overlay-state';
 import { isDismissKey } from './regions';
+import { LANGUAGES } from './strings';
 
 /**
  * The reference sheet against the code that binds its keys (roadmap 1.18).
@@ -18,7 +19,13 @@ import { isDismissKey } from './regions';
  * wrong are all silent: a shortcut renamed in `hotkey.rs`, a type letter moved
  * in `armedTypeForKey`, a key dropped from a handler. Each test below reads the
  * binding rather than restating it.
+ *
+ * The English copy is the one these read, because the tests that find a row by
+ * its words need one language. `every language prints the same keys` below is
+ * what carries the binding checks over to the translations.
  */
+const { BUTTONS, DRAW, MODES, progress, REFERENCE, TYPES } = coachCopy('en');
+const KIND_LABELS = kindLabels('en');
 
 /** The string value of a `pub const NAME: &str = "..."` in `hotkey.rs`. */
 function rustLabel(name: string): string {
@@ -85,32 +92,65 @@ describe('the reference sheet names the keys the app actually binds', () => {
     expect(keys).toContain(DRAW.escKey);
     expect(isDismissKey('Escape')).toBe(true);
   });
+
+  it('every language prints the same keys and chords as English', () => {
+    // The words translate and the keys do not, so every binding check above
+    // holds for each translation too. `drag` is the one key word, and it is the
+    // only cell allowed to differ.
+    const shape = (language: (typeof LANGUAGES)[number]) => {
+      const copy = coachCopy(language);
+      const drag = copy.REFERENCE.placing[0].keys;
+      return {
+        chord: copy.MODES.chord,
+        esc: copy.DRAW.escKey,
+        types: copy.TYPES.rows.map((row) => row.key),
+        anywhere: copy.REFERENCE.anywhere.map((row) =>
+          row.keys.replace(drag, 'drag'),
+        ),
+        placing: copy.REFERENCE.placing.map((row) =>
+          row.keys === drag ? 'drag' : row.keys,
+        ),
+      };
+    };
+    for (const language of LANGUAGES) {
+      expect(shape(language), language).toEqual(shape('en'));
+    }
+  });
 });
 
 describe('the coach copy is public writing', () => {
-  it('carries no em dash or en dash (P-1)', () => {
+  it('carries no em dash or en dash in English (P-1)', () => {
     const strings = JSON.stringify({ BUTTONS, DRAW, TYPES, MODES, REFERENCE });
-    // Escaped rather than typed: the literal characters would put two dashes
-    // into this file, which is the thing the test exists to keep out.
-    expect(strings).not.toMatch(/[\u2013\u2014]/);
+    // Built from code points rather than typed: the literal characters would
+    // put two dashes into this file, which is the thing the test exists to keep
+    // out. (This was an escape sequence until 1.38, when a tool turned it into
+    // the characters themselves.)
+    expect(strings).not.toMatch(
+      new RegExp(`[${String.fromCodePoint(0x2013, 0x2014)}]`),
+    );
   });
 
   it('counts steps the way the coach prints them', () => {
     expect(progress(2, 4)).toBe('Step 2 of 4');
+    expect(coachCopy('de').progress(2, 4)).toBe('Schritt 2 von 4');
   });
 });
 
 describe('the tour calls each type what the rest of the product calls it', () => {
-  it('names every type row with the label the type bar and menu use', () => {
+  it('names every type row with the label the type bar and menu use, in every language', () => {
     // The independent review of 1.18: the tour said "Text" for the type the
-    // menu and the bar call "OCR". The rows read `KIND_LABELS` now; this pins
+    // menu and the bar call "OCR". The rows read `kindLabels` now; this pins
     // that, through the key, so a row whose key and name point at different
     // types fails as well as a row with a word of its own.
-    for (const row of TYPES.rows) {
-      const kind = armedTypeForKey(press(row.key.toLowerCase()));
-      expect(kind, `${row.key} arms nothing`).not.toBeNull();
-      if (kind === null) continue;
-      expect(row.name, `the ${row.key} row`).toBe(KIND_LABELS[kind]);
+    for (const language of LANGUAGES) {
+      const labels = kindLabels(language);
+      for (const row of coachCopy(language).TYPES.rows) {
+        const kind = armedTypeForKey(press(row.key.toLowerCase()));
+        expect(kind, `${row.key} arms nothing`).not.toBeNull();
+        if (kind === null) continue;
+        expect(row.name, `the ${row.key} row (${language})`).toBe(labels[kind]);
+      }
     }
+    expect(KIND_LABELS.ocr).toBe('OCR');
   });
 });

@@ -26,6 +26,7 @@ import {
   type HoverPayload,
   isFreezeKey,
   isRemoveKey,
+  kindLabels,
   type MenuFrame,
   type MenuPayload,
   type MenuView,
@@ -49,6 +50,7 @@ import {
   toggleFreeze,
 } from '$lib/overlay-state';
 import { type CssRect, isDismissKey } from '$lib/regions';
+import { isLanguage, type Language, text } from '$lib/strings';
 
 // Presentation only (architecture §1): the Rust side owns the state machine
 // (ADR-0012), the placement input (ADR-0014) and the area store; this component
@@ -103,6 +105,11 @@ let recognitions = $state(new SvelteMap<number, OcrPayload>());
 // The WebView owns its scale (ADR-0011); refreshed on every state event in case
 // the overlay moved to a monitor at a different DPI.
 let dpr = $state(1);
+// The language Rust chose (roadmap 1.38), asked for once before the first state
+// request so the coach is never drawn in English first. English until then, and
+// English if the answer is anything this build does not ship.
+let language = $state<Language>('en');
+const labels = $derived(kindLabels(language));
 
 const frames: CssRect[] = $derived(monitorFramesCss(monitors, origin, dpr));
 /**
@@ -178,7 +185,15 @@ const frozenFrames: Set<string> = $derived(frozenFrameKeys(stillFrames));
 // its close control, and not for the purpose of the highlight, which is why the
 // payload carries `chromeOnly` beside the id.
 const areaFrames: AreaFrame[] = $derived(
-  areaFramesCss(areas, origin, dpr, hoveredArea, draggedArea, hoverChromeOnly),
+  areaFramesCss(
+    areas,
+    origin,
+    dpr,
+    hoveredArea,
+    draggedArea,
+    hoverChromeOnly,
+    labels,
+  ),
 );
 // The drag preview renders in every visible state as of task 1.17(a), because
 // Living now has move and resize gestures of its own.
@@ -359,7 +374,15 @@ onMount(() => {
     unlistenMenu,
     unlistenCoach,
   ]);
-  void ready.then(() => invoke('overlay_request_state'));
+  void ready.then(async () => {
+    try {
+      const chosen = await invoke('overlay_language');
+      if (isLanguage(chosen)) language = chosen;
+    } catch {
+      // English stays: a missing language is never a reason not to draw.
+    }
+    await invoke('overlay_request_state');
+  });
   return () => {
     void ready.then((unlisteners) => {
       for (const unlisten of unlisteners) unlisten();
@@ -409,7 +432,7 @@ onMount(() => {
              as the first cut did — it reads as "every screen is armed" and
              buries the single fact it exists to convey. -->
         {#if armed && i === activeMonitor}
-          <span class="armed-badge">{armed}</span>
+          <span class="armed-badge">{labels[armed]}</span>
         {/if}
         <!-- FROZEN goes on every monitor THAT IS SHOWING A STILL, and the
              qualifier is the whole of it. The armed badge above is one fact
@@ -426,7 +449,7 @@ onMount(() => {
              inverting the amendment's own *Honesty at the boundary* argument,
              which is that the others visibly stay live. -->
         {#if frozenFrames.has(frameKey(frame))}
-          <span class="frozen-badge">frozen</span>
+          <span class="frozen-badge">{text(language, 'overlay.frozen')}</span>
         {/if}
       </div>
     {/each}
@@ -510,7 +533,7 @@ onMount(() => {
                   recognition.status === 'failed'}
                 use:overflowFade
               >
-                {ocrLine(recognition)}
+                {ocrLine(language, recognition)}
               </div>
             {/if}
           {/if}
@@ -602,6 +625,7 @@ onMount(() => {
        it, which matches the precedence the hook gives the two presses. -->
   {#if coach}
     <Coach
+      {language}
       {coach}
       {origin}
       {dpr}
@@ -896,7 +920,7 @@ onMount(() => {
    The backdrop is the reason this is legible at all -- an OCR area holds no
    pixels of its own, so this text sits directly over whatever is underneath it,
    which is by definition a region dense with text. `pre-wrap` because the
-   engine's line breaks are part of what it read: PP-OCRv4 returns blocks in
+   engine's line breaks are part of what it read: it returns blocks in
    reading order, and reflowing them would merge two columns into one sentence.
 
    `pointer-events: none` like every other piece of area chrome. The overlay is

@@ -1,4 +1,4 @@
-//! Turning an [`RgbaBitmap`] into the tensor PP-OCRv4's detector expects.
+//! Turning an [`RgbaBitmap`] into the tensor the detector expects.
 //!
 //! `architecture.md` section 3.2 opens the OCR pipeline with *"preprocess
 //! (grayscale, threshold, denoise)"*. That description predates the choice of
@@ -74,7 +74,9 @@ pub struct DetectorInput {
 ///
 /// Takes the **map's** dimensions rather than the resized tensor's, because the
 /// caller reads them off the model's actual output shape. For PP-OCRv4's
-/// detector the two agree, but nothing enforces that and a model with a
+/// detector the two agree, and so do they for PP-OCRv6_small's (a 320x480
+/// input gives a 320x480 map, measured 2026-09-15), but nothing enforces that
+/// and a model with a
 /// different stride would silently place every box wrong.
 ///
 /// A zero map dimension yields a factor of `0.0` rather than an infinity, so a
