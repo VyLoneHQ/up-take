@@ -251,8 +251,16 @@ Starting it opens the overlay ready to place an area. `Esc` hands the screen bac
 `Win+Shift+U` switches back to placing. `Win+Shift+G` copies the monitor under your cursor to the
 clipboard without summoning anything.
 <!-- source: ROADMAP.md 1.34 and ADR-0044 decision 1 (a hand launch enters Placement). A launch with
-     Windows stays hidden under decision 2, but there is no autostart yet, so every launch is a hand
-     launch today. Revisit this sentence when 1.14 adds one. -->
+     Windows stays hidden under decision 2.
+
+     This comment said "there is no autostart yet, so every launch is a hand launch today" and asked
+     to be revisited when 1.14 added one. 1.14 adds it: autostart.rs registers a Run-key value
+     carrying --autostart, which is the only thing decision 2 treats as a launch by Windows. The
+     sentence above needs no change, because a hand launch still lands in placing by default and
+     that is what it says.
+
+     Nothing is added here about starting with Windows until it has merged and shipped. P-6 is about
+     public copy in the present tense describing something that is not yet in anyone's hands. -->
 
 ## When there is a release
 
