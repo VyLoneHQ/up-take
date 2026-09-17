@@ -61,6 +61,9 @@ windows-sys = { workspace = true, features = [
   "Win32_System_DataExchange",
   "Win32_System_LibraryLoader",
   "Win32_System_Memory",
+  # autostart.rs: the per-user Run key, which is the whole of ADR-0044's
+  # "start with Windows" registration (roadmap 1.14, backlog I-391).
+  "Win32_System_Registry",
   "Win32_System_SystemInformation",
   # dev_harness.rs: SetThreadDpiHostingBehavior, for roadmap 1.35 gate 1's
   # measurement (UPTAKE_DEV_DPI_HOSTING). Debug builds call it; release builds

@@ -1,0 +1,276 @@
+import { describe, expect, it } from 'vitest';
+import {
+  allRows,
+  type Facts,
+  PANE_IDS,
+  type PaneId,
+  panes,
+  type Row,
+  type Settings,
+} from './settings-model';
+import { LANGUAGES } from './strings';
+
+/**
+ * The settings window's content (roadmap 1.14).
+ *
+ * `UI-UX.md` section 4 calls itself *"the check-list 1.14 builds against"*, and
+ * a check-list nothing runs is a description. This file is what runs it: the
+ * table below is that section transcribed, and the first test fails if a row
+ * moves pane, changes control shape, or goes missing.
+ *
+ * The section says why that matters in its own words: the roadmap's prose "has
+ * already been wrong about its own count once", saying three settings while the
+ * code and `ADR-0026`'s third amendment both said four.
+ */
+
+/** `UI-UX.md` section 4, transcribed. The two hotkey rows are `fact` here. */
+const INVENTORY: { pane: PaneId; id: string; shape: Row['shape'] }[] = [
+  { pane: 'general', id: 'start-with-windows', shape: 'toggle' },
+  { pane: 'general', id: 'hand-launch-state', shape: 'segmented' },
+  { pane: 'general', id: 'hotkey-summon', shape: 'fact' },
+  { pane: 'general', id: 'hotkey-grab', shape: 'fact' },
+  { pane: 'capture', id: 'save-directory', shape: 'folder' },
+  { pane: 'capture', id: 'leave-placing', shape: 'toggle' },
+  { pane: 'capture', id: 'freeze-covers', shape: 'segmented' },
+  { pane: 'capture', id: 'held-picture-quality', shape: 'segmented' },
+  { pane: 'capture', id: 'show-in-recordings', shape: 'toggle' },
+  { pane: 'appearance', id: 'area-opacity', shape: 'slider' },
+  { pane: 'appearance', id: 'filter-strength', shape: 'slider' },
+  { pane: 'appearance', id: 'language', shape: 'segmented' },
+];
+
+/** The shipped defaults, which `settings.rs` asserts from the other side. */
+const DEFAULTS: Settings = {
+  start_with_windows: false,
+  hand_launch_state: 'placing',
+  save_directory: null,
+  leave_placing_after_screenshot: false,
+  freeze_covers: 'this_monitor',
+  held_picture_quality: 'fast',
+  show_in_screen_recordings: false,
+  area_opacity_percent: 40,
+  filter_strength_percent: 16,
+  language: 'system',
+};
+
+const FACTS: Facts = {
+  summon_hotkey: 'Win+Shift+U',
+  grab_hotkey: 'Win+Shift+G',
+  default_save_directory: 'C:\\Users\\someone\\Pictures\\UP-TAKE',
+  autostart_registered: false,
+  opacity_range: [10, 100],
+  filter_range: [5, 60],
+};
+
+const view = (settings: Settings = DEFAULTS, facts: Facts = FACTS) =>
+  panes('en', settings, facts);
+
+function row(id: string, settings: Settings = DEFAULTS, facts: Facts = FACTS) {
+  const found = allRows(view(settings, facts)).find((each) => each.id === id);
+  if (!found) throw new Error(`no row ${id}`);
+  return found;
+}
+
+describe('the inventory', () => {
+  it('has every row UI-UX.md section 4 lists, in its pane and its shape', () => {
+    const actual = view().flatMap((pane) =>
+      pane.sections.flatMap((section) =>
+        section.rows
+          // The Help pane's reference sheet and its replay button are not
+          // settings; section 4 lists Help as one row, "the keybind reference".
+          .filter((each) => each.shape !== 'keys' && each.shape !== 'action')
+          .map((each) => ({
+            pane: pane.id,
+            id: each.id,
+            shape: each.shape,
+          })),
+      ),
+    );
+    expect(actual).toEqual(INVENTORY);
+  });
+
+  it('puts the keybind reference and the tour replay in Help', () => {
+    // ADR-0043 decision 5: the tour's last step is the single source of the
+    // reference, "reachable afterwards from Settings, Help", and the ADR's
+    // consequences add a way to replay the tour.
+    const help = view().find((pane) => pane.id === 'help');
+    const shapes = help?.sections.flatMap((section) =>
+      section.rows.map((each) => each.shape),
+    );
+    expect(shapes).toEqual(['keys', 'keys', 'action']);
+  });
+
+  it('names the panes in the sidebar order section 3.2 gives', () => {
+    expect(view().map((pane) => pane.id)).toEqual([...PANE_IDS]);
+    expect(PANE_IDS).toEqual(['general', 'capture', 'appearance', 'help']);
+  });
+
+  it('reads the keybind rows from the tour rather than restating them', () => {
+    // A second copy of "Win+Shift+U does this" is the F-22/F-37 failure, and
+    // `coach-copy.ts` checks its key names against the handlers that bind
+    // them. Reading from there is what inherits that check.
+    const summon = row('hotkey-summon');
+    expect(summon.shape).toBe('fact');
+    if (summon.shape !== 'fact') return;
+    expect(summon.value).toBe(FACTS.summon_hotkey);
+
+    const keys = row('keys-anywhere');
+    if (keys.shape !== 'keys') throw new Error('not the reference sheet');
+    expect(keys.keys.map((each) => each.keys)).toEqual([
+      'Win+Shift+U',
+      'Win+Shift+G',
+      'Win+Shift+drag',
+    ]);
+  });
+});
+
+describe('a control', () => {
+  it('returns a new settings object and changes exactly one field', () => {
+    const toggle = row('leave-placing');
+    if (toggle.shape !== 'toggle') throw new Error('not a toggle');
+    const next = toggle.set(true);
+
+    expect(next).not.toBe(DEFAULTS);
+    expect(DEFAULTS.leave_placing_after_screenshot).toBe(false);
+    expect(next.leave_placing_after_screenshot).toBe(true);
+    expect({ ...next, leave_placing_after_screenshot: false }).toEqual(
+      DEFAULTS,
+    );
+  });
+
+  it('shows the value it was given, not a default of its own', () => {
+    const changed: Settings = {
+      ...DEFAULTS,
+      freeze_covers: 'every_monitor',
+      area_opacity_percent: 75,
+      language: 'german',
+    };
+    const covers = row('freeze-covers', changed);
+    const opacity = row('area-opacity', changed);
+    const language = row('language', changed);
+    if (covers.shape !== 'segmented') throw new Error('not segmented');
+    if (opacity.shape !== 'slider') throw new Error('not a slider');
+    if (language.shape !== 'segmented') throw new Error('not segmented');
+
+    expect(covers.value).toBe('every_monitor');
+    expect(opacity.value).toBe(75);
+    expect(language.value).toBe('german');
+  });
+
+  it('takes its slider bounds from Rust rather than repeating them', () => {
+    // `settings.rs` owns the ranges and clamps to them. A second copy here
+    // would let the slider offer a value the store then silently changes.
+    const opacity = row('area-opacity');
+    const filter = row('filter-strength');
+    if (opacity.shape !== 'slider' || filter.shape !== 'slider') {
+      throw new Error('not sliders');
+    }
+    expect([opacity.min, opacity.max]).toEqual(FACTS.opacity_range);
+    expect([filter.min, filter.max]).toEqual(FACTS.filter_range);
+    // The floor is not zero: an area at 0% has no border to grab and no
+    // chrome to right-click, so it could not be recovered outside Placement.
+    expect(opacity.min).toBeGreaterThan(0);
+  });
+
+  it('offers every wire value Rust accepts, and no other', () => {
+    // A segment whose value Rust does not deserialize is a control that looks
+    // right and does nothing. These are `settings.rs`'s `rename_all` outputs,
+    // which its own test pins from the other side.
+    const segments = (id: string) => {
+      const found = row(id);
+      if (found.shape !== 'segmented')
+        throw new Error(`${id} is not segmented`);
+      return found.segments.map((each) => each.value);
+    };
+    expect(segments('hand-launch-state')).toEqual(['placing', 'hidden']);
+    expect(segments('freeze-covers')).toEqual([
+      'this_monitor',
+      'every_monitor',
+    ]);
+    expect(segments('held-picture-quality')).toEqual(['fast', 'exact']);
+    expect(segments('language')).toEqual(['system', 'english', 'german']);
+  });
+
+  it('empties the save folder back to the default rather than to a path', () => {
+    const folder = row('save-directory');
+    if (folder.shape !== 'folder') throw new Error('not a folder');
+    // Empty means "use my Pictures folder", and that has to reach Rust as
+    // `null`: a stored empty string would be a folder named nothing.
+    expect(folder.value).toBe('');
+    expect(folder.placeholder).toBe(FACTS.default_save_directory);
+    expect(folder.set(null).save_directory).toBeNull();
+    expect(folder.set('D:\\Shots').save_directory).toBe('D:\\Shots');
+  });
+});
+
+describe('the startup switch', () => {
+  it('says nothing when the setting and the machine agree', () => {
+    const off = row('start-with-windows');
+    if (off.shape !== 'toggle') throw new Error('not a toggle');
+    expect(off.warning).toBeUndefined();
+
+    const on = row(
+      'start-with-windows',
+      { ...DEFAULTS, start_with_windows: true },
+      {
+        ...FACTS,
+        autostart_registered: true,
+      },
+    );
+    if (on.shape !== 'toggle') throw new Error('not a toggle');
+    expect(on.warning).toBeUndefined();
+  });
+
+  it('says so when it is on and the entry is not on this machine', () => {
+    // A copied profile, or a startup cleaner. Reported rather than silently
+    // rewritten: writing a Run key the user did not just ask for is the one
+    // thing a startup switch must not do.
+    const on = row('start-with-windows', {
+      ...DEFAULTS,
+      start_with_windows: true,
+    });
+    if (on.shape !== 'toggle') throw new Error('not a toggle');
+    expect(on.warning).toBeTruthy();
+  });
+});
+
+describe('the words', () => {
+  it('are present in every language the catalogue ships', () => {
+    // `strings.test.ts` proves the catalogue is complete; this proves the
+    // window asks it for keys that exist, in every language, rather than
+    // rendering a key name at someone whose language is not English.
+    for (const language of LANGUAGES) {
+      for (const pane of panes(language, DEFAULTS, FACTS)) {
+        expect(pane.name, `${language}: pane ${pane.id}`).not.toMatch(
+          /^settings\./,
+        );
+        for (const section of pane.sections) {
+          for (const each of section.rows) {
+            if (each.name) {
+              expect(each.name, `${language}: ${each.id}`).not.toMatch(
+                /^settings\./,
+              );
+            }
+            if (each.about) {
+              expect(each.about, `${language}: ${each.id} about`).not.toMatch(
+                /^settings\./,
+              );
+            }
+          }
+        }
+      }
+    }
+  });
+
+  it('differ between English and German, so nothing is left untranslated', () => {
+    const names = (language: 'en' | 'de') =>
+      panes(language, DEFAULTS, FACTS).map((pane) => pane.name);
+    expect(names('de')).not.toEqual(names('en'));
+    expect(names('de')).toEqual([
+      'Allgemein',
+      'Aufnahme',
+      'Darstellung',
+      'Hilfe',
+    ]);
+  });
+});

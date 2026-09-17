@@ -1,3 +1,8 @@
+// Not `cfg(windows)`-gated, for the same reason `output` and `precapture`
+// are not: the registration itself is Windows-only and is gated inside, while
+// `launched_by_windows` is a command-line reading that `setup` calls
+// unconditionally. The crate is Windows-only today.
+mod autostart;
 mod captures;
 mod click_through;
 mod config;
@@ -23,6 +28,8 @@ mod placement;
 // `uptake_capture::capture_region`, which is itself Windows-only, and the
 // modules that consume it are unconditional. The crate is Windows-only today.
 mod precapture;
+mod settings;
+mod settings_window;
 mod strings;
 mod tray;
 
@@ -161,7 +168,13 @@ pub fn run() -> tauri::Result<()> {
                     overlay::overlay_dismiss_focused,
                     overlay::overlay_request_state,
                     first_run::overlay_report_coach,
-                    strings::overlay_language
+                    strings::overlay_language,
+                    settings_window::settings_read,
+                    settings_window::settings_write,
+                    settings_window::settings_facts,
+                    settings_window::settings_choose_folder,
+                    settings_window::settings_replay_tour,
+                    settings_window::settings_close
                 ]
             }
             #[cfg(not(debug_assertions))]
@@ -174,7 +187,13 @@ pub fn run() -> tauri::Result<()> {
                     overlay::overlay_dismiss_focused,
                     overlay::overlay_request_state,
                     first_run::overlay_report_coach,
-                    strings::overlay_language
+                    strings::overlay_language,
+                    settings_window::settings_read,
+                    settings_window::settings_write,
+                    settings_window::settings_facts,
+                    settings_window::settings_choose_folder,
+                    settings_window::settings_replay_tour,
+                    settings_window::settings_close
                 ]
             }
         })
@@ -229,21 +248,32 @@ pub fn run() -> tauri::Result<()> {
             // what gives them time to. Off unless the variable is set.
             #[cfg(debug_assertions)]
             dev_harness::schedule_monitor_perturb(app.handle());
+            // The user's settings, before anything reads one (roadmap 1.14).
+            // `init` pushes the freeze scope and the display format into
+            // `freeze`'s atomics as it loads, so the two announcements below
+            // report a value that is already in force rather than one they are
+            // about to set.
+            //
+            // ⚠️ **Before `first_run::init` and before the summon**, both of
+            // which now read a setting: the tour decides whether to run and the
+            // summon decides whether to happen at all.
+            settings::init();
             // Read once, here, so the answer cannot change under a running
             // Placement — a setting that flipped between `sync_warm_sessions`
             // starting the sessions and `freeze` consulting them would leak
-            // four held sessions. Task 1.14 replaces the env read with the
-            // stored setting; this call site stays.
+            // four held sessions. Still an environment variable: 1.9f's warm
+            // path is settings-gated in the roadmap and is NOT one of the
+            // thirteen rows `UI-UX.md` section 4 inventories, so giving it a
+            // control here would be inventing a row that window's own rule
+            // forbids. Recorded rather than decided in passing.
             freeze::init_warm_capture();
-            // Same place and the same reason: read once, before anything can
-            // freeze, and state what it chose so a rig log says which format
-            // produced its numbers.
-            freeze::init_display_format();
-            // And the third: which monitors a freeze covers. Read here for the
-            // same reason as the warm gate above — the sessions and the freeze
-            // must agree about the scope, and they are consulted at different
-            // moments.
-            freeze::init_freeze_scope();
+            // The display format and the freeze scope are both settings now.
+            // These two calls say which value is in force and where it came
+            // from, so a rig log still names the condition that produced its
+            // numbers — which is the whole of what the old `init_*` pair was
+            // protecting (`UT-F-46`).
+            freeze::announce_display_format();
+            freeze::announce_freeze_scope();
             // NOT under `cfg(debug_assertions)`, unlike the three `dev_harness`
             // calls above, and that is the whole point of `I-42`: the build this
             // switch exists for is the release build, whose log otherwise
@@ -294,12 +324,21 @@ pub fn run() -> tauri::Result<()> {
                     &error,
                 );
             }
-            // ADR-0019: permanent, one-time exclusion from every capture API.
-            // Not fatal — a failed call degrades to "the overlay is visible in
-            // captures" (decision 4), which is worse than the norm but not a
-            // reason to refuse to start.
+            // ADR-0019: excluded from every capture API unless the user has
+            // asked otherwise. Not fatal — a failed call degrades to "the
+            // overlay is visible in captures" (decision 4), which is worse than
+            // the norm but not a reason to refuse to start.
+            //
+            // ⚠️ **No longer one-time**, and the word is struck rather than
+            // quietly dropped: roadmap 1.14 ships the *Show UP-TAKE in screen
+            // recordings* switch ADR-0019 always named, so the affinity is set
+            // again whenever that setting changes. What is unchanged is the
+            // default and the reasoning behind it — off, so the overlay is
+            // excluded until the user says otherwise.
             #[cfg(windows)]
-            if let Err(error) = overlay::exclude_from_capture(app.handle()) {
+            if let Err(error) =
+                overlay::apply_capture_exclusion(app.handle(), settings::current().show_in_screen_recordings)
+            {
                 diagnostics::trouble("overlay", &error);
             }
             // Registered before the tray: architecture §4's mitigation is
@@ -333,13 +372,24 @@ pub fn run() -> tauri::Result<()> {
             // above already summons, so launching UP-TAKE gives the same answer
             // whether or not it was running.
             //
-            // NOT the whole of ADR-0044. A launch *with Windows* must stay
-            // Hidden, recognised only by an argument the autostart registration
-            // itself passes, never inferred from the environment (decision 2).
-            // There is no autostart in this codebase yet, so every launch that
-            // reaches this line is a hand launch. Roadmap 1.14 builds the
-            // registration and adds that check here (`I-391`).
-            overlay::summon(app.handle());
+            // ADR-0044 in full, since roadmap 1.14. A launch *with Windows*
+            // stays Hidden, recognised **only** by an argument the autostart
+            // registration itself passes and never inferred from the
+            // environment (decision 2) — which is why this reads the command
+            // line rather than asking Windows whether it started us. `I-391`
+            // closed: `autostart` writes the registration and puts that
+            // argument in it.
+            //
+            // The hand-launch case is a setting now, defaulting to Placing
+            // (`UI-UX.md` section 4). A user who has chosen Hidden gets the
+            // same startup an autostart does; the argument still decides
+            // whether this *is* a hand launch, and the setting decides only
+            // what a hand launch does.
+            if !autostart::launched_by_windows(std::env::args())
+                && settings::current().hand_launch_state == settings::HandLaunchState::Placing
+            {
+                overlay::summon(app.handle());
+            }
             Ok(())
         })
         // `build` + `run` rather than `run(context)` alone, to reach

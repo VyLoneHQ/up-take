@@ -240,34 +240,47 @@ pub(crate) fn overlay_window(app: &AppHandle) -> Result<WebviewWindow, String> {
         .ok_or_else(|| format!("Window '{WINDOW_LABEL}' does not exist — check tauri.conf.json."))
 }
 
-/// Permanently excludes the overlay from every capture API — its own,
-/// screen-sharing, and every other process's
+/// Excludes the overlay from every capture API — its own, screen-sharing, and
+/// every other process's — or stops doing so
 /// ([ADR-0019](../../../Projects/UP-TAKE/DECISIONS/ADR-0019-overlay-excluded-from-capture.md)).
 ///
-/// Called once from `setup`, right after the window exists. **Never** toggled
-/// around a capture — decision 1 is explicit that `uptake-capture` stays
-/// ignorant of the overlay forever, which is what makes a self-containing live
-/// mirror structurally impossible rather than merely defended against. Would
-/// need re-applying only if the window were ever destroyed and recreated,
-/// which nothing here does today (`hide` keeps it alive).
+/// # What roadmap 1.14 changed here, and what it did not
+///
+/// ⚠️ **This was `exclude_from_capture`, called once, and its docs said
+/// *permanently*.** ADR-0019 always named a *Show UP-TAKE in screen
+/// recordings* setting; 1.14 ships it, so the affinity is now set at startup
+/// **and** whenever that setting changes. The word is struck rather than
+/// dropped because a reader who remembers *permanent* needs to see it go.
+///
+/// **Decision 1 is untouched, and it is the one that matters.** It says
+/// `uptake-capture` stays ignorant of the overlay forever, which is what makes
+/// a self-containing live mirror structurally impossible rather than merely
+/// defended against. Nothing here toggles the affinity **around a capture**;
+/// it changes only when a person changes a setting, and the capture path still
+/// cannot see this window or ask about it.
 ///
 /// A failed call **degrades, it does not abort** (decision 4): below Windows
 /// 10.0.19041 `SetWindowDisplayAffinity` fails, logged rather than treated as
 /// a startup failure, and the overlay is then visible in captures like any
 /// other window.
 #[cfg(windows)]
-pub fn exclude_from_capture(app: &AppHandle) -> Result<(), String> {
+pub fn apply_capture_exclusion(app: &AppHandle, show_in_recordings: bool) -> Result<(), String> {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE,
+        SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
     };
     let window = overlay_window(app)?;
     let hwnd = window
         .hwnd()
         .map_err(|e| format!("Could not get the overlay window handle: {e}"))?
         .0;
+    let affinity = if show_in_recordings {
+        WDA_NONE
+    } else {
+        WDA_EXCLUDEFROMCAPTURE
+    };
     // SAFETY: `hwnd` is a live top-level window handle owned by this process,
     // valid for the duration of this call.
-    let ok = unsafe { SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) };
+    let ok = unsafe { SetWindowDisplayAffinity(hwnd, affinity) };
     if ok == 0 {
         return Err(
             "SetWindowDisplayAffinity failed (Windows build below 10.0.19041?) — the overlay \
@@ -1835,7 +1848,7 @@ pub(crate) fn emit_unpin(app: &AppHandle, id: AreaId) -> Result<(), String> {
 /// the message is genuinely posted. One short-lived thread per area creation,
 /// next to the capture thread `capture_on_create` already spawns.
 pub(crate) fn area_created(app: &AppHandle, kind: AreaType) {
-    let exits_placement = kind.after_create() == AfterCreate::ExitPlacement;
+    let exits_placement = leaves_placement(kind);
     let app = app.clone();
     std::thread::spawn(move || {
         let handle = app.clone();
@@ -1848,6 +1861,35 @@ pub(crate) fn area_created(app: &AppHandle, kind: AreaType) {
             eprintln!("overlay: could not apply the after-create transition: {error}");
         }
     });
+}
+
+/// Whether creating an area of `kind` hands the screen back (`ADR-0023`).
+///
+/// # Why the user's half is here and not in `uptake_core`
+///
+/// [`AreaType::after_create`] describes the *type*: what a Screenshot area is,
+/// independent of who is using it. The setting describes the *user*. The core
+/// crate has no settings and should not gain them for one row -- it is the
+/// crate the area model is tested in, and a preference reaching into it would
+/// make every one of those tests depend on a global.
+///
+/// So the type still answers `StayInPlacement` for everything, and this is the
+/// one place the preference is added on top. ✅ **Roadmap 1.14 is what makes
+/// [`AfterCreate::ExitPlacement`] reachable at all**, which the module docs on
+/// [`area_created`] predicted and already guarded: that path runs through a
+/// spawned thread precisely so this transition does not execute a global
+/// `SPI_SETCURSORS` reload from inside a low-level mouse hook (`F-33`'s class).
+///
+/// **Screenshot only, deliberately.** The setting is worded *leave placing
+/// after a screenshot*, and `ADR-0023` is about the screenshot gesture. A
+/// Filter or an OCR area created while the switch is on stays in Placement,
+/// because nothing has decided otherwise and widening a setting past its own
+/// sentence is how a shipped default stops matching its record.
+fn leaves_placement(kind: AreaType) -> bool {
+    if kind.after_create() == AfterCreate::ExitPlacement {
+        return true;
+    }
+    kind == AreaType::Screenshot && crate::settings::current().leave_placing_after_screenshot
 }
 
 /// Locks a mutex, treating poisoning as recoverable — the state under it is a
@@ -2044,6 +2086,32 @@ pub fn overlay_request_state(app: AppHandle) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_leave_placing_setting_is_screenshot_only() {
+        // The setting is worded "leave placing after a screenshot" and
+        // ADR-0023 is about the screenshot gesture. Widening it to every type
+        // would be a shipped default that no longer matches its record, so the
+        // narrowness is asserted rather than left to the reader.
+        //
+        // This is the switch-OFF half. `settings::current()` returns the
+        // defaults in a test process, because nothing calls `settings::init`,
+        // and the switch-ON half would need a store a test can write --
+        // `settings::save` writes to the real %APPDATA%. Recorded rather than
+        // faked; the backlog row this change opens is where that sits.
+        for kind in [
+            AreaType::Default,
+            AreaType::Screenshot,
+            AreaType::Filter,
+            AreaType::Ocr,
+            AreaType::Upscale,
+        ] {
+            assert!(
+                !leaves_placement(kind),
+                "{kind:?} left placing with the setting off"
+            );
+        }
+    }
 
     use crate::payload_keys::{assert_keys, assert_payload_coverage};
 

@@ -1,7 +1,5 @@
 import { describe, expect, it } from 'vitest';
 
-import overlayStateTs from './overlay-state.ts?raw';
-
 /**
  * Every Rust module in the crate, read eagerly.
  *
@@ -14,6 +12,27 @@ import overlayStateTs from './overlay-state.ts?raw';
  * arrives here without an edit.
  */
 const RUST_SOURCES = import.meta.glob('../../src-tauri/src/*.rs', {
+  eager: true,
+  query: '?raw',
+  import: 'default',
+}) as Record<string, string>;
+
+/**
+ * Every TypeScript module that may declare a wire type, read the same way.
+ *
+ * ⚠️ **This was `import overlayStateTs from './overlay-state.ts?raw'`**, a
+ * single literal path -- which is the exact per-file closure the paragraph
+ * above says `I-96` `F5` removed from the Rust half, left standing on this one
+ * in the same change. Roadmap 1.14 is the third module that comment predicted:
+ * `settings-model.ts` declares `Settings` and `Facts`, Rust pins keys for both,
+ * and the pairing found neither until this glob replaced the import.
+ *
+ * It was not a silent failure -- `leaves no Rust payload unpaired` went red, as
+ * designed. The defect was that it could only ever go red for whoever happened
+ * to add the payload, and the fix was an edit here that nothing would have
+ * asked for.
+ */
+const TS_SOURCES = import.meta.glob(['./*.ts', '!./*.test.ts'], {
   eager: true,
   query: '?raw',
   import: 'default',
@@ -84,6 +103,23 @@ const RENAMED: Record<string, string> = {
  * independent review; writing the distinction down here is the answer to it.
  */
 const PAIRS_EXEMPT: Record<string, string> = {
+  // --- not payloads, from the modules the glob above now reaches ----------
+  Section:
+    'settings-model.ts. A group of settings rows with a label, built on this ' +
+    'side from the settings and facts that DID arrive; nothing sends it.',
+  Pane: 'settings-model.ts. Built on this side, like Section.',
+  AppearanceVars:
+    'appearance.ts. The CSS custom properties computed from two settings ' +
+    'that arrived as percentages; a style attribute, not a wire shape.',
+  KeyRow:
+    'coach-copy.ts. One line of the keybind reference, composed on this side ' +
+    'from a key name written in that file and a translated sentence.',
+  TypeRow: 'coach-copy.ts. One area type on the tour step 2, like KeyRow.',
+  CssRect:
+    'regions.ts. CSS pixels, converted on this side from the physical ' +
+    'geometry Rust sends (ADR-0011 makes the WebView the authority on scale, ' +
+    'so Rust deliberately does not pre-convert).',
+
   FrozenStill:
     'wire-derived but not a Rust payload TYPE: serde sends a bare tuple ' +
     '(x, y, w, h, url) and `stillsFromWire` builds this shape on arrival, so ' +
@@ -222,9 +258,6 @@ function tsInterfaceKeys(source: string): Map<string, string[]> {
     }
     found.set(opens[1], keys.slice().sort());
   }
-  if (found.size === 0) {
-    throw new Error('no exported interfaces found in overlay-state.ts');
-  }
   return found;
 }
 
@@ -234,7 +267,16 @@ const rust = new Map(
     return [...rustPayloadKeys(source, file)];
   }),
 );
-const ts = tsInterfaceKeys(overlayStateTs);
+const ts = new Map(
+  Object.values(TS_SOURCES).flatMap((source) => [...tsInterfaceKeys(source)]),
+);
+if (ts.size === 0) {
+  // The silent-empty case the old per-file throw guarded, kept at the
+  // granularity where it is now true: a reshaped `export interface` that this
+  // extractor stops recognising would otherwise make every pairing below
+  // agree with nothing.
+  throw new Error('no exported interfaces found in any TypeScript module');
+}
 
 describe('every payload arrives under the keys this side reads', () => {
   it('finds a payload table on both sides', () => {
@@ -249,7 +291,7 @@ describe('every payload arrives under the keys this side reads', () => {
     const declared = ts.get(tsName);
     expect(
       declared,
-      `Rust pins keys for \`${name}\` and \`overlay-state.ts\` declares no \`${tsName}\`. Add the interface, or map the name in RENAMED with a reason.`,
+      `Rust pins keys for \`${name}\` and no TypeScript module declares \`${tsName}\`. Add the interface, or map the name in RENAMED with a reason.`,
     ).toBeDefined();
     expect(declared).toEqual(rust.get(name));
   });
@@ -276,12 +318,13 @@ describe('every payload arrives under the keys this side reads', () => {
   it('leaves no TypeScript payload interface unpaired', () => {
     // `I-96` `F7`: the pairing ran Rust -> TypeScript only, while this file's
     // own doc called it complete. A ghost interface with no Rust counterpart
-    // passed, and `overlay-state.ts` carries more exported interfaces than
+    // passed, and the modules read here carry more exported interfaces than
     // there are payloads, so the `ts.size >= 12` floor had slack to hide it in.
     //
     // The other direction is not symmetric and must not be written as though it
-    // were: `overlay-state.ts` legitimately declares interfaces that are not
-    // payloads at all. So this compares against the set the extractor already
+    // were: these modules legitimately declare interfaces that are not
+    // payloads at all, and since the glob replaced the single import there are
+    // more of them, from more files. PAIRS_EXEMPT names each with its module. So this compares against the set the extractor already
     // decided are payload-shaped, and PAIRS_EXEMPT names the ones that are
     // deliberately TypeScript-only, with a reason each.
     const rustNames = new Set(

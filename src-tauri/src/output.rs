@@ -1840,15 +1840,29 @@ fn set_clipboard_png(png: &[u8]) -> Result<(), String> {
 // Save to file: Pictures\UP-TAKE\, timestamp naming, collision suffix.
 // ---------------------------------------------------------------------------
 
-/// Writes `png` to `Pictures\UP-TAKE\UP-TAKE_YYYY-MM-DD_HH-MM-SS.png`,
-/// creating the directory on first use and appending `_2`, `_3`, … on a
-/// same-second collision.
-fn write_file(app: &AppHandle, png: &[u8]) -> Result<(), String> {
+/// Where Save writes: the user's chosen folder, or `Pictures\UP-TAKE`.
+///
+/// **Resolved at the moment of the save, never stored** (roadmap 1.14). The
+/// default is a *rule* rather than a path, so a user whose Pictures folder
+/// moves — to OneDrive, most often — keeps saving where their pictures now
+/// are. Storing the resolved path at first run would have pinned them to the
+/// old one, silently, with the setting still reading as the default.
+pub(crate) fn save_directory(app: &AppHandle) -> Result<PathBuf, String> {
+    if let Some(chosen) = crate::settings::current().save_directory {
+        return Ok(chosen);
+    }
     let pictures = app
         .path()
         .picture_dir()
         .map_err(|error| format!("could not resolve the Pictures folder: {error}"))?;
-    let dir = pictures.join("UP-TAKE");
+    Ok(pictures.join("UP-TAKE"))
+}
+
+/// Writes `png` to `<the save folder>\UP-TAKE_YYYY-MM-DD_HH-MM-SS.png`,
+/// creating the directory on first use and appending `_2`, `_3`, … on a
+/// same-second collision.
+fn write_file(app: &AppHandle, png: &[u8]) -> Result<(), String> {
+    let dir = save_directory(app)?;
     fs::create_dir_all(&dir)
         .map_err(|error| format!("could not create {}: {error}", dir.display()))?;
     let path = unique_path(&dir, &timestamp_name());
