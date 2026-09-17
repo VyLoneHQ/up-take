@@ -28,12 +28,23 @@ import { LANGUAGES } from './strings';
 /**
  * `UI-UX.md` section 4, transcribed. The two hotkey rows are `fact` here.
  *
- * ⚠️ **Transcribed means transcribed, and for six hours it did not.** The
+ * ⚠️ **Transcribed means transcribed, and for a while it did not.** The
  * auto-save row was added to this list when the founder asked for it on the rig
- * and to section 4 only after the independent review pointed out that a test
- * claiming to transcribe a table listed a row the table did not have. The
- * document is the check-list; when the two disagree, the document is what has
- * to change first or this constant is just a second opinion.
+ * and to section 4 hours later. The document is the check-list; when the two
+ * disagree, the document is what has to change first, or this constant is just
+ * a second opinion.
+ *
+ * ⛔ **The first version of this paragraph said the document had already been
+ * corrected, and it had not.** The edit existed in a working tree and was never
+ * committed, while the commit carrying this comment asserted it as done. Round
+ * 2 of the Sonnet 5 review read the planning repository at its real HEAD, found
+ * the row absent, and returned REQUEST_CHANGES on that alone. It was right.
+ * Landed for real in workspace `83d8512d`.
+ *
+ * **Nothing can check this, which is the actual defect.** The table and this
+ * constant are in different repositories with no submodule, no shared CI and
+ * no probe, so the sync is a rule somebody has to remember, and it survived six
+ * hours. UP-TAKE backlog `I-413`.
  */
 const INVENTORY: { pane: PaneId; id: string; shape: Row['shape'] }[] = [
   { pane: 'general', id: 'start-with-windows', shape: 'toggle' },
