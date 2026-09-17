@@ -240,8 +240,8 @@ pub(crate) fn overlay_window(app: &AppHandle) -> Result<WebviewWindow, String> {
         .ok_or_else(|| format!("Window '{WINDOW_LABEL}' does not exist — check tauri.conf.json."))
 }
 
-/// Excludes the overlay from every capture API — its own, screen-sharing, and
-/// every other process's — or stops doing so
+/// Excludes the overlay from every capture API (its own, screen-sharing, and
+/// every other process's), or stops doing so
 /// ([ADR-0019](../../../Projects/UP-TAKE/DECISIONS/ADR-0019-overlay-excluded-from-capture.md)).
 ///
 /// # What roadmap 1.14 changed here, and what it did not

@@ -168,13 +168,13 @@ pub fn install(app: &AppHandle) {
 /// surface that could hold this"*, and 1.14 has landed.** The surface exists;
 /// the dialog stays, and the reason has narrowed rather than gone away. The
 /// settings window shows the two shortcuts **read-only** in part 1, so it can
-/// tell a user what the combination is and cannot yet let them change it —
+/// tell a user what the combination is and cannot yet let them change it,
 /// which is the half that would actually help somebody whose hotkey another
 /// application has taken (`M-9`). It is also not open at the moment this
 /// fails: registration happens during `setup`, and nothing has been clicked.
 /// **Revisit when the hotkey rows become rebindable**, which is the question
 /// `UI-UX.md` section 3.2's three-control-shapes rule leaves for the founder.
-/// stderr is invisible in an installed build. Non-blocking —
+/// stderr is invisible in an installed build. Non-blocking:
 /// during `setup` the event
 /// loop has not started, so a blocking dialog would deadlock the startup it is
 /// reporting on.

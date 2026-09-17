@@ -563,7 +563,7 @@ pub(crate) fn announce_display_format() {
         _ => "the Held picture quality setting",
     };
     eprintln!(
-        "freeze: display stills encode as {} ({source}, ADR-0027) — the DISPLAY path only; \
+        "freeze: display stills encode as {} ({source}, ADR-0027). The DISPLAY path only; \
          crops still come from the lossless bitmap",
         display_format().2
     );
@@ -596,13 +596,13 @@ pub(crate) fn set_display_format(quality: crate::settings::HeldPictureQuality) {
                 // is how this line was wrong: it said "staying on png" while
                 // the default had become JPEG, so a mistyped variable would
                 // have told a rig operator PNG and handed them a JPEG number.
-                // That is `UT-F-46` exactly — the defect this function's own
+                // That is `UT-F-46` exactly, the defect this function's own
                 // doc says it exists to prevent. No branch here may name a
                 // format it did not load, which is why the store happens first
                 // and the message reads it back.
                 DISPLAY_FORMAT.store(slot_for(quality), Ordering::SeqCst);
                 eprintln!(
-                    "freeze: ignoring UPTAKE_FREEZE_FORMAT={raw:?} — expected png, jpeg or bmp; \
+                    "freeze: ignoring UPTAKE_FREEZE_FORMAT={raw:?}: expected png, jpeg or bmp; \
                      staying on {}",
                     display_format().2
                 );

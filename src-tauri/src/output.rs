@@ -1844,7 +1844,7 @@ fn set_clipboard_png(png: &[u8]) -> Result<(), String> {
 ///
 /// **Resolved at the moment of the save, never stored** (roadmap 1.14). The
 /// default is a *rule* rather than a path, so a user whose Pictures folder
-/// moves — to OneDrive, most often — keeps saving where their pictures now
+/// moves (to OneDrive, most often) keeps saving where their pictures now
 /// are. Storing the resolved path at first run would have pinned them to the
 /// old one, silently, with the setting still reading as the default.
 pub(crate) fn save_directory(app: &AppHandle) -> Result<PathBuf, String> {

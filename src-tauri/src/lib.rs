@@ -270,7 +270,7 @@ pub fn run() -> tauri::Result<()> {
             // The display format and the freeze scope are both settings now.
             // These two calls say which value is in force and where it came
             // from, so a rig log still names the condition that produced its
-            // numbers — which is the whole of what the old `init_*` pair was
+            // numbers, which is the whole of what the old `init_*` pair was
             // protecting (`UT-F-46`).
             freeze::announce_display_format();
             freeze::announce_freeze_scope();
@@ -325,7 +325,7 @@ pub fn run() -> tauri::Result<()> {
                 );
             }
             // ADR-0019: excluded from every capture API unless the user has
-            // asked otherwise. Not fatal — a failed call degrades to "the
+            // asked otherwise. Not fatal: a failed call degrades to "the
             // overlay is visible in captures" (decision 4), which is worse than
             // the norm but not a reason to refuse to start.
             //
@@ -333,7 +333,7 @@ pub fn run() -> tauri::Result<()> {
             // quietly dropped: roadmap 1.14 ships the *Show UP-TAKE in screen
             // recordings* switch ADR-0019 always named, so the affinity is set
             // again whenever that setting changes. What is unchanged is the
-            // default and the reasoning behind it — off, so the overlay is
+            // default and the reasoning behind it: off, so the overlay is
             // excluded until the user says otherwise.
             #[cfg(windows)]
             if let Err(error) =
@@ -375,7 +375,7 @@ pub fn run() -> tauri::Result<()> {
             // ADR-0044 in full, since roadmap 1.14. A launch *with Windows*
             // stays Hidden, recognised **only** by an argument the autostart
             // registration itself passes and never inferred from the
-            // environment (decision 2) — which is why this reads the command
+            // environment (decision 2), which is why this reads the command
             // line rather than asking Windows whether it started us. `I-391`
             // closed: `autostart` writes the registration and puts that
             // argument in it.
