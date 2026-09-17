@@ -28,7 +28,8 @@
 //! decision's fourth clause. Nothing in either repository watches crates.io, so
 //! that pin is a dated observation and not a standing truth.
 //!
-//! [`paddle`] is PP-OCRv4 behind [`Engine`] -- roadmap 1.11. **Five of its six
+//! [`paddle`] is PaddleOCR's PP-OCRv6_small behind [`Engine`] -- roadmap 1.11,
+//! which built it for PP-OCRv4. **Five of its six
 //! stages are pure**: the resize, the probability-map post-processing, the
 //! geometry, the crop and CTC decode, and the reading-order sort all take
 //! plain data and are tested in CI with no runtime and no model file present.

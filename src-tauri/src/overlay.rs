@@ -366,9 +366,9 @@ pub(crate) const fn type_name(kind: AreaType) -> &'static str {
     }
 }
 
-/// Summons the overlay into Placement — the tray, a single-instance relaunch,
-/// and the debug startup all enter here. Idempotent: summoning an
-/// already-visible overlay re-shows and re-focuses it.
+/// Summons the overlay into Placement. The tray, a single-instance relaunch
+/// and the startup show on a hand launch all enter here. Idempotent: summoning
+/// an already-visible overlay re-shows and re-focuses it.
 pub fn summon(app: &AppHandle) {
     drive(app, Event::Summon);
 }
@@ -438,6 +438,11 @@ fn drive(app: &AppHandle, event: Event) {
     if let Err(error) = apply(app, target) {
         eprintln!("overlay: could not apply state {target:?}: {error}");
     }
+    // The first-run tour hears about every settled state, after the state's own
+    // effect so the coach is drawn over a window that is already showing
+    // (roadmap 1.18). `collapse_living_if_empty` is the one other caller of
+    // `apply`, and it says the same thing.
+    crate::first_run::on_state(app, target);
 }
 
 /// Performs a state's effect: show or hide the window (which also (de)activates
@@ -1387,6 +1392,9 @@ fn collapse_living_if_empty(app: &AppHandle) {
     if let Err(error) = apply(app, target) {
         eprintln!("overlay: could not apply state {target:?}: {error}");
     }
+    // A transition like any other as far as the first-run tour is concerned,
+    // and it does not pass through `drive`, so it tells the tour itself.
+    crate::first_run::on_state(app, target);
 }
 
 /// Pins an area to a stacking tier (ADR-0013).
@@ -1832,6 +1840,9 @@ pub(crate) fn area_created(app: &AppHandle, kind: AreaType) {
     std::thread::spawn(move || {
         let handle = app.clone();
         if let Err(error) = app.run_on_main_thread(move || {
+            // Before the transition, so a step that moves on for this area is
+            // drawn by the emit the transition's own notification makes.
+            crate::first_run::on_area_created(&handle, kind);
             drive(&handle, Event::AreaCreated { exits_placement });
         }) {
             eprintln!("overlay: could not apply the after-create transition: {error}");
@@ -2016,15 +2027,17 @@ pub fn overlay_dismiss_focused(app: AppHandle) -> Result<(), String> {
 
 /// IPC surface: the frontend requests the current state on mount.
 ///
-/// A webview that loaded *after* the last transition — the debug startup show,
-/// or a dev reload — would otherwise render no indicator and no areas until the
-/// next change. This re-emits both the current state and the area set so the
-/// overlay is correct immediately.
+/// A webview that loaded *after* the last transition (the startup show, which
+/// `setup` can fire before the page has mounted, or a dev reload) would
+/// otherwise render no indicator and no areas until the next change. This
+/// re-emits both the current state and the area set so the overlay is correct
+/// immediately.
 #[tauri::command]
 pub fn overlay_request_state(app: AppHandle) -> Result<(), String> {
     let cell = app.state::<Mutex<OverlayState>>();
     let state = *lock(&cell);
     emit_state(&app, state)?;
+    crate::first_run::emit(&app);
     emit_areas(&app)
 }
 

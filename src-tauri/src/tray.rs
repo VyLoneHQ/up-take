@@ -4,11 +4,17 @@
 //! quitting is a tray action, full stop. This module is therefore the only
 //! place in the app that calls [`AppHandle::exit`].
 //!
-//! Which is exactly why a failure here is reported to the user rather than
-//! logged. The overlay window is `visible: false`, `skipTaskbar: true` and
-//! `decorations: false`, and the startup `overlay::show` is debug-only — so a
-//! release build whose tray did not come up has no tray, no taskbar entry, no
-//! window and no quit command (the startup `overlay::summon` is debug-only).
+//! Which is exactly why a failure here is reported to the user, and since
+//! task 1.15, logged as well. ⚠️ This said "rather than logged" until then;
+//! corrected by round 1 of `PR #94`'s review, which found the sentence still
+//! standing in a file that same change had edited. The overlay window is `visible: false`, `skipTaskbar: true` and
+//! `decorations: false`. Since roadmap 1.34 a launch does show it, in
+//! Placement, but the first `Esc` hands the screen back, and with no areas
+//! that is Hidden. So a release build whose tray did not come up is, one
+//! keypress after launch, a process with no tray, no taskbar entry, no window
+//! and no quit command. ⚠️ This said the startup summon was debug-only, which
+//! was true until 1.34 and made the same conclusion sound unconditional; it
+//! now holds from the first `Esc` rather than from launch.
 //! `eprintln!` reaches nobody there (`main.rs`
 //! sets `windows_subsystem = "windows"`), which would leave that user with a
 //! process they cannot close and no idea why. Same reasoning as
@@ -18,7 +24,6 @@
 use tauri::AppHandle;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
 use crate::{hotkey, overlay};
 
@@ -50,24 +55,25 @@ pub fn install(app: &AppHandle) {
 /// during `setup`, before the event loop starts, so a blocking dialog would
 /// deadlock the startup it is reporting on.
 fn report_failure(app: &AppHandle, error: &str) {
-    eprintln!("tray: could not create the tray icon: {error}");
-    let detail = format!(
-        "UP-TAKE has no tray icon, so it has no menu and no Quit command.\n\n\
-         {} still summons and dismisses the overlay, so the app is usable. \
-         To close it, end `up-take.exe` from Task Manager.\n\n\
-         Restarting UP-TAKE usually clears this. If it persists, please report it \
-         with the details below.\n\n{error}",
-        hotkey::SUMMON_LABEL
+    use crate::strings::{self, Text};
+    let detail = strings::fill(
+        Text::TrayUnavailableDetail,
+        &[("hotkey", hotkey::SUMMON_LABEL), ("error", error)],
     );
-    app.dialog()
-        .message(detail)
-        .kind(MessageDialogKind::Warning)
-        .title("UP-TAKE — tray unavailable")
-        .show(|_| {});
+    // The tailored message above is this module's; the log-and-show mechanics
+    // are shared with `hotkey` through `diagnostics` (task 1.15), which is the
+    // half that was duplicated.
+    crate::diagnostics::report_failure(
+        app,
+        "tray: could not create the tray icon",
+        strings::text(Text::TrayUnavailableTitle),
+        &detail,
+    );
 }
 
 /// Builds the tray icon and its menu.
 fn build(app: &AppHandle) -> Result<(), String> {
+    use crate::strings::{self, Text};
     // Sourced from `bundle.icon` in tauri.conf.json — the same icon already
     // embedded for the window and the installer, so there is nothing new to
     // ship. `None` here means the config path is broken, which a menu item
@@ -80,13 +86,19 @@ fn build(app: &AppHandle) -> Result<(), String> {
     let show = MenuItem::with_id(
         app,
         SHOW_ID,
-        format!("Show UP-TAKE ({})", hotkey::SUMMON_LABEL),
+        strings::fill(Text::TrayShow, &[("hotkey", hotkey::SUMMON_LABEL)]),
         true,
         None::<&str>,
     )
     .map_err(|e| format!("Could not build the Show menu item: {e}"))?;
-    let quit = MenuItem::with_id(app, QUIT_ID, "Quit", true, None::<&str>)
-        .map_err(|e| format!("Could not build the Quit menu item: {e}"))?;
+    let quit = MenuItem::with_id(
+        app,
+        QUIT_ID,
+        strings::text(Text::TrayQuit),
+        true,
+        None::<&str>,
+    )
+    .map_err(|e| format!("Could not build the Quit menu item: {e}"))?;
     let menu = Menu::with_items(app, &[&show, &quit])
         .map_err(|e| format!("Could not build the tray menu: {e}"))?;
 

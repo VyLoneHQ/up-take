@@ -7,6 +7,7 @@
  */
 
 import type { CssRect, Invoke } from './regions';
+import { type Language, text } from './strings';
 
 /** Which of the three interaction states the overlay is in (ADR-0012). */
 export type OverlayStateName = 'hidden' | 'placement' | 'living';
@@ -229,23 +230,26 @@ export interface OcrPayload {
 /**
  * What an area shows for a given OCR state.
  *
- * The recognised text is returned unchanged; every other state gets a sentence.
+ * The recognised text is returned unchanged; every other state gets a sentence,
+ * in the user's language (roadmap 1.38). A reason Rust gives for `unavailable`
+ * or `failed` is shown as it arrives, in the language it was produced in, the
+ * same way a failure dialog shows its reason.
  * **`empty` is a success and reads like one** -- an area drawn over a picture
  * legitimately has no text in it, and wording that as a failure would teach the
  * user to ignore the message that matters.
  */
-export function ocrLine(payload: OcrPayload): string {
+export function ocrLine(language: Language, payload: OcrPayload): string {
   switch (payload.status) {
     case 'working':
-      return 'Reading…';
+      return text(language, 'ocr.reading');
     case 'text':
       return payload.detail ?? '';
     case 'empty':
-      return 'No text found';
+      return text(language, 'ocr.empty');
     case 'unavailable':
-      return payload.detail ?? 'OCR is unavailable';
+      return payload.detail ?? text(language, 'ocr.unavailable');
     case 'failed':
-      return payload.detail ?? 'OCR failed';
+      return payload.detail ?? text(language, 'ocr.failed');
     default:
       // Unreachable while this union matches `Status::as_str`, and deliberately
       // not `never`-asserted into a crash: a Rust-side status this build does
@@ -348,6 +352,30 @@ export interface MenuPayload {
 }
 
 /**
+ * The first-run coach as Rust asks for it drawn (roadmap 1.18, ADR-0043).
+ *
+ * Rust owns the tour: which step, whether it shows, which monitor it belongs
+ * on. This side draws the panel and reports back where it drew it, because
+ * only the WebView knows how tall wrapped prose is. See
+ * `src-tauri/src/first_run.rs` for why the geometry flows this way round.
+ */
+export interface CoachView {
+  /** 1 to 4. */
+  step: number;
+  /** Whether the overlay is in Living, which changes step 3's closing line. */
+  living: boolean;
+  /** The monitor the panel belongs on, physical px. */
+  monitor: PhysRect;
+  /** Echoed back with the layout report, so Rust can refuse a stale one. */
+  generation: number;
+}
+
+/** The payload of `overlay://coach`; `coach` is null when nothing is shown. */
+export interface CoachPayload {
+  coach: CoachView | null;
+}
+
+/**
  * A magnification as the badge prints it: `2×`, `1.25×`, `3.5×`.
  *
  * **Trailing zeros are dropped rather than padded to a fixed width.** The
@@ -408,23 +436,33 @@ export interface AreaFrame {
  * here are checked against the Rust source by a test that already exists, and
  * only the *words* are new.
  *
- * # The words are placeholders and 1.18 owns them
+ * # The words are shared with the first-run tour
  *
- * ADR-0028 leaves *"what the type label says"* deliberately open and assigns it
- * to roadmap 1.18, because the same words have to teach the model in the
- * tutorial. These match `conversion_label`'s spelling in `placement.rs` for the
- * four types that have behaviour, so the bar and the area menu do not call the
- * same type two different things today.
+ * ADR-0028 left *"what the type label says"* open and assigned it to roadmap
+ * 1.18, because the same words have to teach the model in the tutorial. 1.18's
+ * tour now reads its type names from here (`coach-copy.ts`, pinned by
+ * `coach-copy.test.ts`), so the tour, the bar and the area menu say one word
+ * for each type. These match `conversion_label`'s spelling in `placement.rs`
+ * for the four types that have behaviour. Whether `ocr` should read "Text" for
+ * the ordinary user, as the 1.18 mockup had it, is an open naming question and
+ * would change all three at once.
+ *
+ * # In the user's language
+ *
+ * Since roadmap 1.38 the words come from `locales/strings.json`, the file the
+ * Rust menu reads too, in the language Rust chose.
  */
-export const KIND_LABELS: Record<AreaKind, string> = {
-  default: 'Default',
-  screenshot: 'Screenshot',
-  record: 'Record',
-  ocr: 'OCR',
-  upscale: 'Upscale',
-  analysis: 'Analysis',
-  filter: 'Filter',
-};
+export function kindLabels(language: Language): Record<AreaKind, string> {
+  return {
+    default: text(language, 'kind.default'),
+    screenshot: text(language, 'kind.screenshot'),
+    record: text(language, 'kind.record'),
+    ocr: text(language, 'kind.ocr'),
+    upscale: text(language, 'kind.upscale'),
+    analysis: text(language, 'kind.analysis'),
+    filter: text(language, 'kind.filter'),
+  };
+}
 
 /** One drawable row. */
 export interface MenuItemFrame {
@@ -452,6 +490,9 @@ export interface MenuFrame {
  * Returns nothing when the `dpr` is unusable, matching {@link physRectsToCss} —
  * an area drawn at a `NaN` position is worse than an area not drawn, because it
  * still cannot be clicked but now also hides what is underneath.
+ *
+ * `labels` are the type names in the user's language, from {@link kindLabels}.
+ * The page passes them; the English default is for tests that do not care.
  */
 export function areaFramesCss(
   areas: readonly AreaView[],
@@ -460,6 +501,7 @@ export function areaFramesCss(
   hoveredId: number | null,
   draggedId: number | null = null,
   hoverChromeOnly = false,
+  labels: Readonly<Record<AreaKind, string>> = kindLabels('en'),
 ): AreaFrame[] {
   const rects = physRectsToCss(
     areas.map((area) => area.rect),
@@ -510,7 +552,7 @@ export function areaFramesCss(
     // user is concerned (all of an area's outside chrome), and a hover that
     // revealed two of the three would read as chrome failing to draw.
     showBar: area.id === hoveredId && area.id !== draggedId,
-    label: KIND_LABELS[area.kind],
+    label: labels[area.kind],
     source: area.id === draggedId,
   }));
 }
@@ -649,6 +691,53 @@ export function physRectToCss(
 ): CssRect | null {
   if (rect === null) return null;
   return physRectsToCss([rect], origin, dpr)[0] ?? null;
+}
+
+/**
+ * The inverse of {@link physRectToCss}: a rect in the overlay's CSS viewport,
+ * as physical virtual-desktop pixels.
+ *
+ * Used for the first-run coach's layout report (roadmap 1.18), and it has to
+ * be THE inverse rather than a second derivation: Rust hit-tests presses
+ * against what this returns, so a rect off by the origin would put a button
+ * somewhere the user is not aiming. The round trip is tested.
+ *
+ * Rounded outward, so a button is never a pixel smaller as a target than it
+ * looks. Returns null for a `dpr` the forward conversion also refuses.
+ */
+export function cssRectToPhys(
+  rect: CssRect,
+  origin: Origin,
+  dpr: number,
+): PhysRect | null {
+  if (!Number.isFinite(dpr) || dpr <= 0) return null;
+  const [ox, oy] = origin;
+  const left = Math.floor(rect.x * dpr + ox);
+  const top = Math.floor(rect.y * dpr + oy);
+  const right = Math.ceil((rect.x + rect.width) * dpr + ox);
+  const bottom = Math.ceil((rect.y + rect.height) * dpr + oy);
+  return [left, top, Math.max(0, right - left), Math.max(0, bottom - top)];
+}
+
+/**
+ * Tells Rust where the coach's panel and buttons were drawn. Never throws, for
+ * the reason {@link escapeOverlay} does not: the coach is on screen either
+ * way, and a rejection here would be an unhandled promise in a render effect.
+ */
+export async function reportCoachLayout(
+  invoke: Invoke,
+  generation: number,
+  panel: PhysRect,
+  next: PhysRect,
+  skip: PhysRect | null,
+): Promise<boolean> {
+  try {
+    await invoke('overlay_report_coach', { generation, panel, next, skip });
+    return true;
+  } catch (error) {
+    console.error('Failed to report the coach layout:', error);
+    return false;
+  }
 }
 
 /**

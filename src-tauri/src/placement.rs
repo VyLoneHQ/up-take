@@ -307,6 +307,12 @@ enum Gesture {
     /// A press on a row of the open area menu, resolved the same way. The hit
     /// names which of the two lists the row is in (roadmap 1.28).
     MenuItem { hit: MenuHit },
+    /// A press on the first-run coach (roadmap 1.18): on one of its buttons,
+    /// resolved on release like a menu row, or on the panel around them, which
+    /// does nothing and must not fall through to what is underneath the panel.
+    Coach {
+        button: Option<crate::first_run::CoachButton>,
+    },
     /// A press that has already done its job and must do nothing more on
     /// release: closing an open menu by clicking away from it, or landing on
     /// menu padding between rows. It still exists as a gesture so the release is
@@ -1609,7 +1615,10 @@ fn pump_hover(app: &AppHandle, state: &mut PumpState) {
         // The chord is read here and passed down, so `overlay` stays a module about
         // areas. Two `GetAsyncKeyState` calls, on the ticks where the pointer is
         // resolved at all.
-        let pointer = (!menu_open && !gesture_live)
+        // The first-run coach, when it is drawn here on step 3, hides what is
+        // under it from the hover for the reason an open menu does.
+        let on_coach = crate::first_run::hit(point).is_some();
+        let pointer = (!menu_open && !gesture_live && !on_coach)
             .then(|| overlay::living_pointer_at(app, point, move_chord_held()));
         // Whether the hover is chrome-only travels with it, because the frontend
         // spends one id on two meanings: draw the control, and light the area to
@@ -1722,9 +1731,21 @@ fn pump_hover(app: &AppHandle, state: &mut PumpState) {
     }
 
     let menu_open = lock(&MENU).is_some();
+    let coach = crate::first_run::hit(point);
     let (shape, hovered_area) = if menu_open {
         (
             if menu_item.is_some() {
+                CursorShape::Hand
+            } else {
+                CursorShape::Cross
+            },
+            None,
+        )
+    } else if let Some(button) = coach {
+        // Over the first-run coach no area is hovered, because a press lands on
+        // the coach and not on the area under it.
+        (
+            if button.is_some() {
                 CursorShape::Hand
             } else {
                 CursorShape::Cross
@@ -1768,8 +1789,10 @@ const fn gesture_cursor(gesture: Gesture) -> CursorShape {
         Gesture::Create => CursorShape::Cross,
         Gesture::Move { .. } => CursorShape::Move,
         Gesture::Resize { resize, .. } => CursorShape::for_handle(Handle::Resize(resize)),
-        Gesture::Close { .. } | Gesture::MenuItem { .. } => CursorShape::Hand,
-        Gesture::Inert => CursorShape::Cross,
+        Gesture::Close { .. } | Gesture::MenuItem { .. } | Gesture::Coach { button: Some(_) } => {
+            CursorShape::Hand
+        }
+        Gesture::Coach { button: None } | Gesture::Inert => CursorShape::Cross,
     }
 }
 
@@ -1796,7 +1819,11 @@ fn dragged_area() -> Option<u64> {
     }
     match (*lock(&GESTURE))? {
         Gesture::Move { id, .. } | Gesture::Resize { id, .. } => Some(id.get()),
-        Gesture::Create | Gesture::Close { .. } | Gesture::MenuItem { .. } | Gesture::Inert => None,
+        Gesture::Create
+        | Gesture::Close { .. }
+        | Gesture::MenuItem { .. }
+        | Gesture::Coach { .. }
+        | Gesture::Inert => None,
     }
 }
 
@@ -2389,6 +2416,7 @@ fn handle_mouse(wparam: WPARAM, lparam: LPARAM) -> bool {
             // strictly worse than not claiming at all.
             Mode::Living => {
                 let claimed = lock(&MENU).is_some()
+                    || crate::first_run::hit(point).is_some()
                     || APP
                         .get()
                         .is_some_and(|app| pointer_target(app, point).is_some());
@@ -2446,7 +2474,10 @@ fn handle_mouse(wparam: WPARAM, lparam: LPARAM) -> bool {
         WM_RBUTTONUP if RIGHT_PENDING.swap(false, Ordering::SeqCst) => {
             // Opened on *release*, not on press: a menu that appears under a
             // still-held button is one the same gesture can dismiss by accident.
+            // Not over the first-run coach: the menu would open for whatever
+            // area sits under the panel, which the user cannot see.
             if mode() != Mode::Hidden
+                && crate::first_run::hit(point).is_none()
                 && let Some(app) = APP.get()
             {
                 open_menu(app, point);
@@ -2571,6 +2602,16 @@ fn living_lbutton_down(point: Point) -> bool {
         // The click that dismisses a menu does not also act on what it landed
         // on (the standard contract), so it is swallowed even when it sits
         // over the user's app.
+        LEFT_PENDING.store(true, Ordering::SeqCst);
+        return true;
+    }
+    // The first-run coach is drawn in Living on step 3 (roadmap 1.18), and a
+    // press on it is the coach's for the reason a press on an open menu is the
+    // menu's: it is UP-TAKE's chrome over the user's apps, and letting it
+    // through would click whatever is under a button the user was aiming at.
+    if let Some(button) = crate::first_run::hit(point) {
+        *lock(&GESTURE) = Some(Gesture::Coach { button });
+        DRAGGING.store(true, Ordering::SeqCst);
         LEFT_PENDING.store(true, Ordering::SeqCst);
         return true;
     }
@@ -2813,6 +2854,12 @@ fn classify_press(point: Point) -> Gesture {
         if close_menu(app) {
             return Gesture::Inert;
         }
+        // The first-run coach (roadmap 1.18) is above every area and all empty
+        // overlay, and below an open menu, which the lines above have already
+        // dealt with. A press on it never starts a drag.
+        if let Some(button) = crate::first_run::hit(point) {
+            return Gesture::Coach { button };
+        }
         if let Some((id, bounds, handle)) = overlay::area_handle_at(app, point) {
             return match handle {
                 Handle::Close => Gesture::Close {
@@ -2915,6 +2962,12 @@ fn finish_gesture(release: Point) {
             control.contains(release) && overlay::dismiss_area(app, id)
         }
         Gesture::MenuItem { hit } => return activate_menu_item(app, hit, release),
+        Gesture::Coach { button } => {
+            if let Some(button) = button {
+                crate::first_run::activate(app, button, release);
+            }
+            return;
+        }
         Gesture::Inert => return,
     };
     if changed && let Err(error) = overlay::emit_areas(app) {
@@ -3108,8 +3161,9 @@ pub(crate) const fn captures_on_create(kind: AreaType) -> bool {
 /// roadmap 1.26 -- `Ocr` have behaviour on the screen today; `Record` and
 /// `Analysis` are modelled and have none, so offering them would ship two rows
 /// that turn a working area into a rectangle indistinguishable from a bug.
-/// **`Record` and `Analysis` have no roadmap row at all**, so they are not
-/// merely unbuilt, they are unplanned (UP-TAKE `I-64`).
+/// `Record` and `Analysis` are unbuilt and, since 2026-09-08, planned: roadmap
+/// rows 2.14 and 2.15 exist for them, which closed UP-TAKE `I-64`. (This said
+/// they had no roadmap row at all, which was true until that day.)
 ///
 /// **The counts here have moved twice and both moves are the same event.**
 /// `Upscale` left the unbuilt list on 2026-08-21 and `Ocr` on 2026-09-02, each
@@ -3132,11 +3186,12 @@ pub(crate) const fn captures_on_create(kind: AreaType) -> bool {
 ///
 /// Exhaustive rather than a `_` arm, so an eighth `AreaType` fails to compile
 /// here instead of defaulting to either answer.
-const fn conversion_label(kind: AreaType) -> Option<&'static str> {
+fn conversion_label(kind: AreaType) -> Option<&'static str> {
+    use crate::strings::{Text, text};
     match kind {
-        AreaType::Default => Some("Type: Default"),
-        AreaType::Screenshot => Some("Type: Screenshot"),
-        AreaType::Filter => Some("Type: Filter"),
+        AreaType::Default => Some(text(Text::MenuTypeDefault)),
+        AreaType::Screenshot => Some(text(Text::MenuTypeScreenshot)),
+        AreaType::Filter => Some(text(Text::MenuTypeFilter)),
         // Arrived with roadmap 1.24, which is what the doc above said would
         // happen: "this is one line on the day the behaviour lands". It has
         // behaviour now, so it earns the row.
@@ -3145,12 +3200,12 @@ const fn conversion_label(kind: AreaType) -> Option<&'static str> {
         // same change had rewritten to "1.26 for `Ocr`" fourteen lines up, so
         // half of it could no longer be found anywhere in the tree. A quotation
         // a reader can check has to survive the edit it describes.
-        AreaType::Upscale => Some("Type: Upscale"),
+        AreaType::Upscale => Some(text(Text::MenuTypeUpscale)),
         // Arrived with roadmap 1.26, on the same terms `Upscale` did: the doc
         // above promised "1.26 for `Ocr`" and this is that line. An OCR area
         // recognises its region and renders the text in place, so a conversion
         // into it leaves the user with an area that does something.
-        AreaType::Ocr => Some("Type: OCR"),
+        AreaType::Ocr => Some(text(Text::MenuTypeOcr)),
         AreaType::Record | AreaType::Analysis => None,
     }
 }
@@ -3202,7 +3257,12 @@ fn gesture_rect(gesture: Gesture, pointer: Point) -> Option<(i32, i32, u32, u32)
                 interaction::settle_resize(resized, resize, &monitors)
             }
         }
-        Gesture::Close { .. } | Gesture::MenuItem { .. } | Gesture::Inert => return None,
+        Gesture::Close { .. }
+        | Gesture::MenuItem { .. }
+        | Gesture::Coach { .. }
+        | Gesture::Inert => {
+            return None;
+        }
     };
     Some(overlay::as_tuple(rect))
 }
@@ -3502,6 +3562,7 @@ fn leaf(action: MenuAction, label: &'static str, checked: bool) -> MenuRow {
 
 /// The rows an area's menu shows, top to bottom.
 fn menu_rows(area: &overlay::AreaSummary) -> Vec<MenuRow> {
+    use crate::strings::{Text, text};
     // The toggle row switches to the opposite of the area's current input mode;
     // its tick shows the current state (ticked = pass-through).
     let toggled_input = match area.input {
@@ -3526,8 +3587,12 @@ fn menu_rows(area: &overlay::AreaSummary) -> Vec<MenuRow> {
     // movable in the same PR, so the moment arrived immediately, and the rig
     // found it on 2026-07-27. A predicted defect left in place is still a defect.
     if area.kind == AreaType::Screenshot {
-        rows.push(leaf(MenuAction::Copy, "Copy", false));
-        rows.push(leaf(MenuAction::SaveToFile, "Save image", false));
+        rows.push(leaf(MenuAction::Copy, text(Text::MenuCopy), false));
+        rows.push(leaf(
+            MenuAction::SaveToFile,
+            text(Text::MenuSaveImage),
+            false,
+        ));
     }
     // Type conversion (roadmap 1.27). It sits above Layer because it says what
     // the area *is*, where everything below says how it is placed or how it
@@ -3597,7 +3662,7 @@ fn menu_rows(area: &overlay::AreaSummary) -> Vec<MenuRow> {
         .collect();
     rows.push(MenuRow {
         action: MenuAction::OpenSubmenu,
-        label: "Area type",
+        label: text(Text::MenuAreaType),
         checked: false,
         children: types,
     });
@@ -3616,32 +3681,32 @@ fn menu_rows(area: &overlay::AreaSummary) -> Vec<MenuRow> {
     let layers: Vec<MenuRow> = vec![
         leaf(
             MenuAction::SetLayer(Layer::Front),
-            "Always on top",
+            text(Text::MenuDepthFront),
             area.layer == Layer::Front,
         ),
         leaf(
             MenuAction::SetLayer(Layer::Auto),
-            "Auto",
+            text(Text::MenuDepthAuto),
             area.layer == Layer::Auto,
         ),
         leaf(
             MenuAction::SetLayer(Layer::Back),
-            "Always behind",
+            text(Text::MenuDepthBack),
             area.layer == Layer::Back,
         ),
     ];
     rows.push(MenuRow {
         action: MenuAction::OpenSubmenu,
-        label: "Depth",
+        label: text(Text::MenuDepth),
         checked: false,
         children: layers,
     });
     rows.push(leaf(
         MenuAction::SetInput(toggled_input),
-        "Click-through",
+        text(Text::MenuClickThrough),
         area.input == Input::PassThrough,
     ));
-    rows.push(leaf(MenuAction::Dismiss, "Dismiss", false));
+    rows.push(leaf(MenuAction::Dismiss, text(Text::MenuDismiss), false));
     rows
 }
 

@@ -1,4 +1,5 @@
-//! Drives the real PP-OCRv4 pipeline over a real image and prints what it read.
+//! Drives the real OCR pipeline (PP-OCRv6_small) over a real image and prints
+//! what it read.
 //!
 //! # Why this exists
 //!

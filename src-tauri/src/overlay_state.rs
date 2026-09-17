@@ -57,9 +57,9 @@ pub enum Event {
         /// cancelling one leaves the arming intact so the retry is still armed.
         armed: bool,
     },
-    /// An explicit summon — the tray Show item, a single-instance relaunch, or
-    /// the debug startup show. Always ends in `Placement`, so the user lands
-    /// ready to place an area.
+    /// An explicit summon: the tray Show item, a single-instance relaunch, or
+    /// the startup show on a hand launch (roadmap 1.34, ADR-0044). Always ends
+    /// in `Placement`, so the user lands ready to place an area.
     Summon,
     /// An area was just created, carrying that type's answer to ADR-0018 §6's
     /// "and then what?" ([`uptake_core::area::AreaType::after_create`]).

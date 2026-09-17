@@ -1,7 +1,10 @@
 mod captures;
 mod click_through;
+mod config;
 #[cfg(debug_assertions)]
 mod dev_harness;
+mod diagnostics;
+mod first_run;
 mod freeze;
 mod hotkey;
 mod ocr;
@@ -20,6 +23,7 @@ mod placement;
 // `uptake_capture::capture_region`, which is itself Windows-only, and the
 // modules that consume it are unconditional. The crate is Windows-only today.
 mod precapture;
+mod strings;
 mod tray;
 
 use std::sync::Mutex;
@@ -54,6 +58,13 @@ use uptake_core::area::AreaStore;
 /// is a lost session.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() -> tauri::Result<()> {
+    // Roadmap 1.35 gate 1's measurement switch, first so it precedes every
+    // window: the overlay declared in `tauri.conf.json` is created on this
+    // thread, and a window takes its DPI hosting behaviour from its thread at
+    // creation. Off unless `UPTAKE_DEV_DPI_HOSTING` is set. See `dev_harness`.
+    #[cfg(all(debug_assertions, windows))]
+    dev_harness::apply_dpi_hosting();
+
     let mut builder = tauri::Builder::default();
 
     // Registered before every other plugin, deliberately: plugins initialize
@@ -82,8 +93,17 @@ pub fn run() -> tauri::Result<()> {
             // `UPTAKE_DEV_RESHOW` like `dev_harness::log_summon`): this is the
             // only external signal that the guard's callback fired at all, and
             // the second process exits before it can log anything of its own.
-            #[cfg(debug_assertions)]
-            eprintln!("single-instance: relaunch detected, summoning the overlay");
+            // ⚠️ NO LONGER `#[cfg(debug_assertions)]`, and that is a deliberate
+            // behaviour change rather than a lint dodge. Release clippy caught
+            // the re-export as unused, which is what surfaced the question.
+            //
+            // Judged per site, which is why part 2 of 1.15 exists rather than a
+            // mechanical sweep: this event is a LITERAL with no screen content,
+            // it is exactly what a support conversation wants ("it was already
+            // running"), and it fires only on a relaunch attempt, so it cannot
+            // flood the file. `I-42` is the record of release builds logging
+            // almost nothing; this is one line in the other direction.
+            diagnostics::note("single-instance: relaunch detected, summoning the overlay");
             overlay::summon(app);
         }));
     }
@@ -139,7 +159,9 @@ pub fn run() -> tauri::Result<()> {
                     overlay::overlay_report_freeze_latency,
                     overlay::overlay_report_scale,
                     overlay::overlay_dismiss_focused,
-                    overlay::overlay_request_state
+                    overlay::overlay_request_state,
+                    first_run::overlay_report_coach,
+                    strings::overlay_language
                 ]
             }
             #[cfg(not(debug_assertions))]
@@ -150,7 +172,9 @@ pub fn run() -> tauri::Result<()> {
                     overlay::overlay_toggle_freeze,
                     overlay::overlay_report_latency,
                     overlay::overlay_dismiss_focused,
-                    overlay::overlay_request_state
+                    overlay::overlay_request_state,
+                    first_run::overlay_report_coach,
+                    strings::overlay_language
                 ]
             }
         })
@@ -170,10 +194,25 @@ pub fn run() -> tauri::Result<()> {
                     | WindowEvent::ScaleFactorChanged { .. }
             ) && let Err(error) = overlay::sync_bounds(window.app_handle())
             {
-                eprintln!("overlay: could not re-sync after a window event: {error}");
+                diagnostics::trouble("overlay: could not re-sync after a window event", &error);
             }
         })
         .setup(|app| {
+            // FIRST, before anything that might want to report a failure.
+            // Task 1.15: everything below this line can use `tracing`; nothing
+            // above it can, which is why there is nothing above it.
+            //
+            // A failure here is deliberately not fatal and is reported through
+            // the channel that still works -- see `diagnostics::init`.
+            // `init` logs its own success, including the log path -- see its
+            // docs. Only the failure needs handling here, and it cannot be
+            // logged, because the thing that failed is the log.
+            if let Err(error) = diagnostics::init() {
+                eprintln!(
+                    "diagnostics: no log file this run ({error}); continuing, because a capture tool that will not start without its own log is worse than one without a log"
+                );
+            }
+
             // Recorded here because `setup` runs on the event-loop thread, so
             // this is the identity every later summon is compared against.
             #[cfg(debug_assertions)]
@@ -250,8 +289,9 @@ pub fn run() -> tauri::Result<()> {
             // alive.
             #[cfg(windows)]
             if let Err(error) = overlay_wndproc::install(app.handle()) {
-                eprintln!(
-                    "display-watch: display changes while the overlay is visible will not be tracked: {error}"
+                diagnostics::trouble(
+                    "display-watch: display changes while the overlay is visible will not be tracked",
+                    &error,
                 );
             }
             // ADR-0019: permanent, one-time exclusion from every capture API.
@@ -260,7 +300,7 @@ pub fn run() -> tauri::Result<()> {
             // reason to refuse to start.
             #[cfg(windows)]
             if let Err(error) = overlay::exclude_from_capture(app.handle()) {
-                eprintln!("overlay: {error}");
+                diagnostics::trouble("overlay", &error);
             }
             // Registered before the tray: architecture §4's mitigation is
             // telling the user a failed registration, and that still holds
@@ -276,11 +316,29 @@ pub fn run() -> tauri::Result<()> {
             // `hotkey::install` does rather than logging into a void. See the
             // `tray` module docs.
             tray::install(app.handle());
-            // Dev builds still summon the overlay at startup so `pnpm tauri dev`
-            // demonstrates something without a keypress, and because CI never
-            // exercises the dev path (friction F-7). This lands in Placement;
-            // Esc/the hotkey hand control back, the tray and hotkey bring it up.
-            #[cfg(debug_assertions)]
+            // Whether this session runs the first-run tour (roadmap 1.18). Before
+            // the summon below, so the summon's own transition is the tour's
+            // first event and the coach is on screen with the overlay.
+            first_run::init();
+            // A hand launch enters Placement, in every build (roadmap 1.34,
+            // ADR-0044 decisions 1 and 3). This used to sit under
+            // `#[cfg(debug_assertions)]`, so `pnpm tauri dev` landed in
+            // Placement and an installed build landed in Hidden with only a
+            // tray icon: the one startup a user gets was the one no developer
+            // saw (`I-354`). It stays last in `setup`, after the hotkey and the
+            // tray, which are the two ways back up once Esc has put the overlay
+            // away.
+            //
+            // It also agrees with a relaunch now: the single-instance callback
+            // above already summons, so launching UP-TAKE gives the same answer
+            // whether or not it was running.
+            //
+            // NOT the whole of ADR-0044. A launch *with Windows* must stay
+            // Hidden, recognised only by an argument the autostart registration
+            // itself passes, never inferred from the environment (decision 2).
+            // There is no autostart in this codebase yet, so every launch that
+            // reaches this line is a hand launch. Roadmap 1.14 builds the
+            // registration and adds that check here (`I-391`).
             overlay::summon(app.handle());
             Ok(())
         })

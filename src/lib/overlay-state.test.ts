@@ -535,13 +535,13 @@ describe('ocrLine', () => {
   });
 
   it('returns the recognised text unchanged', () => {
-    // Unchanged including its line breaks: PP-OCRv4 returns blocks in reading
+    // Unchanged including its line breaks: the engine returns blocks in reading
     // order and the area renders them `pre-wrap`, so reflowing here would merge
     // two columns into one sentence.
     // Built rather than written as a literal so the newline in this test is
     // unmistakably a newline, not an escape somebody has to squint at.
     const twoLines = ['Total:', '12,00'].join(String.fromCharCode(10));
-    expect(ocrLine(payload({ status: 'text', detail: twoLines }))).toBe(
+    expect(ocrLine('en', payload({ status: 'text', detail: twoLines }))).toBe(
       twoLines,
     );
   });
@@ -549,7 +549,7 @@ describe('ocrLine', () => {
   it('reads an empty result as a success rather than a failure', () => {
     // An area drawn over a picture legitimately has no text in it. Wording this
     // as an error is how a user learns to ignore the message that matters.
-    expect(ocrLine(payload({ status: 'empty' }))).toBe('No text found');
+    expect(ocrLine('en', payload({ status: 'empty' }))).toBe('No text found');
   });
 
   it('prefers the reason it was given to its own fallback', () => {
@@ -557,15 +557,38 @@ describe('ocrLine', () => {
     // user who can fix their install and one who files an issue.
     expect(
       ocrLine(
+        'en',
         payload({
           status: 'unavailable',
           detail: 'no usable OCR models in C:/x',
         }),
       ),
     ).toBe('no usable OCR models in C:/x');
-    expect(ocrLine(payload({ status: 'failed', detail: null }))).toBe(
+    expect(ocrLine('en', payload({ status: 'failed', detail: null }))).toBe(
       'OCR failed',
     );
+  });
+
+  it('writes its own sentences in the language it is given (roadmap 1.38)', () => {
+    // The ellipsis is built from its code point: typed as an escape it can
+    // arrive in the file as some other character.
+    const ellipsis = String.fromCodePoint(0x2026);
+    expect(ocrLine('en', payload({ status: 'working' }))).toBe(
+      `Reading${ellipsis}`,
+    );
+    expect(ocrLine('de', payload({ status: 'working' }))).toBe(
+      `Wird gelesen${ellipsis}`,
+    );
+    expect(ocrLine('de', payload({ status: 'empty' }))).toBe(
+      'Kein Text gefunden',
+    );
+    expect(ocrLine('de', payload({ status: 'failed', detail: null }))).toBe(
+      'OCR fehlgeschlagen',
+    );
+    // A reason from Rust is shown as given, in any language.
+    expect(
+      ocrLine('de', payload({ status: 'failed', detail: 'engine: boom' })),
+    ).toBe('engine: boom');
   });
 
   it('shows an unrecognised status rather than blanking the area', () => {
@@ -575,7 +598,7 @@ describe('ocrLine', () => {
     const unknown = payload({
       status: 'transcribing' as OcrPayload['status'],
     });
-    expect(ocrLine(unknown)).toBe('transcribing');
+    expect(ocrLine('en', unknown)).toBe('transcribing');
   });
 });
 

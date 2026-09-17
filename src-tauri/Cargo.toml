@@ -1,6 +1,6 @@
 [package]
 name = "up-take"
-description = "AI-powered screen intelligence overlay for Windows. Capture, OCR, understand — locally."
+description = "UP-TAKE - Grab, reshape and reuse anything on your screen. Pin any part of your Windows screen as an area that stays while you work; free, local, GPL-3.0-or-later."
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
@@ -34,6 +34,8 @@ tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
+toml = { workspace = true }
+uptake-log = { workspace = true }
 tauri-plugin-global-shortcut = "2.3.2"
 tauri-plugin-dialog = "2.7.2"
 tauri-plugin-single-instance = "2"
@@ -48,15 +50,22 @@ tauri-plugin-single-instance = "2"
 #   - output.rs: the clipboard (Win32_System_DataExchange), GlobalAlloc
 #     (Win32_System_Memory), and GetLocalTime (Win32_System_SystemInformation)
 #     for the output pipeline (task 1.9).
+#   - strings.rs: GetUserDefaultUILanguage (Win32_Globalization), the
+#     display language UP-TAKE's words follow (roadmap 1.38).
 # tao already pulls windows-sys transitively; this makes the usage explicit and
 # feature-gated to exactly what we call.
 windows-sys = { workspace = true, features = [
   "Win32_Foundation",
+  "Win32_Globalization",
   "Win32_Graphics_Gdi",
   "Win32_System_DataExchange",
   "Win32_System_LibraryLoader",
   "Win32_System_Memory",
   "Win32_System_SystemInformation",
+  # dev_harness.rs: SetThreadDpiHostingBehavior, for roadmap 1.35 gate 1's
+  # measurement (UPTAKE_DEV_DPI_HOSTING). Debug builds call it; release builds
+  # link the feature and call nothing.
+  "Win32_UI_HiDpi",
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
 ] }

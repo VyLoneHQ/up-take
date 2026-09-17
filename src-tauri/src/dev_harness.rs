@@ -106,6 +106,45 @@
 //! exercised. A green here means a scale-only difference drives the resync, and
 //! nothing more.
 //!
+//! ## `UPTAKE_DEV_DPI_HOSTING`
+//!
+//! **Roadmap 1.35 gate 1's instrument, and nothing in the product yet.** Sets
+//! the DPI hosting behaviour of the thread that goes on to create the overlay
+//! window, to `mixed` or `default`, so a foreign window reparented into the
+//! overlay can be measured both ways. `I-52` found that on a per-monitor-aware
+//! host `mixed` preserves a differently-aware guest's awareness and `default`
+//! rewrites it, but with a WinForms window as the host. Gate 1 wants the real
+//! overlay, which is a WebView2 window, layered and click-through.
+//!
+//! **A switch rather than a default, deliberately.** The overlay already hosts
+//! child windows of its own: WebView2's, from another process. Whether `mixed`
+//! changes how those render is not measured, and turning it on for every build
+//! before it is would put an unmeasured change on the one window the product
+//! draws.
+//!
+//! It must run **before any window is created on that thread**, which is why
+//! `lib.rs` calls it first thing in `run`. The measurement checks the result
+//! from outside: the harness reads the overlay window's own hosting behaviour,
+//! so a switch that did not reach the window shows up as `DEFAULT` there
+//! rather than as a clean result. One line is printed at startup either way.
+//!
+//! ```text
+//! UPTAKE_DEV_DPI_HOSTING=mixed pnpm tauri dev
+//! ```
+//!
+//! ## `UPTAKE_DEV_FIRST_RUN`
+//!
+//! Runs the first-run tour (roadmap 1.18) whatever the settings file says. The
+//! tour records its completion in the real `%APPDATA%\VyLone\UP-TAKE\config.toml`,
+//! so a developer who has finished it once never sees it again, and deleting a
+//! file under `%APPDATA%` to look at a screen is the step nobody remembers to
+//! undo. Finishing a forced tour still records completion: the switch changes
+//! whether the tour starts, not what finishing it does.
+//!
+//! ```text
+//! UPTAKE_DEV_FIRST_RUN=1 pnpm tauri dev
+//! ```
+//!
 //! ## `UPTAKE_DEV_REPORT`, and it is NOT in this module
 //!
 //! **The fifth switch lives in [`crate::output`], not here, and this section
@@ -150,6 +189,55 @@ const PACING_VAR: &str = "UPTAKE_DEV_PACING";
 /// Environment variable holding the monitor-cache perturbation delay, in
 /// seconds. See [`schedule_monitor_perturb`].
 const MONITOR_PERTURB_VAR: &str = "UPTAKE_DEV_MONITOR_PERTURB";
+
+/// Environment variable naming the DPI hosting behaviour to set on the thread
+/// that creates the overlay window: `mixed` or `default`. See the module docs.
+const DPI_HOSTING_VAR: &str = "UPTAKE_DEV_DPI_HOSTING";
+
+/// Applies `UPTAKE_DEV_DPI_HOSTING` to the calling thread, and says so.
+///
+/// Call it before the thread creates any window: the behaviour is read when a
+/// window is created and is fixed for that window's life. Prints one line
+/// whether or not the variable is set, and names the previous and resulting
+/// values, so a rig log shows what the overlay was created under.
+#[cfg(windows)]
+pub fn apply_dpi_hosting() {
+    use windows_sys::Win32::UI::HiDpi::{
+        DPI_HOSTING_BEHAVIOR_DEFAULT, DPI_HOSTING_BEHAVIOR_MIXED, GetThreadDpiHostingBehavior,
+        SetThreadDpiHostingBehavior,
+    };
+
+    let requested = match env::var(DPI_HOSTING_VAR).as_deref() {
+        Ok("mixed") => DPI_HOSTING_BEHAVIOR_MIXED,
+        Ok("default") => DPI_HOSTING_BEHAVIOR_DEFAULT,
+        Ok(other) => {
+            eprintln!(
+                "dev-harness: {DPI_HOSTING_VAR}={other} is neither mixed nor default, so the DPI hosting behaviour is untouched"
+            );
+            return;
+        }
+        Err(_) => {
+            eprintln!("dev-harness: DPI hosting behaviour untouched ({DPI_HOSTING_VAR} unset)");
+            return;
+        }
+    };
+    // SAFETY: both calls take and return plain integers and touch only the
+    // calling thread's state.
+    let previous = unsafe { SetThreadDpiHostingBehavior(requested) };
+    let now = unsafe { GetThreadDpiHostingBehavior() };
+    eprintln!(
+        "dev-harness: thread DPI hosting behaviour {previous} -> {now} (requested {requested}; 0 default, 1 mixed, -1 invalid). Windows this thread creates from here on carry it."
+    );
+}
+
+/// Environment variable that, when set, runs the first-run tour whatever the
+/// settings file says. See the module docs.
+const FIRST_RUN_VAR: &str = "UPTAKE_DEV_FIRST_RUN";
+
+/// Whether to run the first-run tour this session regardless of the stored flag.
+pub fn first_run_forced() -> bool {
+    env::var(FIRST_RUN_VAR).is_ok()
+}
 
 /// Whether gesture instrumentation is on this run.
 ///

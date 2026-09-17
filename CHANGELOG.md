@@ -19,6 +19,12 @@ Until then it is written by hand.
   per-region click-through.
 - Multi-monitor support including mixed DPI, portrait displays and negative coordinates.
 - A global summon hotkey, `Win+Shift+U`, with conflict handling.
+- Starting the app opens the overlay ready to place an area. Before this, only a development build
+  did that, and an installed build started hidden with just a tray icon.
+- A first-run tour, taught on the overlay itself rather than in a separate window. Four steps: draw
+  an area, give one a type, hand the screen back and take it again, and a sheet of every shortcut.
+  Each of the first three moves on when you do the thing it describes. It runs until you finish or
+  skip it, and a settings file under `%APPDATA%\VyLone\UP-TAKE` remembers that you did.
 - A whole screen grab, `Win+Shift+G`, copying the monitor under the cursor to the clipboard without
   summoning the overlay. It goes through the same capture call the freeze uses when its fast path is
   off, so expect the same lateness.
@@ -31,13 +37,15 @@ Until then it is written by hand.
   sharpens the piece of screen under it in place, without magnifying it, as a still rather than a
   live view; and an OCR area that reads the text under it, shows what it read in place, and puts
   that text on the clipboard so it can be pasted straight into something else. The
-  installer carries the OCR runtime and the models; they are not in this repository, and two
-  checksummed scripts fetch them before a build can bundle them.
+  installer carries the OCR runtime and the models; they are not in this repository, and three
+  checksummed scripts fetch them before a build can bundle them. (This said "two" scripts until
+  2026-09-08; there are three, one each for the runtime, the detector and the recogniser.)
 - Freeze the screen while placing an area, with `Ctrl+Space`.
 - The overlay is excluded from screen capture, so other recording tools do not see it.
 
 <!-- source: STATUS.md Phase 1 (1A merged, 1B partial, 1D partial); ROADMAP.md tasks 1.1 to 1.9f,
-     plus 1.23 (Filter), 1.24 and 1.29 (Upscale; 1.29 and ADR-0031 are what make the entry say
+     plus 1.34 and ADR-0044 decisions 1 and 3 (the entry about starting the app),
+     1.23 (Filter), 1.24 and 1.29 (Upscale; 1.29 and ADR-0031 are what make the entry say
      "sharpens" rather than "magnified", reversing 1.24 on the founder's verdict), 1.26 and 1.31
      (the OCR area and the pipeline behind it; ADR-0035 and BACKLOG.md I-337 are the source of
      the sentence about where the runtime and the models live. That sentence said "not packaged
