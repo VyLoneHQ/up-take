@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   allRows,
   type Facts,
+  languageFor,
   PANE_IDS,
   type PaneId,
   panes,
@@ -60,6 +61,7 @@ const FACTS: Facts = {
   autostart_registered: false,
   opacity_range: [10, 100],
   filter_range: [5, 60],
+  system_language: 'de',
 };
 
 const view = (settings: Settings = DEFAULTS, facts: Facts = FACTS) =>
@@ -272,5 +274,27 @@ describe('the words', () => {
       'Darstellung',
       'Hilfe',
     ]);
+  });
+});
+
+describe('the language row', () => {
+  it('resolves a choice to the language the window re-renders in', () => {
+    // The review of PR #105 found this row was the weakest of the ten: it
+    // stored a value and nothing in the running process changed. The window
+    // itself can change, and does. The overlay and the native menus cannot --
+    // Rust fixes its language once per process and hands out &'static str --
+    // and the row's own sentence says which is which.
+    expect(languageFor('english', FACTS)).toBe('en');
+    expect(languageFor('german', FACTS)).toBe('de');
+  });
+
+  it('asks Rust what Windows says rather than guessing', () => {
+    // `system` cannot be resolved on this side, and it is NOT the language the
+    // process is running in: those part company the moment somebody changes
+    // the setting, which is exactly when this is needed.
+    expect(languageFor('system', FACTS)).toBe(FACTS.system_language);
+    expect(languageFor('system', { ...FACTS, system_language: 'en' })).toBe(
+      'en',
+    );
   });
 });

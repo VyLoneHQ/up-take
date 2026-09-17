@@ -72,6 +72,13 @@ pub struct Facts {
     pub opacity_range: (u8, u8),
     /// The lowest and highest a Filter area's strength may be set to.
     pub filter_range: (u8, u8),
+    /// What the Language setting's **Windows' language** choice resolves to.
+    ///
+    /// Sent so the window can re-render itself the moment the row is used,
+    /// including when the choice is *Windows' language* -- which it cannot work
+    /// out for itself and which is not the same as the language this process is
+    /// running in once somebody has changed the setting.
+    pub system_language: String,
 }
 
 /// Opens the settings window, or brings it to the front if it is already open.
@@ -134,6 +141,7 @@ pub fn settings_facts(app: AppHandle) -> Facts {
         autostart_registered: crate::autostart::is_registered(),
         opacity_range: OPACITY_RANGE,
         filter_range: FILTER_RANGE,
+        system_language: crate::strings::system_language().to_string(),
     }
 }
 
@@ -231,16 +239,33 @@ pub fn settings_choose_folder(app: AppHandle) -> Option<String> {
 
 /// Arms the first-run tour to run again (`ADR-0043` decision 5).
 ///
-/// Clears the stored completion rather than starting the tour now: the tour is
-/// taught **on the overlay**, and the settings window is not it. So this takes
-/// effect the next time the overlay opens, which is what the window says.
+/// Does **not** start the tour now: it is taught on the overlay, and the
+/// settings window is not the overlay. It runs the next time the overlay
+/// opens, which is what the window says.
+///
+/// # Both halves, because the first one alone was a lie
+///
+/// ⚠️ **This cleared the stored flag and stopped**, and
+/// [`crate::first_run::init`] decides once at startup and returns early when
+/// the tour is recorded as done. So in a process that had already run it,
+/// nothing re-read the file and the tour did not appear -- while the window
+/// said it would, on the next overlay open. Found by the independent review of
+/// `PR #105`.
+///
+/// **The file is written first and the process armed second.** A failure
+/// between the two leaves the tour armed on disk, which shows it once more than
+/// asked; the other order loses the request entirely on a crash. And the
+/// process is armed **only** when the file was written, so the window's message
+/// and the stored state cannot disagree.
 ///
 /// # Errors
 ///
 /// For any reason [`crate::config::clear_first_run_completed`] gives.
 #[tauri::command]
 pub fn settings_replay_tour() -> Result<(), String> {
-    crate::config::clear_first_run_completed()
+    crate::config::clear_first_run_completed()?;
+    crate::first_run::restart();
+    Ok(())
 }
 
 /// Closes the settings window.
@@ -290,6 +315,7 @@ mod tests {
                 autostart_registered: false,
                 opacity_range: (10, 100),
                 filter_range: (5, 60),
+                system_language: "en".to_string(),
             },
             &[
                 "summon_hotkey",
@@ -298,6 +324,7 @@ mod tests {
                 "autostart_registered",
                 "opacity_range",
                 "filter_range",
+                "system_language",
             ],
         );
     }

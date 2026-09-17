@@ -626,9 +626,9 @@
       "de_from": "9a73db9b"
     },
     "settings.language.about": {
-      "en": "Takes effect the next time UP-TAKE starts.",
-      "de": "Wird beim nächsten Start von UP-TAKE übernommen.",
-      "de_from": "380e70d3"
+      "en": "This window changes at once. The overlay and its menus change the next time UP-TAKE starts.",
+      "de": "Dieses Fenster wechselt sofort. Das Overlay und seine Menüs wechseln beim nächsten Start von UP-TAKE.",
+      "de_from": "4d3f5de1"
     },
     "settings.language.system": {
       "en": "Windows' language",

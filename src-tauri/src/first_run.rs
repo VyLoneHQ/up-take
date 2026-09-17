@@ -41,6 +41,7 @@
 //! In a debug build `UPTAKE_DEV_FIRST_RUN` runs it whatever the file says; see
 //! `dev_harness`.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use serde::Serialize;
@@ -93,6 +94,23 @@ struct Live {
 /// The tour, or `None` when it is not running this session.
 static LIVE: Mutex<Option<Live>> = Mutex::new(None);
 
+/// The generation the next arming starts from.
+///
+/// # Why this survives `LIVE` going back to `None`
+///
+/// A layout report is accepted only when it names the *current* generation,
+/// which is what stops a report drawn before an emit being applied after it.
+/// [`restart`] can arm the tour again in a process where it has already run,
+/// and starting the count over at zero would make the old numbers reachable
+/// again: a report still in flight from the finished tour could name the
+/// generation the new one is about to use, and be accepted as an answer to an
+/// emit it never saw.
+///
+/// The window is narrow -- it needs a report in flight at the moment Replay is
+/// pressed -- and it costs one atomic to close, so it is closed rather than
+/// written down as unlikely.
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
+
 /// The payload of `overlay://coach`.
 #[derive(Serialize, Clone)]
 struct CoachPayload {
@@ -135,13 +153,42 @@ pub fn init() {
     } else {
         "first run: starting the tour"
     });
+    arm();
+}
+
+/// Puts the tour at step one and makes it live.
+///
+/// `surface` starts at `Hidden` whatever the overlay is actually doing, which
+/// is correct rather than approximate: `on_state` is called by `overlay::drive`
+/// after **every** transition, including one into the state it was already in,
+/// so the first thing the tour learns is where the overlay really is.
+fn arm() {
     *lock(&LIVE) = Some(Live {
         tour: Tour::start(),
         surface: OverlayState::Hidden,
         monitor: None,
-        generation: 0,
+        generation: NEXT_GENERATION.load(Ordering::SeqCst),
         layout: None,
     });
+}
+
+/// Runs the tour again in **this** process (`ADR-0043` decision 5).
+///
+/// # Why clearing the stored flag is not enough, which is what shipped first
+///
+/// [`init`] decides once, at startup, and returns early when the tour is
+/// recorded as done -- so in a process that has already run it, `LIVE` is
+/// `None` and nothing reads the file again. `settings_replay_tour` cleared the
+/// flag and stopped there, and the settings window said *it will run the next
+/// time the overlay opens*. That was true only after a restart, and the window
+/// did not say so. Found by the independent review of `PR #105`.
+///
+/// So the file and the process are both updated, and the order is the file
+/// first: a crash between the two leaves the tour armed on disk, which shows it
+/// once more, rather than armed in memory only, which loses the user's request.
+pub fn restart() {
+    diagnostics::note("first run: the tour was armed again from Settings");
+    arm();
 }
 
 /// The overlay has settled in `state`. Called by `overlay::drive` after every
@@ -250,6 +297,8 @@ fn update(app: &AppHandle, event_for: impl FnOnce(&mut Live) -> Option<TourEvent
 /// can be accepted after it.
 fn view(app: &AppHandle, live: &mut Live) -> Option<CoachView> {
     live.generation = live.generation.wrapping_add(1);
+    // So a later `arm` cannot reuse a number this process has already emitted.
+    NEXT_GENERATION.store(live.generation, Ordering::SeqCst);
     live.layout = None;
     let shown = match live.surface {
         OverlayState::Placement => true,
@@ -351,6 +400,36 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use uptake_core::geometry::{Point, Rect};
+
+    #[test]
+    fn replaying_the_tour_arms_it_in_this_process() {
+        use super::{LIVE, NEXT_GENERATION, arm, lock};
+        use std::sync::atomic::Ordering;
+
+        // The defect the independent review of PR #105 found: clearing the
+        // stored flag left LIVE as None, so the tour did not come back until
+        // the app was restarted -- while the settings window said it would
+        // appear the next time the overlay opened.
+        //
+        // `restart` is not called directly here because it writes a
+        // diagnostics line and the assertion is about `arm`, which is the half
+        // that touches state. The command's own job -- file first, then arm --
+        // is asserted by its early return on a failed write.
+        *lock(&LIVE) = None;
+        arm();
+        assert!(lock(&LIVE).is_some(), "the tour was not armed");
+
+        // And it does not reuse a generation this process has already emitted,
+        // which is what would let a layout report still in flight from the
+        // finished tour be accepted as an answer to the new one's first emit.
+        NEXT_GENERATION.store(7, Ordering::SeqCst);
+        arm();
+        let generation = lock(&LIVE).as_ref().map(|live| live.generation);
+        assert_eq!(generation, Some(7));
+
+        *lock(&LIVE) = None;
+        NEXT_GENERATION.store(0, Ordering::SeqCst);
+    }
 
     use super::{CoachButton, CoachPayload, CoachView, Layout, accepted, hit_in};
     use crate::payload_keys::{assert_keys, assert_payload_coverage};

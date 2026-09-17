@@ -285,6 +285,37 @@ const fn system_locale() -> Option<String> {
     None
 }
 
+/// The catalogue language Windows' own display language resolves to,
+/// ignoring the stored setting and ignoring [`language`]'s cached answer.
+///
+/// # Why this exists rather than being read off `language()`
+///
+/// [`language`] is the language this process is *running in*, fixed at the
+/// first lookup. This is the language the Language setting's **Windows'
+/// language** choice means. They are the same at startup and they part company
+/// the moment somebody changes the setting, which is exactly when the settings
+/// window needs to know the second one: it re-renders itself in whatever the
+/// user just picked, and picking *Windows' language* has to resolve to
+/// something without restarting the app to find out what.
+///
+/// Reads the locale on every call. It is called once per language change in a
+/// window somebody has open, so caching it would be a lock for nothing.
+#[must_use]
+pub fn system_language() -> &'static str {
+    resolve_system()
+}
+
+#[cfg(test)]
+const fn resolve_system() -> &'static str {
+    FALLBACK
+}
+
+#[cfg(not(test))]
+fn resolve_system() -> &'static str {
+    let available = &catalogue().languages;
+    system_locale().map_or(FALLBACK, |locale| pick(&locale, available))
+}
+
 /// A string in the current language.
 #[must_use]
 pub fn text(text: Text) -> &'static str {

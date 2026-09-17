@@ -4,6 +4,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { onMount } from 'svelte';
 import {
   type Facts,
+  languageFor,
   type Pane,
   type PaneId,
   panes,
@@ -40,6 +41,14 @@ const showing = $derived(view.find((each) => each.id === pane) ?? view[0]);
  * *not changed*.
  */
 async function commit(next: Settings): Promise<void> {
+  // The window re-renders in the chosen language at once. The overlay and the
+  // native menus cannot: Rust decides its language once per process and hands
+  // out `&'static str`, so a live switch there would half-translate the tray
+  // until the next restart. The row's own sentence says which is which.
+  if (facts) {
+    const wanted = languageFor(next.language, facts);
+    if (isLanguage(wanted)) language = wanted;
+  }
   settings = next;
   problem = '';
   try {

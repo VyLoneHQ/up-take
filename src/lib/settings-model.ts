@@ -88,6 +88,21 @@ export interface Facts {
   autostart_registered: boolean;
   opacity_range: [number, number];
   filter_range: [number, number];
+  system_language: string;
+}
+
+/**
+ * The catalogue language a Language choice means, given what Windows says.
+ *
+ * The window re-renders itself with this the moment the row is used, so the
+ * setting does something where the user is looking rather than only at the next
+ * launch. The overlay and the native menus still wait for a restart, and the
+ * row's own sentence says so -- `strings.rs` explains why in one place.
+ */
+export function languageFor(choice: LanguageChoice, facts: Facts): string {
+  if (choice === 'english') return 'en';
+  if (choice === 'german') return 'de';
+  return facts.system_language;
 }
 
 /** One option of a segmented control. */
