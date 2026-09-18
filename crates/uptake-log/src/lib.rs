@@ -190,6 +190,31 @@ pub fn note(message: &'static str) {
     tracing::info!(target: TARGET, "{message}");
 }
 
+/// Records something that happened, with a detail that is not a literal.
+///
+/// The info-level twin of [`trouble`], added by task 1.15 part 2. It exists
+/// because the lines being converted include ones whose whole content is a
+/// runtime value that went wrong in no way at all: which state the overlay
+/// moved to, which type of area a drag created. [`note`] cannot carry those and
+/// [`trouble`] would file them as warnings, which is a lie about severity that
+/// a log reader then has to un-learn.
+///
+/// # This is the SECOND `&dyn Display` sink, and that is a real cost
+///
+/// The crate docs say the privacy rule is held by two structural facts, the
+/// second being that messages are `&'static str` by type, with one named
+/// exception. There are now three named exceptions: this, [`trouble`] and
+/// [`measurement`]. A caller who builds a string out of screen content and
+/// passes it here defeats the rule exactly as `I-381` describes for `trouble`.
+///
+/// What keeps it reviewable is that the set is small, named, and greppable:
+/// `git grep -E "note_about|trouble|measurement"` is the whole list of places a
+/// runtime value can reach a log. **Pass enums, numbers and this codebase's own
+/// error strings. Never anything that was read off the screen.**
+pub fn note_about(message: &'static str, detail: &dyn fmt::Display) {
+    tracing::info!(target: TARGET, %detail, "{message}");
+}
+
 /// Records something that went wrong but did not stop the app.
 ///
 /// See the crate docs for why `cause` is `&dyn Display` and what that leaves
@@ -289,11 +314,21 @@ mod tests {
     /// exist.
     #[test]
     fn the_public_surface_is_exactly_what_was_reviewed() {
-        // Every entry was read and its logging argued. `measurement` is the
-        // only one taking a runtime string, and the crate docs say why.
+        // Every entry was read and its logging argued. THREE of them can carry
+        // a runtime value -- `trouble`, `note_about` and `measurement` -- and
+        // the crate docs say what each is for and what it leaves open.
+        //
+        // `note_about` was added by task 1.15 part 2 and this test is what made
+        // that a decision rather than an edit: it went red on the new name and
+        // its message says to read what the entry logs before listing it. It
+        // takes `&dyn Display` exactly as `trouble` does, and it exists because
+        // the conversion turned up lines whose whole content is a runtime value
+        // that went wrong in no way at all (which state the overlay moved to),
+        // where filing them as warnings would be a lie about severity.
         const REVIEWED: &[&str] = &[
             "init",
             "note",
+            "note_about",
             "trouble",
             "trouble_for",
             "failure",

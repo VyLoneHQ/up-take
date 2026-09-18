@@ -95,11 +95,14 @@ unsafe extern "system" fn subclass_proc(
             // dead tray app is a lost session (architecture §5).
             let outcome = catch_unwind(AssertUnwindSafe(|| {
                 if let Err(error) = overlay::sync_bounds(app) {
-                    eprintln!("display-watch: could not re-sync the overlay: {error}");
+                    crate::diagnostics::trouble(
+                        "display-watch: could not re-sync the overlay",
+                        &error,
+                    );
                 }
             }));
             if outcome.is_err() {
-                eprintln!("display-watch: panic while handling a display change");
+                crate::diagnostics::note("display-watch: panic while handling a display change");
             }
         }
         WM_NCDESTROY => unsafe {

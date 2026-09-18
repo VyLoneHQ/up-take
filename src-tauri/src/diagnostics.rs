@@ -28,7 +28,7 @@ use tauri::AppHandle;
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use uptake_core::area::AreaId;
 
-pub(crate) use uptake_log::{init, measurement, note, trouble};
+pub(crate) use uptake_log::{init, measurement, note, note_about, trouble};
 
 /// [`uptake_log::trouble_for`], with the id typed rather than a bare `u64`.
 ///

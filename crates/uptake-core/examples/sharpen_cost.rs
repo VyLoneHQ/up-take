@@ -42,6 +42,15 @@
 //! [ADR-0031]: the private planning repo's
 //! `DECISIONS/ADR-0031-upscale-is-enhancement-not-magnification.md`
 
+// A console program, run by hand from a terminal that somebody is reading.
+// `eprintln!` is the right sink here and the ban does not apply: task 1.15
+// part 2 bans it because a RELEASE BUILD has no console ("F-35"), and this
+// file is never in one.
+#![allow(
+    clippy::print_stderr,
+    reason = "a console program's stderr is its interface; this is never in the release binary (task 1.15 part 2)"
+)]
+
 use std::time::Instant;
 
 use uptake_core::bitmap::{BYTES_PER_PIXEL, RgbaBitmap};

@@ -230,11 +230,17 @@ fn poll_loop(app: &AppHandle) -> ! {
     // not a failure.
     let high_res = HighResTimer::new();
     // Not gated on `UPTAKE_DEV_PACING`: this one reports a real degradation of
-    // the shipping path rather than an instrumentation number, and it prints at
+    // the shipping path rather than an instrumentation number, and it happens at
     // most once per process, only when the OS refused the timer.
-    #[cfg(debug_assertions)]
+    //
+    // The `#[cfg(debug_assertions)]` came off with task 1.15 part 2. A degraded
+    // gesture rate is something a user can feel and cannot explain, so it is
+    // worth exactly as much in the build they are running as in one this
+    // machine builds.
     if high_res.is_none() {
-        eprintln!("poll: no high-resolution timer available — gesture pacing stays at ~63 Hz");
+        crate::diagnostics::note(
+            "poll: no high-resolution timer available, gesture pacing stays at ~63 Hz",
+        );
     }
     loop {
         // Park while the overlay is hidden. Zero wakeups until `activate`.
@@ -361,6 +367,10 @@ fn poll_loop(app: &AppHandle) -> ! {
         // ordinary one — a completed drag and one whose overlay vanished
         // underneath it are different events (`UT-F-46`).
         #[cfg(debug_assertions)]
+        #[allow(
+            clippy::print_stderr,
+            reason = "this block is #[cfg(debug_assertions)], so a developer at a console is the audience and there is no release build to be silent in (task 1.15 part 2)"
+        )]
         if let Some((ticks, start)) = gesture.take()
             && ticks > 0
         {
@@ -373,7 +383,7 @@ fn poll_loop(app: &AppHandle) -> ! {
         if let Ok(window) = overlay_window(app)
             && let Err(error) = window.set_ignore_cursor_events(true)
         {
-            eprintln!("click-through: could not reset on hide: {error}");
+            crate::diagnostics::trouble("click-through: could not reset on hide", &error);
         }
     }
 }
@@ -386,6 +396,10 @@ fn poll_loop(app: &AppHandle) -> ! {
 /// took to get there. Reporting the rate alone is how a change that provably did
 /// nothing was once read as an improvement (see [`FRAME_GESTURE`]).
 #[cfg(debug_assertions)]
+#[allow(
+    clippy::print_stderr,
+    reason = "this block is #[cfg(debug_assertions)], so a developer at a console is the audience and there is no release build to be silent in (task 1.15 part 2)"
+)]
 fn report_gesture(ticks: u32, start: std::time::Instant) {
     let elapsed = start.elapsed().as_secs_f64();
     eprintln!(
@@ -422,7 +436,7 @@ fn tick(app: &AppHandle, state: &ClickThrough) {
     // `applied` unchanged makes the next tick retry.
     match window.set_ignore_cursor_events(true) {
         Ok(()) => *applied = Some(true),
-        Err(error) => eprintln!("click-through: could not apply state: {error}"),
+        Err(error) => crate::diagnostics::trouble("click-through: could not apply state", &error),
     }
 }
 

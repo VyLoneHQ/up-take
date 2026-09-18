@@ -168,6 +168,17 @@
 //! nobody finds. Nothing detects an omission from a prose index, which is the
 //! same weakness as any rule an author has to remember.
 
+// Compiled out of release builds entirely, which is exactly the condition
+// task 1.15 part 2's eprintln ban carves out: the ban exists because a
+// release build has no console, and this module is never in one. A
+// developer watching a terminal is the whole audience here, and routing
+// this chatter into a user's log file would put dev instrumentation on a
+// disk that never runs the code.
+#![allow(
+    clippy::print_stderr,
+    reason = "debug-only instrumentation; a developer at a console is the audience and there is no release build to be silent in (task 1.15 part 2)"
+)]
+
 use std::env;
 use std::sync::{LazyLock, OnceLock};
 use std::thread::{self, ThreadId};

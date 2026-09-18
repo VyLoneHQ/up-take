@@ -34,9 +34,34 @@
 # (`enabled!`, `level_enabled!`, `event_enabled!`, `span_enabled!`) are NOT
 # listed: they return a bool and record nothing.
 #
-# ⚠️ `eprintln!` is NOT here yet. 68 remain in `src-tauri` and part 2 of task
-# 1.15 is where they go; the ban widens with them. Adding it today would need 68
-# exceptions, which is worse than the gap it closes.
+# ⚠️ `eprintln!` IS NOT ON THIS LIST, AND THAT IS A DECISION RATHER THAN THE OLD
+# GAP. The note here used to read *"68 remain in `src-tauri` and part 2 of task
+# 1.15 is where they go; the ban widens with them."* Part 2 has run: the figure
+# was 71 by then, re-derived with the command in `uptake-log`'s own docs rather
+# than carried over, and 45 of them now go through the log.
+#
+# **The ban it widened into is `clippy::print_stderr`, in the workspace
+# `[lints.clippy]` table, NOT an entry in the list below.** Putting it here was
+# tried first and `uptake-log`'s own `no_other_crate_waives_the_ban` test refused
+# it, which was the right answer to a real defect and not a false positive: this
+# whole list is policed by a SINGLE lint, so every `#[allow]` written to excuse
+# an `eprintln!` would ALSO have switched off the tracing ban at that site.
+# `dev_harness`'s module-level waiver would have opened a whole module to
+# `tracing::info!(text)`. A privacy rule cannot share a switch with a tidiness
+# rule.
+#
+# ⚠️ That same test greps every non-`uptake-log` file for the underscored lint
+# name in any spelling, so a mention in PROSE trips it exactly as a real waiver
+# would -- which is why the paragraphs here say "this list" and "a single lint"
+# and never write the name. The check is deliberately the dumbest kind there is;
+# the cost is paid in wording rather than by loosening it.
+#
+# They are different rules and they now have different switches. This one is a
+# PRIVACY rule: the tracing macros can put screen content on a user's disk, so
+# only one crate may call them. `print_stderr` is an AUDIBILITY rule: `main.rs`
+# sets `windows_subsystem = "windows"`, so a release build has no console and
+# `eprintln!` reaches nobody (`F-35`) -- a failure printed there is a failure
+# that did not happen, as far as anyone who could act on it is concerned.
 disallowed-macros = [
   # The event macros. `event!` is the generic one the rest wrap.
   { path = "tracing::event", reason = "log through uptake-log, so every log line lives in one reviewable file (task 1.15)" },

@@ -231,9 +231,15 @@ pub fn run() -> tauri::Result<()> {
             // docs. Only the failure needs handling here, and it cannot be
             // logged, because the thing that failed is the log.
             if let Err(error) = diagnostics::init() {
-                eprintln!(
-                    "diagnostics: no log file this run ({error}); continuing, because a capture tool that will not start without its own log is worse than one without a log"
-                );
+                #[allow(
+                    clippy::print_stderr,
+                    reason = "the thing that failed IS the log, so logging this would be circular. One of the two sinks task 1.15 part 2 deliberately leaves on stderr"
+                )]
+                {
+                    eprintln!(
+                        "diagnostics: no log file this run ({error}); continuing, because a capture tool that will not start without its own log is worse than one without a log"
+                    );
+                }
             }
 
             // Recorded here because `setup` runs on the event-loop thread, so
@@ -400,7 +406,23 @@ pub fn run() -> tauri::Result<()> {
         // `RunEvent::Exit`: a graceful shutdown (the tray Quit) must restore the
         // system cursors the placement layer may have overridden. A *hard* kill
         // runs none of this — see the `placement` module docs.
-        .build(tauri::generate_context!())?
+        .build({
+            // Bound here, in a block of its own, purely to scope the waiver
+            // below to this one macro.
+            //
+            // ⚠️ **This is NOT one of UP-TAKE's stderr sinks.** `generate_context!`
+            // is Tauri's macro and its EXPANSION contains an `eprintln!`, which
+            // clippy attributes to the call site: the ban task 1.15 part 2 added
+            // fires on code nobody here wrote and cannot change. Worth knowing
+            // before widening any macro ban: a third-party macro can put a
+            // banned call in your crate, and the lint names your line for it.
+            #[allow(
+                clippy::print_stderr,
+                reason = "the eprintln is inside tauri's generate_context! expansion, not ours (task 1.15 part 2)"
+            )]
+            let context = tauri::generate_context!();
+            context
+        })?
         .run(|_app, event| {
             if let RunEvent::Exit = event {
                 placement::teardown();

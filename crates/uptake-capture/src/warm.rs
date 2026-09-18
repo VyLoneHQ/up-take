@@ -971,7 +971,13 @@ fn spawn_session(slot: Arc<Slot>) -> bool {
             // path runs — but it is the difference between "warm and quiet" and
             // "never warm", which `status` is what actually reports.
             #[cfg(debug_assertions)]
-            eprintln!("warm: session failed for {:?}: {error}", slot.bounds);
+            #[allow(
+                clippy::print_stderr,
+                reason = "this block is #[cfg(debug_assertions)], so a developer at a console is the audience and there is no release build to be silent in (task 1.15 part 2)"
+            )]
+            {
+                eprintln!("warm: session failed for {:?}: {error}", slot.bounds);
+            }
             let _ = &error;
         }
     });

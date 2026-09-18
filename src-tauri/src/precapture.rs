@@ -310,7 +310,10 @@ fn spawn_capture(monitor: Rect, generation: u64) {
                 // screenshot, just by the slow path. Logged because a
                 // pre-capture failing *every* time would otherwise look like
                 // nothing more than the fast path never helping.
-                eprintln!("precapture: could not pre-capture {monitor:?}: {error}");
+                crate::diagnostics::trouble(
+                    "precapture: could not pre-capture a monitor",
+                    &format_args!("{monitor:?}: {error}"),
+                );
                 return;
             }
         };

@@ -242,6 +242,10 @@ pub(crate) const fn take_paint_probe() -> Option<u64> {
 /// It still **excludes DWM's final composite**, like the poll probe, so it is a
 /// lower bound on what the eye sees rather than a claim about photons.
 #[cfg(debug_assertions)]
+#[allow(
+    clippy::print_stderr,
+    reason = "this block is #[cfg(debug_assertions)], so a developer at a console is the audience and there is no release build to be silent in (task 1.15 part 2)"
+)]
 pub(crate) fn record_paint_latency(probe: u64) {
     let now = u64::try_from(PROBE_EPOCH.elapsed().as_nanos()).unwrap_or(u64::MAX);
     #[expect(
@@ -315,9 +319,9 @@ pub(crate) fn init_warm_capture() {
         .is_ok_and(|value| matches!(value.trim(), "1" | "true" | "on"));
     WARM_CAPTURE.store(enabled, Ordering::SeqCst);
     if enabled {
-        eprintln!(
-            "freeze: warm capture ENABLED (UPTAKE_WARM_CAPTURE) — sessions are held \
-             while Placement is visible; expect higher idle CPU and ~175 MB more RAM"
+        crate::diagnostics::note(
+            "freeze: warm capture ENABLED (UPTAKE_WARM_CAPTURE), sessions are held \
+             while Placement is visible; expect higher idle CPU and ~175 MB more RAM",
         );
     }
 }
@@ -369,18 +373,21 @@ static FREEZE_ALL_MONITORS: AtomicBool = AtomicBool::new(false);
 /// likely to misattribute a number to, so it says which one it is on every run
 /// rather than only when something was set.
 pub(crate) fn announce_freeze_scope() {
-    eprintln!(
-        "freeze: scope is {} ({})",
-        if freeze_all_monitors_enabled() {
-            "EVERY monitor"
-        } else {
-            "the cursor's monitor"
-        },
-        if scope_override().is_some() {
-            "UPTAKE_FREEZE_ALL_MONITORS"
-        } else {
-            "the Freeze covers setting"
-        }
+    crate::diagnostics::note_about(
+        "freeze: scope",
+        &format_args!(
+            "{} ({})",
+            if freeze_all_monitors_enabled() {
+                "EVERY monitor"
+            } else {
+                "the cursor's monitor"
+            },
+            if scope_override().is_some() {
+                "UPTAKE_FREEZE_ALL_MONITORS"
+            } else {
+                "the Freeze covers setting"
+            }
+        ),
     );
 }
 
@@ -562,10 +569,10 @@ pub(crate) fn announce_display_format() {
         // `set_display_format`, and what is in force is the setting.
         _ => "the Held picture quality setting",
     };
-    eprintln!(
-        "freeze: display stills encode as {} ({source}, ADR-0027). The DISPLAY path only; \
-         crops still come from the lossless bitmap",
-        display_format().2
+    crate::diagnostics::note_about(
+        "freeze: display stills encode in the configured format. The DISPLAY path \
+         only; crops still come from the lossless bitmap",
+        &format_args!("{} ({source}, ADR-0027)", display_format().2),
     );
 }
 
@@ -601,10 +608,9 @@ pub(crate) fn set_display_format(quality: crate::settings::HeldPictureQuality) {
                 // format it did not load, which is why the store happens first
                 // and the message reads it back.
                 DISPLAY_FORMAT.store(slot_for(quality), Ordering::SeqCst);
-                eprintln!(
-                    "freeze: ignoring UPTAKE_FREEZE_FORMAT={raw:?}: expected png, jpeg or bmp; \
-                     staying on {}",
-                    display_format().2
+                crate::diagnostics::trouble(
+                    "freeze: ignoring UPTAKE_FREEZE_FORMAT, expected png, jpeg or bmp",
+                    &format_args!("{raw:?}; staying on {}", display_format().2),
                 );
                 return;
             }
@@ -851,10 +857,16 @@ pub(crate) fn resync_warm_sessions(cursor: Option<Point>) -> Resync {
         // that never prints it has not exercised the fix.
         Resync::Undone => {
             #[cfg(debug_assertions)]
-            eprintln!(
-                "freeze: warm sessions rebuilt for a Placement that had gone — stopped again \
-                 ({scope:?}; I-29, the rebuild outlived the crossing that asked for it)"
-            );
+            #[allow(
+                clippy::print_stderr,
+                reason = "this block is #[cfg(debug_assertions)], so a developer at a console is the audience and there is no release build to be silent in (task 1.15 part 2)"
+            )]
+            {
+                eprintln!(
+                    "freeze: warm sessions rebuilt for a Placement that had gone, stopped again \
+                     ({scope:?}; I-29, the rebuild outlived the crossing that asked for it)"
+                );
+            }
         }
         Resync::Skipped => {}
     }
@@ -880,6 +892,10 @@ pub(crate) fn resync_warm_sessions(cursor: Option<Point>) -> Resync {
 /// where it was fixed.
 fn report_held(held: usize, scope: Option<Scope>) {
     #[cfg(debug_assertions)]
+    #[allow(
+        clippy::print_stderr,
+        reason = "this block is #[cfg(debug_assertions)], so a developer at a console is the audience and there is no release build to be silent in (task 1.15 part 2)"
+    )]
     {
         let status = uptake_capture::warm::status();
         // The scope is present on the deferred path and absent on the two
@@ -1268,7 +1284,10 @@ fn capture_still(monitor: Rect) -> Option<(Still, MonitorCost)> {
         None => match uptake_capture::capture_region(monitor) {
             Ok(shot) => shot,
             Err(error) => {
-                eprintln!("freeze: could not capture {monitor:?}: {error}");
+                crate::diagnostics::trouble(
+                    "freeze: could not capture a monitor",
+                    &format_args!("{monitor:?}: {error}"),
+                );
                 return None;
             }
         },
@@ -1282,7 +1301,10 @@ fn capture_still(monitor: Rect) -> Option<(Still, MonitorCost)> {
     let encoded = match crate::output::encode_for_display(&shot.bitmap) {
         Ok(encoded) => encoded,
         Err(error) => {
-            eprintln!("freeze: could not encode {monitor:?}: {error}");
+            crate::diagnostics::trouble(
+                "freeze: could not encode a monitor",
+                &format_args!("{monitor:?}: {error}"),
+            );
             return None;
         }
     };
