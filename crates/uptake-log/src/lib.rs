@@ -52,12 +52,18 @@
 //!
 //! - ~~**`eprintln!` is not banned yet.** 68 remain in `src-tauri`.~~
 //!   **BANNED 2026-09-18 by task 1.15 part 2**, as `clippy::print_stderr =
-//!   "deny"` in the workspace `[lints.clippy]` table. 26 sites keep it, each
-//!   with an `#[allow]` and a reason at its own site: code that is not in the
-//!   release binary, the two sinks that run when the log itself cannot be
-//!   trusted, and the examples. The figure stays reproducible rather than
-//!   remembered, and running it is what found 71 rather than the 68 recorded
-//!   here and on the roadmap:
+//!   "deny"` in the workspace `[lints.clippy]` table **and, separately, in this
+//!   crate's own table, because this crate inherits nothing**: cargo refuses
+//!   `workspace = true` beside an override, and the `disallowed_macros` override
+//!   is why the crate exists. Round 3 of `PR #107` found that hole by adding an
+//!   `eprintln!` here and watching clippy pass, and `unwrap_used` and
+//!   `expect_used` had been in the same hole since the crate was created. See
+//!   `no_workspace_lint_is_missing_here`, which is what stops the restated list
+//!   drifting. 26 sites keep the macro, each with an `#[allow]` and a reason at
+//!   its own site: code that is not in the release binary, the two sinks that
+//!   run when the log itself cannot be trusted, and the examples. The figure
+//!   stays reproducible rather than remembered, and running it is what found 71
+//!   rather than the 68 recorded here and on the roadmap:
 //!
 //!   ```text
 //!   python -c "import pathlib; print(sum(l.strip().count('eprintln!') \
@@ -414,6 +420,80 @@ mod tests {
     /// simplest possible kind: does a string appear in a file. No parsing, no
     /// literal tracking, no structure assumed, which is precisely what the
     /// eight bypasses of the old scanner all exploited.
+    /// Every lint the workspace denies is restated in this crate's own table.
+    ///
+    /// # Why this crate needs a test nobody else needs
+    ///
+    /// It is the only member that cannot say `[lints] workspace = true`. Cargo
+    /// refuses the combination in as many words -- *"cannot override
+    /// `workspace.lints` in `lints`, either remove the overrides or
+    /// `lints.workspace = true` and manually specify the lints"* -- and this
+    /// crate must override `disallowed_macros`, because that override is the
+    /// whole reason the crate exists. So it inherits NOTHING and restates
+    /// everything, and a restated list with nothing checking it is the defect
+    /// this repository keeps paying for.
+    ///
+    /// **Round 3 of `PR #107` is why this exists**, and it found the gap by
+    /// drilling rather than by reading: an `eprintln!` added to this crate
+    /// passed `cargo clippy -p uptake-log -- -D warnings` while the same edit in
+    /// `src-tauri` failed. `unwrap_used` and `expect_used` had been in the same
+    /// hole since the crate was created, which `architecture.md` §5 calls
+    /// clippy-enforced.
+    ///
+    /// It compares NAMES and not levels. A lint this crate deliberately relaxes
+    /// -- `disallowed_macros` is `allow` here and absent from the workspace --
+    /// is exactly the case for a per-crate decision, so requiring equal levels
+    /// would make the test refuse the thing the crate is for.
+    #[test]
+    fn no_workspace_lint_is_missing_here() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("crates/uptake-log has a workspace root two levels up");
+
+        /// The lint names in a `[...lints.clippy]` table, to its blank line.
+        fn lints_in(manifest: &str, header: &str) -> Vec<String> {
+            manifest
+                .split_once(header)
+                .map(|(_, rest)| rest)
+                .unwrap_or("")
+                .lines()
+                .skip(1)
+                .take_while(|line| !line.trim().is_empty() && !line.starts_with('['))
+                .filter_map(|line| line.split_once('='))
+                .map(|(name, _)| name.trim().to_string())
+                .filter(|name| !name.starts_with('#'))
+                .collect()
+        }
+
+        let workspace = fs::read_to_string(root.join("Cargo.toml"))
+            .expect("the workspace manifest is readable");
+        let mine = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
+            .expect("this crate's manifest is readable");
+
+        let wanted = lints_in(&workspace, "[workspace.lints.clippy]");
+        let have = lints_in(&mine, "[lints.clippy]");
+
+        // A parse that found nothing would pass vacuously, which is the shape
+        // this file's own history warns about most.
+        assert!(
+            wanted.len() >= 2,
+            "read {} lints from [workspace.lints.clippy]; the parse is broken, \
+             not the manifest",
+            wanted.len()
+        );
+
+        let missing: Vec<&String> = wanted.iter().filter(|name| !have.contains(name)).collect();
+        assert!(
+            missing.is_empty(),
+            "the workspace denies {missing:?} and this crate's [lints.clippy] does \
+             not name them. It cannot inherit -- cargo refuses `workspace = true` \
+             beside an override -- so every workspace lint has to be restated in \
+             crates/uptake-log/Cargo.toml. Add them at the workspace's level, or \
+             at a level this crate argues for."
+        );
+    }
+
     #[test]
     fn no_other_crate_waives_the_ban() {
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))

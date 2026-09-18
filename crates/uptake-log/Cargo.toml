@@ -29,5 +29,30 @@ tracing-appender = { workspace = true }
 #
 # It also has no `tauri` dependency on purpose -- the dialog half of
 # diagnostics stays in `src-tauri`, so this crate is testable with no window.
+# ⚠️ **THIS CRATE INHERITS NOTHING FROM THE WORKSPACE, AND IT CANNOT.** Every
+# other member says `[lints] workspace = true`; this one cannot, because cargo
+# refuses the combination outright:
+#
+#   cannot override `workspace.lints` in `lints`, either remove the overrides
+#   or `lints.workspace = true` and manually specify the lints
+#
+# So the workspace's lints are restated below, which is what that message says to
+# do. **Found 2026-09-18 by round 3 of `PR #107`'s independent review, by
+# drilling rather than by reading**: it added an `eprintln!` to this crate and
+# `cargo clippy -p uptake-log -- -D warnings` PASSED, while the same edit in
+# `src-tauri` failed. Task 1.15 part 2's new ban had a hole in a shipped library
+# on its first day.
+#
+# **`unwrap_used` and `expect_used` were in that hole too, and had been since this
+# crate was created.** `architecture.md` §5 forbids them outside tests and calls
+# them clippy-enforced; here they were not enforced at all. A pre-existing defect
+# this change did not cause and does not get to leave behind.
+#
+# `no_workspace_lint_is_missing_here` in `src/lib.rs` is what stops this list
+# drifting from the workspace's: a lint added there and not here fails that test.
+# That mechanism is the only reason a duplicated list is acceptable.
 [lints.clippy]
 disallowed_macros = "allow"
+print_stderr = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
