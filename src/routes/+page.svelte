@@ -102,6 +102,17 @@ let stills: FrozenStill[] = $state([]);
 // one cached list. Null in a dead zone between mismatched monitors, in which
 // case no badge is drawn at all rather than one guessed onto a screen.
 let activeMonitor: number | null = $state(null);
+// Whether Rust has TOLD us, as opposed to having been asked on mount (`I-405`).
+//
+// Deliberately not `$state`: nothing renders it, and the one thing it does is
+// stop a reply that was in flight from overwriting an event that arrived while
+// it was. The read happens last in the mount sequence, so its answer is already
+// the freshest thing that sequence has, but an IPC round trip is not free, and
+// a cursor that crosses a monitor edge inside that window would otherwise leave
+// the badge on the monitor it just left, until the next crossing. That is a
+// smaller version of the defect being fixed, introduced by the fix, so it is
+// closed here rather than noted.
+let activeMonitorReported = false;
 // Each area's pinned capture URL, keyed by area id. Versioned URLs (see the
 // Rust `captures` module), so a re-capture replaces the entry with a distinct
 // address rather than relying on the WebView to bust its own cache.
@@ -322,6 +333,7 @@ onMount(() => {
     'overlay://active-monitor',
     (event) => {
       activeMonitor = event.payload.index;
+      activeMonitorReported = true;
     },
   );
   const unlistenFlash = listen<FlashPayload>('overlay://flash', (event) => {
@@ -411,6 +423,30 @@ onMount(() => {
       // not to draw, which is the same rule the language above follows.
     }
     await invoke('overlay_request_state');
+    // Which monitor the placement chrome belongs on (`I-405`).
+    //
+    // `overlay://active-monitor` fires only when the answer CHANGES, and on a
+    // hand launch the overlay is already in Placement before this page exists
+    // (`ADR-0044`) -- so the first emission has no listener to reach and the
+    // next one waits for the cursor to cross a monitor edge, which a cursor
+    // sitting still never does. The armed badge draws on `activeMonitor` alone,
+    // so it stayed absent until the hotkey was pressed twice.
+    //
+    // **A seed, not an authority.** Rust's own event wins whenever there is
+    // one. See `activeMonitorReported`, which is why this is a conditional
+    // assignment and not a plain one. Placed last in the mount sequence so its
+    // answer is the most recent this sequence can produce.
+    try {
+      const active = await invoke<ActiveMonitorPayload>(
+        'overlay_active_monitor',
+      );
+      if (!activeMonitorReported) activeMonitor = active.index;
+    } catch {
+      // No badge until the cursor moves, which is the behaviour this fixes and
+      // is still better than a badge on a guessed monitor. Same rule as the
+      // language and the settings above: a value that cannot be read is never a
+      // reason not to draw.
+    }
   });
   return () => {
     void ready.then((unlisteners) => {

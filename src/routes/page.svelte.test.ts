@@ -100,12 +100,34 @@ vi.mock('@tauri-apps/api/event', () => ({
   },
 }));
 
+/**
+ * What `invoke` answers, by command name. Anything unlisted resolves undefined.
+ *
+ * Keyed by name rather than by call order: the component reads three values on
+ * mount and a positional mock would silently re-order with the next one added.
+ *
+ * A promise may be stored here, which is how a test drives what happens *while*
+ * the page is waiting for a reply. `Promise.resolve` flattens it.
+ */
+const invokeReplies = new Map<string, unknown>();
+
+/** A reply the test holds open and resolves by hand. */
+function deferred<T>() {
+  let settle!: (value: T) => void;
+  const promise = new Promise<T>((resolve) => {
+    settle = resolve;
+  });
+  return { promise, settle };
+}
+
 // Resolves rather than rejects. The component calls `overlay_report_scale` on
 // mount and swallows the failure on purpose (the endpoint is debug-only), so a
 // rejecting mock would exercise a path every test would then be sharing with
 // the thing it is actually asserting.
 vi.mock('@tauri-apps/api/core', () => ({
-  invoke: vi.fn(() => Promise.resolve()),
+  invoke: vi.fn((command: string) =>
+    Promise.resolve(invokeReplies.get(command)),
+  ),
 }));
 
 const Page = (await import('./+page.svelte')).default;
@@ -166,6 +188,9 @@ function state(overrides: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   handlers.clear();
+  // Cleared with the handlers: a reply left over from another test is a
+  // fixture nobody in the failing test can see.
+  invokeReplies.clear();
   // jsdom reports 1; the component reads it on every state event and the
   // conversion is `physRectToCss`. Set explicitly so a jsdom default change
   // cannot quietly move every asserted rectangle.
@@ -701,6 +726,73 @@ describe('an area outside chrome appears with its hover and not otherwise', () =
     expect(container.querySelector('.armed-badge')?.textContent).toBe(
       'Screenshot',
     );
+  });
+
+  test('the armed badge draws after a hand launch, where the active monitor was emitted before this page existed', async () => {
+    // 🔴 **`I-405`, open since 2026-09-15 and wrongly fixed once.** A hand launch
+    // enters Placement during startup (`ADR-0044`), and the placement poll emits
+    // `overlay://active-monitor` only when the monitor CHANGES. So the first
+    // emission lands before the webview has registered its listener, and the
+    // next one needs the cursor to cross a monitor edge -- which a still cursor
+    // never does. `activeMonitor` therefore stayed `null` and the badge, drawn
+    // under `armed && i === activeMonitor`, never appeared. Pressing the hotkey
+    // twice worked because leaving Placement clears the poll's memory of the
+    // monitor and re-entering re-emits it.
+    //
+    // **The first fix was aimed at the keyboard and changed nothing** (`up-take`
+    // PR #104, approved twice, disproved on the rig): `F` armed all along, so
+    // focus was never the fault. What the state event carries -- `armed` -- came
+    // back on mount through `overlay_request_state`; the monitor it belongs on
+    // did not, because that command re-emits the state, the coach and the areas
+    // and this fact was left out of the set.
+    //
+    // ⚠️ **NO `overlay://active-monitor` EMIT IN THIS TEST, deliberately.** That
+    // event is the one that never arrives on a hand launch, and emitting it
+    // would assert the path that already worked -- which is what the test above
+    // does, and why it stayed green through the whole of this defect.
+    invokeReplies.set('overlay_active_monitor', { index: 1 });
+
+    const { container } = await mount();
+    await emit('overlay://state', state({ armed: 'filter' }));
+
+    const monitors = container.querySelectorAll('.monitor-frame');
+    expect(monitors[1]?.querySelector('.armed-badge')?.textContent).toBe(
+      'Filter',
+    );
+    // On the cursor's monitor ONLY (F-13). Asserted here as well as above,
+    // because "draw it on every screen" is the other way this can be wrong and
+    // an assertion that only looks at monitor 1 cannot tell the two apart.
+    expect(container.querySelectorAll('.armed-badge')).toHaveLength(1);
+  });
+
+  test('the mount read does not overwrite a monitor the poll reported while it was in flight', async () => {
+    // The race the fix above would otherwise introduce. `overlay_active_monitor`
+    // is an IPC round trip, and a cursor that crosses a monitor edge inside that
+    // window would leave the badge on the screen it just left -- a smaller copy
+    // of `I-405` caused by its own fix.
+    //
+    // The reply is held open so the event can arrive first, which is the only
+    // ordering that distinguishes a seed from an authority. Resolving it late
+    // with a DIFFERENT monitor is what makes the assertion able to fail: a reply
+    // carrying the same index as the event would pass either way, which is
+    // `UT-F-83`'s fixture that cannot tell two hypotheses apart.
+    const reply = deferred<{ index: number | null }>();
+    invokeReplies.set('overlay_active_monitor', reply.promise);
+
+    const { container } = await mount();
+    await emit('overlay://state', state({ armed: 'filter' }));
+    await emit('overlay://active-monitor', { index: 2 });
+
+    reply.settle({ index: 1 });
+    await tick();
+    await Promise.resolve();
+    await tick();
+
+    const monitors = container.querySelectorAll('.monitor-frame');
+    expect(monitors[2]?.querySelector('.armed-badge')?.textContent).toBe(
+      'Filter',
+    );
+    expect(container.querySelectorAll('.armed-badge')).toHaveLength(1);
   });
 
   test('the bar says what type the area is', async () => {
