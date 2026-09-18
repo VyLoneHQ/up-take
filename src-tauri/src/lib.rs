@@ -167,6 +167,7 @@ pub fn run() -> tauri::Result<()> {
                     overlay::overlay_report_scale,
                     overlay::overlay_dismiss_focused,
                     overlay::overlay_request_state,
+                    overlay::overlay_active_monitor,
                     first_run::overlay_report_coach,
                     strings::overlay_language,
                     settings_window::settings_read,
@@ -188,6 +189,14 @@ pub fn run() -> tauri::Result<()> {
                     overlay::overlay_report_latency,
                     overlay::overlay_dismiss_focused,
                     overlay::overlay_request_state,
+                    // BOTH lists, and that is the whole of the care this needs:
+                    // a command registered only in the debug list is a feature
+                    // that works for whoever built it and is absent from the
+                    // product (`ADR-0044` decision 3 is the same rule about
+                    // startup). `I-405` is itself a defect nothing but a real
+                    // launch could see, so shipping its fix to debug only would
+                    // be the joke the row is about.
+                    overlay::overlay_active_monitor,
                     first_run::overlay_report_coach,
                     strings::overlay_language,
                     settings_window::settings_read,

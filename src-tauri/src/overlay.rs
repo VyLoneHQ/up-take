@@ -1627,8 +1627,12 @@ pub(crate) fn create_area(
 const ACTIVE_MONITOR_EVENT: &str = "overlay://active-monitor";
 
 /// The payload of `overlay://active-monitor`: which monitor holds the cursor.
+///
+/// Also the reply of [`overlay_active_monitor`], so the page has one shape for
+/// this fact whether it was told or asked. Two shapes would be two decoders and
+/// the second would drift.
 #[derive(Serialize, Clone)]
-struct ActiveMonitorPayload {
+pub struct ActiveMonitorPayload {
     /// An index into the `monitors` array of the last `overlay://state` — both
     /// come from [`monitor_rects`], so they address the same list. `null` when
     /// the cursor is in a dead zone between mismatched monitors, where any
@@ -1657,6 +1661,49 @@ pub(crate) fn emit_active_monitor(app: &AppHandle, index: Option<usize>) {
     if let Err(error) = app.emit(ACTIVE_MONITOR_EVENT, ActiveMonitorPayload { index }) {
         crate::diagnostics::trouble("overlay: could not emit the active monitor", &error);
     }
+}
+
+/// IPC surface: which monitor holds the cursor, asked for rather than waited on.
+///
+/// # Why this exists (`I-405`)
+///
+/// [`emit_active_monitor`] fires from the placement poll **only when the answer
+/// changes**, and a hand launch enters Placement while the webview is still
+/// loading (`ADR-0044`). So the first emission lands in a page that has not
+/// registered its listener yet, and the next one waits for the cursor to cross a
+/// monitor edge, which a cursor sitting still never does. The armed badge draws
+/// on `activeMonitor` alone, so it stayed absent until the user pressed the
+/// hotkey twice: leaving Placement clears the poll's memory of the monitor
+/// (`PumpState::active_monitor`) and re-entering re-emits it.
+///
+/// # Why a read rather than a fourth emit from [`overlay_request_state`]
+///
+/// That command exists for this class and would be the tidier home for it. The
+/// honest reason it is not used is that nothing in this repository can test a
+/// `#[tauri::command]`'s emissions, and this row has already been "fixed" once
+/// by a change that passed two independent reviews and did nothing on the rig.
+/// The page reads two other current values on mount the same way
+/// (`overlay_language`, `settings_read`), and a read is what the frontend suite
+/// can hold a test against. The residue is real and is recorded rather than
+/// hidden: the set of facts a fresh webview needs is still maintained by hand in
+/// two places, and the next event added can be forgotten exactly as this one
+/// was.
+///
+/// # The cursor is read from the window, not from the hook
+///
+/// [`crate::placement`]'s atomics are only current while the hook is installed,
+/// and this is called on mount, which is before that is guaranteed. Same reason
+/// and same call as [`overlay_dismiss_focused`]. A dead zone between mismatched
+/// monitors stays `None` here, as it does on the event: the badge belongs on the
+/// cursor's monitor, and a guessed monitor is worse than no badge.
+#[tauri::command]
+pub fn overlay_active_monitor(app: AppHandle) -> Result<ActiveMonitorPayload, String> {
+    let window = overlay_window(&app)?;
+    let position = window
+        .cursor_position()
+        .map_err(|e| format!("Could not read the cursor position: {e}"))?;
+    let index = Point::from_physical_f64(position.x, position.y).and_then(monitor_index_at);
+    Ok(ActiveMonitorPayload { index })
 }
 
 const FLASH_EVENT: &str = "overlay://flash";
@@ -2086,6 +2133,14 @@ pub fn overlay_dismiss_focused(app: AppHandle) -> Result<(), String> {
 /// otherwise render no indicator and no areas until the next change. This
 /// re-emits both the current state and the area set so the overlay is correct
 /// immediately.
+///
+/// ⚠️ **It is NOT the whole of what a fresh webview needs, and `I-405` is what
+/// that cost.** Which monitor holds the cursor is the fourth fact, it was
+/// missing from here for two months, and the page now asks for it separately
+/// through [`overlay_active_monitor`]. See that function for why it is a read
+/// rather than a fourth emit added here. **Anything added to the page's mount
+/// sequence has two homes to consider, and nothing checks that the set is
+/// complete.**
 #[tauri::command]
 pub fn overlay_request_state(app: AppHandle) -> Result<(), String> {
     let cell = app.state::<Mutex<OverlayState>>();
