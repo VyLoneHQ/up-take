@@ -19,8 +19,19 @@
 //! 1. **A crate boundary the compiler enforces.** Logging cannot be scattered,
 //!    because nowhere else may call the macros.
 //! 2. **The messages are `&'static str` by type.** A literal cannot contain
-//!    what was on a screen at runtime. There is exactly one exception,
-//!    [`measurement`], and it is named for what it is.
+//!    what was on a screen at runtime. **THREE functions take a runtime value
+//!    anyway, and they are named rather than counted:** [`trouble`] and
+//!    [`note_about`] take a `&dyn Display` cause, and [`measurement`] takes a
+//!    `&str` line. ⚠️ *This said "exactly one exception, [`measurement`]" until
+//!    task 1.15 part 2, and it was already wrong when written: [`trouble`] has
+//!    taken a `&dyn Display` since part 1, and the "What is honestly NOT held"
+//!    section below said so in the same file. Part 2 added the third and the
+//!    independent review of `PR #107` found the sentence still claiming one.*
+//!
+//!    So the property is not "no runtime value can reach a log". It is that
+//!    every place one can is greppable in a single command:
+//!    `git grep -E "note_about|trouble|measurement"`. **Pass enums, numbers and
+//!    this codebase's own error strings; never anything read off the screen.**
 //!
 //! # What this replaced
 //!
@@ -39,10 +50,14 @@
 //!
 //! # What is honestly NOT held
 //!
-//! - **`eprintln!` is not banned yet.** 68 remain in `src-tauri` -- the
-//!   figure is reproducible rather than remembered, and round 5 of
-//!   `PR #94` read 73 from a raw grep that also counts the word in
-//!   comments, five of which this crate's own docs added:
+//! - ~~**`eprintln!` is not banned yet.** 68 remain in `src-tauri`.~~
+//!   **BANNED 2026-09-18 by task 1.15 part 2**, as `clippy::print_stderr =
+//!   "deny"` in the workspace `[lints.clippy]` table. 26 sites keep it, each
+//!   with an `#[allow]` and a reason at its own site: code that is not in the
+//!   release binary, the two sinks that run when the log itself cannot be
+//!   trusted, and the examples. The figure stays reproducible rather than
+//!   remembered, and running it is what found 71 rather than the 68 recorded
+//!   here and on the roadmap:
 //!
 //!   ```text
 //!   python -c "import pathlib; print(sum(l.strip().count('eprintln!') \
@@ -51,9 +66,12 @@
 //!     if not l.strip().startswith('//')))"
 //!   ```
 //!
-//!   Part 2 of
-//!   `1.15` is where they go and the ban widens with them. Adding it today
-//!   would need 68 exceptions, which is worse than the gap.
+//!   ⚠️ **The ban is NOT on this crate's `clippy.toml` list, and the reason
+//!   matters more than the fact.** Putting it there was tried first and
+//!   `no_other_crate_waives_the_ban` below went red, correctly: that list is
+//!   policed by a SINGLE lint, so an `#[allow]` written to excuse an
+//!   `eprintln!` switches off the PRIVACY ban at the same site. A privacy rule
+//!   cannot share a switch with an audibility rule.
 //! - **A crate-root `#![allow(clippy::disallowed_macros)]` waives the ban,
 //!   and no manifest changes.** Round 4 of `PR #94` drilled it: one line at
 //!   another crate's root and clippy goes green on a live leak. I had
