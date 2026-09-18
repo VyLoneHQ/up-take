@@ -26,6 +26,15 @@
 //! Prints the clamped rectangle and the capture latency — the number the §1
 //! budget (selection→clipboard < 300 ms) cares about.
 
+// A console program, run by hand from a terminal that somebody is reading.
+// `eprintln!` is the right sink here and the ban does not apply: task 1.15
+// part 2 bans it because a RELEASE BUILD has no console ("F-35"), and this
+// file is never in one.
+#![allow(
+    clippy::print_stderr,
+    reason = "a console program's stderr is its interface; this is never in the release binary (task 1.15 part 2)"
+)]
+
 #[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use uptake_core::geometry::Rect;

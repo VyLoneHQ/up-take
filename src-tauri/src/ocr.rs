@@ -478,7 +478,10 @@ pub(crate) fn recognise_into_area(app: &AppHandle, id: AreaId, bounds: Rect) {
         let frame = match crate::output::frame_for_ocr(bounds) {
             Ok(frame) => frame,
             Err(error) => {
-                eprintln!("ocr: could not capture area {id:?}: {error}");
+                crate::diagnostics::trouble(
+                    "ocr: could not capture the area",
+                    &format_args!("{id:?}: {error}"),
+                );
                 crate::overlay::emit_ocr(&app, id, Status::Failed, Some(error));
                 return;
             }
@@ -623,7 +626,10 @@ pub(crate) fn pump(app: &AppHandle) {
                 // interpret means an area is waiting for an answer that has
                 // arrived in a shape nothing draws, and silence there is the
                 // failure `Outcome::Abandoned` exists to prevent.
-                other => eprintln!("ocr: unrecognised outcome from the worker: {other:?}"),
+                other => crate::diagnostics::note_about(
+                    "ocr: unrecognised outcome from the worker",
+                    &format_args!("{other:?}"),
+                ),
             }
         }
     }

@@ -756,7 +756,10 @@ pub fn enter(app: &AppHandle) {
     // First entry wins; later ones are the same handle, so ignore the result.
     let _ = APP.set(app.clone());
     if let Err(error) = app.run_on_main_thread(enter_placement_on_main_thread) {
-        eprintln!("placement: could not schedule hook install on the main thread: {error}");
+        crate::diagnostics::trouble(
+            "placement: could not schedule hook install on the main thread",
+            &error,
+        );
     }
 }
 
@@ -767,7 +770,10 @@ pub fn enter(app: &AppHandle) {
 pub fn enter_living(app: &AppHandle) {
     let _ = APP.set(app.clone());
     if let Err(error) = app.run_on_main_thread(enter_living_on_main_thread) {
-        eprintln!("placement: could not schedule Living entry on the main thread: {error}");
+        crate::diagnostics::trouble(
+            "placement: could not schedule Living entry on the main thread",
+            &error,
+        );
     }
 }
 
@@ -778,7 +784,10 @@ pub fn enter_living(app: &AppHandle) {
 /// thread. Idempotent.
 pub fn exit(app: &AppHandle) {
     if let Err(error) = app.run_on_main_thread(exit_on_main_thread) {
-        eprintln!("placement: could not schedule placement exit on the main thread: {error}");
+        crate::diagnostics::trouble(
+            "placement: could not schedule placement exit on the main thread",
+            &error,
+        );
     }
 }
 
@@ -1032,14 +1041,14 @@ fn pump_hook_health(app: &AppHandle, state: &mut PumpState) {
     if state.silent_ticks >= SILENT_TICKS_BEFORE_REINSTALL {
         state.silent_ticks = 0;
         state.reinstall_cooldown = REINSTALL_COOLDOWN_TICKS;
-        eprintln!("placement: mouse hook stopped receiving input; reinstalling");
+        crate::diagnostics::note("placement: mouse hook stopped receiving input, reinstalling");
         if let Err(error) = app.run_on_main_thread(reinstall_on_main_thread) {
             // The main thread is not servicing its queue, which is itself the
             // reason the hook died, if something has put it in a modal loop.
             // Nothing here can fix that from another thread: installing and
             // removing a low-level hook are both thread-affine to the event
             // loop.
-            eprintln!("placement: could not schedule a hook reinstall: {error}");
+            crate::diagnostics::trouble("placement: could not schedule a hook reinstall", &error);
         }
     }
 }
@@ -1179,9 +1188,9 @@ fn reinstall_on_main_thread() {
     // Living would wrongly assert one.
     if mode() != Mode::Hidden {
         ensure_hook();
-        eprintln!(
-            "placement: mouse hook reinstalled (installed: {})",
-            HOOK.load(Ordering::SeqCst) != 0
+        crate::diagnostics::note_about(
+            "placement: mouse hook reinstalled",
+            &format_args!("installed: {}", HOOK.load(Ordering::SeqCst) != 0),
         );
     }
 }
@@ -1842,7 +1851,9 @@ fn ensure_hook() {
             // Logged rather than shown, because this failure path is
             // essentially unreachable (SetWindowsHookExW fails only on resource
             // exhaustion or a locked desktop).
-            eprintln!("placement: SetWindowsHookExW failed; area input is unavailable");
+            crate::diagnostics::note(
+                "placement: SetWindowsHookExW failed, area input is unavailable",
+            );
         } else {
             HOOK.store(hook as isize, Ordering::SeqCst);
         }
@@ -2210,8 +2221,9 @@ fn snapshot_cursor(shape: CursorShape) -> HCURSOR {
 fn apply_cursor(shape: CursorShape) {
     let cursor: HCURSOR = snapshot_cursor(shape);
     if cursor.is_null() {
-        eprintln!(
-            "placement: could not load the {shape:?} cursor; leaving the system cursor as-is"
+        crate::diagnostics::trouble(
+            "placement: could not load a cursor, leaving the system cursor as-is",
+            &format_args!("{shape:?}"),
         );
         return;
     }
@@ -2225,8 +2237,9 @@ fn apply_cursor(shape: CursorShape) {
 fn apply_cursor_to(shape: CursorShape, id: u32) {
     let cursor: HCURSOR = snapshot_cursor(shape);
     if cursor.is_null() {
-        eprintln!(
-            "placement: could not load the {shape:?} cursor; leaving the system cursor as-is"
+        crate::diagnostics::trouble(
+            "placement: could not load a cursor, leaving the system cursor as-is",
+            &format_args!("{shape:?}"),
         );
         return;
     }
@@ -2288,7 +2301,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
     if code >= 0 {
         let swallow = catch_unwind(AssertUnwindSafe(|| handle_mouse(wparam, lparam)))
             .unwrap_or_else(|_| {
-                eprintln!("placement: panic in the mouse hook");
+                crate::diagnostics::note("placement: panic in the mouse hook");
                 false
             });
         if swallow {
@@ -2665,7 +2678,10 @@ fn living_lbutton_down(point: Point) -> bool {
     if overlay::raise_area(app, id)
         && let Err(error) = overlay::emit_areas(app)
     {
-        eprintln!("placement: raised an area but could not emit the new set: {error}");
+        crate::diagnostics::trouble(
+            "placement: raised an area but could not emit the new set",
+            &error,
+        );
     }
     *lock(&GESTURE) = Some(match handle {
         Handle::Close => Gesture::Close {
@@ -2918,6 +2934,10 @@ fn finish_gesture(release: Point) {
             // store and click-through regions use, across every monitor, the
             // 125% primary included.
             #[cfg(debug_assertions)]
+            #[allow(
+                clippy::print_stderr,
+                reason = "this block is #[cfg(debug_assertions)], so a developer at a console is the audience and there is no release build to be silent in (task 1.15 part 2)"
+            )]
             if created.is_some() {
                 eprintln!("placement: created {kind:?} area {width}x{height} at ({x}, {y})");
             } else {
@@ -2971,7 +2991,10 @@ fn finish_gesture(release: Point) {
         Gesture::Inert => return,
     };
     if changed && let Err(error) = overlay::emit_areas(app) {
-        eprintln!("placement: applied a gesture but could not emit the new set: {error}");
+        crate::diagnostics::trouble(
+            "placement: applied a gesture but could not emit the new set",
+            &error,
+        );
     }
 }
 
@@ -3838,7 +3861,10 @@ fn activate_menu_item(app: &AppHandle, hit: MenuHit, release: Point) {
         }
     };
     if changed && let Err(error) = overlay::emit_areas(app) {
-        eprintln!("placement: menu action applied but could not emit the new set: {error}");
+        crate::diagnostics::trouble(
+            "placement: menu action applied but could not emit the new set",
+            &error,
+        );
     }
 }
 

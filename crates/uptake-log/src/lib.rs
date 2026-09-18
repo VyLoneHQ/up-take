@@ -19,8 +19,19 @@
 //! 1. **A crate boundary the compiler enforces.** Logging cannot be scattered,
 //!    because nowhere else may call the macros.
 //! 2. **The messages are `&'static str` by type.** A literal cannot contain
-//!    what was on a screen at runtime. There is exactly one exception,
-//!    [`measurement`], and it is named for what it is.
+//!    what was on a screen at runtime. **THREE functions take a runtime value
+//!    anyway, and they are named rather than counted:** [`trouble`] and
+//!    [`note_about`] take a `&dyn Display` cause, and [`measurement`] takes a
+//!    `&str` line. ⚠️ *This said "exactly one exception, [`measurement`]" until
+//!    task 1.15 part 2, and it was already wrong when written: [`trouble`] has
+//!    taken a `&dyn Display` since part 1, and the "What is honestly NOT held"
+//!    section below said so in the same file. Part 2 added the third and the
+//!    independent review of `PR #107` found the sentence still claiming one.*
+//!
+//!    So the property is not "no runtime value can reach a log". It is that
+//!    every place one can is greppable in a single command:
+//!    `git grep -E "note_about|trouble|measurement"`. **Pass enums, numbers and
+//!    this codebase's own error strings; never anything read off the screen.**
 //!
 //! # What this replaced
 //!
@@ -39,10 +50,20 @@
 //!
 //! # What is honestly NOT held
 //!
-//! - **`eprintln!` is not banned yet.** 68 remain in `src-tauri` -- the
-//!   figure is reproducible rather than remembered, and round 5 of
-//!   `PR #94` read 73 from a raw grep that also counts the word in
-//!   comments, five of which this crate's own docs added:
+//! - ~~**`eprintln!` is not banned yet.** 68 remain in `src-tauri`.~~
+//!   **BANNED 2026-09-18 by task 1.15 part 2**, as `clippy::print_stderr =
+//!   "deny"` in the workspace `[lints.clippy]` table **and, separately, in this
+//!   crate's own table, because this crate inherits nothing**: cargo refuses
+//!   `workspace = true` beside an override, and the `disallowed_macros` override
+//!   is why the crate exists. Round 3 of `PR #107` found that hole by adding an
+//!   `eprintln!` here and watching clippy pass, and `unwrap_used` and
+//!   `expect_used` had been in the same hole since the crate was created. See
+//!   `no_workspace_lint_is_missing_here`, which is what stops the restated list
+//!   drifting. 26 sites keep the macro, each with an `#[allow]` and a reason at
+//!   its own site: code that is not in the release binary, the two sinks that
+//!   run when the log itself cannot be trusted, and the examples. The figure
+//!   stays reproducible rather than remembered, and running it is what found 71
+//!   rather than the 68 recorded here and on the roadmap:
 //!
 //!   ```text
 //!   python -c "import pathlib; print(sum(l.strip().count('eprintln!') \
@@ -51,9 +72,12 @@
 //!     if not l.strip().startswith('//')))"
 //!   ```
 //!
-//!   Part 2 of
-//!   `1.15` is where they go and the ban widens with them. Adding it today
-//!   would need 68 exceptions, which is worse than the gap.
+//!   ⚠️ **The ban is NOT on this crate's `clippy.toml` list, and the reason
+//!   matters more than the fact.** Putting it there was tried first and
+//!   `no_other_crate_waives_the_ban` below went red, correctly: that list is
+//!   policed by a SINGLE lint, so an `#[allow]` written to excuse an
+//!   `eprintln!` switches off the PRIVACY ban at the same site. A privacy rule
+//!   cannot share a switch with an audibility rule.
 //! - **A crate-root `#![allow(clippy::disallowed_macros)]` waives the ban,
 //!   and no manifest changes.** Round 4 of `PR #94` drilled it: one line at
 //!   another crate's root and clippy goes green on a live leak. I had
@@ -190,6 +214,31 @@ pub fn note(message: &'static str) {
     tracing::info!(target: TARGET, "{message}");
 }
 
+/// Records something that happened, with a detail that is not a literal.
+///
+/// The info-level twin of [`trouble`], added by task 1.15 part 2. It exists
+/// because the lines being converted include ones whose whole content is a
+/// runtime value that went wrong in no way at all: which state the overlay
+/// moved to, which type of area a drag created. [`note`] cannot carry those and
+/// [`trouble`] would file them as warnings, which is a lie about severity that
+/// a log reader then has to un-learn.
+///
+/// # This is the SECOND `&dyn Display` sink, and that is a real cost
+///
+/// The crate docs say the privacy rule is held by two structural facts, the
+/// second being that messages are `&'static str` by type, with one named
+/// exception. There are now three named exceptions: this, [`trouble`] and
+/// [`measurement`]. A caller who builds a string out of screen content and
+/// passes it here defeats the rule exactly as `I-381` describes for `trouble`.
+///
+/// What keeps it reviewable is that the set is small, named, and greppable:
+/// `git grep -E "note_about|trouble|measurement"` is the whole list of places a
+/// runtime value can reach a log. **Pass enums, numbers and this codebase's own
+/// error strings. Never anything that was read off the screen.**
+pub fn note_about(message: &'static str, detail: &dyn fmt::Display) {
+    tracing::info!(target: TARGET, %detail, "{message}");
+}
+
 /// Records something that went wrong but did not stop the app.
 ///
 /// See the crate docs for why `cause` is `&dyn Display` and what that leaves
@@ -289,11 +338,21 @@ mod tests {
     /// exist.
     #[test]
     fn the_public_surface_is_exactly_what_was_reviewed() {
-        // Every entry was read and its logging argued. `measurement` is the
-        // only one taking a runtime string, and the crate docs say why.
+        // Every entry was read and its logging argued. THREE of them can carry
+        // a runtime value -- `trouble`, `note_about` and `measurement` -- and
+        // the crate docs say what each is for and what it leaves open.
+        //
+        // `note_about` was added by task 1.15 part 2 and this test is what made
+        // that a decision rather than an edit: it went red on the new name and
+        // its message says to read what the entry logs before listing it. It
+        // takes `&dyn Display` exactly as `trouble` does, and it exists because
+        // the conversion turned up lines whose whole content is a runtime value
+        // that went wrong in no way at all (which state the overlay moved to),
+        // where filing them as warnings would be a lie about severity.
         const REVIEWED: &[&str] = &[
             "init",
             "note",
+            "note_about",
             "trouble",
             "trouble_for",
             "failure",
@@ -361,6 +420,80 @@ mod tests {
     /// simplest possible kind: does a string appear in a file. No parsing, no
     /// literal tracking, no structure assumed, which is precisely what the
     /// eight bypasses of the old scanner all exploited.
+    /// Every lint the workspace denies is restated in this crate's own table.
+    ///
+    /// # Why this crate needs a test nobody else needs
+    ///
+    /// It is the only member that cannot say `[lints] workspace = true`. Cargo
+    /// refuses the combination in as many words -- *"cannot override
+    /// `workspace.lints` in `lints`, either remove the overrides or
+    /// `lints.workspace = true` and manually specify the lints"* -- and this
+    /// crate must override `disallowed_macros`, because that override is the
+    /// whole reason the crate exists. So it inherits NOTHING and restates
+    /// everything, and a restated list with nothing checking it is the defect
+    /// this repository keeps paying for.
+    ///
+    /// **Round 3 of `PR #107` is why this exists**, and it found the gap by
+    /// drilling rather than by reading: an `eprintln!` added to this crate
+    /// passed `cargo clippy -p uptake-log -- -D warnings` while the same edit in
+    /// `src-tauri` failed. `unwrap_used` and `expect_used` had been in the same
+    /// hole since the crate was created, which `architecture.md` §5 calls
+    /// clippy-enforced.
+    ///
+    /// It compares NAMES and not levels. A lint this crate deliberately relaxes
+    /// -- `disallowed_macros` is `allow` here and absent from the workspace --
+    /// is exactly the case for a per-crate decision, so requiring equal levels
+    /// would make the test refuse the thing the crate is for.
+    #[test]
+    fn no_workspace_lint_is_missing_here() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("crates/uptake-log has a workspace root two levels up");
+
+        /// The lint names in a `[...lints.clippy]` table, to its blank line.
+        fn lints_in(manifest: &str, header: &str) -> Vec<String> {
+            manifest
+                .split_once(header)
+                .map(|(_, rest)| rest)
+                .unwrap_or("")
+                .lines()
+                .skip(1)
+                .take_while(|line| !line.trim().is_empty() && !line.starts_with('['))
+                .filter_map(|line| line.split_once('='))
+                .map(|(name, _)| name.trim().to_string())
+                .filter(|name| !name.starts_with('#'))
+                .collect()
+        }
+
+        let workspace = fs::read_to_string(root.join("Cargo.toml"))
+            .expect("the workspace manifest is readable");
+        let mine = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
+            .expect("this crate's manifest is readable");
+
+        let wanted = lints_in(&workspace, "[workspace.lints.clippy]");
+        let have = lints_in(&mine, "[lints.clippy]");
+
+        // A parse that found nothing would pass vacuously, which is the shape
+        // this file's own history warns about most.
+        assert!(
+            wanted.len() >= 2,
+            "read {} lints from [workspace.lints.clippy]; the parse is broken, \
+             not the manifest",
+            wanted.len()
+        );
+
+        let missing: Vec<&String> = wanted.iter().filter(|name| !have.contains(name)).collect();
+        assert!(
+            missing.is_empty(),
+            "the workspace denies {missing:?} and this crate's [lints.clippy] does \
+             not name them. It cannot inherit -- cargo refuses `workspace = true` \
+             beside an override -- so every workspace lint has to be restated in \
+             crates/uptake-log/Cargo.toml. Add them at the workspace's level, or \
+             at a level this crate argues for."
+        );
+    }
+
     #[test]
     fn no_other_crate_waives_the_ban() {
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))

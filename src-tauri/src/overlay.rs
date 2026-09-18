@@ -449,7 +449,10 @@ fn drive(app: &AppHandle, event: Event) {
         target
     };
     if let Err(error) = apply(app, target) {
-        eprintln!("overlay: could not apply state {target:?}: {error}");
+        crate::diagnostics::trouble(
+            "overlay: could not apply state",
+            &format_args!("{target:?}: {error}"),
+        );
     }
     // The first-run tour hears about every settled state, after the state's own
     // effect so the coach is drawn over a window that is already showing
@@ -478,7 +481,7 @@ fn apply(app: &AppHandle, state: OverlayState) -> Result<(), String> {
     // (did arming work, did the Screenshot auto-exit) is only readable if the
     // current state is an observation instead of an assumption.
     #[cfg(debug_assertions)]
-    eprintln!("overlay: state -> {state:?}");
+    crate::diagnostics::note_about("overlay: state", &format_args!("{state:?}"));
     // Every state transition returns the screen to live (ADR-0026 decision 4).
     // Placed here, at the one point every transition funnels through, rather
     // than at each entry: freeze exists only inside Placement, so "reset on
@@ -620,13 +623,16 @@ fn emit_state(app: &AppHandle, state: OverlayState) -> Result<(), String> {
 pub fn toggle_freeze(app: &AppHandle) {
     let state = *lock(&app.state::<Mutex<OverlayState>>());
     if !matches!(state, OverlayState::Placement) {
-        eprintln!("overlay: freeze toggle ignored outside Placement (state {state:?})");
+        crate::diagnostics::note_about(
+            "overlay: freeze toggle ignored outside Placement",
+            &format_args!("{state:?}"),
+        );
         return;
     }
     if crate::freeze::is_frozen() {
         crate::freeze::thaw();
         if let Err(error) = emit_state(app, state) {
-            eprintln!("overlay: could not emit state after thawing: {error}");
+            crate::diagnostics::trouble("overlay: could not emit state after thawing", &error);
         }
         return;
     }
@@ -663,7 +669,7 @@ pub fn toggle_freeze(app: &AppHandle) {
             // a ~420 ms window where that is the right behaviour is exactly what
             // a session reads a log to explain.
             Err(skipped) => {
-                eprintln!("freeze: no stills published — {skipped}");
+                crate::diagnostics::trouble("freeze: no stills published", &skipped);
                 return;
             }
         };
@@ -679,8 +685,8 @@ pub fn toggle_freeze(app: &AppHandle) {
         // monitors, and a single `1/4` cannot distinguish it from a whole-desktop
         // freeze that lost three either. `UT-F-46`'s rule is that a run reports
         // the condition it ran under, and the scope is that condition here.
-        eprintln!(
-            "freeze: froze {}/{} monitor(s) in scope, {} of {} on the desktop, in {} ms — \
+        crate::diagnostics::measurement(&format!(
+            "freeze: froze {}/{} monitor(s) in scope, {} of {} on the desktop, in {} ms, \
              warm {}/{}, slowest monitor: capture {} ms, encode {} ms",
             report.count,
             monitors.len(),
@@ -691,7 +697,7 @@ pub fn toggle_freeze(app: &AppHandle) {
             report.count,
             report.slowest_capture_ms,
             report.slowest_encode_ms
-        );
+        ));
         // Per-monitor, with the encoded size beside the timings, because
         // `quality-bars.md` §1's row is content-dependent and a maximum cannot
         // say what it was taken against. The byte length is the run describing
@@ -702,8 +708,8 @@ pub fn toggle_freeze(app: &AppHandle) {
         // nobody can prove is on looks like, and a rig operator reading a freeze
         // line is the reader this exists for.
         for cost in &report.per_monitor {
-            eprintln!(
-                "freeze:   {}x{} at ({}, {}) — capture {} ms, encode {} ms, \
+            crate::diagnostics::measurement(&format!(
+                "freeze:   {}x{} at ({}, {}), capture {} ms, encode {} ms, \
                  {} bytes, {}",
                 cost.rect.size.width,
                 cost.rect.size.height,
@@ -713,10 +719,10 @@ pub fn toggle_freeze(app: &AppHandle) {
                 cost.encode_ms,
                 cost.encoded_bytes,
                 if cost.served_warm { "warm" } else { "cold" }
-            );
+            ));
         }
         if let Err(error) = emit_state(&app, OverlayState::Placement) {
-            eprintln!("overlay: could not emit state after freezing: {error}");
+            crate::diagnostics::trouble("overlay: could not emit state after freezing", &error);
         }
     });
 }
@@ -966,7 +972,7 @@ pub(crate) fn zoom_area(app: &AppHandle, id: AreaId, notches: i32) -> bool {
     // The badge is on the area payload, so the area set has to go out again for
     // the new factor to be visible.
     if let Err(error) = emit_areas(app) {
-        eprintln!("overlay: zoomed but could not emit the areas: {error}");
+        crate::diagnostics::trouble("overlay: zoomed but could not emit the areas", &error);
     }
     true
 }
@@ -1403,7 +1409,10 @@ fn collapse_living_if_empty(app: &AppHandle) {
         OverlayState::Hidden
     };
     if let Err(error) = apply(app, target) {
-        eprintln!("overlay: could not apply state {target:?}: {error}");
+        crate::diagnostics::trouble(
+            "overlay: could not apply state",
+            &format_args!("{target:?}: {error}"),
+        );
     }
     // A transition like any other as far as the first-run tour is concerned,
     // and it does not pass through `drive`, so it tells the tour itself.
@@ -1650,7 +1659,7 @@ pub(crate) fn monitor_index_at(point: Point) -> Option<usize> {
 /// it would recompute geometry for a one-integer change.
 pub(crate) fn emit_active_monitor(app: &AppHandle, index: Option<usize>) {
     if let Err(error) = app.emit(ACTIVE_MONITOR_EVENT, ActiveMonitorPayload { index }) {
-        eprintln!("overlay: could not emit the active monitor: {error}");
+        crate::diagnostics::trouble("overlay: could not emit the active monitor", &error);
     }
 }
 
@@ -1733,7 +1742,7 @@ pub(crate) fn emit_flash(app: &AppHandle, id: AreaId) {
             nonce,
         },
     ) {
-        eprintln!("overlay: could not emit the flash: {error}");
+        crate::diagnostics::trouble("overlay: could not emit the flash", &error);
     }
 }
 
@@ -1771,7 +1780,7 @@ pub(crate) fn emit_ocr(
             detail,
         },
     ) {
-        eprintln!("overlay: could not emit the OCR state: {error}");
+        crate::diagnostics::trouble("overlay: could not emit the OCR state", &error);
     }
 }
 
@@ -1905,7 +1914,10 @@ pub(crate) fn area_created(app: &AppHandle, kind: AreaType) {
             crate::first_run::on_area_created(&handle, kind);
             drive(&handle, Event::AreaCreated { exits_placement });
         }) {
-            eprintln!("overlay: could not apply the after-create transition: {error}");
+            crate::diagnostics::trouble(
+                "overlay: could not apply the after-create transition",
+                &error,
+            );
         }
     });
 }

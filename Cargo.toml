@@ -114,6 +114,31 @@ ort = { version = "=2.0.0-rc.13", default-features = false, features = ["load-dy
 [workspace.lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"
+# Task 1.15 part 2. `main.rs` sets `windows_subsystem = "windows"`, so a release
+# build has no console and `eprintln!` reaches nobody (`F-35`): a failure printed
+# there is a failure that did not happen, as far as anyone who could act on it is
+# concerned. Log through `uptake-log` instead.
+#
+# **Deliberately this lint and NOT a `disallowed-macros` entry in `clippy.toml`,
+# where the tracing ban lives.** That was tried first and `uptake-log`'s
+# `no_other_crate_waives_the_ban` test refused it, correctly: that list is
+# policed by a SINGLE lint covering every entry on it, so an `#[allow]` written
+# to excuse an `eprintln!` would switch off the PRIVACY ban at the same site.
+# Separate rules, separate switches; see the long note in `clippy.toml`.
+#
+# ⚠️ That test also greps every non-`uptake-log` file for the underscored lint
+# name, in any spelling, and a mention in PROSE trips it exactly as a real
+# waiver would. So this comment names the `clippy.toml` key with its hyphen and
+# never writes the lint's own name. The check is deliberately the dumbest kind
+# there is, and the cost of that is paid here rather than by loosening it.
+#
+# 26 sites keep it, each with `#[allow(clippy::print_stderr, reason = ...)]` at
+# its own site rather than a file-level waiver: code that is not in the release
+# binary (`dev_harness` and the `#[cfg(debug_assertions)]` instrumentation
+# blocks), the two sinks that run when the log itself cannot be trusted
+# (`lib.rs`'s failed `diagnostics::init`, `main.rs`'s startup failure), and the
+# examples, which are console programs whose stderr is their interface.
+print_stderr = "deny"
 
 # No [profile.release] tuning here on purpose. The obvious knob, opt-level = "s",
 # would trade OCR inference speed for binary size, and quality-bars.md §1 is

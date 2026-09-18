@@ -27,6 +27,17 @@
 //!
 //! So: assert on CONTENT. A size read through `read_dir` proves nothing here.
 
+// An integration test is its own crate, so the `#[allow]` on the unit-test
+// module in `src/lib.rs` never covered it. It did not have to before: this
+// crate inherited no workspace lints at all, which is the hole round 3 of
+// `PR #107` found. Now that `unwrap_used` and `expect_used` are denied here,
+// this file needs the same waiver the unit tests have, for the same reason.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "a failed unwrap is a failed test"
+)]
+
 use std::time::{Duration, Instant};
 
 #[test]

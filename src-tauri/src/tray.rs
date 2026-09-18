@@ -20,6 +20,11 @@
 //! process they cannot close and no idea why. Same reasoning as
 //! [`crate::hotkey::install`], and stronger: a hotkey conflict is
 //! user-fixable, a missing tray is not.
+//!
+//! Since task 1.15 part 2 this module writes through
+//! [`crate::diagnostics`] rather than to a console nobody is reading, so the
+//! menu actions leave a trace in a release build too. The dialog on a failed
+//! tray, above, is unchanged and is still the part a user sees.
 
 use tauri::AppHandle;
 use tauri::menu::{Menu, MenuItem};
@@ -130,31 +135,36 @@ fn build(app: &AppHandle) -> Result<(), String> {
         // platform's menu gesture) still opens the menu regardless of this
         // setting — it only governs the left button.
         .show_menu_on_left_click(false)
-        // Each arm announces itself in debug builds. None of these actions
-        // left a trace on success before, which made a clean exit
-        // indistinguishable from any other way the process could end — a
-        // verification run was lost to exactly that ambiguity. The Show
-        // arms are separated for the same reason: the menu item and a left
-        // click reach the same `overlay::summon` through different tauri
-        // callbacks, so one line is what tells you which one fired.
+        // Each arm announces itself. None of these actions left a trace on
+        // success before, which made a clean exit indistinguishable from any
+        // other way the process could end, and a verification run was lost to
+        // exactly that ambiguity. The Show arms are separated for the same
+        // reason: the menu item and a left click reach the same
+        // `overlay::summon` through different tauri callbacks, so one line is
+        // what tells you which one fired.
+        //
+        // **These were `#[cfg(debug_assertions)] eprintln!` until task 1.15
+        // part 2**, which is to say they answered that question for whoever
+        // built the app and for nobody who runs it. The ambiguity is at its
+        // worst in a release build on someone else's machine, where "did they
+        // quit, or did it die?" is exactly what a log has to answer. Every
+        // message here is a literal, so `uptake-log`'s privacy rule holds by
+        // type rather than by care.
         .on_menu_event(|app, event| match event.id.as_ref() {
             SHOW_ID => {
-                #[cfg(debug_assertions)]
-                eprintln!("tray: Show chosen from the menu");
+                crate::diagnostics::note("tray: Show chosen from the menu");
                 // Summon into Placement (ADR-0012), the same as a relaunch.
                 overlay::summon(app);
             }
             SETTINGS_ID => {
-                #[cfg(debug_assertions)]
-                eprintln!("tray: Settings chosen from the menu");
+                crate::diagnostics::note("tray: Settings chosen from the menu");
                 crate::settings_window::open(app);
             }
             QUIT_ID => {
-                // The last line the app prints. `app.exit(0)` unwinds through
+                // The last line the app logs. `app.exit(0)` unwinds through
                 // `RunEvent::Exit`, so anything logged after this would be a
                 // lie about the order.
-                #[cfg(debug_assertions)]
-                eprintln!("tray: Quit chosen — exiting");
+                crate::diagnostics::note("tray: Quit chosen, exiting");
                 app.exit(0);
             }
             _ => {}
@@ -169,8 +179,7 @@ fn build(app: &AppHandle) -> Result<(), String> {
             } = event
             {
                 let app = tray.app_handle();
-                #[cfg(debug_assertions)]
-                eprintln!("tray: left click on the icon");
+                crate::diagnostics::note("tray: left click on the icon");
                 overlay::summon(app);
             }
         })
