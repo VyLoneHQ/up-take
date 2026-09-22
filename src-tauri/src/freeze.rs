@@ -1371,6 +1371,7 @@ pub(crate) struct FreezeReport {
 /// `DECISIONS/ADR-0019-overlay-excluded-from-capture.md`
 pub(crate) fn freeze(
     monitors: &[Rect],
+    generation: u64,
     overlay: Option<&dyn StepAside>,
 ) -> Result<FreezeReport, Skipped> {
     // Claimed before any work: `InFlight` means this call must do nothing at
@@ -1383,7 +1384,13 @@ pub(crate) fn freeze(
         return Err(Skipped::InFlight);
     }
     let _releases_the_claim = FreezingGuard;
-    let generation = GENERATION.load(Ordering::SeqCst);
+    // Retired before it started: the toggle was overtaken by a transition
+    // between the key and this thread being scheduled. Nothing to hide, nothing
+    // to capture, nothing to publish. See [`generation`] for why the caller
+    // reads this and not this function.
+    if GENERATION.load(Ordering::SeqCst) != generation {
+        return Err(Skipped::Retired);
+    }
     let started = Instant::now();
     // After the claim, so a toggle that does nothing also hides nothing. Timed
     // on its own because it is the cost decision 6 added, and the ADR says it
@@ -1437,6 +1444,27 @@ pub(crate) fn freeze(
         step_aside_ms,
         per_monitor,
     })
+}
+
+/// The generation a freeze requested now belongs to, for [`freeze`].
+///
+/// **Read by the caller, on the thread the key arrived on, BEFORE it checks the
+/// state is Placement** -- never inside the freeze. Found by round 1 of
+/// `up-take` `#109`'s independent review, which reproduced it: `freeze` used to
+/// read the generation itself, on the worker, so an `Esc` landing between the
+/// key and the worker being scheduled bumped the generation first and the
+/// worker adopted the new one as its own. Every guard then passed, and the
+/// worker showed an overlay the state machine had just hidden and emitted
+/// Placement into Hidden.
+///
+/// **Why before the state check, not after.** A transition writes the state
+/// under its lock and then calls [`thaw`], which bumps this. Read here first and
+/// then the state: a transition that lands before this read has already written
+/// the state, so the check refuses; one that lands after it bumps the number,
+/// so the freeze is retired. Read the other way round, a transition landing
+/// between the two reads would pass both.
+pub(crate) fn generation() -> u64 {
+    GENERATION.load(Ordering::SeqCst)
 }
 
 /// Stores `captured` as the frozen stills, unless `generation` has been retired.
@@ -1864,12 +1892,15 @@ mod tests {
             "the flag must start clear, or this test is asserting nothing"
         );
         assert_eq!(
-            freeze(&[], None).err(),
+            freeze(&[], generation(), None).err(),
             Some(Skipped::InFlight),
             "a freeze must not start while another is in flight"
         );
         FREEZING.store(false, Ordering::SeqCst);
-        assert!(freeze(&[], None).is_ok(), "the claim must be released");
+        assert!(
+            freeze(&[], generation(), None).is_ok(),
+            "the claim must be released"
+        );
     }
 
     /// A freeze overtaken by a state transition must publish nothing.
@@ -1923,7 +1954,7 @@ mod tests {
                 .expect("a frozen url parses");
         assert!(still_bytes(index, version).is_some());
         // A freeze over no monitors: captures nothing, and must still retire it.
-        assert!(freeze(&[], None).is_ok());
+        assert!(freeze(&[], generation(), None).is_ok());
         // Re-install a still at the same index. Without this the assertion below
         // passes for the wrong reason — the stills are empty, so the lookup
         // fails on the *index* and the version is never consulted. Confirmed by
@@ -2305,7 +2336,7 @@ mod tests {
     fn a_freeze_hides_the_overlay_for_its_capture_and_shows_it_after() {
         let _guard = crate::precapture::frame_store_guard();
         let window = Recorded::default();
-        let report = freeze(&[], Some(&window)).ok();
+        let report = freeze(&[], generation(), Some(&window)).ok();
         assert_eq!(window.calls(), ["hide", "composed", "show"]);
         assert!(!window.is_hidden(), "the overlay must be visible again");
         assert!(
@@ -2321,7 +2352,7 @@ mod tests {
     #[test]
     fn the_default_path_hides_nothing() {
         let _guard = crate::precapture::frame_store_guard();
-        let report = freeze(&[], None).ok();
+        let report = freeze(&[], generation(), None).ok();
         assert!(report.is_some());
         assert!(report.and_then(|report| report.step_aside_ms).is_none());
     }
@@ -2334,7 +2365,7 @@ mod tests {
         let _guard = crate::precapture::frame_store_guard();
         let window = Recorded::default();
         FREEZING.store(true, Ordering::SeqCst);
-        let refused = freeze(&[], Some(&window)).err();
+        let refused = freeze(&[], generation(), Some(&window)).err();
         FREEZING.store(false, Ordering::SeqCst);
         assert_eq!(refused, Some(Skipped::InFlight));
         assert!(window.calls().is_empty(), "{:?}", window.calls());
@@ -2351,6 +2382,25 @@ mod tests {
         thaw();
         assert!(step_aside(&window, generation).is_none());
         assert!(window.calls().is_empty(), "{:?}", window.calls());
+    }
+
+    /// `Ctrl+Space` then `Esc`, with the `Esc` landing before the worker is
+    /// even scheduled -- the ordering round 1 of `#109`'s review reproduced.
+    /// The generation is the one the key was pressed under, so the freeze is
+    /// retired and touches neither the window nor the stills.
+    #[test]
+    fn a_transition_before_the_worker_starts_retires_the_freeze() {
+        let _guard = crate::precapture::frame_store_guard();
+        let window = Recorded::default();
+        let requested = generation();
+        thaw();
+        let version = VERSION.load(Ordering::SeqCst);
+        assert_eq!(
+            freeze(&[], requested, Some(&window)).err(),
+            Some(Skipped::Retired)
+        );
+        assert!(window.calls().is_empty(), "{:?}", window.calls());
+        assert_eq!(VERSION.load(Ordering::SeqCst), version, "nothing published");
     }
 
     /// `Ctrl+Space` then `Esc`: the transition lands while the capture runs.

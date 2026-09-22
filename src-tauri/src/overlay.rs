@@ -670,6 +670,9 @@ fn emit_state(app: &AppHandle, state: OverlayState) -> Result<(), String> {
 /// beat, and this project has already recorded what a green-looking wrong state
 /// costs.
 pub fn toggle_freeze(app: &AppHandle) {
+    // First, before the state is read: the order is the fix for a stale worker
+    // undoing a transition. See `freeze::generation`.
+    let generation = crate::freeze::generation();
     let state = *lock(&app.state::<Mutex<OverlayState>>());
     if !matches!(state, OverlayState::Placement) {
         crate::diagnostics::note_about(
@@ -717,7 +720,7 @@ pub fn toggle_freeze(app: &AppHandle) {
         let stepping = overlay
             .as_ref()
             .map(|overlay| overlay as &dyn crate::freeze::StepAside);
-        let report = match crate::freeze::freeze(&monitors, stepping) {
+        let report = match crate::freeze::freeze(&monitors, generation, stepping) {
             Ok(report) => report,
             // Nothing was published, so nothing is emitted: the state the
             // frontend already holds is the correct one in both cases. Logged
