@@ -1,10 +1,16 @@
 <script lang="ts">
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { onMount } from 'svelte';
+import { onMount, tick } from 'svelte';
 import { SvelteMap } from 'svelte/reactivity';
 import { appearanceStyle } from '$lib/appearance';
 import Coach from '$lib/Coach.svelte';
+import {
+  afterNextPaint,
+  type FreezeHidePayload,
+  type FreezeRevealPayload,
+  hiddenClipPath,
+} from '$lib/freeze-mask';
 import { overflowFade } from '$lib/overflow-fade';
 import {
   type ActiveMonitorPayload,
@@ -39,6 +45,7 @@ import {
   ocrLine,
   type PhysRect,
   type PinPayload,
+  physRectsToCss,
   physRectToCss,
   reportCoachLayout,
   reportFreezeLatency,
@@ -64,6 +71,18 @@ let filterStrengthPercent = $state(16);
 const appearance = $derived(
   appearanceStyle(areaOpacityPercent, filterStrengthPercent),
 );
+
+// What a freeze has asked the page to hide while it captures (ADR-0019
+// decision 6, backlog I-426): the monitors the freeze covers, in CSS px. Empty
+// except for the few frames of a freeze with *Show UP-TAKE in screen
+// recordings* on. The token names which freeze asked, so a reveal for an
+// earlier freeze cannot show what a later one hid.
+let freezeHidden: CssRect[] = $state([]);
+let freezeHideToken: number | null = null;
+const overlayStyle = $derived.by(() => {
+  const clip = hiddenClipPath(freezeHidden);
+  return clip === null ? appearance : `${appearance}; clip-path: ${clip}`;
+});
 
 // Presentation only (architecture §1): the Rust side owns the state machine
 // (ADR-0012), the placement input (ADR-0014) and the area store; this component
@@ -406,6 +425,41 @@ onMount(() => {
       areaOpacityPercent = event.payload.area_opacity_percent;
       filterStrengthPercent = event.payload.filter_strength_percent;
     }),
+    // A freeze asking the page to take its drawing on the covered monitors out
+    // of the shot (ADR-0019 decision 6, I-426). Rust waits for the answer and
+    // refuses the freeze if it does not come, so every path that cannot hide
+    // simply does not answer.
+    listen<FreezeHidePayload>('overlay://freeze-hide', async (event) => {
+      const { token, rects } = event.payload;
+      const hidden = physRectsToCss(rects, origin, dpr);
+      // A rectangle that will not convert cannot be hidden, and a freeze that
+      // hid three monitors of four would put the fourth's areas in the still.
+      if (hidden.length !== rects.length) return;
+      freezeHideToken = token;
+      freezeHidden = hidden;
+      // Svelte applies the style, then two painted frames: the first paint can
+      // still be in flight to the compositor when the first callback runs, and
+      // Rust's own compositor wait comes after this answer, not instead of it.
+      await tick();
+      await afterNextPaint();
+      await afterNextPaint();
+      // Superseded while painting: a later freeze owns the page now.
+      if (freezeHideToken !== token) return;
+      try {
+        await invoke('overlay_freeze_hidden', { token });
+      } catch {
+        // No answer is the refusal: Rust times out and does not capture.
+      }
+    }),
+    listen<FreezeRevealPayload>('overlay://freeze-reveal', (event) => {
+      // Only this freeze's own reveal. One for an earlier freeze arriving late
+      // must not show what a later freeze has hidden.
+      if (freezeHideToken !== null && event.payload.token !== freezeHideToken) {
+        return;
+      }
+      freezeHideToken = null;
+      freezeHidden = [];
+    }),
   ]);
   void ready.then(async () => {
     try {
@@ -465,7 +519,7 @@ onMount(() => {
 <main
   class="overlay"
   class:active={showsTint(overlayState)}
-  style={appearance}
+  style={overlayStyle}
 >
   <!-- The frozen stills, first in the DOM so every piece of chrome below draws
        over them. Each one covers exactly its own monitor: a single desktop-wide
