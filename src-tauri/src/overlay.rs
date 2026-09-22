@@ -10,8 +10,7 @@
 //! Geometry decisions live in `uptake_core::geometry`; this module only maps
 //! Tauri's monitor reports into core types and talks to the OS.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Mutex, MutexGuard, PoisonError, RwLock};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
@@ -273,14 +272,23 @@ pub(crate) fn overlay_window(app: &AppHandle) -> Result<WebviewWindow, String> {
 /// UP-TAKE's own. ADR-0019 decision 6 cloaks the window around a freeze exactly
 /// then, and a flag that followed the setting would leave the old-Windows case
 /// uncovered.
+///
+/// **Written under the lock a freeze holds for its whole capture** (round 3 of
+/// `#109`'s review). A freeze that decided *excluded, no cloak needed* and then
+/// had the setting flip to *show* mid-capture would capture the overlay
+/// uncloaked. So a change made during a freeze waits for it, at most one
+/// capture, and a freeze never runs across a change.
 #[cfg(windows)]
 pub fn apply_capture_exclusion(app: &AppHandle, show_in_recordings: bool) -> Result<(), String> {
-    // Cleared first, so every early return below leaves it saying "in shot",
-    // which is the answer that costs a frame rather than a dirty still.
-    EXCLUDED_FROM_CAPTURE.store(false, Ordering::SeqCst);
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
     };
+    let mut excluded = EXCLUDED_FROM_CAPTURE
+        .write()
+        .unwrap_or_else(PoisonError::into_inner);
+    // Cleared first, so every early return below leaves it saying "in shot",
+    // which is the answer that costs a frame rather than a dirty still.
+    *excluded = false;
     let window = overlay_window(app)?;
     let hwnd = window
         .hwnd()
@@ -301,34 +309,29 @@ pub fn apply_capture_exclusion(app: &AppHandle, show_in_recordings: bool) -> Res
                 .to_string(),
         );
     }
-    EXCLUDED_FROM_CAPTURE.store(!show_in_recordings, Ordering::SeqCst);
+    *excluded = !show_in_recordings;
     Ok(())
 }
 
 /// Whether the overlay is excluded from capture right now -- see
-/// [`apply_capture_exclusion`].
+/// [`apply_capture_exclusion`]. A lock rather than an atomic because a freeze
+/// reads it and then holds it for its whole capture.
 ///
 /// Starts `false`, the answer that makes a freeze cloak the window, so a freeze
 /// that could somehow run before startup applies the affinity errs toward a
 /// clean still.
-static EXCLUDED_FROM_CAPTURE: AtomicBool = AtomicBool::new(false);
+static EXCLUDED_FROM_CAPTURE: RwLock<bool> = RwLock::new(false);
 
-/// The overlay window a freeze must cloak so it is not in its own still:
-/// `Ok(None)` when it cannot be in the still anyway (ADR-0019 decision 6).
-///
-/// `Err` when it would be in the still and its handle cannot be had. The
-/// caller then does not freeze at all, for the reason `freeze::step_aside`
-/// fails closed: a still that silently contains the overlay again is the
-/// defect back.
-fn in_shot_of_freeze(app: &AppHandle) -> Result<Option<crate::freeze::OverlayWindow>, String> {
-    if EXCLUDED_FROM_CAPTURE.load(Ordering::SeqCst) {
-        return Ok(None);
-    }
+/// The overlay window a freeze may need to cloak so it is not in its own still
+/// (ADR-0019 decision 6). Resolved on the key's thread because the lookup goes
+/// through the app; whether it is NEEDED is decided on the worker, under
+/// [`EXCLUDED_FROM_CAPTURE`], and that is where an `Err` here refuses.
+fn overlay_for_freeze(app: &AppHandle) -> Result<crate::freeze::OverlayWindow, String> {
     let window = overlay_window(app)?;
     let hwnd = window
         .hwnd()
         .map_err(|e| format!("Could not get the overlay window handle: {e}"))?;
-    Ok(Some(crate::freeze::OverlayWindow::new(hwnd.0)))
+    Ok(crate::freeze::OverlayWindow::new(hwnd.0))
 }
 
 // ---------------------------------------------------------------------------
@@ -679,19 +682,9 @@ pub fn toggle_freeze(app: &AppHandle) {
         }
         return;
     }
-    // Resolved on this thread because the handle lookup goes through the app,
-    // and BEFORE the latency probe is stamped: refusing here stamps nothing, so
-    // no later paint can consume a probe for a freeze that never ran.
-    let overlay = match in_shot_of_freeze(app) {
-        Ok(overlay) => overlay,
-        Err(error) => {
-            crate::diagnostics::trouble(
-                "freeze: the overlay cannot step out of its own shot, so nothing was frozen",
-                &error,
-            );
-            return;
-        }
-    };
+    // Resolved on this thread because the handle lookup goes through the app.
+    // Whether the freeze needs it is the worker's question -- see below.
+    let window = overlay_for_freeze(app);
     // Stamped here — on the key, on the calling thread, before the capture
     // thread is even spawned — because `quality-bars.md` §1's row measures what
     // the user waits for. Anything later would time a stage and call it the
@@ -717,10 +710,33 @@ pub fn toggle_freeze(app: &AppHandle) {
         // stage split, because "slow" is not actionable and "the capture is
         // slow" is. The stage figures are per-monitor maxima and the total is
         // wall-clock, so they do not add up — see `FreezeReport`.
-        let stepping = overlay
-            .as_ref()
-            .map(|overlay| overlay as &dyn crate::freeze::StepAside);
-        let report = match crate::freeze::freeze(&monitors, generation, stepping) {
+        // Held until the freeze returns: the exclusion cannot change under a
+        // capture that decided on it (round 3 of `#109`'s review). A setting
+        // change waits for at most one capture.
+        let excluded = EXCLUDED_FROM_CAPTURE
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        let stepping: Option<&dyn crate::freeze::StepAside> = if *excluded {
+            None
+        } else {
+            match &window {
+                Ok(window) => Some(window),
+                // In shot and no handle to cloak: refuse, for the reason
+                // `freeze::step_aside` fails closed. The probe stamped on the
+                // key is taken, so no later paint reports it.
+                Err(error) => {
+                    crate::diagnostics::trouble(
+                        "freeze: the overlay cannot step out of its own shot, so nothing was frozen",
+                        error,
+                    );
+                    let _ = crate::freeze::take_paint_probe();
+                    return;
+                }
+            }
+        };
+        let outcome = crate::freeze::freeze(&monitors, generation, stepping);
+        drop(excluded);
+        let report = match outcome {
             Ok(report) => report,
             // Nothing was published, so nothing is emitted: the state the
             // frontend already holds is the correct one in both cases. Logged

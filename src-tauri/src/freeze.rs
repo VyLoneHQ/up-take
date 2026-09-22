@@ -932,8 +932,9 @@ pub(crate) trait StepAside {
     fn cloak(&self) -> bool;
     /// Puts the window back into composition.
     fn uncloak(&self);
-    /// Waits until the compositor has presented a frame.
-    fn composed(&self);
+    /// Waits until the compositor has presented a frame, returning whether
+    /// the wait worked.
+    fn composed(&self) -> bool;
 }
 
 /// The overlay window itself, by handle.
@@ -1020,17 +1021,19 @@ impl StepAside for OverlayWindow {
         }
     }
 
-    fn composed(&self) {
+    fn composed(&self) -> bool {
         use windows_sys::Win32::Graphics::Dwm::DwmFlush;
         // SAFETY: no arguments and no preconditions. It blocks until DWM
         // presents the next frame, which is the first one without the window.
         let result = unsafe { DwmFlush() };
         if result < 0 {
             crate::diagnostics::trouble(
-                "freeze: DwmFlush failed, so the still may be one frame early",
+                "freeze: DwmFlush failed, so nothing was captured",
                 &format_args!("HRESULT {result:#010x}"),
             );
+            return false;
         }
+        true
     }
 }
 
@@ -1039,8 +1042,10 @@ impl StepAside for OverlayWindow {
 ///
 /// # Fails closed
 ///
-/// A cloak that did not take refuses the whole freeze with
-/// [`Skipped::CouldNotStepAside`] rather than capturing anyway. The overlay
+/// A cloak that did not take, or a compositor wait that failed, refuses the
+/// whole freeze with [`Skipped::CouldNotStepAside`] rather than capturing
+/// anyway. The second was round 3 of `#109`'s review: without a presented
+/// frame the capture can still read the one the overlay was in. The overlay
 /// staying out of its own still is the point of decision 6, and a freeze that
 /// silently contains it again is the defect back, unannounced. The key doing
 /// nothing is logged and visible; that is the better failure.
@@ -1054,7 +1059,9 @@ fn step_aside(overlay: &dyn StepAside) -> Result<SteppedAside<'_>, Skipped> {
     }
     // Out of the *next* composed frame, not the current one. WGC hands back
     // composed frames, so the capture starts after that frame is presented.
-    overlay.composed();
+    if !overlay.composed() {
+        return Err(Skipped::CouldNotStepAside);
+    }
     Ok(stepped)
 }
 
@@ -2278,6 +2285,8 @@ mod tests {
         calls: Mutex<Vec<&'static str>>,
         /// `DwmSetWindowAttribute` refusing the cloak.
         cloak_fails: bool,
+        /// `DwmFlush` failing.
+        compose_fails: bool,
     }
 
     impl Recorded {
@@ -2306,8 +2315,9 @@ mod tests {
             self.record("uncloak");
         }
 
-        fn composed(&self) {
+        fn composed(&self) -> bool {
             self.record("composed");
+            !self.compose_fails
         }
     }
 
@@ -2423,6 +2433,25 @@ mod tests {
             Some(Skipped::CouldNotStepAside)
         );
         assert_eq!(window.calls(), ["cloak", "uncloak"]);
+        assert_eq!(VERSION.load(Ordering::SeqCst), version, "nothing published");
+    }
+
+    /// Round 3 of `#109`'s review: a compositor wait that failed leaves no
+    /// presented frame without the overlay, so the capture could read the one
+    /// it was in. The freeze refuses, and the window is still uncloaked.
+    #[test]
+    fn a_failed_compositor_wait_refuses_the_freeze() {
+        let _guard = crate::precapture::frame_store_guard();
+        let window = Recorded {
+            compose_fails: true,
+            ..Recorded::default()
+        };
+        let version = VERSION.load(Ordering::SeqCst);
+        assert_eq!(
+            freeze(&[], generation(), Some(&window)).err(),
+            Some(Skipped::CouldNotStepAside)
+        );
+        assert_eq!(window.calls(), ["cloak", "composed", "uncloak"]);
         assert_eq!(VERSION.load(Ordering::SeqCst), version, "nothing published");
     }
 }
