@@ -921,6 +921,166 @@ impl Drop for FreezingGuard {
     }
 }
 
+/// What a freeze asks of the overlay window so that UP-TAKE's own chrome is not
+/// in its own still (ADR-0019 decision 6, backlog `I-411`).
+///
+/// A trait rather than three Win32 calls inline, so the ordering and the
+/// failure paths of decision 6 are driven by the tests below without a
+/// desktop. [`OverlayWindow`] is the real one.
+pub(crate) trait StepAside {
+    /// Takes the window out of composition, returning whether it worked.
+    fn cloak(&self) -> bool;
+    /// Puts the window back into composition.
+    fn uncloak(&self);
+    /// Waits until the compositor has presented a frame, returning whether
+    /// the wait worked.
+    fn composed(&self) -> bool;
+}
+
+/// The overlay window itself, by handle.
+///
+/// # Cloaked, not hidden -- round 2 of `#109`'s review
+///
+/// The first version hid the window with `ShowWindowAsync(SW_HIDE)` and showed
+/// it with `SW_SHOWNA`, as the ADR's consequences sketched. The independent
+/// review found two defects in that, and both were real:
+///
+/// * **Hiding the active window activates another one, and `SW_SHOWNA` does
+///   not take it back.** Placement focuses the overlay so its keys reach the
+///   page, `Ctrl+Space` and `Esc` included, so after every freeze Placement was
+///   on screen and deaf.
+/// * **A posted hide has to be waited for**, and the wait needed a deadline,
+///   after which the capture went ahead with the overlay possibly still in the
+///   frame. That is the defect the whole change exists to remove.
+///
+/// **`DWMWA_CLOAK` has neither problem.** A cloaked window is left out of
+/// composition -- which is what every capture API reads -- while staying
+/// visible and active as far as Win32 is concerned, so focus never moves. It is
+/// a synchronous call on the window, so there is nothing to wait for and no
+/// deadline to fall through. And it is **independent of show and hide**, which
+/// removed a race rather than guarding it: a transition that hides or shows the
+/// overlay mid-capture composes correctly with a cloak, so the restore always
+/// uncloaks and never needs to know what the state machine did meanwhile.
+///
+/// ⛔ **Still not [`crate::overlay::hide`].** That is a state transition, and a
+/// freeze is not a mode change: afterwards Placement is still Placement.
+pub(crate) struct OverlayWindow {
+    /// The `HWND` as an address, because a raw pointer is not `Send` and the
+    /// freeze runs on a thread of its own.
+    hwnd: usize,
+}
+
+impl OverlayWindow {
+    pub(crate) fn new(hwnd: windows_sys::Win32::Foundation::HWND) -> Self {
+        Self { hwnd: hwnd.addr() }
+    }
+
+    fn hwnd(&self) -> windows_sys::Win32::Foundation::HWND {
+        std::ptr::without_provenance_mut(self.hwnd)
+    }
+
+    fn set_cloak(&self, cloaked: bool) -> windows_sys::core::HRESULT {
+        use windows_sys::Win32::Graphics::Dwm::{DWMWA_CLOAK, DwmSetWindowAttribute};
+        let value = windows_sys::core::BOOL::from(cloaked);
+        // SAFETY: `value` is a live BOOL for the duration of the call and the
+        // size passed is its own. A dead handle is reported through the
+        // HRESULT rather than by touching memory.
+        unsafe {
+            DwmSetWindowAttribute(
+                self.hwnd(),
+                // A small positive enum constant, so the cast keeps its value.
+                DWMWA_CLOAK.cast_unsigned(),
+                std::ptr::from_ref(&value).cast(),
+                // A four-byte BOOL; the cast cannot truncate.
+                std::mem::size_of_val(&value).try_into().unwrap_or(4),
+            )
+        }
+    }
+}
+
+impl StepAside for OverlayWindow {
+    fn cloak(&self) -> bool {
+        let result = self.set_cloak(true);
+        if result < 0 {
+            crate::diagnostics::trouble(
+                "freeze: the overlay could not be cloaked, so nothing was captured",
+                &format_args!("DwmSetWindowAttribute(DWMWA_CLOAK) HRESULT {result:#010x}"),
+            );
+            return false;
+        }
+        true
+    }
+
+    fn uncloak(&self) {
+        let result = self.set_cloak(false);
+        if result < 0 {
+            crate::diagnostics::trouble(
+                "freeze: the overlay could not be uncloaked after its capture",
+                &format_args!("DwmSetWindowAttribute(DWMWA_CLOAK) HRESULT {result:#010x}"),
+            );
+        }
+    }
+
+    fn composed(&self) -> bool {
+        use windows_sys::Win32::Graphics::Dwm::DwmFlush;
+        // SAFETY: no arguments and no preconditions. It blocks until DWM
+        // presents the next frame, which is the first one without the window.
+        let result = unsafe { DwmFlush() };
+        if result < 0 {
+            crate::diagnostics::trouble(
+                "freeze: DwmFlush failed, so nothing was captured",
+                &format_args!("HRESULT {result:#010x}"),
+            );
+            return false;
+        }
+        true
+    }
+}
+
+/// Takes the overlay out of composition for as long as the returned guard
+/// lives.
+///
+/// # Fails closed
+///
+/// A cloak that did not take, or a compositor wait that failed, refuses the
+/// whole freeze with [`Skipped::CouldNotStepAside`] rather than capturing
+/// anyway. The second was round 3 of `#109`'s review: without a presented
+/// frame the capture can still read the one the overlay was in. The overlay
+/// staying out of its own still is the point of decision 6, and a freeze that
+/// silently contains it again is the defect back, unannounced. The key doing
+/// nothing is logged and visible; that is the better failure.
+fn step_aside(overlay: &dyn StepAside) -> Result<SteppedAside<'_>, Skipped> {
+    // Built before the cloak, so an uncloak is attempted even for a cloak that
+    // reported failure: uncloaking a window that is not cloaked is harmless,
+    // and a failure report does not prove nothing changed.
+    let stepped = SteppedAside { overlay };
+    if !overlay.cloak() {
+        return Err(Skipped::CouldNotStepAside);
+    }
+    // Out of the *next* composed frame, not the current one. WGC hands back
+    // composed frames, so the capture starts after that frame is presented.
+    if !overlay.composed() {
+        return Err(Skipped::CouldNotStepAside);
+    }
+    Ok(stepped)
+}
+
+/// Puts the overlay back when the capture is done, however it ends --
+/// including by panic.
+///
+/// **Unconditional**, and that is the cloak's property rather than an
+/// oversight: it does not interact with show or hide, so there is no state the
+/// machine could have reached meanwhile that an uncloak would undo.
+struct SteppedAside<'a> {
+    overlay: &'a dyn StepAside,
+}
+
+impl Drop for SteppedAside<'_> {
+    fn drop(&mut self) {
+        self.overlay.uncloak();
+    }
+}
+
 fn stills() -> std::sync::MutexGuard<'static, Vec<Still>> {
     STILLS.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -1009,6 +1169,9 @@ pub(crate) enum Skipped {
     InFlight,
     /// The screen left Placement mid-capture, so the stills were discarded.
     Retired,
+    /// The overlay could not be taken out of its own shot, so nothing was
+    /// captured (ADR-0019 decision 6 fails closed -- see [`step_aside`]).
+    CouldNotStepAside,
 }
 
 impl std::fmt::Display for Skipped {
@@ -1016,6 +1179,9 @@ impl std::fmt::Display for Skipped {
         match self {
             Self::InFlight => write!(f, "a freeze is already in flight"),
             Self::Retired => write!(f, "the screen left Placement mid-capture"),
+            Self::CouldNotStepAside => {
+                write!(f, "the overlay could not be taken out of its own shot")
+            }
         }
     }
 }
@@ -1093,6 +1259,15 @@ pub(crate) struct FreezeReport {
     pub elapsed_ms: u128,
     /// The slowest single monitor's capture.
     pub slowest_capture_ms: u128,
+    /// How long taking the overlay out of shot took, from the claim to the
+    /// compositor presenting a frame without it (ADR-0019 decision 6).
+    ///
+    /// `None` when the overlay was not cloaked: excluded from capture already,
+    /// which is the default. **That is the condition
+    /// the run was taken under, and it belongs in the log line beside the
+    /// timing** (`UT-F-46`): the same freeze costs at least one compositor
+    /// frame more with the setting on.
+    pub step_aside_ms: Option<u128>,
     /// The slowest single monitor's display encode — see [`MonitorCost`] for
     /// why the format is not assumed.
     pub slowest_encode_ms: u128,
@@ -1160,18 +1335,59 @@ pub(crate) struct FreezeReport {
 /// affinity is `WDA_NONE`, and [`crate::capture`] is ignorant of the overlay by
 /// [ADR-0019] decision 1 -- deliberately, because that is what makes a
 /// self-containing mirror impossible to build rather than merely guarded
-/// against. So a freeze taken while the setting is on **does** include
-/// UP-TAKE's own chrome, and re-freezing **does** compound it.
+/// against. So a freeze taken while the setting is on **did** include
+/// UP-TAKE's own chrome, and re-freezing **did** compound it.
 ///
-/// That is the setting doing what it says, and it is still a poor picture. It
-/// is recorded rather than fixed here: making the freeze path suppress the
-/// affinity around its own capture is exactly the toggling decision 1 forbids,
-/// and it is not a call to take inside a doc comment. The default is
-/// unchanged, so nobody meets it without asking.
+/// ✅ **FIXED BY [ADR-0019] DECISION 6, 2026-09-22 (backlog `I-411`).** This
+/// paragraph said the problem was *recorded rather than fixed here*, and that
+/// suppressing the affinity around the capture is the toggling decision 1
+/// forbids. Both halves still stand: the affinity is not touched. What changed
+/// is that decision 6 found a mechanism that is not a toggle. **When `overlay`
+/// is given, the window is taken out of composition (cloaked) for the length
+/// of the capture and put back afterwards** ([`step_aside`]), so the still is
+/// the user's screen whatever the setting says. [`OverlayWindow`] says why a
+/// cloak and not a hide. The caller passes `None` when the window is excluded
+/// from capture already, which keeps the default path exactly as it was: no
+/// blink, and no compositor frame spent.
+///
+/// **The cloak brackets every monitor's thread, not each one.** The overlay is
+/// one window spanning the virtual desktop, so cloaking it per monitor would
+/// mean the first thread to finish uncloaking it while the others are still
+/// capturing.
+///
+/// **The warm path is bypassed while the overlay is cloaked**, because a warm
+/// session's newest frame can predate the cloak and would carry the chrome the
+/// cloak exists to remove. The warm path is a developer switch today
+/// (`UPTAKE_WARM_CAPTURE`), so no user meets this, and it is reported per
+/// monitor as `cold` rather than hidden.
 ///
 /// [ADR-0019]: the private planning repo's
 /// `DECISIONS/ADR-0019-overlay-excluded-from-capture.md`
-pub(crate) fn freeze(monitors: &[Rect]) -> Result<FreezeReport, Skipped> {
+pub(crate) fn freeze(
+    monitors: &[Rect],
+    generation: u64,
+    overlay: Option<&dyn StepAside>,
+) -> Result<FreezeReport, Skipped> {
+    freeze_with(monitors, generation, overlay, capture_still)
+}
+
+/// [`freeze`], with the per-monitor capture passed in.
+///
+/// **The seam exists so the ordering can be tested without a desktop** (the
+/// final review of `#109`, GPT-6 Astra). The first ordering test froze no
+/// monitors, so no capture ran and it could not tell whether the overlay came
+/// back before or after the pictures were taken: moving the uncloak ahead of
+/// the capture threads left every test green. With the capture injectable, a
+/// test records it beside the cloak and the uncloak, and sees `serve_warm` too.
+fn freeze_with<C>(
+    monitors: &[Rect],
+    generation: u64,
+    overlay: Option<&dyn StepAside>,
+    capture: C,
+) -> Result<FreezeReport, Skipped>
+where
+    C: Fn(Rect, bool) -> Option<(Still, MonitorCost)> + Sync,
+{
     // Claimed before any work: `InFlight` means this call must do nothing at
     // all — not even capture and discard, which would cost four WGC sessions to
     // reach the same place.
@@ -1182,15 +1398,35 @@ pub(crate) fn freeze(monitors: &[Rect]) -> Result<FreezeReport, Skipped> {
         return Err(Skipped::InFlight);
     }
     let _releases_the_claim = FreezingGuard;
-    let generation = GENERATION.load(Ordering::SeqCst);
+    // Retired before it started: the toggle was overtaken by a transition
+    // between the key and this thread being scheduled. Nothing to cloak,
+    // nothing to capture, nothing to publish. See [`generation`] for why the caller
+    // reads this and not this function.
+    if GENERATION.load(Ordering::SeqCst) != generation {
+        return Err(Skipped::Retired);
+    }
     let started = Instant::now();
+    // After the claim, so a toggle that does nothing also cloaks nothing. Timed
+    // on its own because it is the cost decision 6 added, and the ADR says it
+    // is measured before it is called done.
+    let stepped_aside = match overlay {
+        Some(overlay) => Some(step_aside(overlay)?),
+        None => None,
+    };
+    let step_aside_ms = stepped_aside
+        .as_ref()
+        .map(|_| started.elapsed().as_millis());
+    let serve_warm = stepped_aside.is_none();
     // Scoped rather than detached: the stills must all be in hand before the
     // state is emitted, and a scope makes "every thread has finished" a property
     // of the type rather than something the caller has to remember to join.
     let captured: Vec<(Still, MonitorCost)> = std::thread::scope(|scope| {
         let handles: Vec<_> = monitors
             .iter()
-            .map(|monitor| scope.spawn(move || capture_still(*monitor)))
+            .map(|monitor| {
+                let capture = &capture;
+                scope.spawn(move || capture(*monitor, serve_warm))
+            })
             .collect();
         handles
             .into_iter()
@@ -1201,6 +1437,11 @@ pub(crate) fn freeze(monitors: &[Rect]) -> Result<FreezeReport, Skipped> {
             .filter_map(|handle| handle.join().unwrap_or(None))
             .collect()
     });
+    // Back in shot before anything is published, so the window the frozen
+    // state is emitted to is a visible one. Explicit rather than left to the
+    // end of the function, because the encode already ran on the capture
+    // threads and there is nothing left for the user to wait for.
+    drop(stepped_aside);
     let slowest_capture_ms = captured.iter().map(|(_, cost)| cost.capture_ms).max();
     let slowest_encode_ms = captured.iter().map(|(_, cost)| cost.encode_ms).max();
     let warm_served = captured.iter().filter(|(_, cost)| cost.served_warm).count();
@@ -1220,17 +1461,40 @@ pub(crate) fn freeze(monitors: &[Rect]) -> Result<FreezeReport, Skipped> {
         elapsed_ms: started.elapsed().as_millis(),
         slowest_capture_ms: slowest_capture_ms.unwrap_or_default(),
         slowest_encode_ms: slowest_encode_ms.unwrap_or_default(),
+        step_aside_ms,
         per_monitor,
     })
 }
 
+/// The generation a freeze requested now belongs to, for [`freeze`].
+///
+/// **Read by the caller, on the thread the key arrived on, BEFORE it checks the
+/// state is Placement** -- never inside the freeze. Found by round 1 of
+/// `up-take` `#109`'s independent review, which reproduced it: `freeze` used to
+/// read the generation itself, on the worker, so an `Esc` landing between the
+/// key and the worker being scheduled bumped the generation first and the
+/// worker adopted the new one as its own. Every guard then passed, and the
+/// worker showed an overlay the state machine had just hidden and emitted
+/// Placement into Hidden.
+///
+/// **Why before the state check, not after.** A transition writes the state
+/// under its lock and then calls [`thaw`], which bumps this. Read here first and
+/// then the state: a transition that lands before this read has already written
+/// the state, so the check refuses; one that lands after it bumps the number,
+/// so the freeze is retired. Read the other way round, a transition landing
+/// between the two reads would pass both.
+pub(crate) fn generation() -> u64 {
+    GENERATION.load(Ordering::SeqCst)
+}
+
 /// Stores `captured` as the frozen stills, unless `generation` has been retired.
 ///
-/// A separate function because it is the whole of the overtaken-freeze fix and
-/// the only part of a freeze that can be driven without a desktop: `freeze`
-/// reads the generation at entry, so a test calling `thaw` around it can never
-/// reproduce the interleaving that matters. Here the stale generation is an
-/// argument, which is the interleaving, stated directly.
+/// A separate function because it is the whole of the overtaken-freeze fix,
+/// and the one check that covers a transition landing *during* the capture:
+/// the generation is compared under the same lock [`thaw`] takes, so a freeze
+/// either publishes before the transition or sees it. [`freeze`] now takes the
+/// generation as an argument too, which covers a transition landing *before*
+/// the worker starts (round 1 of `#109`'s review); this covers the rest.
 ///
 /// # Why the version is not bumped on the retired path
 ///
@@ -1264,7 +1528,10 @@ fn publish(captured: Vec<Still>, generation: u64) -> Result<(), Skipped> {
 /// keeping it would mean a monitor whose pixels a drag would use but which shows
 /// live content — the see-one-thing-get-another failure this feature exists to
 /// avoid.
-fn capture_still(monitor: Rect) -> Option<(Still, MonitorCost)> {
+///
+/// `serve_warm` is `false` while the overlay is cloaked, for the reason
+/// [`freeze`] gives.
+fn capture_still(monitor: Rect, serve_warm: bool) -> Option<(Still, MonitorCost)> {
     let capture_started = Instant::now();
     // The warm path first, when it is on and has something to hand over.
     //
@@ -1275,7 +1542,7 @@ fn capture_still(monitor: Rect) -> Option<(Still, MonitorCost)> {
     // `UT-F-45`'s own ~350 ms lateness to be worth naming in those terms: for
     // that first third of a second the feature is exactly as late as it was
     // before, and no message says so because there is nothing the user could do.
-    let warm = warm_capture_enabled()
+    let warm = (serve_warm && warm_capture_enabled())
         .then(|| uptake_capture::warm::capture_monitor(monitor))
         .flatten();
     let served_warm = warm.is_some();
@@ -1646,12 +1913,15 @@ mod tests {
             "the flag must start clear, or this test is asserting nothing"
         );
         assert_eq!(
-            freeze(&[]).err(),
+            freeze(&[], generation(), None).err(),
             Some(Skipped::InFlight),
             "a freeze must not start while another is in flight"
         );
         FREEZING.store(false, Ordering::SeqCst);
-        assert!(freeze(&[]).is_ok(), "the claim must be released");
+        assert!(
+            freeze(&[], generation(), None).is_ok(),
+            "the claim must be released"
+        );
     }
 
     /// A freeze overtaken by a state transition must publish nothing.
@@ -1705,7 +1975,7 @@ mod tests {
                 .expect("a frozen url parses");
         assert!(still_bytes(index, version).is_some());
         // A freeze over no monitors: captures nothing, and must still retire it.
-        assert!(freeze(&[]).is_ok());
+        assert!(freeze(&[], generation(), None).is_ok());
         // Re-install a still at the same index. Without this the assertion below
         // passes for the wrong reason — the stills are empty, so the lookup
         // fails on the *index* and the version is never consulted. Confirmed by
@@ -2023,5 +2293,252 @@ mod tests {
             sync_warm_sessions(false, None);
             assert!(!placement_visible());
         });
+    }
+
+    // ---- ADR-0019 decision 6: the overlay steps out of its own freeze ----
+    //
+    // Everything here runs without a desktop, and that is deliberately the
+    // half it covers: the order of the calls, and what happens when a
+    // transition, a panic or a failed cloak lands. Whether the still is
+    // actually clean, and what the cloak costs, only the rig can say (the
+    // ADR's verification owed, items 1 and 2).
+
+    /// A window that records what a freeze asked of it, in order.
+    #[derive(Default)]
+    struct Recorded {
+        calls: Mutex<Vec<&'static str>>,
+        /// `DwmSetWindowAttribute` refusing the cloak.
+        cloak_fails: bool,
+        /// `DwmFlush` failing.
+        compose_fails: bool,
+    }
+
+    impl Recorded {
+        fn calls(&self) -> Vec<&'static str> {
+            self.calls
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        }
+
+        fn record(&self, call: &'static str) {
+            self.calls
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(call);
+        }
+    }
+
+    impl StepAside for Recorded {
+        fn cloak(&self) -> bool {
+            self.record("cloak");
+            !self.cloak_fails
+        }
+
+        fn uncloak(&self) {
+            self.record("uncloak");
+        }
+
+        fn composed(&self) -> bool {
+            self.record("composed");
+            !self.compose_fails
+        }
+    }
+
+    /// The whole of decision 6 in one sequence: cloaked, a frame presented
+    /// without it, captured, uncloaked. The order is the claim -- a capture
+    /// before `composed` would read the frame the window was still in.
+    #[test]
+    fn a_freeze_cloaks_the_overlay_for_its_capture_and_uncloaks_it_after() {
+        let _guard = crate::precapture::frame_store_guard();
+        let window = Recorded::default();
+        let report = freeze(&[], generation(), Some(&window)).ok();
+        assert_eq!(window.calls(), ["cloak", "composed", "uncloak"]);
+        assert!(
+            report.and_then(|report| report.step_aside_ms).is_some(),
+            "a freeze that cloaked the overlay must say so beside its timing"
+        );
+    }
+
+    /// With no window passed -- the default, where the overlay is excluded
+    /// from capture already -- nothing is cloaked and the report says so. This
+    /// is the path every user is on unless they turned the setting on, and it
+    /// must cost exactly what it cost before decision 6.
+    #[test]
+    fn the_default_path_cloaks_nothing() {
+        let _guard = crate::precapture::frame_store_guard();
+        let report = freeze(&[], generation(), None).ok();
+        assert!(report.is_some());
+        assert!(report.and_then(|report| report.step_aside_ms).is_none());
+    }
+
+    /// A toggle refused as in flight must not touch the window: the freeze
+    /// that holds the claim owns the cloak, and an uncloak from here would put
+    /// the overlay back in the middle of that freeze's capture.
+    #[test]
+    fn a_freeze_refused_as_in_flight_cloaks_nothing() {
+        let _guard = crate::precapture::frame_store_guard();
+        let window = Recorded::default();
+        FREEZING.store(true, Ordering::SeqCst);
+        let refused = freeze(&[], generation(), Some(&window)).err();
+        FREEZING.store(false, Ordering::SeqCst);
+        assert_eq!(refused, Some(Skipped::InFlight));
+        assert!(window.calls().is_empty(), "{:?}", window.calls());
+    }
+
+    /// `Ctrl+Space` then `Esc`, with the `Esc` landing before the worker is
+    /// even scheduled -- the ordering round 1 of `#109`'s review reproduced.
+    /// The generation is the one the key was pressed under, so the freeze is
+    /// retired and touches neither the window nor the stills.
+    ///
+    /// **This is the only guard on that path since round 2**, which found a
+    /// second check inside `step_aside` masking it; that check went with the
+    /// hide it protected. So removing the guard in `freeze` turns this red.
+    #[test]
+    fn a_transition_before_the_worker_starts_retires_the_freeze() {
+        let _guard = crate::precapture::frame_store_guard();
+        let window = Recorded::default();
+        let requested = generation();
+        thaw();
+        let version = VERSION.load(Ordering::SeqCst);
+        assert_eq!(
+            freeze(&[], requested, Some(&window)).err(),
+            Some(Skipped::Retired)
+        );
+        assert!(window.calls().is_empty(), "{:?}", window.calls());
+        assert_eq!(VERSION.load(Ordering::SeqCst), version, "nothing published");
+    }
+
+    /// `Ctrl+Space` then `Esc`, with the transition landing while the capture
+    /// runs. **The window is still uncloaked**, and that is correct rather than
+    /// a race: a cloak does not interact with the transition's own show or
+    /// hide, so uncloaking restores exactly what the state machine decided.
+    /// With a hide instead of a cloak this is the case that needed a
+    /// generation check, and it is the reason the mechanism changed.
+    #[test]
+    fn a_transition_during_the_capture_still_uncloaks() {
+        let _guard = crate::precapture::frame_store_guard();
+        let window = Recorded::default();
+        let stepped = step_aside(&window);
+        assert!(stepped.is_ok());
+        thaw();
+        drop(stepped);
+        assert_eq!(window.calls(), ["cloak", "composed", "uncloak"]);
+    }
+
+    /// A capture that panics must still put the window back: a cloaked
+    /// overlay is invisible, which is loud, but it must not be permanent.
+    #[test]
+    fn the_overlay_is_uncloaked_when_the_capture_panics() {
+        let _guard = crate::precapture::frame_store_guard();
+        let window = Recorded::default();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _stepped = step_aside(&window);
+            panic!("a capture thread's panic, reaching the freeze");
+        }));
+        assert!(outcome.is_err());
+        assert_eq!(window.calls(), ["cloak", "composed", "uncloak"]);
+    }
+
+    /// Round 2 of `#109`'s review: a freeze that cannot take the overlay out
+    /// of shot must not capture anyway. It fails closed -- nothing captured,
+    /// nothing published -- and still asks for the window back, because a
+    /// failure report does not prove the attribute is unchanged.
+    #[test]
+    fn a_cloak_that_fails_refuses_the_freeze() {
+        let _guard = crate::precapture::frame_store_guard();
+        let window = Recorded {
+            cloak_fails: true,
+            ..Recorded::default()
+        };
+        let version = VERSION.load(Ordering::SeqCst);
+        assert_eq!(
+            freeze(&[], generation(), Some(&window)).err(),
+            Some(Skipped::CouldNotStepAside)
+        );
+        assert_eq!(window.calls(), ["cloak", "uncloak"]);
+        assert_eq!(VERSION.load(Ordering::SeqCst), version, "nothing published");
+    }
+
+    /// Round 3 of `#109`'s review: a compositor wait that failed leaves no
+    /// presented frame without the overlay, so the capture could read the one
+    /// it was in. The freeze refuses, and the window is still uncloaked.
+    #[test]
+    fn a_failed_compositor_wait_refuses_the_freeze() {
+        let _guard = crate::precapture::frame_store_guard();
+        let window = Recorded {
+            compose_fails: true,
+            ..Recorded::default()
+        };
+        let version = VERSION.load(Ordering::SeqCst);
+        assert_eq!(
+            freeze(&[], generation(), Some(&window)).err(),
+            Some(Skipped::CouldNotStepAside)
+        );
+        assert_eq!(window.calls(), ["cloak", "composed", "uncloak"]);
+        assert_eq!(VERSION.load(Ordering::SeqCst), version, "nothing published");
+    }
+
+    /// The capture runs INSIDE the cloak: cloaked, a frame presented without
+    /// the overlay, every monitor captured, then uncloaked. Two monitors, the
+    /// first one slow, so an uncloak that came back before the slower capture
+    /// finished would show up in the order. The final review of `#109` found
+    /// the first version of this test froze no monitors and so could not fail.
+    #[test]
+    fn every_capture_runs_inside_the_cloak() {
+        let _guard = crate::precapture::frame_store_guard();
+        let window = Recorded::default();
+        let monitors = [Rect::new(0, 0, 64, 48), Rect::new(64, 0, 64, 48)];
+        let slow = monitors[0];
+        let report = freeze_with(
+            &monitors,
+            generation(),
+            Some(&window),
+            |monitor, serve_warm| {
+                if monitor == slow {
+                    std::thread::sleep(std::time::Duration::from_millis(30));
+                }
+                window.record(if serve_warm {
+                    "capture:warm"
+                } else {
+                    "capture:cold"
+                });
+                None
+            },
+        );
+        assert!(report.is_ok());
+        assert_eq!(
+            window.calls(),
+            [
+                "cloak",
+                "composed",
+                "capture:cold",
+                "capture:cold",
+                "uncloak"
+            ],
+            "every capture must land between the cloak and the uncloak, and none may use the warm path"
+        );
+    }
+
+    /// Without a cloak -- the default, excluded path -- the warm path stays
+    /// available. Together with the test above this pins `serve_warm` both
+    /// ways, which the final review of `#109` (Opus, finding 5) found nothing
+    /// did.
+    #[test]
+    fn the_warm_path_is_offered_only_when_nothing_is_cloaked() {
+        let _guard = crate::precapture::frame_store_guard();
+        let seen = Mutex::new(Vec::new());
+        let monitors = [Rect::new(0, 0, 64, 48), Rect::new(64, 0, 64, 48)];
+        let report = freeze_with(&monitors, generation(), None, |_, serve_warm| {
+            seen.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(serve_warm);
+            None
+        });
+        assert!(report.is_ok());
+        assert_eq!(
+            *seen.lock().unwrap_or_else(PoisonError::into_inner),
+            [true, true]
+        );
     }
 }
