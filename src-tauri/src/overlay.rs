@@ -773,7 +773,7 @@ pub fn toggle_freeze(app: &AppHandle) {
             report.slowest_capture_ms,
             report.slowest_encode_ms,
             // The condition the run was taken under (`UT-F-46`): with the
-            // setting on the same freeze pays for a hide, and a timing that
+            // setting on the same freeze pays for a cloak, and a timing that
             // does not say which case it is cannot be compared with another.
             report.step_aside_ms.map_or_else(
                 || "overlay left in place".to_string(),
