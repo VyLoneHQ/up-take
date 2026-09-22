@@ -1368,6 +1368,26 @@ pub(crate) fn freeze(
     generation: u64,
     overlay: Option<&dyn StepAside>,
 ) -> Result<FreezeReport, Skipped> {
+    freeze_with(monitors, generation, overlay, capture_still)
+}
+
+/// [`freeze`], with the per-monitor capture passed in.
+///
+/// **The seam exists so the ordering can be tested without a desktop** (the
+/// final review of `#109`, GPT-6 Astra). The first ordering test froze no
+/// monitors, so no capture ran and it could not tell whether the overlay came
+/// back before or after the pictures were taken: moving the uncloak ahead of
+/// the capture threads left every test green. With the capture injectable, a
+/// test records it beside the cloak and the uncloak, and sees `serve_warm` too.
+fn freeze_with<C>(
+    monitors: &[Rect],
+    generation: u64,
+    overlay: Option<&dyn StepAside>,
+    capture: C,
+) -> Result<FreezeReport, Skipped>
+where
+    C: Fn(Rect, bool) -> Option<(Still, MonitorCost)> + Sync,
+{
     // Claimed before any work: `InFlight` means this call must do nothing at
     // all — not even capture and discard, which would cost four WGC sessions to
     // reach the same place.
@@ -1403,7 +1423,10 @@ pub(crate) fn freeze(
     let captured: Vec<(Still, MonitorCost)> = std::thread::scope(|scope| {
         let handles: Vec<_> = monitors
             .iter()
-            .map(|monitor| scope.spawn(move || capture_still(*monitor, serve_warm)))
+            .map(|monitor| {
+                let capture = &capture;
+                scope.spawn(move || capture(*monitor, serve_warm))
+            })
             .collect();
         handles
             .into_iter()
@@ -1466,11 +1489,12 @@ pub(crate) fn generation() -> u64 {
 
 /// Stores `captured` as the frozen stills, unless `generation` has been retired.
 ///
-/// A separate function because it is the whole of the overtaken-freeze fix and
-/// the only part of a freeze that can be driven without a desktop: `freeze`
-/// reads the generation at entry, so a test calling `thaw` around it can never
-/// reproduce the interleaving that matters. Here the stale generation is an
-/// argument, which is the interleaving, stated directly.
+/// A separate function because it is the whole of the overtaken-freeze fix,
+/// and the one check that covers a transition landing *during* the capture:
+/// the generation is compared under the same lock [`thaw`] takes, so a freeze
+/// either publishes before the transition or sees it. [`freeze`] now takes the
+/// generation as an argument too, which covers a transition landing *before*
+/// the worker starts (round 1 of `#109`'s review); this covers the rest.
 ///
 /// # Why the version is not bumped on the retired path
 ///
@@ -2453,5 +2477,68 @@ mod tests {
         );
         assert_eq!(window.calls(), ["cloak", "composed", "uncloak"]);
         assert_eq!(VERSION.load(Ordering::SeqCst), version, "nothing published");
+    }
+
+    /// The capture runs INSIDE the cloak: cloaked, a frame presented without
+    /// the overlay, every monitor captured, then uncloaked. Two monitors, the
+    /// first one slow, so an uncloak that came back before the slower capture
+    /// finished would show up in the order. The final review of `#109` found
+    /// the first version of this test froze no monitors and so could not fail.
+    #[test]
+    fn every_capture_runs_inside_the_cloak() {
+        let _guard = crate::precapture::frame_store_guard();
+        let window = Recorded::default();
+        let monitors = [Rect::new(0, 0, 64, 48), Rect::new(64, 0, 64, 48)];
+        let slow = monitors[0];
+        let report = freeze_with(
+            &monitors,
+            generation(),
+            Some(&window),
+            |monitor, serve_warm| {
+                if monitor == slow {
+                    std::thread::sleep(std::time::Duration::from_millis(30));
+                }
+                window.record(if serve_warm {
+                    "capture:warm"
+                } else {
+                    "capture:cold"
+                });
+                None
+            },
+        );
+        assert!(report.is_ok());
+        assert_eq!(
+            window.calls(),
+            [
+                "cloak",
+                "composed",
+                "capture:cold",
+                "capture:cold",
+                "uncloak"
+            ],
+            "every capture must land between the cloak and the uncloak, and none may use the warm path"
+        );
+    }
+
+    /// Without a cloak -- the default, excluded path -- the warm path stays
+    /// available. Together with the test above this pins `serve_warm` both
+    /// ways, which the final review of `#109` (Opus, finding 5) found nothing
+    /// did.
+    #[test]
+    fn the_warm_path_is_offered_only_when_nothing_is_cloaked() {
+        let _guard = crate::precapture::frame_store_guard();
+        let seen = Mutex::new(Vec::new());
+        let monitors = [Rect::new(0, 0, 64, 48), Rect::new(64, 0, 64, 48)];
+        let report = freeze_with(&monitors, generation(), None, |_, serve_warm| {
+            seen.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(serve_warm);
+            None
+        });
+        assert!(report.is_ok());
+        assert_eq!(
+            *seen.lock().unwrap_or_else(PoisonError::into_inner),
+            [true, true]
+        );
     }
 }

@@ -62,11 +62,18 @@ about it. Also vylone.com, which has no security contact of its own yet.
 - **The overlay is excluded from screen capture at the window level, and that is the default.**
   Other capture tools cannot see UP-TAKE's own rendering, and UP-TAKE does not capture it either.
   **One setting changes it, and only you can turn it on:** *Show UP-TAKE in screen recordings*, in
-  Settings under Capture. With it on, the exclusion is lifted, UP-TAKE appears in recordings like
-  any other window, and a frozen screen taken while it is on contains the overlay. Nothing else
-  lifts the exclusion, and nothing lifts it on its own.
+  Settings under Capture. With it on, the exclusion is lifted and UP-TAKE appears in recordings
+  like any other window. A frozen screen is meant to leave UP-TAKE out even then: for the moment
+  it takes its own picture, UP-TAKE removes its window from the screen image and puts it back
+  afterwards, and if it cannot remove it, it does not freeze. That is built and has not yet been
+  confirmed on real hardware. Nothing else lifts the exclusion, and nothing lifts it on its own.
   <!-- source: ADR-0019 (overlay excluded from capture), decision 1 for the affinity and decision 3
-       for the setting, which that ADR named from the start and roadmap 1.14 builds.
+       for the setting, which that ADR named from the start and roadmap 1.14 builds. The freeze
+       sentence is decision 6 (backlog I-411), built in src-tauri/src/freeze.rs as a DWM cloak
+       around the capture. "Not yet confirmed on real hardware" is literal: the ADR owes a rig
+       pass showing a clean still, and this sentence is strengthened only after that pass, not
+       before. Until 2026-09-22 this said a frozen screen "contains the overlay", which was true
+       of the code before decision 6.
 
        This said "permanently and by design" and "UP-TAKE never captures it either" until
        2026-09-17. Both were true until the setting existed. Corrected rather than softened,
