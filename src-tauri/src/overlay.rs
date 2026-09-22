@@ -270,13 +270,13 @@ pub(crate) fn overlay_window(app: &AppHandle) -> Result<WebviewWindow, String> {
 /// [`EXCLUDED_FROM_CAPTURE`] is set to whether the exclusion is **in force**,
 /// not to what the setting asks: `false` with the setting on, and `false` when
 /// the call failed, because on both the overlay is in every capture including
-/// UP-TAKE's own. ADR-0019 decision 6 hides the window around a freeze exactly
+/// UP-TAKE's own. ADR-0019 decision 6 cloaks the window around a freeze exactly
 /// then, and a flag that followed the setting would leave the old-Windows case
 /// uncovered.
 #[cfg(windows)]
 pub fn apply_capture_exclusion(app: &AppHandle, show_in_recordings: bool) -> Result<(), String> {
     // Cleared first, so every early return below leaves it saying "in shot",
-    // which is the answer that costs a blink rather than a dirty still.
+    // which is the answer that costs a frame rather than a dirty still.
     EXCLUDED_FROM_CAPTURE.store(false, Ordering::SeqCst);
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
@@ -308,36 +308,27 @@ pub fn apply_capture_exclusion(app: &AppHandle, show_in_recordings: bool) -> Res
 /// Whether the overlay is excluded from capture right now -- see
 /// [`apply_capture_exclusion`].
 ///
-/// Starts `false`, the answer that makes a freeze hide the window, so a freeze
+/// Starts `false`, the answer that makes a freeze cloak the window, so a freeze
 /// that could somehow run before startup applies the affinity errs toward a
 /// clean still.
 static EXCLUDED_FROM_CAPTURE: AtomicBool = AtomicBool::new(false);
 
-/// The overlay window a freeze must hide so it is not in its own still, or
-/// `None` when it cannot be in the still anyway (ADR-0019 decision 6).
+/// The overlay window a freeze must cloak so it is not in its own still:
+/// `Ok(None)` when it cannot be in the still anyway (ADR-0019 decision 6).
 ///
-/// `None` is also the answer when the handle cannot be had, logged: the freeze
-/// then captures the overlay as it did before decision 6, which is a worse
-/// picture and not a broken feature.
-fn in_shot_of_freeze(app: &AppHandle) -> Option<crate::freeze::OverlayWindow> {
+/// `Err` when it would be in the still and its handle cannot be had. The
+/// caller then does not freeze at all, for the reason `freeze::step_aside`
+/// fails closed: a still that silently contains the overlay again is the
+/// defect back.
+fn in_shot_of_freeze(app: &AppHandle) -> Result<Option<crate::freeze::OverlayWindow>, String> {
     if EXCLUDED_FROM_CAPTURE.load(Ordering::SeqCst) {
-        return None;
+        return Ok(None);
     }
-    let hwnd = overlay_window(app).and_then(|window| {
-        window
-            .hwnd()
-            .map_err(|e| format!("Could not get the overlay window handle: {e}"))
-    });
-    match hwnd {
-        Ok(hwnd) => Some(crate::freeze::OverlayWindow::new(hwnd.0)),
-        Err(error) => {
-            crate::diagnostics::trouble(
-                "freeze: the overlay cannot step aside, so the still may contain it",
-                &error,
-            );
-            None
-        }
-    }
+    let window = overlay_window(app)?;
+    let hwnd = window
+        .hwnd()
+        .map_err(|e| format!("Could not get the overlay window handle: {e}"))?;
+    Ok(Some(crate::freeze::OverlayWindow::new(hwnd.0)))
 }
 
 // ---------------------------------------------------------------------------
@@ -688,6 +679,19 @@ pub fn toggle_freeze(app: &AppHandle) {
         }
         return;
     }
+    // Resolved on this thread because the handle lookup goes through the app,
+    // and BEFORE the latency probe is stamped: refusing here stamps nothing, so
+    // no later paint can consume a probe for a freeze that never ran.
+    let overlay = match in_shot_of_freeze(app) {
+        Ok(overlay) => overlay,
+        Err(error) => {
+            crate::diagnostics::trouble(
+                "freeze: the overlay cannot step out of its own shot, so nothing was frozen",
+                &error,
+            );
+            return;
+        }
+    };
     // Stamped here — on the key, on the calling thread, before the capture
     // thread is even spawned — because `quality-bars.md` §1's row measures what
     // the user waits for. Anything later would time a stage and call it the
@@ -698,10 +702,6 @@ pub fn toggle_freeze(app: &AppHandle) {
     // by the time the capture thread runs the pointer may have moved. The scope
     // must describe what the user was looking at when they asked.
     let cursor = placement::real_cursor(app);
-    // Resolved here rather than on the capture thread because the handle
-    // lookup goes through the app, and the answer is a property of the moment
-    // of the key like the cursor above.
-    let overlay = in_shot_of_freeze(app);
     let app = app.clone();
     std::thread::spawn(move || {
         // Narrowed to the cursor's monitor unless the 1.14 setting widens it
