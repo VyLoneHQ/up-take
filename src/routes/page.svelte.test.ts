@@ -1092,6 +1092,38 @@ describe('a freeze hides the covered monitors before the page confirms', () => {
   });
 
   /**
+   * One animation-frame callback runs BEFORE its frame is painted, so a page
+   * that confirmed after one could confirm a mask that is not on screen yet.
+   * The final review of `#110` cut the wait to one and the suite stayed green,
+   * because the stub above fires callbacks on a timer. Here the frames are
+   * stepped by hand: no confirmation after the first, one after the second.
+   */
+  test('the page confirms only after the second animation frame', async () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    const settle = async () => {
+      for (let i = 0; i < 10; i += 1) await Promise.resolve();
+      await tick();
+    };
+    await mountRecording();
+    await emit('overlay://state', state());
+    await emit('overlay://freeze-hide', { token: 13, rects: [SECOND] });
+    await settle();
+    expect(confirmed).toHaveLength(0);
+    expect(frames).toHaveLength(1);
+    frames.shift()?.(0);
+    await settle();
+    expect(confirmed, 'one frame is not enough').toHaveLength(0);
+    expect(frames).toHaveLength(1);
+    frames.shift()?.(0);
+    await vi.waitFor(() => expect(confirmed).toHaveLength(1));
+    expect(confirmed[0].style ?? '').toContain('M2560 0h1920v1080h-1920Z');
+  });
+
+  /**
    * The names this file emits are only worth something if they are the ones
    * Rust sends: a renamed event leaves every test above throwing *nothing
    * listened*, but a rename on BOTH sides of the page would not. So the names

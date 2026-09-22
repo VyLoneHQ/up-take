@@ -6,10 +6,10 @@ import { SvelteMap } from 'svelte/reactivity';
 import { appearanceStyle } from '$lib/appearance';
 import Coach from '$lib/Coach.svelte';
 import {
-  afterNextPaint,
   type FreezeHidePayload,
   type FreezeRevealPayload,
   hiddenClipPath,
+  nextAnimationFrame,
 } from '$lib/freeze-mask';
 import { overflowFade } from '$lib/overflow-fade';
 import {
@@ -437,12 +437,14 @@ onMount(() => {
       if (hidden.length !== rects.length) return;
       freezeHideToken = token;
       freezeHidden = hidden;
-      // Svelte applies the style, then two painted frames: the first paint can
-      // still be in flight to the compositor when the first callback runs, and
-      // Rust's own compositor wait comes after this answer, not instead of it.
+      // Svelte applies the style, then TWO animation-frame callbacks. A callback
+      // runs before its frame is painted, so after the first the mask may not
+      // be on screen yet; the second runs a frame later, after the frame that
+      // painted it. Rust's own compositor wait comes after this answer, not
+      // instead of it. Pinned by a test that steps the frames by hand.
       await tick();
-      await afterNextPaint();
-      await afterNextPaint();
+      await nextAnimationFrame();
+      await nextAnimationFrame();
       // Superseded while painting: a later freeze owns the page now.
       if (freezeHideToken !== token) return;
       try {

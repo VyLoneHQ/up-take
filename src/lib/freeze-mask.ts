@@ -43,8 +43,16 @@ export function hiddenClipPath(hidden: readonly CssRect[]): string | null {
   return `path(evenodd, '${outer}${holes}')`;
 }
 
-/** Resolves after the browser has painted the next frame. */
-export function afterNextPaint(): Promise<void> {
+/**
+ * Resolves inside the next `requestAnimationFrame` callback.
+ *
+ * **That callback runs BEFORE the frame is painted**, so one of these is not a
+ * paint confirmation: a style set just before it may not have reached the
+ * screen when it resolves. The caller awaits two, and says why. The final
+ * review of `#110` caught the earlier name, `afterNextPaint`, promising more
+ * than this does.
+ */
+export function nextAnimationFrame(): Promise<void> {
   return new Promise((resolve) => {
     requestAnimationFrame(() => resolve());
   });

@@ -926,8 +926,8 @@ impl Drop for FreezingGuard {
 /// drawing on the monitors the freeze covers.
 ///
 /// A trait rather than calls inline, so the ordering and the failure paths are
-/// driven by the tests below without a desktop. `overlay::OverlayPage` is the
-/// real one.
+/// driven by the tests below without a desktop. [`PageAside`] is the real
+/// one.
 ///
 /// # Why the page hides its own drawing, and not the window
 ///
@@ -1080,6 +1080,115 @@ struct SteppedAside<'a> {
 impl Drop for SteppedAside<'_> {
     fn drop(&mut self) {
         self.overlay.reveal();
+    }
+}
+
+/// What [`PageAside`] asks of the overlay page.
+pub(crate) enum PageRequest<'a> {
+    /// Hide everything drawn inside `covers`, then confirm `token`.
+    Hide { token: u64, covers: &'a [Rect] },
+    /// Remove the mask `token` put on.
+    Reveal { token: u64 },
+}
+
+/// UP-TAKE's own page, asked to take its drawing on the covered monitors out
+/// of a freeze's shot (ADR-0019 decision 6, narrowed by backlog `I-426`).
+///
+/// **Only the covered monitors.** With *Freezing covers: This monitor* that is
+/// the cursor's monitor, and the others keep their areas on screen while the
+/// freeze runs; with *Every monitor* it is all of them. The page hides ALL of
+/// its drawing inside those rectangles, not only the areas, because anything
+/// left there is in the still.
+///
+/// # Why this lives here and takes `send`
+///
+/// So the adapter is tested, not just the helpers under it. The final review
+/// of `#110` (GPT-6 Astra) showed that when this was a struct holding an
+/// `AppHandle` in `overlay.rs`, treating a failed send as success, skipping the
+/// confirmation wait and skipping the compositor wait all left the suite green.
+/// Now the page is reached only through `send`, the tests below drive every
+/// branch with a fake, and what `overlay::toggle_freeze` supplies is the one
+/// line that turns a [`PageRequest`] into an event.
+pub(crate) struct PageAside<S>
+where
+    S: Fn(PageRequest<'_>) -> Result<(), String>,
+{
+    send: S,
+    covers: Vec<Rect>,
+    /// The token of the hide this page was asked for, so the reveal names the
+    /// same one. Zero until [`StepAside::hide`] runs.
+    token: AtomicU64,
+    confirm_timeout: std::time::Duration,
+    present: fn() -> bool,
+}
+
+impl<S> PageAside<S>
+where
+    S: Fn(PageRequest<'_>) -> Result<(), String>,
+{
+    /// The production adapter: the real confirmation timeout and the real
+    /// compositor wait.
+    pub(crate) fn new(send: S, covers: Vec<Rect>) -> Self {
+        Self::with_parts(send, covers, HIDE_CONFIRM_TIMEOUT, present_frames)
+    }
+
+    fn with_parts(
+        send: S,
+        covers: Vec<Rect>,
+        confirm_timeout: std::time::Duration,
+        present: fn() -> bool,
+    ) -> Self {
+        Self {
+            send,
+            covers,
+            token: AtomicU64::new(0),
+            confirm_timeout,
+            present,
+        }
+    }
+}
+
+impl<S> StepAside for PageAside<S>
+where
+    S: Fn(PageRequest<'_>) -> Result<(), String>,
+{
+    fn hide(&self) -> bool {
+        // Registered before the request goes out, so a page that answers
+        // faster than this thread can reach the wait still lands.
+        let (token, confirmed) = expect_hidden();
+        self.token.store(token, Ordering::SeqCst);
+        if let Err(error) = (self.send)(PageRequest::Hide {
+            token,
+            covers: &self.covers,
+        }) {
+            crate::diagnostics::trouble(
+                "freeze: could not ask the overlay to hide, so nothing was frozen",
+                &error,
+            );
+            return false;
+        }
+        if !wait_hidden(&confirmed, self.confirm_timeout) {
+            crate::diagnostics::trouble(
+                "freeze: the overlay did not confirm its drawing was hidden, so nothing was frozen",
+                &format_args!("{} ms", self.confirm_timeout.as_millis()),
+            );
+            return false;
+        }
+        true
+    }
+
+    fn reveal(&self) {
+        let token = self.token.load(Ordering::SeqCst);
+        if let Err(error) = (self.send)(PageRequest::Reveal { token }) {
+            crate::diagnostics::trouble(
+                "freeze: could not ask the overlay to show its drawing again",
+                &error,
+            );
+        }
+    }
+
+    fn composed(&self) -> bool {
+        (self.present)()
     }
 }
 
@@ -2590,5 +2699,116 @@ mod tests {
             -1
         }));
         assert_eq!(calls, 1, "a failed wait refuses rather than waiting again");
+    }
+
+    // ---- The production adapter, driven through a fake page ----
+
+    /// Records every request, and plays the page: on a hide it confirms the
+    /// token, unless told the page is silent or the send itself fails.
+    fn fake_page(
+        requests: &Mutex<Vec<String>>,
+        page_answers: bool,
+        send_fails: bool,
+    ) -> impl Fn(PageRequest<'_>) -> Result<(), String> + '_ {
+        move |request| {
+            let line = match request {
+                PageRequest::Hide { token, covers } => {
+                    if page_answers && !send_fails {
+                        acknowledge_hidden(token);
+                    }
+                    format!("hide:{token}:{}", covers.len())
+                }
+                PageRequest::Reveal { token } => format!("reveal:{token}"),
+            };
+            requests
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(line);
+            if send_fails {
+                Err("the event could not be sent".to_string())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn requests(log: &Mutex<Vec<String>>) -> Vec<String> {
+        log.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    const PRESENTED: fn() -> bool = || true;
+    const NOT_PRESENTED: fn() -> bool = || false;
+    const SHORT: std::time::Duration = std::time::Duration::from_millis(20);
+
+    /// The whole handshake: the covered monitors go out with a token, the
+    /// page's confirmation for that token lets the hide succeed, and the
+    /// reveal names the same token.
+    #[test]
+    fn the_adapter_waits_for_its_own_confirmation_and_reveals_the_same_token() {
+        let _guard = crate::precapture::frame_store_guard();
+        let log = Mutex::new(Vec::new());
+        let covers = vec![Rect::new(0, 0, 64, 48), Rect::new(64, 0, 64, 48)];
+        let page = PageAside::with_parts(fake_page(&log, true, false), covers, SHORT, PRESENTED);
+        assert!(page.hide());
+        page.reveal();
+        let sent = requests(&log);
+        assert_eq!(sent.len(), 2, "{sent:?}");
+        let token = sent[0]
+            .strip_prefix("hide:")
+            .and_then(|rest| rest.strip_suffix(":2"))
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            !token.is_empty(),
+            "the hide must carry both covered monitors: {sent:?}"
+        );
+        assert_eq!(sent[1], format!("reveal:{token}"));
+    }
+
+    /// A hide that could not even be sent refuses at once: nothing will ever
+    /// confirm it, and waiting out the timeout would only delay the refusal.
+    #[test]
+    fn the_adapter_refuses_when_the_hide_cannot_be_sent() {
+        let _guard = crate::precapture::frame_store_guard();
+        let log = Mutex::new(Vec::new());
+        let page = PageAside::with_parts(
+            fake_page(&log, true, true),
+            vec![Rect::new(0, 0, 64, 48)],
+            std::time::Duration::from_secs(5),
+            PRESENTED,
+        );
+        let started = Instant::now();
+        assert!(!page.hide());
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    /// A page that never confirms is a refusal, after the timeout and not
+    /// before it.
+    #[test]
+    fn the_adapter_refuses_when_the_page_does_not_confirm() {
+        let _guard = crate::precapture::frame_store_guard();
+        let log = Mutex::new(Vec::new());
+        let page = PageAside::with_parts(
+            fake_page(&log, false, false),
+            vec![Rect::new(0, 0, 64, 48)],
+            SHORT,
+            PRESENTED,
+        );
+        let started = Instant::now();
+        assert!(!page.hide());
+        assert!(started.elapsed() >= SHORT);
+    }
+
+    /// The compositor wait is the adapter's answer to `composed`, failure
+    /// included: a wait that failed must not read as presented.
+    #[test]
+    fn the_adapter_reports_the_compositor_wait_as_it_went() {
+        let log = Mutex::new(Vec::new());
+        let presented =
+            PageAside::with_parts(fake_page(&log, true, false), vec![], SHORT, PRESENTED);
+        let failed =
+            PageAside::with_parts(fake_page(&log, true, false), vec![], SHORT, NOT_PRESENTED);
+        assert!(presented.composed());
+        assert!(!failed.composed());
     }
 }

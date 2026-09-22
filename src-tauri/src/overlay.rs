@@ -323,7 +323,8 @@ pub fn apply_capture_exclusion(app: &AppHandle, show_in_recordings: bool) -> Res
 static EXCLUDED_FROM_CAPTURE: RwLock<bool> = RwLock::new(false);
 
 /// The event asking the overlay page to hide its drawing on the monitors a
-/// freeze covers. The page answers with [`overlay_freeze_hidden`].
+/// freeze covers (sent for `freeze::PageAside`). The page answers with
+/// [`overlay_freeze_hidden`].
 const FREEZE_HIDE_EVENT: &str = "overlay://freeze-hide";
 
 /// The event asking the page to show that drawing again.
@@ -344,88 +345,6 @@ struct FreezeHidePayload {
 #[derive(Clone, Serialize)]
 struct FreezeRevealPayload {
     token: u64,
-}
-
-/// UP-TAKE's own page, asked to take its drawing on the covered monitors out
-/// of a freeze's shot (ADR-0019 decision 6, narrowed to the covered monitors by
-/// backlog `I-426`). See `freeze::StepAside` for why the page and not the
-/// window.
-///
-/// **Only the covered monitors.** With *Freezing covers: This monitor* that is
-/// the cursor's monitor, and the others keep their areas on screen while the
-/// freeze runs; with *Every monitor* it is all of them. The page hides ALL of
-/// its drawing inside those rectangles, not only the areas, because anything
-/// left there is in the still.
-pub(crate) struct OverlayPage {
-    app: AppHandle,
-    covers: Vec<Rect>,
-    /// The token of the hide this page was asked for, so the reveal names the
-    /// same one. Zero until [`crate::freeze::StepAside::hide`] runs.
-    token: std::sync::atomic::AtomicU64,
-}
-
-impl OverlayPage {
-    pub(crate) fn new(app: AppHandle, covers: Vec<Rect>) -> Self {
-        Self {
-            app,
-            covers,
-            token: std::sync::atomic::AtomicU64::new(0),
-        }
-    }
-}
-
-impl crate::freeze::StepAside for OverlayPage {
-    fn hide(&self) -> bool {
-        let (token, confirmed) = crate::freeze::expect_hidden();
-        self.token.store(token, std::sync::atomic::Ordering::SeqCst);
-        let rects = self
-            .covers
-            .iter()
-            .map(|rect| {
-                (
-                    rect.origin.x,
-                    rect.origin.y,
-                    rect.size.width,
-                    rect.size.height,
-                )
-            })
-            .collect();
-        if let Err(error) = self
-            .app
-            .emit(FREEZE_HIDE_EVENT, FreezeHidePayload { token, rects })
-        {
-            crate::diagnostics::trouble(
-                "freeze: could not ask the overlay to hide, so nothing was frozen",
-                &error,
-            );
-            return false;
-        }
-        if !crate::freeze::wait_hidden(&confirmed, crate::freeze::HIDE_CONFIRM_TIMEOUT) {
-            crate::diagnostics::trouble(
-                "freeze: the overlay did not confirm its drawing was hidden, so nothing was frozen",
-                &format_args!("{} ms", crate::freeze::HIDE_CONFIRM_TIMEOUT.as_millis()),
-            );
-            return false;
-        }
-        true
-    }
-
-    fn reveal(&self) {
-        let token = self.token.load(std::sync::atomic::Ordering::SeqCst);
-        if let Err(error) = self
-            .app
-            .emit(FREEZE_REVEAL_EVENT, FreezeRevealPayload { token })
-        {
-            crate::diagnostics::trouble(
-                "freeze: could not ask the overlay to show its drawing again",
-                &error,
-            );
-        }
-    }
-
-    fn composed(&self) -> bool {
-        crate::freeze::present_frames()
-    }
 }
 
 /// The page's confirmation that it has hidden what a freeze asked for, and
@@ -827,7 +746,36 @@ pub fn toggle_freeze(app: &AppHandle) {
             .unwrap_or_else(PoisonError::into_inner);
         // The page hides only what this freeze covers, which is `monitors`:
         // the cursor's monitor, or every monitor with the 1.14 setting.
-        let page = OverlayPage::new(app.clone(), monitors.clone());
+        // The adapter is `freeze::PageAside`, tested there; this is only the
+        // line that turns its two requests into the two events.
+        let page_app = app.clone();
+        let page = crate::freeze::PageAside::new(
+            move |request| match request {
+                crate::freeze::PageRequest::Hide { token, covers } => page_app
+                    .emit(
+                        FREEZE_HIDE_EVENT,
+                        FreezeHidePayload {
+                            token,
+                            rects: covers
+                                .iter()
+                                .map(|rect| {
+                                    (
+                                        rect.origin.x,
+                                        rect.origin.y,
+                                        rect.size.width,
+                                        rect.size.height,
+                                    )
+                                })
+                                .collect(),
+                        },
+                    )
+                    .map_err(|error| error.to_string()),
+                crate::freeze::PageRequest::Reveal { token } => page_app
+                    .emit(FREEZE_REVEAL_EVENT, FreezeRevealPayload { token })
+                    .map_err(|error| error.to_string()),
+            },
+            monitors.clone(),
+        );
         let stepping: Option<&dyn crate::freeze::StepAside> =
             (!*excluded).then_some(&page as &dyn crate::freeze::StepAside);
         let outcome = crate::freeze::freeze(&monitors, generation, stepping);
