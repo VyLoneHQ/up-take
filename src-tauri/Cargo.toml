@@ -57,6 +57,9 @@ tauri-plugin-single-instance = "2"
 windows-sys = { workspace = true, features = [
   "Win32_Foundation",
   "Win32_Globalization",
+  # freeze.rs: DwmFlush, so a freeze captures only after the overlay has
+  # left the composed frame (ADR-0019 decision 6, backlog I-411).
+  "Win32_Graphics_Dwm",
   "Win32_Graphics_Gdi",
   "Win32_System_DataExchange",
   "Win32_System_LibraryLoader",

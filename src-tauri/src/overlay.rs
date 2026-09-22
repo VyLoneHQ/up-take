@@ -10,6 +10,7 @@
 //! Geometry decisions live in `uptake_core::geometry`; this module only maps
 //! Tauri's monitor reports into core types and talks to the OS.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use serde::Serialize;
@@ -263,8 +264,20 @@ pub(crate) fn overlay_window(app: &AppHandle) -> Result<WebviewWindow, String> {
 /// 10.0.19041 `SetWindowDisplayAffinity` fails, logged rather than treated as
 /// a startup failure, and the overlay is then visible in captures like any
 /// other window.
+///
+/// # What it records, for the freeze
+///
+/// [`EXCLUDED_FROM_CAPTURE`] is set to whether the exclusion is **in force**,
+/// not to what the setting asks: `false` with the setting on, and `false` when
+/// the call failed, because on both the overlay is in every capture including
+/// UP-TAKE's own. ADR-0019 decision 6 hides the window around a freeze exactly
+/// then, and a flag that followed the setting would leave the old-Windows case
+/// uncovered.
 #[cfg(windows)]
 pub fn apply_capture_exclusion(app: &AppHandle, show_in_recordings: bool) -> Result<(), String> {
+    // Cleared first, so every early return below leaves it saying "in shot",
+    // which is the answer that costs a blink rather than a dirty still.
+    EXCLUDED_FROM_CAPTURE.store(false, Ordering::SeqCst);
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
     };
@@ -288,7 +301,43 @@ pub fn apply_capture_exclusion(app: &AppHandle, show_in_recordings: bool) -> Res
                 .to_string(),
         );
     }
+    EXCLUDED_FROM_CAPTURE.store(!show_in_recordings, Ordering::SeqCst);
     Ok(())
+}
+
+/// Whether the overlay is excluded from capture right now -- see
+/// [`apply_capture_exclusion`].
+///
+/// Starts `false`, the answer that makes a freeze hide the window, so a freeze
+/// that could somehow run before startup applies the affinity errs toward a
+/// clean still.
+static EXCLUDED_FROM_CAPTURE: AtomicBool = AtomicBool::new(false);
+
+/// The overlay window a freeze must hide so it is not in its own still, or
+/// `None` when it cannot be in the still anyway (ADR-0019 decision 6).
+///
+/// `None` is also the answer when the handle cannot be had, logged: the freeze
+/// then captures the overlay as it did before decision 6, which is a worse
+/// picture and not a broken feature.
+fn in_shot_of_freeze(app: &AppHandle) -> Option<crate::freeze::OverlayWindow> {
+    if EXCLUDED_FROM_CAPTURE.load(Ordering::SeqCst) {
+        return None;
+    }
+    let hwnd = overlay_window(app).and_then(|window| {
+        window
+            .hwnd()
+            .map_err(|e| format!("Could not get the overlay window handle: {e}"))
+    });
+    match hwnd {
+        Ok(hwnd) => Some(crate::freeze::OverlayWindow::new(hwnd.0)),
+        Err(error) => {
+            crate::diagnostics::trouble(
+                "freeze: the overlay cannot step aside, so the still may contain it",
+                &error,
+            );
+            None
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -646,6 +695,10 @@ pub fn toggle_freeze(app: &AppHandle) {
     // by the time the capture thread runs the pointer may have moved. The scope
     // must describe what the user was looking at when they asked.
     let cursor = placement::real_cursor(app);
+    // Resolved here rather than on the capture thread because the handle
+    // lookup goes through the app, and the answer is a property of the moment
+    // of the key like the cursor above.
+    let overlay = in_shot_of_freeze(app);
     let app = app.clone();
     std::thread::spawn(move || {
         // Narrowed to the cursor's monitor unless the 1.14 setting widens it
@@ -661,7 +714,10 @@ pub fn toggle_freeze(app: &AppHandle) {
         // stage split, because "slow" is not actionable and "the capture is
         // slow" is. The stage figures are per-monitor maxima and the total is
         // wall-clock, so they do not add up — see `FreezeReport`.
-        let report = match crate::freeze::freeze(&monitors) {
+        let stepping = overlay
+            .as_ref()
+            .map(|overlay| overlay as &dyn crate::freeze::StepAside);
+        let report = match crate::freeze::freeze(&monitors, stepping) {
             Ok(report) => report,
             // Nothing was published, so nothing is emitted: the state the
             // frontend already holds is the correct one in both cases. Logged
@@ -687,7 +743,7 @@ pub fn toggle_freeze(app: &AppHandle) {
         // the condition it ran under, and the scope is that condition here.
         crate::diagnostics::measurement(&format!(
             "freeze: froze {}/{} monitor(s) in scope, {} of {} on the desktop, in {} ms, \
-             warm {}/{}, slowest monitor: capture {} ms, encode {} ms",
+             warm {}/{}, slowest monitor: capture {} ms, encode {} ms, {}",
             report.count,
             monitors.len(),
             report.count,
@@ -696,7 +752,14 @@ pub fn toggle_freeze(app: &AppHandle) {
             report.warm_served,
             report.count,
             report.slowest_capture_ms,
-            report.slowest_encode_ms
+            report.slowest_encode_ms,
+            // The condition the run was taken under (`UT-F-46`): with the
+            // setting on the same freeze pays for a hide, and a timing that
+            // does not say which case it is cannot be compared with another.
+            report.step_aside_ms.map_or_else(
+                || "overlay left in place".to_string(),
+                |ms| format!("overlay stepped aside in {ms} ms"),
+            )
         ));
         // Per-monitor, with the encoded size beside the timings, because
         // `quality-bars.md` §1's row is content-dependent and a maximum cannot
