@@ -1016,10 +1016,21 @@ pub(crate) fn wait_hidden(
 /// the question; the rig measures what it costs.
 pub(crate) fn present_frames() -> bool {
     use windows_sys::Win32::Graphics::Dwm::DwmFlush;
-    for _ in 0..2 {
-        // SAFETY: no arguments and no preconditions; it blocks until DWM
-        // presents the next frame.
-        let result = unsafe { DwmFlush() };
+    // SAFETY: no arguments and no preconditions; it blocks until DWM presents
+    // the next frame.
+    present_frames_with(|| unsafe { DwmFlush() })
+}
+
+/// How many DWM frames [`present_frames`] waits for. A constant rather than a
+/// literal in the loop so the test below can say what it is pinning; the
+/// review of `#110` found reducing it to one left every test green.
+const COMPOSITOR_FRAMES: usize = 2;
+
+/// [`present_frames`] with the flush passed in, so the count and the refusal
+/// are testable without a compositor.
+fn present_frames_with(mut flush: impl FnMut() -> windows_sys::core::HRESULT) -> bool {
+    for _ in 0..COMPOSITOR_FRAMES {
+        let result = flush();
         if result < 0 {
             crate::diagnostics::trouble(
                 "freeze: DwmFlush failed, so nothing was captured",
@@ -2559,5 +2570,25 @@ mod tests {
             &receiver,
             std::time::Duration::from_millis(10)
         ));
+    }
+
+    /// Two DWM frames, not one: the review of `#110` found the count could drop
+    /// to one with every test green. And a failed wait stops at once, because
+    /// the frame it did not wait for may be the one with the drawing in it.
+    #[test]
+    fn the_compositor_wait_is_two_frames_and_stops_at_a_failure() {
+        let mut calls = 0;
+        assert!(present_frames_with(|| {
+            calls += 1;
+            0
+        }));
+        assert_eq!(calls, 2, "a freeze waits for two presented frames");
+
+        let mut calls = 0;
+        assert!(!present_frames_with(|| {
+            calls += 1;
+            -1
+        }));
+        assert_eq!(calls, 1, "a failed wait refuses rather than waiting again");
     }
 }

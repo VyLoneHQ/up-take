@@ -84,11 +84,13 @@
  * harness works.
  */
 
+import { invoke } from '@tauri-apps/api/core';
 import { render } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import type { AreaKind } from '$lib/overlay-state';
 import areaRs from '../../crates/uptake-core/src/area.rs?raw';
+import overlayRs from '../../src-tauri/src/overlay.rs?raw';
 
 /** Every handler the component registered, by event name. */
 const handlers = new Map<string, (event: { payload: unknown }) => void>();
@@ -978,5 +980,132 @@ describe('the first-run coach draws what Rust sends and reports where it drew it
 
     await emit('overlay://coach', { coach: null });
     expect(container.querySelectorAll('.coach')).toHaveLength(0);
+  });
+});
+
+/**
+ * ADR-0019 decision 6 as narrowed by `I-426`: while a freeze captures, the page
+ * hides its drawing on the covered monitors, and ONLY THEN confirms.
+ *
+ * These exist because the independent review of `up-take` `#110` showed the
+ * page side could be broken with the whole suite green: confirming without
+ * applying the mask, renaming the event, and disabling each of the three
+ * guards all passed. Every test below asserts the mask as it stood **at the
+ * moment the page confirmed**, because that is the moment Rust starts the
+ * capture, and a mask applied afterwards is a still with the areas in it.
+ */
+describe('a freeze hides the covered monitors before the page confirms', () => {
+  const confirmed: { token: unknown; style: string | null }[] = [];
+
+  /**
+   * Mounts, and records every `overlay_freeze_hidden` with the root's style at
+   * that instant. Everything else keeps the harness's default reply.
+   */
+  async function mountRecording() {
+    confirmed.length = 0;
+    const rendered = await mount();
+    const main = rendered.container.querySelector('main');
+    vi.mocked(invoke).mockImplementation((command: string, args?: unknown) => {
+      if (command === 'overlay_freeze_hidden') {
+        confirmed.push({
+          token: (args as { token: unknown }).token,
+          style: main?.getAttribute('style') ?? null,
+        });
+      }
+      return Promise.resolve(invokeReplies.get(command));
+    });
+    return { ...rendered, main };
+  }
+
+  beforeEach(() => {
+    // jsdom has no painting, so a frame is a macrotask here. What is under test
+    // is the ORDER (mask, then confirm), not the timing.
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) =>
+      setTimeout(() => callback(0), 0),
+    );
+    return () => {
+      vi.unstubAllGlobals();
+      vi.mocked(invoke).mockImplementation((command: string) =>
+        Promise.resolve(invokeReplies.get(command)),
+      );
+    };
+  });
+
+  test('the covered monitor is masked when the page confirms, and the others are not', async () => {
+    await mountRecording();
+    await emit('overlay://state', state());
+    await emit('overlay://freeze-hide', { token: 7, rects: [SECOND] });
+    await vi.waitFor(() => expect(confirmed).toHaveLength(1));
+    expect(confirmed[0].token).toBe(7);
+    const style = confirmed[0].style ?? '';
+    expect(style).toContain('clip-path');
+    expect(style).toContain('M2560 0h1920v1080h-1920Z');
+    expect(style).not.toContain('M0 0h2560');
+    expect(style).not.toContain('M-1080 0');
+  });
+
+  test('every monitor is masked when the freeze covers every monitor', async () => {
+    await mountRecording();
+    await emit('overlay://state', state());
+    await emit('overlay://freeze-hide', {
+      token: 8,
+      rects: [PRIMARY, SECOND, THIRD],
+    });
+    await vi.waitFor(() => expect(confirmed).toHaveLength(1));
+    const style = confirmed[0].style ?? '';
+    expect(style).toContain('M0 0h2560v1440h-2560Z');
+    expect(style).toContain('M2560 0h1920v1080h-1920Z');
+    expect(style).toContain('M-1080 0h1080v1920h-1080Z');
+  });
+
+  test('a monitor the page cannot place gets no confirmation, so Rust refuses the freeze', async () => {
+    await mountRecording();
+    Object.defineProperty(window, 'devicePixelRatio', {
+      value: 0,
+      configurable: true,
+    });
+    await emit('overlay://state', state());
+    await emit('overlay://freeze-hide', { token: 9, rects: [SECOND] });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(confirmed).toHaveLength(0);
+  });
+
+  test('a hide superseded while painting is not confirmed; the later one is', async () => {
+    await mountRecording();
+    await emit('overlay://state', state());
+    await emit('overlay://freeze-hide', { token: 10, rects: [SECOND] });
+    await emit('overlay://freeze-hide', { token: 11, rects: [PRIMARY] });
+    await vi.waitFor(() => expect(confirmed).toHaveLength(1));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(confirmed.map((entry) => entry.token)).toEqual([11]);
+  });
+
+  test('a late reveal for an earlier freeze does not show what the current one hid', async () => {
+    const { main } = await mountRecording();
+    await emit('overlay://state', state());
+    await emit('overlay://freeze-hide', { token: 12, rects: [SECOND] });
+    await vi.waitFor(() => expect(confirmed).toHaveLength(1));
+    await emit('overlay://freeze-reveal', { token: 11 });
+    expect(main?.getAttribute('style')).toContain('clip-path');
+    await emit('overlay://freeze-reveal', { token: 12 });
+    expect(main?.getAttribute('style')).not.toContain('clip-path');
+  });
+
+  /**
+   * The names this file emits are only worth something if they are the ones
+   * Rust sends: a renamed event leaves every test above throwing *nothing
+   * listened*, but a rename on BOTH sides of the page would not. So the names
+   * are read out of `overlay.rs` rather than trusted.
+   */
+  test('the event and command names are the ones Rust uses', () => {
+    expect(overlayRs).toContain(
+      'const FREEZE_HIDE_EVENT: &str = "overlay://freeze-hide";',
+    );
+    expect(overlayRs).toContain(
+      'const FREEZE_REVEAL_EVENT: &str = "overlay://freeze-reveal";',
+    );
+    expect(overlayRs).toContain(
+      'pub async fn overlay_freeze_hidden(token: u64)',
+    );
   });
 });
