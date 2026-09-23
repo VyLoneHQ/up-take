@@ -124,7 +124,8 @@ use uptake_core::interaction::{self, Handle, Resize};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, VK_ESCAPE, VK_LBUTTON, VK_LWIN, VK_MENU, VK_RBUTTON, VK_RWIN, VK_SHIFT,
+    GetAsyncKeyState, VK_CONTROL, VK_ESCAPE, VK_LBUTTON, VK_LWIN, VK_MENU, VK_RBUTTON, VK_RWIN,
+    VK_SHIFT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CopyIcon, GA_ROOT, GW_HWNDPREV, GetAncestor, GetWindow, HCURSOR, HHOOK,
@@ -158,50 +159,70 @@ const HOVER_EVENT: &str = "overlay://hover";
 /// process-wide state without a lock.
 static HOOK: AtomicIsize = AtomicIsize::new(0);
 
-/// The low-level keyboard hook, installed and removed with [`HOOK`], for one
-/// key: `Esc` in Placement when another program has the keyboard.
+/// The low-level keyboard hook, installed and removed with [`HOOK`], for
+/// Placement's own keys when another program has the keyboard.
 ///
 /// # Why it exists
 ///
 /// Placement's keys reach UP-TAKE through the overlay page, which gets them only
 /// while the overlay window has keyboard focus. [`overlay::show`] focuses it
 /// once, and anything that takes the foreground afterwards (a notification, an
-/// app raising itself, a window the user touched before pressing the hotkey)
-/// takes `Esc` with it, while the mouse hook keeps Placement on screen. The
-/// founder hit it at the rig on 2026-09-23: *"esc doesn't work quite often"*.
-/// Placement already owns the mouse, so the program that has the keyboard cannot
-/// be in use; taking its `Esc` costs it nothing.
+/// app raising itself, `Alt+Tab`) takes the keys with it, while the mouse hook
+/// keeps Placement on screen. The founder hit it at the rig on 2026-09-23, first
+/// with `Esc` (*"esc doesn't work quite often"*) and then with the rest: arming
+/// a type and freezing did nothing after `Alt+Tab` to Notepad.
 ///
-/// **Only when the foreground window is another process's.** When the overlay
-/// or UP-TAKE's settings window has focus, the key goes through untouched and
-/// the page handles it as before, so no `Esc` is ever acted on twice.
+/// **Only Placement's keys, and only when the foreground window is another
+/// process's.** Those are exactly the keys the page acts on ([`placement_key`]):
+/// `Esc`, `Ctrl+Space`, `Delete`, and the arming letters. Every other key, and
+/// every key while UP-TAKE's own window has focus, goes through untouched, so
+/// `Alt+Tab` still works, typing into the program still works, and no key is
+/// ever acted on twice. Placement already owns the mouse, so taking these few
+/// keys from the program in front costs it nothing it could be using.
 ///
 /// # What it cannot reach: an elevated window in front
 ///
 /// While a higher-integrity window holds the foreground (an admin console,
 /// Task Manager), Windows delivers no low-level keyboard events to this
 /// medium-integrity process, exactly as it starves the mouse hook (UIPI, F-25,
-/// the module docs). So `Esc` still does nothing there. **This is not fixed
+/// the module docs). So the keys still do nothing there. **This is not fixed
 /// and not worked around**: crossing it needs UP-TAKE elevated or signed with
-/// `uiAccess`, which is out of proportion to one key. The way out in that case
-/// is the one the module docs already name for the mouse: the global hotkey
-/// (F-13), or bringing a non-elevated window to the front. Raised by the second
-/// review of `up-take` `#112`; whether the hotkey itself reaches UP-TAKE past an
-/// elevated window has not been measured here.
+/// `uiAccess`, which is out of proportion to a handful of keys. The way out in
+/// that case is the one the module docs already name for the mouse: the global
+/// hotkey (F-13), or bringing a non-elevated window to the front. Raised by the
+/// second review of `up-take` `#112`; whether the hotkey itself reaches UP-TAKE
+/// past an elevated window has not been measured here.
 static KEY_HOOK: AtomicIsize = AtomicIsize::new(0);
 
-/// An `Esc` press the keyboard hook took, whose release it has not seen yet.
+/// Per virtual-key code: a press the keyboard hook took, whose release it has
+/// not seen yet.
 ///
 /// **A taken press owns its whole keystroke** (the first review of `up-take`
 /// `#112`): its auto-repeats and its release are swallowed too, or the program
-/// with the keyboard gets a release with no press, and holding `Esc` would
-/// step through every rung of `overlay::escape`. The mouse hook keeps
-/// [`LEFT_PENDING`] for the same reason.
-static ESC_TAKEN: AtomicBool = AtomicBool::new(false);
+/// with the keyboard gets a release with no press, and holding a key would act
+/// on every repeat (holding `Ctrl+Space` would toggle the freeze on and off).
+/// The mouse hook keeps [`LEFT_PENDING`] for the same reason.
+static KEY_TAKEN: [AtomicBool; 256] = [const { AtomicBool::new(false) }; 256];
 
 /// The keyboard hook outlived a teardown to swallow a taken press's release,
-/// and removes itself when that release arrives. See [`release_keyboard_hook`].
+/// and removes itself when the last such release arrives. See
+/// [`release_keyboard_hook`].
 static KEY_UNHOOK_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// The arming letters, as virtual-key codes (the key labelled with that letter
+/// on the user's layout), and the type each arms (ADR-0018 section 1).
+///
+/// **A copy of the page's `armedTypeForKey`**, needed because a key taken here
+/// never reaches the page. `page.svelte.test.ts` reads this line and compares
+/// it with `armedTypeForKey` for every letter, so the two cannot drift apart
+/// silently. That test parses the block from `const ARM_KEYS` to its `];`,
+/// so keep each entry in the `(b'X', "name")` shape.
+const ARM_KEYS: [(u8, &str); 4] = [
+    (b'S', "screenshot"),
+    (b'F', "filter"),
+    (b'U', "upscale"),
+    (b'O', "ocr"),
+];
 
 /// Which overlay state the hook is serving (ADR-0016). Decides what a fresh
 /// button event means: a Placement gesture, a Living routing decision, or
@@ -1231,10 +1252,11 @@ fn reinstall_on_main_thread() {
     // mouse hook is. A taken press survives the renewal only while the key is
     // really still down, as `LEFT_PENDING` does below.
     unhook_keyboard();
-    ESC_TAKEN.store(
-        ESC_TAKEN.load(Ordering::SeqCst) && vk_is_down(i32::from(VK_ESCAPE)),
-        Ordering::SeqCst,
-    );
+    for (vk, taken) in (0_i32..).zip(KEY_TAKEN.iter()) {
+        if taken.load(Ordering::SeqCst) && !vk_is_down(vk) {
+            taken.store(false, Ordering::SeqCst);
+        }
+    }
     LEFT_PENDING.store(vk_is_down(i32::from(VK_LBUTTON)), Ordering::SeqCst);
     RIGHT_PENDING.store(vk_is_down(i32::from(VK_RBUTTON)), Ordering::SeqCst);
     WANT_TEARDOWN.store(false, Ordering::SeqCst);
@@ -1945,21 +1967,60 @@ fn unhook_keyboard() {
     }
 }
 
+/// Whether any taken press is still physically held.
+fn any_taken_key_down() -> bool {
+    (0_i32..)
+        .zip(KEY_TAKEN.iter())
+        .any(|(vk, taken)| taken.load(Ordering::SeqCst) && vk_is_down(vk))
+}
+
 /// Removes the keyboard hook at a teardown, unless it still owes a taken
-/// press its release: then it stays until that release arrives and removes
-/// itself ([`keyboard_proc`]). Event-loop thread only.
+/// press its release: then it stays until the last such release arrives and
+/// removes itself ([`keyboard_proc`]). Event-loop thread only.
 ///
-/// Read against the key's real state, as the mouse hook's reinstall reads the
+/// Read against the keys' real state, as the mouse hook's reinstall reads the
 /// buttons: a release that already happened while nothing was watching is not
 /// waited for.
 fn release_keyboard_hook() {
-    if ESC_TAKEN.load(Ordering::SeqCst) && vk_is_down(i32::from(VK_ESCAPE)) {
+    if any_taken_key_down() {
         KEY_UNHOOK_PENDING.store(true, Ordering::SeqCst);
         return;
     }
-    ESC_TAKEN.store(false, Ordering::SeqCst);
+    for taken in &KEY_TAKEN {
+        taken.store(false, Ordering::SeqCst);
+    }
     KEY_UNHOOK_PENDING.store(false, Ordering::SeqCst);
     unhook_keyboard();
+}
+
+/// One of the keys the overlay page acts on in Placement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlacementKey {
+    /// `Esc`, with any modifiers: the page's `isDismissKey`.
+    Escape,
+    /// `Ctrl+Space` without `Alt` or the Windows key: the page's `isFreezeKey`.
+    Freeze,
+    /// `Delete`, with any modifiers: the page's `isRemoveKey`.
+    Remove,
+    /// An arming letter without `Ctrl`, `Alt` or the Windows key: the page's
+    /// `armedTypeForKey`, through [`ARM_KEYS`].
+    Arm(&'static str),
+}
+
+/// Which Placement key this is, if any, by the page's own rules. Pure.
+fn placement_key(vk: u32, ctrl: bool, alt: bool, win: bool) -> Option<PlacementKey> {
+    const VK_SPACE: u32 = 0x20;
+    const VK_DELETE: u32 = 0x2E;
+    match vk {
+        v if v == u32::from(VK_ESCAPE) => Some(PlacementKey::Escape),
+        VK_DELETE => Some(PlacementKey::Remove),
+        VK_SPACE if ctrl && !alt && !win => Some(PlacementKey::Freeze),
+        _ if !ctrl && !alt && !win => ARM_KEYS
+            .iter()
+            .find(|(letter, _)| u32::from(*letter) == vk)
+            .map(|(_, kind)| PlacementKey::Arm(kind)),
+        _ => None,
+    }
 }
 
 /// What the keyboard hook does with one key event.
@@ -1967,35 +2028,55 @@ fn release_keyboard_hook() {
 enum KeyAction {
     /// Not ours: chain it on.
     Pass,
-    /// Take this `Esc` press: run the escape, swallow the key.
-    Escape,
+    /// Take this press: act on it, swallow the key.
+    Act(PlacementKey),
     /// Part of a press already taken (a repeat or its release): swallow it.
     Swallow,
 }
 
 /// The keyboard hook's whole rule. Pure, so it is tested without a desktop.
 ///
-/// Only `Esc`. A press is taken only in Placement and only when the foreground
-/// window is not UP-TAKE's own: there the page already receives the key, and
-/// taking it here too would act on one press twice. Once a press is taken,
-/// everything until its release belongs to it, whatever the mode is by then.
+/// A press is taken only in Placement, only for one of [`placement_key`]'s
+/// keys, and only when the foreground window is not UP-TAKE's own: there the
+/// page already receives the key, and taking it here too would act on one
+/// press twice. Once a press is taken, everything until its release belongs to
+/// it, whatever the mode is by then.
 fn key_action(
     mode: Mode,
-    vk: u32,
+    key: Option<PlacementKey>,
     is_down: bool,
     foreground_is_ours: bool,
-    esc_taken: bool,
+    taken: bool,
 ) -> KeyAction {
-    if vk != u32::from(VK_ESCAPE) {
-        return KeyAction::Pass;
-    }
-    if esc_taken {
+    if taken {
         return KeyAction::Swallow;
     }
-    if mode == Mode::Placement && is_down && !foreground_is_ours {
-        return KeyAction::Escape;
+    match key {
+        Some(key) if mode == Mode::Placement && is_down && !foreground_is_ours => {
+            KeyAction::Act(key)
+        }
+        _ => KeyAction::Pass,
     }
-    KeyAction::Pass
+}
+
+/// Runs what the page would have run for `key`, through the same commands its
+/// IPC calls reach, so the two routes cannot come to differ.
+fn act_on(app: &AppHandle, key: PlacementKey) {
+    let outcome = match key {
+        PlacementKey::Escape => {
+            overlay::escape(app);
+            Ok(())
+        }
+        PlacementKey::Freeze => {
+            overlay::toggle_freeze(app);
+            Ok(())
+        }
+        PlacementKey::Remove => overlay::overlay_dismiss_focused(app.clone()),
+        PlacementKey::Arm(kind) => overlay::overlay_arm_type(app.clone(), kind.to_string()),
+    };
+    if let Err(error) = outcome {
+        crate::diagnostics::trouble("placement: a key taken from another program failed", &error);
+    }
 }
 
 /// Whether the foreground window belongs to this process. `true` when there is
@@ -2016,36 +2097,53 @@ fn foreground_is_ours() -> bool {
 }
 
 /// The `WH_KEYBOARD_LL` callback. Runs on the event-loop thread, like
-/// [`mouse_proc`], and is as short: one comparison for every key but `Esc`.
-/// The escape itself runs on a spawned thread, as the page's IPC command does,
-/// so nothing here counts against `LowLevelHooksTimeout`.
+/// [`mouse_proc`], and is as short: a table lookup for every key, and the
+/// foreground check only for Placement's own. The action runs on a spawned
+/// thread, as the page's IPC commands do, so nothing here counts against
+/// `LowLevelHooksTimeout`.
 unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code >= 0 {
         let swallow = catch_unwind(AssertUnwindSafe(|| {
             // SAFETY: for WH_KEYBOARD_LL, lparam points at a KBDLLHOOKSTRUCT
             // valid for this call.
             let vk = unsafe { (*(lparam as *const KBDLLHOOKSTRUCT)).vkCode };
-            if vk != u32::from(VK_ESCAPE) {
+            let Some(taken) = usize::try_from(vk)
+                .ok()
+                .and_then(|index| KEY_TAKEN.get(index))
+            else {
                 return false;
-            }
+            };
             let is_down = matches!(u32::try_from(wparam), Ok(WM_KEYDOWN | WM_SYSKEYDOWN));
-            let esc_taken = ESC_TAKEN.load(Ordering::SeqCst);
-            match key_action(mode(), vk, is_down, foreground_is_ours(), esc_taken) {
+            let was_taken = taken.load(Ordering::SeqCst);
+            let key = if was_taken || mode() != Mode::Placement {
+                None
+            } else {
+                placement_key(
+                    vk,
+                    vk_is_down(i32::from(VK_CONTROL)),
+                    vk_is_down(i32::from(VK_MENU)),
+                    vk_is_down(i32::from(VK_LWIN)) || vk_is_down(i32::from(VK_RWIN)),
+                )
+            };
+            // The foreground is asked only about a key that could be taken.
+            let ours = key.is_some() && foreground_is_ours();
+            match key_action(mode(), key, is_down, ours, was_taken) {
                 KeyAction::Pass => false,
-                KeyAction::Escape => {
+                KeyAction::Act(key) => {
                     let Some(app) = APP.get().cloned() else {
                         return false;
                     };
-                    ESC_TAKEN.store(true, Ordering::SeqCst);
-                    std::thread::spawn(move || overlay::escape(&app));
+                    taken.store(true, Ordering::SeqCst);
+                    std::thread::spawn(move || act_on(&app, key));
                     true
                 }
                 KeyAction::Swallow => {
                     if !is_down {
-                        ESC_TAKEN.store(false, Ordering::SeqCst);
+                        taken.store(false, Ordering::SeqCst);
                         // This callback runs on the installing thread, which
                         // is the thread `UnhookWindowsHookEx` requires.
-                        if KEY_UNHOOK_PENDING.swap(false, Ordering::SeqCst) {
+                        if KEY_UNHOOK_PENDING.load(Ordering::SeqCst) && !any_taken_key_down() {
+                            KEY_UNHOOK_PENDING.store(false, Ordering::SeqCst);
                             unhook_keyboard();
                         }
                     }
@@ -4144,16 +4242,16 @@ mod tests {
 
     use crate::payload_keys::{assert_keys, assert_payload_coverage};
 
-    /// The founder's 2026-09-23 report: `Esc` in Placement did nothing when
-    /// another program had the keyboard. The hook takes exactly that case and
-    /// nothing else.
+    /// The founder's 2026-09-23 reports: Placement's keys did nothing when
+    /// another program had the keyboard. The hook takes exactly those keys, in
+    /// exactly that case.
     #[test]
-    fn the_keyboard_hook_takes_escape_only_in_placement_from_another_program() {
-        use super::{KeyAction, Mode, key_action};
-        let esc = u32::from(super::VK_ESCAPE);
+    fn the_keyboard_hook_takes_placement_keys_only_from_another_program() {
+        use super::{KeyAction, Mode, PlacementKey, key_action};
+        let esc = Some(PlacementKey::Escape);
         assert_eq!(
             key_action(Mode::Placement, esc, true, false, false),
-            KeyAction::Escape
+            KeyAction::Act(PlacementKey::Escape)
         );
         // The page has the key: leave it to the page, or one press acts twice.
         assert_eq!(
@@ -4169,15 +4267,52 @@ mod tests {
             key_action(Mode::Hidden, esc, true, false, false),
             KeyAction::Pass
         );
-        // A release nobody took, and any other key, go through.
+        // A release nobody took, and a key that is not Placement's, go through.
         assert_eq!(
             key_action(Mode::Placement, esc, false, false, false),
             KeyAction::Pass
         );
         assert_eq!(
-            key_action(Mode::Placement, 0x41, true, false, false),
+            key_action(Mode::Placement, None, true, false, false),
             KeyAction::Pass
         );
+    }
+
+    /// The page's key rules, reproduced: `Esc` and `Delete` with anything held,
+    /// `Ctrl+Space` without `Alt` or the Windows key, and the arming letters
+    /// bare. Everything else, `Tab` included, is not Placement's.
+    #[test]
+    fn placement_keys_follow_the_pages_rules() {
+        use super::{PlacementKey, placement_key};
+        let esc = u32::from(super::VK_ESCAPE);
+        assert_eq!(
+            placement_key(esc, true, true, false),
+            Some(PlacementKey::Escape)
+        );
+        assert_eq!(
+            placement_key(0x2E, true, false, false),
+            Some(PlacementKey::Remove)
+        );
+        assert_eq!(
+            placement_key(0x20, true, false, false),
+            Some(PlacementKey::Freeze)
+        );
+        assert_eq!(placement_key(0x20, false, false, false), None);
+        assert_eq!(placement_key(0x20, true, true, false), None);
+        assert_eq!(placement_key(0x20, true, false, true), None);
+        assert_eq!(
+            placement_key(u32::from(b'S'), false, false, false),
+            Some(PlacementKey::Arm("screenshot"))
+        );
+        assert_eq!(
+            placement_key(u32::from(b'O'), false, false, false),
+            Some(PlacementKey::Arm("ocr"))
+        );
+        // A chord is never an arming key, and a letter that arms nothing is not ours.
+        assert_eq!(placement_key(u32::from(b'S'), true, false, false), None);
+        assert_eq!(placement_key(u32::from(b'S'), false, true, false), None);
+        assert_eq!(placement_key(u32::from(b'A'), false, false, false), None);
+        assert_eq!(placement_key(0x09, false, true, false), None);
     }
 
     /// The first review of `#112`: a taken press owns its keystroke. Its
@@ -4186,8 +4321,8 @@ mod tests {
     /// press and holding `Esc` does not step through every rung.
     #[test]
     fn a_taken_escape_press_swallows_its_repeats_and_its_release() {
-        use super::{KeyAction, Mode, key_action};
-        let esc = u32::from(super::VK_ESCAPE);
+        use super::{KeyAction, Mode, PlacementKey, key_action};
+        let esc = Some(PlacementKey::Escape);
         for mode in [Mode::Placement, Mode::Living, Mode::Hidden] {
             assert_eq!(key_action(mode, esc, true, false, true), KeyAction::Swallow);
             assert_eq!(
@@ -4196,9 +4331,10 @@ mod tests {
             );
             assert_eq!(key_action(mode, esc, false, true, true), KeyAction::Swallow);
         }
-        // Other keys are never held back by a pending Esc.
+        // Taken is per key: another key, with nothing of its own taken, passes
+        // whatever Esc is doing.
         assert_eq!(
-            key_action(Mode::Placement, 0x41, false, false, true),
+            key_action(Mode::Placement, None, false, false, false),
             KeyAction::Pass
         );
     }
