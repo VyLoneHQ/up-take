@@ -1124,6 +1124,77 @@ describe('a freeze hides the covered monitors before the page confirms', () => {
   });
 
   /**
+   * The final review of `#110` (Astra, F1): the mask was converted to CSS px
+   * once, at the hide, while the drawing follows every state event. A scale
+   * change between the two frames moved SECOND's drawing to `1280 0 960 540`
+   * and left the hole at `2560 0 1920 1080`, and the page confirmed anyway.
+   * Now the mask follows the geometry, and a move restarts the two-frame wait.
+   */
+  test('a scale change while waiting moves the mask and restarts the wait', async () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    const settle = async () => {
+      for (let i = 0; i < 10; i += 1) await Promise.resolve();
+      await tick();
+    };
+    const { main } = await mountRecording();
+    await emit('overlay://state', state());
+    await emit('overlay://freeze-hide', { token: 14, rects: [SECOND] });
+    await settle();
+    frames.shift()?.(0);
+    await settle();
+    Object.defineProperty(window, 'devicePixelRatio', {
+      value: 2,
+      configurable: true,
+    });
+    await emit('overlay://state', state());
+    expect(main?.getAttribute('style') ?? '').toContain(
+      'M1280 0h960v540h-960Z',
+    );
+    frames.shift()?.(0);
+    await settle();
+    expect(confirmed, 'the moved mask has not had its two frames').toHaveLength(
+      0,
+    );
+    frames.shift()?.(0);
+    await settle();
+    expect(confirmed).toHaveLength(0);
+    frames.shift()?.(0);
+    await vi.waitFor(() => expect(confirmed).toHaveLength(1));
+    const style = confirmed[0].style ?? '';
+    expect(style).toContain('M1280 0h960v540h-960Z');
+    expect(style).not.toContain('M2560 0h1920v1080h-1920Z');
+  });
+
+  test('geometry that never holds still gets no confirmation', async () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    const settle = async () => {
+      for (let i = 0; i < 10; i += 1) await Promise.resolve();
+      await tick();
+    };
+    await mountRecording();
+    await emit('overlay://state', state());
+    await emit('overlay://freeze-hide', { token: 15, rects: [SECOND] });
+    for (let wait = 0; wait < 4; wait += 1) {
+      await settle();
+      frames.shift()?.(0);
+      await settle();
+      await emit('overlay://state', state({ origin: [wait + 1, 0] }));
+      frames.shift()?.(0);
+    }
+    await settle();
+    expect(frames).toHaveLength(0);
+    expect(confirmed).toHaveLength(0);
+  });
+
+  /**
    * The names this file emits are only worth something if they are the ones
    * Rust sends: a renamed event leaves every test above throwing *nothing
    * listened*, but a rename on BOTH sides of the page would not. So the names
