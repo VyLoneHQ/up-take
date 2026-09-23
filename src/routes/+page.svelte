@@ -1,10 +1,16 @@
 <script lang="ts">
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { onMount } from 'svelte';
+import { onMount, tick } from 'svelte';
 import { SvelteMap } from 'svelte/reactivity';
 import { appearanceStyle } from '$lib/appearance';
 import Coach from '$lib/Coach.svelte';
+import {
+  type FreezeHidePayload,
+  type FreezeRevealPayload,
+  hiddenClipPath,
+  nextAnimationFrame,
+} from '$lib/freeze-mask';
 import { overflowFade } from '$lib/overflow-fade';
 import {
   type ActiveMonitorPayload,
@@ -39,6 +45,7 @@ import {
   ocrLine,
   type PhysRect,
   type PinPayload,
+  physRectsToCss,
   physRectToCss,
   reportCoachLayout,
   reportFreezeLatency,
@@ -64,6 +71,24 @@ let filterStrengthPercent = $state(16);
 const appearance = $derived(
   appearanceStyle(areaOpacityPercent, filterStrengthPercent),
 );
+
+// What a freeze has asked the page to hide while it captures (ADR-0019
+// decision 6, backlog I-426): the monitors the freeze covers. Empty except for
+// the few frames of a freeze with *Show UP-TAKE in screen recordings* on. The
+// token names which freeze asked, so a reveal for an earlier freeze cannot
+// show what a later one hid.
+//
+// Held as the PHYSICAL rects Rust sent and converted whenever `origin` or
+// `dpr` changes, like everything else the page draws. The final review of
+// `#110` found the mask converted once, at the hide: a state event moving the
+// geometry mid-handshake moved the drawing and left the mask where it was.
+// The CSS rects are `freezeHidden`, derived below `dpr`.
+let freezeHiddenPhys: PhysRect[] = $state([]);
+let freezeHideToken: number | null = null;
+const overlayStyle = $derived.by(() => {
+  const clip = hiddenClipPath(freezeHidden);
+  return clip === null ? appearance : `${appearance}; clip-path: ${clip}`;
+});
 
 // Presentation only (architecture §1): the Rust side owns the state machine
 // (ADR-0012), the placement input (ADR-0014) and the area store; this component
@@ -129,6 +154,9 @@ let recognitions = $state(new SvelteMap<number, OcrPayload>());
 // The WebView owns its scale (ADR-0011); refreshed on every state event in case
 // the overlay moved to a monitor at a different DPI.
 let dpr = $state(1);
+const freezeHidden: CssRect[] = $derived(
+  physRectsToCss(freezeHiddenPhys, origin, dpr),
+);
 // The language Rust chose (roadmap 1.38), asked for once before the first state
 // request so the coach is never drawn in English first. English until then, and
 // English if the answer is anything this build does not ship.
@@ -406,6 +434,54 @@ onMount(() => {
       areaOpacityPercent = event.payload.area_opacity_percent;
       filterStrengthPercent = event.payload.filter_strength_percent;
     }),
+    // A freeze asking the page to take its drawing on the covered monitors out
+    // of the shot (ADR-0019 decision 6, I-426). Rust waits for the answer and
+    // refuses the freeze if it does not come, so every path that cannot hide
+    // simply does not answer.
+    listen<FreezeHidePayload>('overlay://freeze-hide', async (event) => {
+      const { token, rects } = event.payload;
+      // A rectangle that will not convert cannot be hidden, and a freeze that
+      // hid three monitors of four would put the fourth's areas in the still.
+      if (physRectsToCss(rects, origin, dpr).length !== rects.length) return;
+      freezeHideToken = token;
+      freezeHiddenPhys = rects;
+      // Svelte applies the style, then TWO animation-frame callbacks. A callback
+      // runs before its frame is painted, so after the first the mask may not
+      // be on screen yet; the second runs a frame later, after the frame that
+      // painted it. Rust's own compositor wait comes after this answer, not
+      // instead of it. Pinned by a test that steps the frames by hand.
+      //
+      // If `origin` or `dpr` moved during the wait, the mask moved with the
+      // drawing and that move has not had its two frames, so the wait starts
+      // again. Three tries: geometry that will not hold still gets no answer,
+      // and no answer is Rust's refusal.
+      for (let attempt = 0; ; attempt += 1) {
+        if (attempt === 3) return;
+        const before = `${origin[0]},${origin[1]},${dpr}`;
+        await tick();
+        await nextAnimationFrame();
+        await nextAnimationFrame();
+        // Superseded while painting: a later freeze owns the page now.
+        if (freezeHideToken !== token) return;
+        if (`${origin[0]},${origin[1]},${dpr}` === before) break;
+      }
+      // The geometry that held still may be one the rects no longer convert in.
+      if (freezeHidden.length !== rects.length) return;
+      try {
+        await invoke('overlay_freeze_hidden', { token });
+      } catch {
+        // No answer is the refusal: Rust times out and does not capture.
+      }
+    }),
+    listen<FreezeRevealPayload>('overlay://freeze-reveal', (event) => {
+      // Only this freeze's own reveal. One for an earlier freeze arriving late
+      // must not show what a later freeze has hidden.
+      if (freezeHideToken !== null && event.payload.token !== freezeHideToken) {
+        return;
+      }
+      freezeHideToken = null;
+      freezeHiddenPhys = [];
+    }),
   ]);
   void ready.then(async () => {
     try {
@@ -465,7 +541,7 @@ onMount(() => {
 <main
   class="overlay"
   class:active={showsTint(overlayState)}
-  style={appearance}
+  style={overlayStyle}
 >
   <!-- The frozen stills, first in the DOM so every piece of chrome below draws
        over them. Each one covers exactly its own monitor: a single desktop-wide
