@@ -124,8 +124,8 @@ use uptake_core::interaction::{self, Handle, Resize};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, VK_CONTROL, VK_ESCAPE, VK_LBUTTON, VK_LWIN, VK_MENU, VK_RBUTTON, VK_RWIN,
-    VK_SHIFT,
+    GetAsyncKeyState, GetKeyboardLayout, MAPVK_VK_TO_CHAR, MapVirtualKeyExW, VK_CONTROL, VK_ESCAPE,
+    VK_LBUTTON, VK_LWIN, VK_MENU, VK_RBUTTON, VK_RWIN, VK_SHIFT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CopyIcon, GA_ROOT, GW_HWNDPREV, GetAncestor, GetWindow, HCURSOR, HHOOK,
@@ -2008,19 +2008,59 @@ enum PlacementKey {
 }
 
 /// Which Placement key this is, if any, by the page's own rules. Pure.
-fn placement_key(vk: u32, ctrl: bool, alt: bool, win: bool) -> Option<PlacementKey> {
+///
+/// `typed` is the character the key produces on the foreground program's
+/// keyboard layout ([`layout_char`]), and the arming letters are matched on it,
+/// not on `vk`: the page matches `KeyboardEvent.key`, which is that character,
+/// so on a Cyrillic layout the key in `F`'s place arms nothing on either route
+/// (the second review of the widened `#112`). `Esc`, `Delete` and `Space` are
+/// matched on `vk` because the page matches their names, which no layout
+/// changes.
+fn placement_key(
+    vk: u32,
+    typed: Option<char>,
+    ctrl: bool,
+    alt: bool,
+    win: bool,
+) -> Option<PlacementKey> {
     const VK_SPACE: u32 = 0x20;
     const VK_DELETE: u32 = 0x2E;
     match vk {
         v if v == u32::from(VK_ESCAPE) => Some(PlacementKey::Escape),
         VK_DELETE => Some(PlacementKey::Remove),
         VK_SPACE if ctrl && !alt && !win => Some(PlacementKey::Freeze),
-        _ if !ctrl && !alt && !win => ARM_KEYS
-            .iter()
-            .find(|(letter, _)| u32::from(*letter) == vk)
-            .map(|(_, kind)| PlacementKey::Arm(kind)),
+        VK_SPACE => None,
+        _ if !ctrl && !alt && !win => {
+            let typed = typed?;
+            ARM_KEYS
+                .iter()
+                .find(|(letter, _)| typed.eq_ignore_ascii_case(&char::from(*letter)))
+                .map(|(_, kind)| PlacementKey::Arm(kind))
+        }
         _ => None,
     }
+}
+
+/// The character `vk` produces on the foreground program's keyboard layout,
+/// unshifted, or `None` for a key that produces none or a dead key.
+///
+/// `MapVirtualKeyExW` reads the layout's table and nothing else, so unlike
+/// `ToUnicodeEx` it does not disturb a dead key the user is half-way through
+/// typing in that program. The foreground thread's layout, because Windows
+/// keeps one per thread and that is the one the key would have been typed in.
+fn layout_char(vk: u32) -> Option<char> {
+    // SAFETY: all three only read window-manager and layout state; a null
+    // foreground window gives thread 0, whose layout is the system default.
+    let layout = unsafe {
+        let thread = GetWindowThreadProcessId(GetForegroundWindow(), ptr::null_mut());
+        GetKeyboardLayout(thread)
+    };
+    let mapped = unsafe { MapVirtualKeyExW(vk, MAPVK_VK_TO_CHAR, layout) };
+    // The top bit marks a dead key, which types nothing on its own.
+    if mapped == 0 || mapped & 0x8000_0000 != 0 {
+        return None;
+    }
+    char::from_u32(mapped)
 }
 
 /// What the keyboard hook does with one key event.
@@ -2118,12 +2158,12 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
             let key = if was_taken || mode() != Mode::Placement {
                 None
             } else {
-                placement_key(
-                    vk,
-                    vk_is_down(i32::from(VK_CONTROL)),
-                    vk_is_down(i32::from(VK_MENU)),
-                    vk_is_down(i32::from(VK_LWIN)) || vk_is_down(i32::from(VK_RWIN)),
-                )
+                let ctrl = vk_is_down(i32::from(VK_CONTROL));
+                let alt = vk_is_down(i32::from(VK_MENU));
+                let win = vk_is_down(i32::from(VK_LWIN)) || vk_is_down(i32::from(VK_RWIN));
+                // Only a bare key can arm, so only a bare key needs the layout.
+                let typed = (!ctrl && !alt && !win).then(|| layout_char(vk)).flatten();
+                placement_key(vk, typed, ctrl, alt, win)
             };
             // The foreground is asked only about a key that could be taken.
             let ours = key.is_some() && foreground_is_ours();
@@ -4285,34 +4325,57 @@ mod tests {
     fn placement_keys_follow_the_pages_rules() {
         use super::{PlacementKey, placement_key};
         let esc = u32::from(super::VK_ESCAPE);
+        let key_s = u32::from(b'S');
         assert_eq!(
-            placement_key(esc, true, true, false),
+            placement_key(esc, None, true, true, false),
             Some(PlacementKey::Escape)
         );
         assert_eq!(
-            placement_key(0x2E, true, false, false),
+            placement_key(0x2E, None, true, false, false),
             Some(PlacementKey::Remove)
         );
         assert_eq!(
-            placement_key(0x20, true, false, false),
+            placement_key(0x20, Some(' '), true, false, false),
             Some(PlacementKey::Freeze)
         );
-        assert_eq!(placement_key(0x20, false, false, false), None);
-        assert_eq!(placement_key(0x20, true, true, false), None);
-        assert_eq!(placement_key(0x20, true, false, true), None);
+        assert_eq!(placement_key(0x20, Some(' '), false, false, false), None);
+        assert_eq!(placement_key(0x20, Some(' '), true, true, false), None);
+        assert_eq!(placement_key(0x20, Some(' '), true, false, true), None);
+        // The letters are matched on what the layout types, in either case.
         assert_eq!(
-            placement_key(u32::from(b'S'), false, false, false),
+            placement_key(key_s, Some('S'), false, false, false),
             Some(PlacementKey::Arm("screenshot"))
         );
         assert_eq!(
-            placement_key(u32::from(b'O'), false, false, false),
+            placement_key(u32::from(b'O'), Some('o'), false, false, false),
             Some(PlacementKey::Arm("ocr"))
         );
         // A chord is never an arming key, and a letter that arms nothing is not ours.
-        assert_eq!(placement_key(u32::from(b'S'), true, false, false), None);
-        assert_eq!(placement_key(u32::from(b'S'), false, true, false), None);
-        assert_eq!(placement_key(u32::from(b'A'), false, false, false), None);
-        assert_eq!(placement_key(0x09, false, true, false), None);
+        assert_eq!(placement_key(key_s, Some('S'), true, false, false), None);
+        assert_eq!(placement_key(key_s, Some('S'), false, true, false), None);
+        assert_eq!(
+            placement_key(u32::from(b'A'), Some('A'), false, false, false),
+            None
+        );
+        assert_eq!(placement_key(0x09, None, false, true, false), None);
+    }
+
+    /// The second review of the widened `#112`: the page arms on the
+    /// character the layout types, so the hook must too. On a Cyrillic layout
+    /// the key in `F`'s place types a Cyrillic letter and arms nothing on
+    /// either route; on a layout that puts `S` elsewhere, the key typing `S`
+    /// arms Screenshot whatever its code. A key that types nothing arms nothing.
+    #[test]
+    fn arming_follows_the_layout_not_the_key_code() {
+        use super::{PlacementKey, placement_key};
+        let key_f = u32::from(b'F');
+        let cyrillic_a = char::from_u32(0x0410);
+        assert_eq!(placement_key(key_f, cyrillic_a, false, false, false), None);
+        assert_eq!(
+            placement_key(0xBA, Some('S'), false, false, false),
+            Some(PlacementKey::Arm("screenshot"))
+        );
+        assert_eq!(placement_key(key_f, None, false, false, false), None);
     }
 
     /// The first review of `#112`: a taken press owns its keystroke. Its
