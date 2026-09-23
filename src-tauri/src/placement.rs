@@ -175,6 +175,19 @@ static HOOK: AtomicIsize = AtomicIsize::new(0);
 /// **Only when the foreground window is another process's.** When the overlay
 /// or UP-TAKE's settings window has focus, the key goes through untouched and
 /// the page handles it as before, so no `Esc` is ever acted on twice.
+///
+/// # What it cannot reach: an elevated window in front
+///
+/// While a higher-integrity window holds the foreground (an admin console,
+/// Task Manager), Windows delivers no low-level keyboard events to this
+/// medium-integrity process, exactly as it starves the mouse hook (UIPI, F-25,
+/// the module docs). So `Esc` still does nothing there. **This is not fixed
+/// and not worked around**: crossing it needs UP-TAKE elevated or signed with
+/// `uiAccess`, which is out of proportion to one key. The way out in that case
+/// is the one the module docs already name for the mouse: the global hotkey
+/// (F-13), or bringing a non-elevated window to the front. Raised by the second
+/// review of `up-take` `#112`; whether the hotkey itself reaches UP-TAKE past an
+/// elevated window has not been measured here.
 static KEY_HOOK: AtomicIsize = AtomicIsize::new(0);
 
 /// An `Esc` press the keyboard hook took, whose release it has not seen yet.
