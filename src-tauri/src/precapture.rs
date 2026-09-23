@@ -164,6 +164,15 @@ struct Held {
     /// the age of the image by the whole capture duration — 200–300 ms, i.e.
     /// more than the bound itself, which would make the bound meaningless.
     taken: Instant,
+    /// Whether UP-TAKE's own drawing could have been in these pixels: the
+    /// overlay was in capture when the capture started or when it ended.
+    ///
+    /// **Recorded with the frame, not read at mouse-up** (the first review of
+    /// `up-take` `#111`). A frame taken while the drawing was in shot stays
+    /// dirty if the setting is switched off before the drag ends, so the answer
+    /// at mouse-up says nothing about these pixels. Read at both ends of the
+    /// capture because a switch during it leaves either state possible.
+    drawing_in_shot: bool,
 }
 
 /// Why [`take`] declined to serve a crop.
@@ -306,7 +315,9 @@ fn spawn_capture(monitor: Rect, generation: u64) {
         return;
     }
     std::thread::spawn(move || {
+        let in_shot_at_start = crate::overlay::overlay_in_capture();
         let captured = uptake_capture::capture_region(monitor);
+        let drawing_in_shot = in_shot_at_start || crate::overlay::overlay_in_capture();
         // Released before the store rather than after, and on every path out —
         // an early `return` that skipped it would wedge the flag set and stop
         // every later refresh in the process's life, silently.
@@ -337,6 +348,7 @@ fn spawn_capture(monitor: Rect, generation: u64) {
                 rect: captured.rect,
                 bitmap: captured.bitmap,
                 taken,
+                drawing_in_shot,
             });
         }
     });
@@ -412,6 +424,11 @@ pub(crate) fn take(bounds: Rect) -> Result<RgbaBitmap, Fallback> {
             age_ms: age.as_millis(),
         });
     }
+    // `I-427`: a frame taken with UP-TAKE's drawing in it has the selection box
+    // and the areas in its pixels, and it cannot be stepped aside afterwards.
+    if frame.drawing_in_shot {
+        return Err(Fallback::OverlayInShot);
+    }
     // Screen space → frame-local space, then a byte-exact row copy. Both halves
     // live in `crop_screen` rather than here, and that is deliberate: task
     // 1.9d's frozen still crops through the identical call, so "every path
@@ -458,6 +475,7 @@ pub(crate) fn install_for_test(rect: Rect, bitmap: RgbaBitmap) {
         rect,
         bitmap,
         taken: Instant::now(),
+        drawing_in_shot: false,
     });
 }
 
@@ -502,7 +520,28 @@ mod tests {
             rect,
             bitmap,
             taken,
+            drawing_in_shot: false,
         });
+    }
+
+    /// The first review of `up-take` `#111`: whether a held frame is clean is a
+    /// property of the frame, recorded when it was taken. One taken with the
+    /// drawing in shot is refused whatever the setting says at mouse-up.
+    #[test]
+    fn a_frame_taken_with_the_drawing_in_shot_is_refused() {
+        let _guard = serial();
+        let rect = Rect::new(0, 0, 100, 100);
+        *held() = Some(Held {
+            rect,
+            bitmap: RgbaBitmap::transparent(rect.size).unwrap(),
+            taken: Instant::now(),
+            drawing_in_shot: true,
+        });
+        let outcome = take(Rect::new(10, 10, 20, 20));
+        assert!(
+            matches!(outcome, Err(Fallback::OverlayInShot)),
+            "a dirty frame must not be cropped"
+        );
     }
 
     /// The tests share the process-global `HELD`, and `cargo test` runs them
