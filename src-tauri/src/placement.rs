@@ -213,7 +213,7 @@ static KEY_UNHOOK_PENDING: AtomicBool = AtomicBool::new(false);
 /// on the user's layout), and the type each arms (ADR-0018 section 1).
 ///
 /// **A copy of the page's `armedTypeForKey`**, needed because a key taken here
-/// never reaches the page. `page.svelte.test.ts` reads this line and compares
+/// never reaches the page. `src/lib/placement-keys.test.ts` reads it and compares
 /// it with `armedTypeForKey` for every letter, so the two cannot drift apart
 /// silently. That test parses the block from `const ARM_KEYS` to its `];`,
 /// so keep each entry in the `(b'X', "name")` shape.
