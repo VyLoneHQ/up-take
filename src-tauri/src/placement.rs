@@ -124,7 +124,7 @@ use uptake_core::interaction::{self, Handle, Resize};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, VK_LBUTTON, VK_LWIN, VK_MENU, VK_RBUTTON, VK_RWIN, VK_SHIFT,
+    GetAsyncKeyState, VK_ESCAPE, VK_LBUTTON, VK_LWIN, VK_MENU, VK_RBUTTON, VK_RWIN, VK_SHIFT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CopyIcon, GA_ROOT, GW_HWNDPREV, GetAncestor, GetWindow, HCURSOR, HHOOK,
@@ -134,6 +134,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     OCR_WAIT, SPI_SETCURSORS, SetSystemCursor, SetWindowsHookExW, SystemParametersInfoW,
     UnhookWindowsHookEx, WH_MOUSE_LL, WHEEL_DELTA, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
     WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WindowFromPoint,
+};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    GetForegroundWindow, GetWindowThreadProcessId, KBDLLHOOKSTRUCT, WH_KEYBOARD_LL, WM_KEYDOWN,
+    WM_SYSKEYDOWN,
 };
 
 use crate::overlay;
@@ -153,6 +157,25 @@ const HOVER_EVENT: &str = "overlay://hover";
 /// event-loop thread, but it is atomic so [`is_dragging`] and friends can read
 /// process-wide state without a lock.
 static HOOK: AtomicIsize = AtomicIsize::new(0);
+
+/// The low-level keyboard hook, installed and removed with [`HOOK`], for one
+/// key: `Esc` in Placement when another program has the keyboard.
+///
+/// # Why it exists
+///
+/// Placement's keys reach UP-TAKE through the overlay page, which gets them only
+/// while the overlay window has keyboard focus. [`overlay::show`] focuses it
+/// once, and anything that takes the foreground afterwards (a notification, an
+/// app raising itself, a window the user touched before pressing the hotkey)
+/// takes `Esc` with it, while the mouse hook keeps Placement on screen. The
+/// founder hit it at the rig on 2026-09-23: *"esc doesn't work quite often"*.
+/// Placement already owns the mouse, so the program that has the keyboard cannot
+/// be in use; taking its `Esc` costs it nothing.
+///
+/// **Only when the foreground window is another process's.** When the overlay
+/// or UP-TAKE's settings window has focus, the key goes through untouched and
+/// the page handles it as before, so no `Esc` is ever acted on twice.
+static KEY_HOOK: AtomicIsize = AtomicIsize::new(0);
 
 /// Which overlay state the hook is serving (ADR-0016). Decides what a fresh
 /// button event means: a Placement gesture, a Living routing decision, or
@@ -1177,6 +1200,10 @@ fn reinstall_on_main_thread() {
             UnhookWindowsHookEx(hook as HHOOK);
         }
     }
+    // Windows drops a keyboard hook on the same timeout it drops a mouse hook
+    // on, and nothing counts keyboard events, so it is renewed whenever the
+    // mouse hook is.
+    unhook_keyboard();
     LEFT_PENDING.store(vk_is_down(i32::from(VK_LBUTTON)), Ordering::SeqCst);
     RIGHT_PENDING.store(vk_is_down(i32::from(VK_RBUTTON)), Ordering::SeqCst);
     WANT_TEARDOWN.store(false, Ordering::SeqCst);
@@ -1858,6 +1885,92 @@ fn ensure_hook() {
             HOOK.store(hook as isize, Ordering::SeqCst);
         }
     }
+    if KEY_HOOK.load(Ordering::SeqCst) == 0 {
+        let hmod = unsafe { GetModuleHandleW(ptr::null()) };
+        let hook = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), hmod, 0) };
+        if hook.is_null() {
+            // Not fatal: `Esc` still works whenever the overlay has focus, and
+            // the global hotkey still leaves Placement from anywhere (F-13).
+            crate::diagnostics::note(
+                "placement: the keyboard hook could not be installed, Esc needs the overlay focused",
+            );
+        } else {
+            KEY_HOOK.store(hook as isize, Ordering::SeqCst);
+        }
+    }
+}
+
+/// Removes the keyboard hook, if installed. Event-loop thread only, beside the
+/// mouse hook's removal, because `UnhookWindowsHookEx` wants the installing
+/// thread.
+fn unhook_keyboard() {
+    let hook = KEY_HOOK.swap(0, Ordering::SeqCst);
+    if hook != 0 {
+        unsafe {
+            UnhookWindowsHookEx(hook as HHOOK);
+        }
+    }
+}
+
+/// Whether the keyboard hook takes this key for itself. Pure, so the rule is
+/// tested without a desktop.
+///
+/// Only a key-DOWN of `Esc`, only in Placement, and only when the foreground
+/// window is not UP-TAKE's own: there the page already receives the key, and
+/// taking it here too would act on one press twice.
+fn takes_escape(mode: Mode, vk: u32, is_down: bool, foreground_is_ours: bool) -> bool {
+    mode == Mode::Placement && is_down && vk == u32::from(VK_ESCAPE) && !foreground_is_ours
+}
+
+/// Whether the foreground window belongs to this process. `true` when there is
+/// no foreground window to ask about, because then nothing else has the key and
+/// the safe answer is to leave it alone.
+fn foreground_is_ours() -> bool {
+    // SAFETY: both calls only read window-manager state; a null window is
+    // handled before the second one.
+    let foreground = unsafe { GetForegroundWindow() };
+    if foreground.is_null() {
+        return true;
+    }
+    let mut pid = 0_u32;
+    unsafe {
+        GetWindowThreadProcessId(foreground, &mut pid);
+    }
+    pid == std::process::id()
+}
+
+/// The `WH_KEYBOARD_LL` callback. Runs on the event-loop thread, like
+/// [`mouse_proc`], and is as short: one comparison for every key but `Esc`.
+/// The escape itself runs on a spawned thread, as the page's IPC command does,
+/// so nothing here counts against `LowLevelHooksTimeout`.
+unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code >= 0 {
+        let swallow = catch_unwind(AssertUnwindSafe(|| {
+            // SAFETY: for WH_KEYBOARD_LL, lparam points at a KBDLLHOOKSTRUCT
+            // valid for this call.
+            let vk = unsafe { (*(lparam as *const KBDLLHOOKSTRUCT)).vkCode };
+            let is_down = matches!(u32::try_from(wparam), Ok(WM_KEYDOWN | WM_SYSKEYDOWN));
+            if vk != u32::from(VK_ESCAPE) || !is_down {
+                return false;
+            }
+            if !takes_escape(mode(), vk, is_down, foreground_is_ours()) {
+                return false;
+            }
+            let Some(app) = APP.get().cloned() else {
+                return false;
+            };
+            std::thread::spawn(move || overlay::escape(&app));
+            true
+        }))
+        .unwrap_or_else(|_| {
+            crate::diagnostics::note("placement: panic in the keyboard hook");
+            false
+        });
+        if swallow {
+            return 1;
+        }
+    }
+    unsafe { CallNextHookEx(ptr::null_mut(), code, wparam, lparam) }
 }
 
 /// Enters `Placement` mode: hook installed, crosshair asserted. Runs on the
@@ -2003,6 +2116,7 @@ fn teardown_now() {
             UnhookWindowsHookEx(hook as HHOOK);
         }
     }
+    unhook_keyboard();
     WANT_TEARDOWN.store(false, Ordering::SeqCst);
     LEFT_PENDING.store(false, Ordering::SeqCst);
     RIGHT_PENDING.store(false, Ordering::SeqCst);
@@ -3938,6 +4052,43 @@ mod tests {
     use uptake_core::interaction;
 
     use crate::payload_keys::{assert_keys, assert_payload_coverage};
+
+    /// The founder's 2026-09-23 report: `Esc` in Placement did nothing when
+    /// another program had the keyboard. The hook takes exactly that case and
+    /// nothing else.
+    #[test]
+    fn the_keyboard_hook_takes_escape_only_in_placement_from_another_program() {
+        let esc = u32::from(super::VK_ESCAPE);
+        assert!(super::takes_escape(
+            super::Mode::Placement,
+            esc,
+            true,
+            false
+        ));
+        // The page has the key: leave it to the page, or one press acts twice.
+        assert!(!super::takes_escape(
+            super::Mode::Placement,
+            esc,
+            true,
+            true
+        ));
+        // Not Placement: Living's keys belong to the apps (ADR-0016).
+        assert!(!super::takes_escape(super::Mode::Living, esc, true, false));
+        assert!(!super::takes_escape(super::Mode::Hidden, esc, true, false));
+        // Only the press, and only Esc.
+        assert!(!super::takes_escape(
+            super::Mode::Placement,
+            esc,
+            false,
+            false
+        ));
+        assert!(!super::takes_escape(
+            super::Mode::Placement,
+            0x41,
+            true,
+            false
+        ));
+    }
 
     use super::{
         ALL_SHAPES, CURSOR_SNAPSHOT_LEN, ChildMenuView, HoverPayload, MenuAction, MenuItemView,
