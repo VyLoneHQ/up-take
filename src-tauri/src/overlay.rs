@@ -322,6 +322,97 @@ pub fn apply_capture_exclusion(app: &AppHandle, show_in_recordings: bool) -> Res
 /// clean still.
 static EXCLUDED_FROM_CAPTURE: RwLock<bool> = RwLock::new(false);
 
+/// Whether UP-TAKE's own drawing is in a capture taken now: the setting is on,
+/// or the call that excludes it failed. See [`apply_capture_exclusion`].
+///
+/// For a caller deciding whether pixels taken EARLIER can be trusted, such as
+/// the frame held since mouse-down, which was taken with the drawing on screen
+/// and cannot be stepped aside after the fact. A capture taken now goes through
+/// [`capture_aside`] instead, which also holds the answer steady.
+pub(crate) fn overlay_in_capture() -> bool {
+    !*EXCLUDED_FROM_CAPTURE
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Runs `capture` with UP-TAKE's drawing inside `bounds` out of the shot
+/// (UP-TAKE `I-427`, `ADR-0019` decision 6 applied to every capture).
+///
+/// With the overlay excluded from capture this is just `capture()`. Otherwise
+/// the page hides what it draws inside `bounds`, confirms, the compositor is
+/// waited for, `capture` runs, and the drawing comes back. **Fails closed**, as
+/// the freeze does: no confirmation, no capture, and the reason says so.
+///
+/// Until `I-427` only the freeze did this, so with *Show UP-TAKE in screen
+/// recordings* on, an OCR area read its own *Reading...* label and close
+/// button, and Copy or Save put UP-TAKE's chrome into the user's picture.
+///
+/// Only `bounds` is hidden, not the monitor: the rest of the screen, other
+/// areas included, stays drawn while the capture runs.
+///
+/// # Errors
+///
+/// `capture`'s own error, or a sentence saying the drawing could not be taken
+/// out of the picture.
+pub(crate) fn capture_aside<T>(
+    app: &AppHandle,
+    bounds: Rect,
+    capture: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    // Held for the whole capture, as the freeze holds it: the setting cannot
+    // flip between deciding "nothing to hide" and taking the pixels.
+    let excluded = EXCLUDED_FROM_CAPTURE
+        .read()
+        .unwrap_or_else(PoisonError::into_inner);
+    if *excluded {
+        return capture();
+    }
+    let page = page_aside(app, vec![bounds]);
+    let _aside = crate::freeze::step_aside(&page).map_err(|_| {
+        "UP-TAKE could not take its own drawing out of the picture, so nothing was captured"
+            .to_string()
+    })?;
+    capture()
+}
+
+/// The page adapter every step-aside uses: the freeze's, and [`capture_aside`]'s.
+///
+/// `freeze::PageAside` holds the logic and its tests; this is the one place
+/// that turns its two requests into the two events.
+fn page_aside(
+    app: &AppHandle,
+    covers: Vec<Rect>,
+) -> crate::freeze::PageAside<impl Fn(crate::freeze::PageRequest<'_>) -> Result<(), String>> {
+    let page_app = app.clone();
+    crate::freeze::PageAside::new(
+        move |request| match request {
+            crate::freeze::PageRequest::Hide { token, covers } => page_app
+                .emit(
+                    FREEZE_HIDE_EVENT,
+                    FreezeHidePayload {
+                        token,
+                        rects: covers
+                            .iter()
+                            .map(|rect| {
+                                (
+                                    rect.origin.x,
+                                    rect.origin.y,
+                                    rect.size.width,
+                                    rect.size.height,
+                                )
+                            })
+                            .collect(),
+                    },
+                )
+                .map_err(|error| error.to_string()),
+            crate::freeze::PageRequest::Reveal { token } => page_app
+                .emit(FREEZE_REVEAL_EVENT, FreezeRevealPayload { token })
+                .map_err(|error| error.to_string()),
+        },
+        covers,
+    )
+}
+
 /// The event asking the overlay page to hide its drawing on the monitors a
 /// freeze covers (sent for `freeze::PageAside`). The page answers with
 /// [`overlay_freeze_hidden`].
@@ -748,34 +839,7 @@ pub fn toggle_freeze(app: &AppHandle) {
         // the cursor's monitor, or every monitor with the 1.14 setting.
         // The adapter is `freeze::PageAside`, tested there; this is only the
         // line that turns its two requests into the two events.
-        let page_app = app.clone();
-        let page = crate::freeze::PageAside::new(
-            move |request| match request {
-                crate::freeze::PageRequest::Hide { token, covers } => page_app
-                    .emit(
-                        FREEZE_HIDE_EVENT,
-                        FreezeHidePayload {
-                            token,
-                            rects: covers
-                                .iter()
-                                .map(|rect| {
-                                    (
-                                        rect.origin.x,
-                                        rect.origin.y,
-                                        rect.size.width,
-                                        rect.size.height,
-                                    )
-                                })
-                                .collect(),
-                        },
-                    )
-                    .map_err(|error| error.to_string()),
-                crate::freeze::PageRequest::Reveal { token } => page_app
-                    .emit(FREEZE_REVEAL_EVENT, FreezeRevealPayload { token })
-                    .map_err(|error| error.to_string()),
-            },
-            monitors.clone(),
-        );
+        let page = page_aside(&app, monitors.clone());
         let stepping: Option<&dyn crate::freeze::StepAside> =
             (!*excluded).then_some(&page as &dyn crate::freeze::StepAside);
         let outcome = crate::freeze::freeze(&monitors, generation, stepping);

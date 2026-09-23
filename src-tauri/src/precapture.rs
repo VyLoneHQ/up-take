@@ -182,6 +182,10 @@ pub(crate) enum Fallback {
     /// The drawn rectangle is not wholly inside the captured monitor — the drag
     /// straddled monitors, or crossed onto one the pre-capture did not cover.
     Straddle,
+    /// UP-TAKE's own drawing is in captures, so the frame held since
+    /// mouse-down has the selection box and the areas in it (`I-427`). A live
+    /// capture steps aside; a held frame cannot.
+    OverlayInShot,
 }
 
 impl std::fmt::Display for Fallback {
@@ -194,6 +198,10 @@ impl std::fmt::Display for Fallback {
                 FRESHNESS.as_millis()
             ),
             Self::Straddle => write!(f, "the area is not wholly on the pre-captured monitor"),
+            Self::OverlayInShot => write!(
+                f,
+                "UP-TAKE is shown in screen recordings, so the held frame has its drawing in it"
+            ),
         }
     }
 }
