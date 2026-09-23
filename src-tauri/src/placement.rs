@@ -112,7 +112,9 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{
+    AtomicBool, AtomicI32, AtomicIsize, AtomicU8, AtomicU32, AtomicU64, Ordering,
+};
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
 use serde::Serialize;
@@ -132,9 +134,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     IDC_ARROW, IDC_CROSS, IDC_HAND, IDC_IBEAM, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE,
     IDC_SIZEWE, LoadCursorW, MSLLHOOKSTRUCT, OCR_APPSTARTING, OCR_CROSS, OCR_HAND, OCR_IBEAM,
     OCR_NO, OCR_NORMAL, OCR_SIZEALL, OCR_SIZENESW, OCR_SIZENS, OCR_SIZENWSE, OCR_SIZEWE, OCR_UP,
-    OCR_WAIT, SPI_SETCURSORS, SetSystemCursor, SetWindowsHookExW, SystemParametersInfoW,
-    UnhookWindowsHookEx, WH_MOUSE_LL, WHEEL_DELTA, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WindowFromPoint,
+    OCR_WAIT, SPI_GETKEYBOARDDELAY, SPI_SETCURSORS, SetSystemCursor, SetWindowsHookExW,
+    SystemParametersInfoW, UnhookWindowsHookEx, WH_MOUSE_LL, WHEEL_DELTA, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WindowFromPoint,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, GetWindowThreadProcessId, KBDLLHOOKSTRUCT, WH_KEYBOARD_LL, WM_KEYDOWN,
@@ -203,6 +205,11 @@ static KEY_HOOK: AtomicIsize = AtomicIsize::new(0);
 /// on every repeat (holding `Ctrl+Space` would toggle the freeze on and off).
 /// The mouse hook keeps [`LEFT_PENDING`] for the same reason.
 static KEY_TAKEN: [AtomicBool; 256] = [const { AtomicBool::new(false) }; 256];
+
+/// Per virtual-key code: the event time (`KBDLLHOOKSTRUCT::time`, ms) of the
+/// last event the hook saw for that key, so a taken key's "repeat" that comes
+/// too late can be recognised as a new press ([`is_stale_press`]).
+static KEY_TAKEN_LAST_MS: [AtomicU32; 256] = [const { AtomicU32::new(0) }; 256];
 
 /// The keyboard hook outlived a teardown to swallow a taken press's release,
 /// and removes itself when the last such release arrives. See
@@ -1967,6 +1974,34 @@ fn unhook_keyboard() {
     }
 }
 
+/// Whether a press of a taken key is a NEW press whose predecessor's release
+/// was never seen, rather than an auto-repeat of the held key. Pure.
+///
+/// A held key repeats first after the keyboard delay (250 to 1000 ms, a user
+/// setting) and then faster, so a gap longer than the delay plus a margin
+/// cannot be a repeat. The release goes unseen when an elevated window takes
+/// the foreground while the key is held (UIPI); without this, the next press of
+/// that key in an ordinary program was swallowed as a repeat (the third review
+/// of the widened `#112`). A re-press inside the window after a missed release
+/// is still taken as a repeat, and needs an elevated window to come and go
+/// within about a second while the key is held.
+fn is_stale_press(gap_ms: u32, keyboard_delay_ms: u32) -> bool {
+    gap_ms > keyboard_delay_ms.saturating_add(150)
+}
+
+/// The user's keyboard repeat delay in ms: 250 to 1000, or 1000 if Windows
+/// will not say, which errs toward treating a press as a repeat.
+fn keyboard_delay_ms() -> u32 {
+    let mut setting = 3_u32;
+    // SAFETY: SPI_GETKEYBOARDDELAY writes one u32 into the pointer given.
+    let ok =
+        unsafe { SystemParametersInfoW(SPI_GETKEYBOARDDELAY, 0, (&raw mut setting).cast(), 0) };
+    if ok == 0 {
+        return 1000;
+    }
+    (setting.min(3) + 1) * 250
+}
+
 /// Whether any taken press is still physically held.
 fn any_taken_key_down() -> bool {
     (0_i32..)
@@ -2146,15 +2181,33 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
         let swallow = catch_unwind(AssertUnwindSafe(|| {
             // SAFETY: for WH_KEYBOARD_LL, lparam points at a KBDLLHOOKSTRUCT
             // valid for this call.
-            let vk = unsafe { (*(lparam as *const KBDLLHOOKSTRUCT)).vkCode };
-            let Some(taken) = usize::try_from(vk)
+            let event = unsafe { &*(lparam as *const KBDLLHOOKSTRUCT) };
+            let vk = event.vkCode;
+            let Some(index) = usize::try_from(vk)
                 .ok()
-                .and_then(|index| KEY_TAKEN.get(index))
+                .filter(|index| *index < KEY_TAKEN.len())
             else {
                 return false;
             };
+            let taken = &KEY_TAKEN[index];
+            let last_seen = &KEY_TAKEN_LAST_MS[index];
             let is_down = matches!(u32::try_from(wparam), Ok(WM_KEYDOWN | WM_SYSKEYDOWN));
-            let was_taken = taken.load(Ordering::SeqCst);
+            let mut was_taken = taken.load(Ordering::SeqCst);
+            // A press arriving too long after the last event of a taken key is
+            // not its repeat: its release went unseen (an elevated window was
+            // in front, UIPI) and this is a new press. The third review of the
+            // widened `#112`: without this it was swallowed as a repeat.
+            if was_taken
+                && is_down
+                && is_stale_press(
+                    event.time.wrapping_sub(last_seen.load(Ordering::SeqCst)),
+                    keyboard_delay_ms(),
+                )
+            {
+                taken.store(false, Ordering::SeqCst);
+                was_taken = false;
+            }
+            last_seen.store(event.time, Ordering::SeqCst);
             let key = if was_taken || mode() != Mode::Placement {
                 None
             } else {
@@ -2168,7 +2221,15 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
             // The foreground is asked only about a key that could be taken.
             let ours = key.is_some() && foreground_is_ours();
             match key_action(mode(), key, is_down, ours, was_taken) {
-                KeyAction::Pass => false,
+                KeyAction::Pass => {
+                    // A stale press cleared above may have been the last thing
+                    // a pending unhook was waiting for.
+                    if KEY_UNHOOK_PENDING.load(Ordering::SeqCst) && !any_taken_key_down() {
+                        KEY_UNHOOK_PENDING.store(false, Ordering::SeqCst);
+                        unhook_keyboard();
+                    }
+                    false
+                }
                 KeyAction::Act(key) => {
                     let Some(app) = APP.get().cloned() else {
                         return false;
@@ -4365,6 +4426,21 @@ mod tests {
     /// the key in `F`'s place types a Cyrillic letter and arms nothing on
     /// either route; on a layout that puts `S` elsewhere, the key typing `S`
     /// arms Screenshot whatever its code. A key that types nothing arms nothing.
+    #[test]
+    fn a_late_press_of_a_taken_key_is_new_not_a_repeat() {
+        use super::is_stale_press;
+        // Repeats: at or inside the delay plus margin, for every delay setting.
+        for delay in [250, 500, 750, 1000] {
+            assert!(!is_stale_press(33, delay));
+            assert!(!is_stale_press(delay, delay));
+            assert!(!is_stale_press(delay + 150, delay));
+            // A press after the release went unseen: past it.
+            assert!(is_stale_press(delay + 151, delay));
+        }
+        // A wrapped tick counter is a large gap, and reads as stale.
+        assert!(is_stale_press(5_u32.wrapping_sub(4_000_000_000), 1000));
+    }
+
     #[test]
     fn arming_follows_the_layout_not_the_key_code() {
         use super::{PlacementKey, placement_key};
