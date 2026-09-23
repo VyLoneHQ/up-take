@@ -288,6 +288,7 @@ pub fn run() -> tauri::Result<()> {
             // control here would be inventing a row that window's own rule
             // forbids. Recorded rather than decided in passing.
             freeze::init_warm_capture();
+            freeze::init_frame_trace();
             // The display format and the freeze scope are both settings now.
             // These two calls say which value is in force and where it came
             // from, so a rig log still names the condition that produced its

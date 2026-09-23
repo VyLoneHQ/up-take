@@ -85,6 +85,7 @@ use windows_capture::settings::{
     ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
     MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
 };
+use windows_sys::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     MSG, PM_NOREMOVE, PeekMessageW, PostThreadMessageW, WM_QUIT, WM_USER,
@@ -99,6 +100,95 @@ use crate::CapturedRegion;
 /// reason: two variables holding one fact is where this project's findings
 /// ledger keeps finding defects.
 static SESSIONS: Mutex<Vec<Arc<Slot>>> = Mutex::new(Vec::new());
+
+/// When each held session's frames were composed, and when they reached us
+/// (UP-TAKE `I-426` phase 2, a developer measurement).
+///
+/// Phase 2 wants to take **the first frame composed after the page hid its
+/// drawing** from a session that is already running, instead of starting a cold
+/// one. WGC delivers a frame only when the screen changes, so whether such a
+/// frame arrives, and how long after the hide, is a property of the compositor
+/// that nobody here has measured. This records it, and decides nothing.
+///
+/// Off unless [`set_frame_trace`] turns it on, and then it costs one clock read
+/// and one short lock per frame on the pump thread.
+static FRAME_TRACE: AtomicBool = AtomicBool::new(false);
+
+/// The stamps recorded since the last [`take_frame_trace`], oldest first.
+static FRAME_STAMPS: Mutex<Vec<FrameStamp>> = Mutex::new(Vec::new());
+
+/// Past this many unread stamps the oldest are dropped, so a trace nobody reads
+/// cannot grow without bound. At 60 frames a second on one held monitor it is
+/// several seconds, which is longer than any freeze.
+const FRAME_STAMPS_KEPT: usize = 512;
+
+/// One frame a held session delivered.
+///
+/// Both times are in **100 ns units on the QPC clock**: `composed` is WGC's
+/// `SystemRelativeTime`, which is QPC-based, and `arrived` is
+/// [`qpc_100ns`] read as the frame reached the handler. So they compare
+/// directly with each other and with any other [`qpc_100ns`] reading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameStamp {
+    /// The held session's monitor.
+    pub monitor: Rect,
+    /// When the compositor composed the frame, or `None` if WGC would not say.
+    pub composed: Option<i64>,
+    /// When the frame reached the handler.
+    pub arrived: i64,
+}
+
+/// Turns the frame trace on or off. See [`FRAME_TRACE`].
+pub fn set_frame_trace(on: bool) {
+    FRAME_TRACE.store(on, Ordering::SeqCst);
+}
+
+/// Everything recorded since the last call, oldest first, and clears it.
+pub fn take_frame_trace() -> Vec<FrameStamp> {
+    std::mem::take(&mut *FRAME_STAMPS.lock().unwrap_or_else(PoisonError::into_inner))
+}
+
+/// The QPC clock now, in 100 ns units: the clock and the unit WGC stamps
+/// frames with.
+pub fn qpc_100ns() -> i64 {
+    let mut counter = 0_i64;
+    let mut frequency = 0_i64;
+    // SAFETY: both calls only write the `i64` they are given, and cannot fail
+    // on any Windows since XP.
+    unsafe {
+        QueryPerformanceCounter(&mut counter);
+        QueryPerformanceFrequency(&mut frequency);
+    }
+    qpc_ticks_to_100ns(counter, frequency)
+}
+
+/// Converts QPC ticks to 100 ns units without overflowing on a long uptime.
+fn qpc_ticks_to_100ns(counter: i64, frequency: i64) -> i64 {
+    if frequency <= 0 {
+        return 0;
+    }
+    let whole = (counter / frequency) * 10_000_000;
+    let part = (counter % frequency) * 10_000_000 / frequency;
+    whole + part
+}
+
+/// Records one arriving frame, if the trace is on.
+fn stamp(slot: &Slot, frame: &Frame<'_>) {
+    if !FRAME_TRACE.load(Ordering::Relaxed) {
+        return;
+    }
+    let arrived = qpc_100ns();
+    let composed = frame.timestamp().ok().map(|span| span.Duration);
+    let mut stamps = FRAME_STAMPS.lock().unwrap_or_else(PoisonError::into_inner);
+    if stamps.len() >= FRAME_STAMPS_KEPT {
+        stamps.remove(0);
+    }
+    stamps.push(FrameStamp {
+        monitor: slot.bounds,
+        composed,
+        arrived,
+    });
+}
 
 /// One monitor's GPU-side state.
 struct Retained {
@@ -725,6 +815,7 @@ impl GraphicsCaptureApiHandler for Warm {
             capture_control.stop();
             return Ok(());
         }
+        stamp(&self.flags.slot, frame);
         retain(&self.flags.slot, frame).inspect_err(|_| capture_control.stop())
     }
 
@@ -1047,6 +1138,30 @@ mod tests {
     #[test]
     fn a_mapping_shorter_than_it_claims_is_refused() {
         assert!(pack_rows(&[0; 32], 16, Size::new(4, 4)).is_none());
+    }
+
+    /// The frame trace compares QPC ticks with WGC's 100 ns stamps, so the
+    /// conversion is the whole of its accuracy. A 10 MHz QPC (the common one)
+    /// is already in 100 ns units; a 3 MHz one is not, and a naive
+    /// `counter * 10_000_000` overflows after about ten days of uptime.
+    #[test]
+    fn qpc_ticks_convert_to_100ns_exactly_and_without_overflow() {
+        assert_eq!(qpc_ticks_to_100ns(12_345_678, 10_000_000), 12_345_678);
+        assert_eq!(qpc_ticks_to_100ns(3_000_000, 3_000_000), 10_000_000);
+        assert_eq!(qpc_ticks_to_100ns(1_500_000, 3_000_000), 5_000_000);
+        let thirty_days = 30 * 24 * 3600 * 3_000_000_i64;
+        assert_eq!(
+            qpc_ticks_to_100ns(thirty_days, 3_000_000),
+            30 * 24 * 3600 * 10_000_000
+        );
+        assert_eq!(qpc_ticks_to_100ns(5, 0), 0);
+    }
+
+    #[test]
+    fn qpc_reads_move_forward() {
+        let first = qpc_100ns();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        assert!(qpc_100ns() > first);
     }
 
     #[test]

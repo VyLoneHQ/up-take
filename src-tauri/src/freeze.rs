@@ -331,6 +331,109 @@ pub(crate) fn warm_capture_enabled() -> bool {
     WARM_CAPTURE.load(Ordering::SeqCst)
 }
 
+/// Whether each freeze logs its own timeline against the held sessions' frames
+/// (`UPTAKE_DEV_FRAME_TRACE`, UP-TAKE `I-426` phase 2).
+///
+/// A developer measurement and nothing else: it decides nothing and changes no
+/// freeze. Phase 2 wants to take the first frame composed after the page hid
+/// its drawing from a session already running, and WGC sends a frame only when
+/// the screen changes, so the question this answers is *does such a frame
+/// arrive, and how long after the page confirms*. It needs the held sessions,
+/// so it is only useful with `UPTAKE_WARM_CAPTURE` on, and says so.
+static FRAME_TRACE: AtomicBool = AtomicBool::new(false);
+
+/// This freeze's moments, as `(what, qpc_100ns)`, in the order they happened.
+static FRAME_TRACE_MARKS: Mutex<Vec<(&'static str, i64)>> = Mutex::new(Vec::new());
+
+/// How long after a freeze its timeline is written, so the frame the reveal
+/// produces is in it too. Longer than any reveal takes to paint, shorter than
+/// a person takes to press the key again.
+const FRAME_TRACE_SETTLE: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// Reads `UPTAKE_DEV_FRAME_TRACE` once at startup and reports what it decided.
+pub(crate) fn init_frame_trace() {
+    let enabled = std::env::var("UPTAKE_DEV_FRAME_TRACE")
+        .is_ok_and(|value| matches!(value.trim(), "1" | "true" | "on"));
+    FRAME_TRACE.store(enabled, Ordering::SeqCst);
+    uptake_capture::warm::set_frame_trace(enabled);
+    if enabled {
+        crate::diagnostics::note(if warm_capture_enabled() {
+            "freeze: frame trace ON (UPTAKE_DEV_FRAME_TRACE), each freeze logs its timeline"
+        } else {
+            "freeze: frame trace ON but UPTAKE_WARM_CAPTURE is off, so no session is \
+             held and the trace will record no frames"
+        });
+    }
+}
+
+/// Records one moment of the current freeze, if the trace is on.
+fn trace_mark(what: &'static str) {
+    if FRAME_TRACE.load(Ordering::Relaxed) {
+        FRAME_TRACE_MARKS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((what, uptake_capture::warm::qpc_100ns()));
+    }
+}
+
+/// Writes this freeze's timeline once the reveal has had time to paint.
+///
+/// Everything is relative to the freeze's first mark, in milliseconds. A frame
+/// is listed from 100 ms before the freeze started, so the last frame before
+/// the hide is there to compare with.
+fn trace_flush() {
+    if !FRAME_TRACE.load(Ordering::Relaxed) {
+        return;
+    }
+    let marks = std::mem::take(
+        &mut *FRAME_TRACE_MARKS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner),
+    );
+    std::thread::spawn(move || {
+        std::thread::sleep(FRAME_TRACE_SETTLE);
+        let frames = uptake_capture::warm::take_frame_trace();
+        crate::diagnostics::measurement(&frame_trace_line(&marks, &frames));
+    });
+}
+
+/// One freeze's timeline as a log line. Separate so it is tested without a
+/// compositor.
+fn frame_trace_line(
+    marks: &[(&'static str, i64)],
+    frames: &[uptake_capture::warm::FrameStamp],
+) -> String {
+    use std::fmt::Write as _;
+    let Some(&(_, start)) = marks.first() else {
+        return "frame-trace: no marks".to_string();
+    };
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a developer's log line in milliseconds; a 100 ns tick past 2^53 is centuries of uptime"
+    )]
+    let ms = |at: i64| (at - start) as f64 / 10_000.0;
+    let mut line = format!("frame-trace: t0={start}");
+    for &(what, at) in marks {
+        let _ = write!(line, " {what}=+{:.1}", ms(at));
+    }
+    let _ = write!(line, " | frames");
+    for frame in frames
+        .iter()
+        .filter(|frame| frame.arrived >= start - 1_000_000)
+    {
+        let m = frame.monitor;
+        let _ = write!(line, " [{},{}", m.origin.x, m.origin.y);
+        match frame.composed {
+            Some(composed) => {
+                let _ = write!(line, " composed=+{:.1}", ms(composed));
+            }
+            None => line.push_str(" composed=?"),
+        }
+        let _ = write!(line, " arrived=+{:.1}]", ms(frame.arrived));
+    }
+    line
+}
+
 /// Whether a freeze covers **every** monitor rather than the cursor's.
 ///
 /// **Default off, which means the cursor's monitor** — [ADR-0026]'s third
@@ -1063,6 +1166,7 @@ fn step_aside(overlay: &dyn StepAside) -> Result<SteppedAside<'_>, Skipped> {
     if !overlay.composed() {
         return Err(Skipped::CouldNotStepAside);
     }
+    trace_mark("composed");
     Ok(stepped)
 }
 
@@ -1157,6 +1261,7 @@ where
         // faster than this thread can reach the wait still lands.
         let (token, confirmed) = expect_hidden();
         self.token.store(token, Ordering::SeqCst);
+        trace_mark("hide-sent");
         if let Err(error) = (self.send)(PageRequest::Hide {
             token,
             covers: &self.covers,
@@ -1174,6 +1279,7 @@ where
             );
             return false;
         }
+        trace_mark("confirmed");
         true
     }
 
@@ -1518,6 +1624,12 @@ where
         return Err(Skipped::Retired);
     }
     let started = Instant::now();
+    // A freeze that failed part-way left its marks behind; this one starts clean.
+    FRAME_TRACE_MARKS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clear();
+    trace_mark("start");
     // After the claim, so a toggle that does nothing also hides nothing. Timed
     // on its own because it is the cost decision 6 added, and the ADR says it
     // is measured before it is called done.
@@ -1553,7 +1665,10 @@ where
     // state is emitted to is a visible one. Explicit rather than left to the
     // end of the function, because the encode already ran on the capture
     // threads and there is nothing left for the user to wait for.
+    trace_mark("captured");
     drop(stepped_aside);
+    trace_mark("reveal-sent");
+    trace_flush();
     let slowest_capture_ms = captured.iter().map(|(_, cost)| cost.capture_ms).max();
     let slowest_encode_ms = captured.iter().map(|(_, cost)| cost.encode_ms).max();
     let warm_served = captured.iter().filter(|(_, cost)| cost.served_warm).count();
@@ -1755,6 +1870,46 @@ mod tests {
 
     use super::*;
     use crate::settings::{FreezeCovers, HeldPictureQuality};
+
+    /// The timeline is read by a person comparing numbers, so the numbers are
+    /// what is pinned: every time relative to the first mark, in ms, and a
+    /// frame from well before the freeze left out.
+    #[test]
+    fn a_frame_trace_line_is_relative_to_the_freeze_start() {
+        use uptake_capture::warm::FrameStamp;
+        let t0 = 1_000_000_000_i64;
+        let monitor = Rect::new(2560, 0, 1920, 1080);
+        let marks = [
+            ("start", t0),
+            ("confirmed", t0 + 170_000),
+            ("composed", t0 + 330_000),
+        ];
+        let frames = [
+            FrameStamp {
+                monitor,
+                composed: Some(t0 - 5_000_000),
+                arrived: t0 - 4_000_000,
+            },
+            FrameStamp {
+                monitor,
+                composed: Some(t0 + 250_000),
+                arrived: t0 + 262_000,
+            },
+            FrameStamp {
+                monitor,
+                composed: None,
+                arrived: t0 + 400_000,
+            },
+        ];
+        assert_eq!(
+            frame_trace_line(&marks, &frames),
+            format!(
+                "frame-trace: t0={t0} start=+0.0 confirmed=+17.0 composed=+33.0 | frames \
+                 [2560,0 composed=+25.0 arrived=+26.2] [2560,0 composed=? arrived=+40.0]"
+            )
+        );
+        assert_eq!(frame_trace_line(&[], &frames), "frame-trace: no marks");
+    }
 
     #[test]
     fn the_quality_setting_names_the_format_adr_0027_chose() {
