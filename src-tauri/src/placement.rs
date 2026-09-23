@@ -177,6 +177,19 @@ static HOOK: AtomicIsize = AtomicIsize::new(0);
 /// the page handles it as before, so no `Esc` is ever acted on twice.
 static KEY_HOOK: AtomicIsize = AtomicIsize::new(0);
 
+/// An `Esc` press the keyboard hook took, whose release it has not seen yet.
+///
+/// **A taken press owns its whole keystroke** (the first review of `up-take`
+/// `#112`): its auto-repeats and its release are swallowed too, or the program
+/// with the keyboard gets a release with no press, and holding `Esc` would
+/// step through every rung of `overlay::escape`. The mouse hook keeps
+/// [`LEFT_PENDING`] for the same reason.
+static ESC_TAKEN: AtomicBool = AtomicBool::new(false);
+
+/// The keyboard hook outlived a teardown to swallow a taken press's release,
+/// and removes itself when that release arrives. See [`release_keyboard_hook`].
+static KEY_UNHOOK_PENDING: AtomicBool = AtomicBool::new(false);
+
 /// Which overlay state the hook is serving (ADR-0016). Decides what a fresh
 /// button event means: a Placement gesture, a Living routing decision, or
 /// nothing at all.
@@ -1202,8 +1215,13 @@ fn reinstall_on_main_thread() {
     }
     // Windows drops a keyboard hook on the same timeout it drops a mouse hook
     // on, and nothing counts keyboard events, so it is renewed whenever the
-    // mouse hook is.
+    // mouse hook is. A taken press survives the renewal only while the key is
+    // really still down, as `LEFT_PENDING` does below.
     unhook_keyboard();
+    ESC_TAKEN.store(
+        ESC_TAKEN.load(Ordering::SeqCst) && vk_is_down(i32::from(VK_ESCAPE)),
+        Ordering::SeqCst,
+    );
     LEFT_PENDING.store(vk_is_down(i32::from(VK_LBUTTON)), Ordering::SeqCst);
     RIGHT_PENDING.store(vk_is_down(i32::from(VK_RBUTTON)), Ordering::SeqCst);
     WANT_TEARDOWN.store(false, Ordering::SeqCst);
@@ -1885,6 +1903,8 @@ fn ensure_hook() {
             HOOK.store(hook as isize, Ordering::SeqCst);
         }
     }
+    // A hook kept alive past a teardown for a pending release is wanted again.
+    KEY_UNHOOK_PENDING.store(false, Ordering::SeqCst);
     if KEY_HOOK.load(Ordering::SeqCst) == 0 {
         let hmod = unsafe { GetModuleHandleW(ptr::null()) };
         let hook = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), hmod, 0) };
@@ -1912,14 +1932,57 @@ fn unhook_keyboard() {
     }
 }
 
-/// Whether the keyboard hook takes this key for itself. Pure, so the rule is
-/// tested without a desktop.
+/// Removes the keyboard hook at a teardown, unless it still owes a taken
+/// press its release: then it stays until that release arrives and removes
+/// itself ([`keyboard_proc`]). Event-loop thread only.
 ///
-/// Only a key-DOWN of `Esc`, only in Placement, and only when the foreground
+/// Read against the key's real state, as the mouse hook's reinstall reads the
+/// buttons: a release that already happened while nothing was watching is not
+/// waited for.
+fn release_keyboard_hook() {
+    if ESC_TAKEN.load(Ordering::SeqCst) && vk_is_down(i32::from(VK_ESCAPE)) {
+        KEY_UNHOOK_PENDING.store(true, Ordering::SeqCst);
+        return;
+    }
+    ESC_TAKEN.store(false, Ordering::SeqCst);
+    KEY_UNHOOK_PENDING.store(false, Ordering::SeqCst);
+    unhook_keyboard();
+}
+
+/// What the keyboard hook does with one key event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyAction {
+    /// Not ours: chain it on.
+    Pass,
+    /// Take this `Esc` press: run the escape, swallow the key.
+    Escape,
+    /// Part of a press already taken (a repeat or its release): swallow it.
+    Swallow,
+}
+
+/// The keyboard hook's whole rule. Pure, so it is tested without a desktop.
+///
+/// Only `Esc`. A press is taken only in Placement and only when the foreground
 /// window is not UP-TAKE's own: there the page already receives the key, and
-/// taking it here too would act on one press twice.
-fn takes_escape(mode: Mode, vk: u32, is_down: bool, foreground_is_ours: bool) -> bool {
-    mode == Mode::Placement && is_down && vk == u32::from(VK_ESCAPE) && !foreground_is_ours
+/// taking it here too would act on one press twice. Once a press is taken,
+/// everything until its release belongs to it, whatever the mode is by then.
+fn key_action(
+    mode: Mode,
+    vk: u32,
+    is_down: bool,
+    foreground_is_ours: bool,
+    esc_taken: bool,
+) -> KeyAction {
+    if vk != u32::from(VK_ESCAPE) {
+        return KeyAction::Pass;
+    }
+    if esc_taken {
+        return KeyAction::Swallow;
+    }
+    if mode == Mode::Placement && is_down && !foreground_is_ours {
+        return KeyAction::Escape;
+    }
+    KeyAction::Pass
 }
 
 /// Whether the foreground window belongs to this process. `true` when there is
@@ -1949,18 +2012,33 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
             // SAFETY: for WH_KEYBOARD_LL, lparam points at a KBDLLHOOKSTRUCT
             // valid for this call.
             let vk = unsafe { (*(lparam as *const KBDLLHOOKSTRUCT)).vkCode };
+            if vk != u32::from(VK_ESCAPE) {
+                return false;
+            }
             let is_down = matches!(u32::try_from(wparam), Ok(WM_KEYDOWN | WM_SYSKEYDOWN));
-            if vk != u32::from(VK_ESCAPE) || !is_down {
-                return false;
+            let esc_taken = ESC_TAKEN.load(Ordering::SeqCst);
+            match key_action(mode(), vk, is_down, foreground_is_ours(), esc_taken) {
+                KeyAction::Pass => false,
+                KeyAction::Escape => {
+                    let Some(app) = APP.get().cloned() else {
+                        return false;
+                    };
+                    ESC_TAKEN.store(true, Ordering::SeqCst);
+                    std::thread::spawn(move || overlay::escape(&app));
+                    true
+                }
+                KeyAction::Swallow => {
+                    if !is_down {
+                        ESC_TAKEN.store(false, Ordering::SeqCst);
+                        // This callback runs on the installing thread, which
+                        // is the thread `UnhookWindowsHookEx` requires.
+                        if KEY_UNHOOK_PENDING.swap(false, Ordering::SeqCst) {
+                            unhook_keyboard();
+                        }
+                    }
+                    true
+                }
             }
-            if !takes_escape(mode(), vk, is_down, foreground_is_ours()) {
-                return false;
-            }
-            let Some(app) = APP.get().cloned() else {
-                return false;
-            };
-            std::thread::spawn(move || overlay::escape(&app));
-            true
         }))
         .unwrap_or_else(|_| {
             crate::diagnostics::note("placement: panic in the keyboard hook");
@@ -2116,7 +2194,7 @@ fn teardown_now() {
             UnhookWindowsHookEx(hook as HHOOK);
         }
     }
-    unhook_keyboard();
+    release_keyboard_hook();
     WANT_TEARDOWN.store(false, Ordering::SeqCst);
     LEFT_PENDING.store(false, Ordering::SeqCst);
     RIGHT_PENDING.store(false, Ordering::SeqCst);
@@ -4058,36 +4136,58 @@ mod tests {
     /// nothing else.
     #[test]
     fn the_keyboard_hook_takes_escape_only_in_placement_from_another_program() {
+        use super::{KeyAction, Mode, key_action};
         let esc = u32::from(super::VK_ESCAPE);
-        assert!(super::takes_escape(
-            super::Mode::Placement,
-            esc,
-            true,
-            false
-        ));
+        assert_eq!(
+            key_action(Mode::Placement, esc, true, false, false),
+            KeyAction::Escape
+        );
         // The page has the key: leave it to the page, or one press acts twice.
-        assert!(!super::takes_escape(
-            super::Mode::Placement,
-            esc,
-            true,
-            true
-        ));
+        assert_eq!(
+            key_action(Mode::Placement, esc, true, true, false),
+            KeyAction::Pass
+        );
         // Not Placement: Living's keys belong to the apps (ADR-0016).
-        assert!(!super::takes_escape(super::Mode::Living, esc, true, false));
-        assert!(!super::takes_escape(super::Mode::Hidden, esc, true, false));
-        // Only the press, and only Esc.
-        assert!(!super::takes_escape(
-            super::Mode::Placement,
-            esc,
-            false,
-            false
-        ));
-        assert!(!super::takes_escape(
-            super::Mode::Placement,
-            0x41,
-            true,
-            false
-        ));
+        assert_eq!(
+            key_action(Mode::Living, esc, true, false, false),
+            KeyAction::Pass
+        );
+        assert_eq!(
+            key_action(Mode::Hidden, esc, true, false, false),
+            KeyAction::Pass
+        );
+        // A release nobody took, and any other key, go through.
+        assert_eq!(
+            key_action(Mode::Placement, esc, false, false, false),
+            KeyAction::Pass
+        );
+        assert_eq!(
+            key_action(Mode::Placement, 0x41, true, false, false),
+            KeyAction::Pass
+        );
+    }
+
+    /// The first review of `#112`: a taken press owns its keystroke. Its
+    /// repeats and its release are swallowed, in whatever mode the escape left
+    /// behind, so the program with the keyboard never gets a release without a
+    /// press and holding `Esc` does not step through every rung.
+    #[test]
+    fn a_taken_escape_press_swallows_its_repeats_and_its_release() {
+        use super::{KeyAction, Mode, key_action};
+        let esc = u32::from(super::VK_ESCAPE);
+        for mode in [Mode::Placement, Mode::Living, Mode::Hidden] {
+            assert_eq!(key_action(mode, esc, true, false, true), KeyAction::Swallow);
+            assert_eq!(
+                key_action(mode, esc, false, false, true),
+                KeyAction::Swallow
+            );
+            assert_eq!(key_action(mode, esc, false, true, true), KeyAction::Swallow);
+        }
+        // Other keys are never held back by a pending Esc.
+        assert_eq!(
+            key_action(Mode::Placement, 0x41, false, false, true),
+            KeyAction::Pass
+        );
     }
 
     use super::{
