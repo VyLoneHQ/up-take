@@ -475,7 +475,7 @@ pub(crate) fn recognise_into_area(app: &AppHandle, id: AreaId, bounds: Rect) {
     crate::overlay::emit_ocr(app, id, Status::Working, None);
     let app = app.clone();
     std::thread::spawn(move || {
-        let frame = match crate::output::frame_for_ocr(bounds) {
+        let frame = match crate::output::frame_for_ocr(&app, bounds) {
             Ok(frame) => frame,
             Err(error) => {
                 crate::diagnostics::trouble(
