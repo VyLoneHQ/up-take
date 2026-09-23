@@ -335,6 +335,22 @@ pub(crate) fn overlay_in_capture() -> bool {
         .unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Runs `capture` with the exclusion held steady, telling it whether UP-TAKE's
+/// drawing is in the shot.
+///
+/// For a capture that cannot step aside, such as the frame held since
+/// mouse-down, which is taken while the user drags. Holding the lock for the
+/// whole capture is what makes the answer true of the pixels: a setting change
+/// waits for it, at most one capture, exactly as it waits for a freeze. Sampling
+/// the setting before and after instead misses it being switched on and back
+/// off during the capture (the second review of `up-take` `#111`).
+pub(crate) fn with_exclusion_held<T>(capture: impl FnOnce(bool) -> T) -> T {
+    let excluded = EXCLUDED_FROM_CAPTURE
+        .read()
+        .unwrap_or_else(PoisonError::into_inner);
+    capture(!*excluded)
+}
+
 /// Runs `capture` with UP-TAKE's drawing inside `bounds` out of the shot
 /// (UP-TAKE `I-427`, `ADR-0019` decision 6 applied to every capture).
 ///

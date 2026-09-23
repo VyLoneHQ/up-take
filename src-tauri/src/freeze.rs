@@ -2537,56 +2537,40 @@ mod tests {
 
     /// `I-427`: every live capture steps aside now, and the page holds one mask
     /// and one token, so a second hide while the first capture runs would
-    /// supersede it and get that capture refused. The second must wait for the
-    /// first's reveal. Both pages write into one log so the order is visible.
+    /// supersede it and get that capture refused. So the serialising lock is
+    /// held from the hide until AFTER the reveal.
+    ///
+    /// Asserted on the lock itself rather than on two threads' ordering: the
+    /// second review of `#111` showed a sleep-based version passes when the
+    /// second thread happens to be scheduled late, with the lock removed.
     #[test]
-    fn a_second_step_aside_waits_for_the_first_to_reveal() {
-        struct Shared {
-            name: &'static str,
-            log: std::sync::Arc<Mutex<Vec<String>>>,
-        }
-        impl StepAside for Shared {
+    fn a_step_aside_holds_the_serialising_lock_until_after_its_reveal() {
+        struct RevealSeesLock(Mutex<Option<bool>>);
+        impl StepAside for RevealSeesLock {
             fn hide(&self) -> bool {
-                self.log
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .push(format!("{} hide", self.name));
                 true
             }
             fn reveal(&self) {
-                self.log
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .push(format!("{} reveal", self.name));
+                *self.0.lock().unwrap_or_else(PoisonError::into_inner) =
+                    Some(STEP_ASIDE.try_lock().is_err());
             }
             fn composed(&self) -> bool {
                 true
             }
         }
-        let log = std::sync::Arc::new(Mutex::new(Vec::new()));
-        let first = Shared {
-            name: "first",
-            log: std::sync::Arc::clone(&log),
-        };
-        let held = step_aside(&first);
-        assert!(held.is_ok());
-        let second_log = std::sync::Arc::clone(&log);
-        let second = std::thread::spawn(move || {
-            let page = Shared {
-                name: "second",
-                log: second_log,
-            };
-            let stepped = step_aside(&page);
-            assert!(stepped.is_ok());
-        });
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        drop(held);
-        second
-            .join()
-            .unwrap_or_else(|_| panic!("the second step-aside panicked"));
+        let _guard = crate::precapture::frame_store_guard();
+        let page = RevealSeesLock(Mutex::new(None));
+        let stepped = step_aside(&page);
+        assert!(stepped.is_ok());
+        assert!(
+            STEP_ASIDE.try_lock().is_err(),
+            "a second capture could hide now"
+        );
+        drop(stepped);
         assert_eq!(
-            *log.lock().unwrap_or_else(PoisonError::into_inner),
-            ["first hide", "first reveal", "second hide", "second reveal"]
+            *page.0.lock().unwrap_or_else(PoisonError::into_inner),
+            Some(true),
+            "the lock was released before the reveal"
         );
     }
 

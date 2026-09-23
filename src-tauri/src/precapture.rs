@@ -170,8 +170,9 @@ struct Held {
     /// **Recorded with the frame, not read at mouse-up** (the first review of
     /// `up-take` `#111`). A frame taken while the drawing was in shot stays
     /// dirty if the setting is switched off before the drag ends, so the answer
-    /// at mouse-up says nothing about these pixels. Read at both ends of the
-    /// capture because a switch during it leaves either state possible.
+    /// at mouse-up says nothing about these pixels. Read with the exclusion held
+    /// for the whole capture, so the setting cannot change under it
+    /// (`overlay::with_exclusion_held`).
     drawing_in_shot: bool,
 }
 
@@ -315,9 +316,9 @@ fn spawn_capture(monitor: Rect, generation: u64) {
         return;
     }
     std::thread::spawn(move || {
-        let in_shot_at_start = crate::overlay::overlay_in_capture();
-        let captured = uptake_capture::capture_region(monitor);
-        let drawing_in_shot = in_shot_at_start || crate::overlay::overlay_in_capture();
+        let (captured, drawing_in_shot) = crate::overlay::with_exclusion_held(|in_shot| {
+            (uptake_capture::capture_region(monitor), in_shot)
+        });
         // Released before the store rather than after, and on every path out —
         // an early `return` that skipped it would wedge the flag set and stop
         // every later refresh in the process's life, silently.
