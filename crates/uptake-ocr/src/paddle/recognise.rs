@@ -133,6 +133,13 @@ impl DecodedText {
         // in a row still give one boundary and no gap (review of `#114`).
         let mut gap: Option<(usize, usize)> = None;
         for character in &self.characters {
+            // An EMPTY dictionary entry is neither a letter nor a separator:
+            // `all` is true of an empty string, which made one split a word
+            // (review of `#114`, round 3). It contributes nothing and is
+            // skipped.
+            if character.text.is_empty() {
+                continue;
+            }
             if character.text.chars().all(char::is_whitespace) {
                 gap = Some(match gap {
                     Some((first, _)) => (first, character.last),
@@ -597,6 +604,24 @@ mod tests {
         assert_covers_the_line(&words);
         // The boundary is the middle of the whole run, 1..=3, so 2 / 6.
         assert!((words[0].end - 2.0 / 6.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn an_empty_dictionary_entry_does_not_split_a_word() {
+        // Classes: 0 blank, 1 "a", 2 "" (an internal empty line), 3 "b".
+        let dict = CharacterDictionary::from_lines(
+            "a
+
+b
+",
+        );
+        let decoded = ctc_decode(&logits(&[1, 2, 3], 5), 5, &dict);
+        assert_eq!(decoded.text, "ab");
+        let words = decoded.words();
+        assert_eq!(
+            words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>(),
+            vec!["ab"]
+        );
     }
 
     #[test]

@@ -619,33 +619,44 @@ fn place_words(decoded: &DecodedText, quad: &quad::Quad) -> Vec<Word> {
                 along(bottom_left, bottom_right, span.start),
                 along(bottom_left, bottom_right, span.end),
             ];
-            let min_x = corners.iter().map(|c| c.0).fold(f32::INFINITY, f32::min);
-            let min_y = corners.iter().map(|c| c.1).fold(f32::INFINITY, f32::min);
-            let max_x = corners
-                .iter()
-                .map(|c| c.0)
-                .fold(f32::NEG_INFINITY, f32::max);
-            let max_y = corners
-                .iter()
-                .map(|c| c.1)
-                .fold(f32::NEG_INFINITY, f32::max);
             // Clockwise from the top-left: top start, top end, bottom end,
             // bottom start. Rounded to the NEAREST pixel, not outward: a cut
             // point is shared with the neighbour, and both must land on the
             // same pixel for their outlines to meet exactly.
             let [top_start, top_end, bottom_start, bottom_end] = corners;
+            let outline = [
+                point_from(top_start),
+                point_from(top_end),
+                point_from(bottom_end),
+                point_from(bottom_start),
+            ];
             Word {
                 text: span.text,
-                outline: [
-                    point_from(top_start),
-                    point_from(top_end),
-                    point_from(bottom_end),
-                    point_from(bottom_start),
-                ],
-                bounds: rect_from_bounds(min_x, min_y, max_x, max_y),
+                bounds: bounds_of(&outline),
+                outline,
             }
         })
         .collect()
+}
+
+/// The axis-aligned box around an already-rounded word outline.
+///
+/// Derived from the ROUNDED outline, not from the subpixel corners: rounding
+/// the corners outward on their own put a shared cut at `x = 50.25` into the
+/// left word's box as 51 and the right word's as 50, so two upright neighbours
+/// overlapped by a pixel and neither box was the box of its own outline
+/// (review of `#114`, round 3).
+fn bounds_of(outline: &[Point; 4]) -> Rect {
+    let min_x = outline.iter().map(|p| p.x).min().unwrap_or(0);
+    let max_x = outline.iter().map(|p| p.x).max().unwrap_or(0);
+    let min_y = outline.iter().map(|p| p.y).min().unwrap_or(0);
+    let max_y = outline.iter().map(|p| p.y).max().unwrap_or(0);
+    Rect::new(
+        min_x,
+        min_y,
+        (max_x - min_x).unsigned_abs(),
+        (max_y - min_y).unsigned_abs(),
+    )
 }
 
 /// Rounds a subpixel position to the nearest whole pixel, for a word outline.
@@ -759,6 +770,28 @@ mod tests {
         let words = place_words(&two_words(), &quad);
         assert_eq!(words[0].bounds, Rect::new(0, 30, 100, 30));
         assert_eq!(words[1].bounds, Rect::new(100, 20, 100, 30));
+    }
+
+    #[test]
+    fn upright_neighbours_at_a_fractional_cut_meet_without_overlapping() {
+        // The review of `#114`, round 3: a box ending at x = 100.5 cut at its
+        // middle puts the shared edge at 50.25. Both words must agree on it.
+        let quad = quad::Quad::new([
+            quad::PointF::new(0.0, 10.0),
+            quad::PointF::new(100.5, 10.0),
+            quad::PointF::new(100.5, 30.0),
+            quad::PointF::new(0.0, 30.0),
+        ]);
+        let words = place_words(&two_words(), &quad);
+        let (left, right) = (words[0].bounds, words[1].bounds);
+        assert_eq!(
+            left.origin.x + left.size.width as i32,
+            right.origin.x,
+            "{left:?} {right:?}"
+        );
+        for word in &words {
+            assert_eq!(word.bounds, bounds_of(&word.outline));
+        }
     }
 
     #[test]
