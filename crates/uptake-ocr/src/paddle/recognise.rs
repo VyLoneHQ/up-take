@@ -62,6 +62,116 @@ pub struct DecodedText {
     /// distinct from the detector's box score: a crisp box around a smudge
     /// scores high on detection and low here.
     pub confidence: f32,
+    /// Every emitted character with the timesteps that produced it, in order.
+    ///
+    /// Joining their `text` gives [`DecodedText::text`]. This is where a word's
+    /// POSITION comes from (roadmap `1.40`, `ADR-0046`): the recogniser's
+    /// timesteps run left to right across the crop, so a timestep index is a
+    /// horizontal position along the line.
+    pub characters: Vec<DecodedCharacter>,
+    /// How many timesteps the line had, the denominator for those positions.
+    pub timesteps: usize,
+}
+
+/// One emitted character and the run of timesteps that chose it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedCharacter {
+    /// The character, as the dictionary spells it.
+    pub text: String,
+    /// The first timestep of the run, inclusive.
+    pub first: usize,
+    /// The last timestep of the run, inclusive.
+    pub last: usize,
+}
+
+/// One word of a decoded line, positioned as a fraction of the line's width.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WordSpan {
+    /// The word, with no whitespace in it.
+    pub text: String,
+    /// Where the word starts, `0.0` being the crop's left edge.
+    pub start: f32,
+    /// Where it ends, `1.0` being the crop's right edge.
+    pub end: f32,
+}
+
+impl DecodedText {
+    /// Splits the line into words and places each one along the crop.
+    ///
+    /// # Where a boundary goes, and why
+    ///
+    /// A CTC recogniser fires near a character's CENTRE, not across its full
+    /// width, so the timesteps of a word's own letters understate where it
+    /// begins and ends by about half a letter. **The space between two words is
+    /// the better witness**: a boundary is put at the middle of the space's run,
+    /// so neighbouring words meet with no gap and no overlap. That is what a
+    /// selection drawn as one connected band per line wants (`ADR-0046`
+    /// decision 3), and it makes every point of the line belong to exactly one
+    /// word for hit-testing. The first word starts at the crop's left edge and
+    /// the last ends at its right edge, which the detector has already padded
+    /// around the text.
+    ///
+    /// **The middle is the middle timestep INDEX of the run, `(first + last) /
+    /// 2`, not the run's geometric centre, and that is a measurement.** On
+    /// 2026-09-25, 203 rendered words (Segoe UI at 12 to 20 px, Consolas 14,
+    /// Georgia 16) were compared with their true ink. The geometric centre put
+    /// both edges about 1 px to the RIGHT of the gap's middle: 2 boxes cut into
+    /// their own word and 13 reached a neighbour's ink. Half a timestep earlier
+    /// the error is about 0.75 px to the left, and 0 boxes cut their word, 4
+    /// reach a neighbour by more than 1 px. A box that never cuts its own word
+    /// is the property a selection needs, so the earlier point is kept.
+    #[must_use]
+    pub fn words(&self) -> Vec<WordSpan> {
+        if self.timesteps == 0 {
+            return Vec::new();
+        }
+        let total = self.timesteps as f32;
+        let mut spans: Vec<WordSpan> = Vec::new();
+        let mut current = String::new();
+        // The whitespace run since the last word character: its first and last
+        // timesteps. A boundary is the middle of the WHOLE run, so two spaces
+        // in a row still give one boundary and no gap (review of `#114`).
+        let mut gap: Option<(usize, usize)> = None;
+        for character in &self.characters {
+            // An EMPTY dictionary entry is neither a letter nor a separator:
+            // `all` is true of an empty string, which made one split a word
+            // (review of `#114`, round 3). It contributes nothing and is
+            // skipped.
+            if character.text.is_empty() {
+                continue;
+            }
+            if character.text.chars().all(char::is_whitespace) {
+                gap = Some(match gap {
+                    Some((first, _)) => (first, character.last),
+                    None => (character.first, character.last),
+                });
+                continue;
+            }
+            if let Some((first, last)) = gap.take()
+                && !current.is_empty()
+            {
+                let middle = (first + last) as f32 / 2.0 / total;
+                let start = spans.last().map_or(0.0, |previous| previous.end);
+                spans.push(WordSpan {
+                    text: std::mem::take(&mut current),
+                    start,
+                    end: middle,
+                });
+            }
+            current.push_str(&character.text);
+        }
+        if !current.is_empty() {
+            // Leading and trailing whitespace are not boundaries: the first word
+            // starts at the crop's left edge and the last ends at its right.
+            let start = spans.last().map_or(0.0, |previous| previous.end);
+            spans.push(WordSpan {
+                text: current,
+                start,
+                end: 1.0,
+            });
+        }
+        spans
+    }
 }
 
 /// An upright greyscale-normalised strip, ready for the recogniser.
@@ -332,15 +442,23 @@ pub fn ctc_decode(
         return DecodedText {
             text: String::new(),
             confidence: 0.0,
+            characters: Vec::new(),
+            timesteps: 0,
         };
     }
 
     let mut text = String::new();
+    let mut characters: Vec<DecodedCharacter> = Vec::new();
     let mut total_confidence = 0.0_f32;
     let mut counted = 0_u32;
     let mut previous_class: Option<usize> = None;
+    // Whether the previous timestep's run emitted a character, so a repeat
+    // extends that character's run instead of starting nothing.
+    let mut run_emitted = false;
+    let mut timesteps = 0_usize;
 
-    for timestep in logits.chunks_exact(class_count) {
+    for (index, timestep) in logits.chunks_exact(class_count).enumerate() {
+        timesteps = index + 1;
         let mut best_class = 0_usize;
         let mut best_value = f32::NEG_INFINITY;
         for (class, &value) in timestep.iter().enumerate() {
@@ -350,15 +468,26 @@ pub fn ctc_decode(
             }
         }
 
-        // Rule 1: a repeat of the previous timestep's class contributes nothing.
+        // Rule 1: a repeat of the previous timestep's class contributes no
+        // character. It does widen the run the character came from.
         if previous_class == Some(best_class) {
+            if run_emitted && let Some(open) = characters.last_mut() {
+                open.last = index;
+            }
             continue;
         }
         previous_class = Some(best_class);
 
         // Rule 2, applied after the repeat check, never before.
+        run_emitted = false;
         if let Some(character) = dictionary.character_for_class(best_class) {
             text.push_str(character);
+            characters.push(DecodedCharacter {
+                text: character.to_owned(),
+                first: index,
+                last: index,
+            });
+            run_emitted = true;
             total_confidence += best_value;
             counted += 1;
         }
@@ -369,7 +498,12 @@ pub fn ctc_decode(
     } else {
         total_confidence / counted as f32
     };
-    DecodedText { text, confidence }
+    DecodedText {
+        text,
+        confidence,
+        characters,
+        timesteps,
+    }
 }
 
 #[cfg(test)]
@@ -380,6 +514,125 @@ mod tests {
 
     fn dictionary() -> CharacterDictionary {
         CharacterDictionary::from_lines("a\nb\nl\no\n \n")
+    }
+
+    #[test]
+    fn a_character_remembers_the_run_of_timesteps_that_chose_it() {
+        let dict = dictionary();
+        // blank a a blank b b b -> "ab", with a at 1..=2 and b at 4..=6.
+        let decoded = ctc_decode(&logits(&[0, 1, 1, 0, 2, 2, 2], 6), 6, &dict);
+        assert_eq!(decoded.text, "ab");
+        assert_eq!(decoded.timesteps, 7);
+        let runs: Vec<(usize, usize)> = decoded
+            .characters
+            .iter()
+            .map(|c| (c.first, c.last))
+            .collect();
+        assert_eq!(runs, vec![(1, 2), (4, 6)]);
+    }
+
+    #[test]
+    fn a_double_letter_split_by_a_blank_is_two_runs() {
+        let dict = dictionary();
+        // l blank l -> "ll": the blank ends the first run, it does not extend it.
+        let decoded = ctc_decode(&logits(&[3, 0, 3], 6), 6, &dict);
+        assert_eq!(decoded.text, "ll");
+        let runs: Vec<(usize, usize)> = decoded
+            .characters
+            .iter()
+            .map(|c| (c.first, c.last))
+            .collect();
+        assert_eq!(runs, vec![(0, 0), (2, 2)]);
+    }
+
+    #[test]
+    fn words_meet_at_the_middle_of_the_space_between_them() {
+        let dict = dictionary();
+        // a b [space at 4..=6] b a, over 10 timesteps.
+        let decoded = ctc_decode(&logits(&[1, 2, 0, 0, 5, 5, 5, 2, 1, 0], 6), 6, &dict);
+        assert_eq!(decoded.text, "ab ba");
+        let words = decoded.words();
+        assert_eq!(
+            words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>(),
+            vec!["ab", "ba"]
+        );
+        // The space's middle index is 5, so the boundary is at 5 / 10.
+        assert!((words[0].start - 0.0).abs() < f32::EPSILON);
+        assert!((words[0].end - 0.5).abs() < f32::EPSILON);
+        assert!((words[1].start - 0.5).abs() < f32::EPSILON);
+        assert!((words[1].end - 1.0).abs() < f32::EPSILON);
+    }
+
+    /// Checks that `words` covers `[0, 1]` with no gap and no overlap.
+    fn assert_covers_the_line(words: &[WordSpan]) {
+        assert!((words[0].start - 0.0).abs() < f32::EPSILON, "{words:?}");
+        assert!(
+            (words[words.len() - 1].end - 1.0).abs() < f32::EPSILON,
+            "{words:?}"
+        );
+        for pair in words.windows(2) {
+            assert!(
+                (pair[0].end - pair[1].start).abs() < f32::EPSILON,
+                "{words:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn leading_and_trailing_spaces_do_not_move_the_line_ends() {
+        let dict = dictionary();
+        // [space] a b [space] b a [space], over 10 timesteps.
+        let decoded = ctc_decode(&logits(&[5, 1, 2, 0, 5, 0, 2, 1, 0, 5], 6), 6, &dict);
+        let words = decoded.words();
+        assert_eq!(
+            words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>(),
+            vec!["ab", "ba"]
+        );
+        assert_covers_the_line(&words);
+    }
+
+    #[test]
+    fn two_spaces_in_a_row_are_one_boundary_with_no_gap() {
+        let dict = dictionary();
+        // a [space] blank [space] b: two separate space runs at 1 and 3.
+        let decoded = ctc_decode(&logits(&[1, 5, 0, 5, 2, 0], 6), 6, &dict);
+        let words = decoded.words();
+        assert_eq!(
+            words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+        assert_covers_the_line(&words);
+        // The boundary is the middle of the whole run, 1..=3, so 2 / 6.
+        assert!((words[0].end - 2.0 / 6.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn an_empty_dictionary_entry_does_not_split_a_word() {
+        // Classes: 0 blank, 1 "a", 2 "" (an internal empty line), 3 "b".
+        let dict = CharacterDictionary::from_lines(
+            "a
+
+b
+",
+        );
+        let decoded = ctc_decode(&logits(&[1, 2, 3], 5), 5, &dict);
+        assert_eq!(decoded.text, "ab");
+        let words = decoded.words();
+        assert_eq!(
+            words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>(),
+            vec!["ab"]
+        );
+    }
+
+    #[test]
+    fn a_line_with_no_characters_has_no_words() {
+        let dict = dictionary();
+        assert!(
+            ctc_decode(&logits(&[0, 0, 0], 6), 6, &dict)
+                .words()
+                .is_empty()
+        );
+        assert!(ctc_decode(&[], 6, &dict).words().is_empty());
     }
 
     /// Builds `timesteps` of one-hot scores from a list of class indices.

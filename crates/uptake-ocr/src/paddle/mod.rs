@@ -33,9 +33,9 @@ use std::sync::OnceLock;
 use ort::session::Session;
 use ort::value::TensorRef;
 use uptake_core::bitmap::RgbaBitmap;
-use uptake_core::geometry::Rect;
+use uptake_core::geometry::{Point, Rect};
 
-use crate::engine::{Engine, EngineError, Recognition, TextBlock};
+use crate::engine::{Engine, EngineError, Recognition, TextBlock, Word};
 use detect::{DetectorOptions, ProbabilityMap};
 use reading_order::Placed;
 use recognise::{CharacterDictionary, DecodedText};
@@ -575,6 +575,7 @@ impl Engine for PaddleEngine {
                 continue;
             }
             let (min_x, min_y, max_x, max_y) = found.quad.bounds();
+            let words = place_words(&decoded, &found.quad);
             placed.push(Placed {
                 top: min_y,
                 bottom: max_y,
@@ -582,12 +583,93 @@ impl Engine for PaddleEngine {
                 payload: TextBlock {
                     text,
                     bounds: rect_from_bounds(min_x, min_y, max_x, max_y),
+                    words,
                 },
             });
         }
 
         Ok(assemble(placed))
     }
+}
+
+/// Places a decoded line's words back onto the frame (roadmap `1.40`).
+///
+/// A word's span is a fraction of the crop's width, and the crop was sampled
+/// from the quad by [`recognise::rectify`]'s bilinear map: position `u` along
+/// the crop is `u` of the way along the quad's top edge and, equally, along
+/// its bottom edge. So a word is the quad cut at its two fractions, which keeps
+/// a tilted line's words tilted with it. Each corner of the cut is rounded to
+/// the NEAREST pixel in [`point_from`], so two neighbours land on the same cut
+/// points, and the word's bounds are the box around those rounded corners, from
+/// [`bounds_of`]. **This is the one place the pipeline does not round outward
+/// through [`rect_from_bounds`]**: outward rounding gave neighbours two
+/// different pixels for one shared edge (review of `#114`, round 3).
+fn place_words(decoded: &DecodedText, quad: &quad::Quad) -> Vec<Word> {
+    let [top_left, top_right, bottom_right, bottom_left] = quad.corners;
+    let along = |from: quad::PointF, to: quad::PointF, u: f32| {
+        (
+            from.x.mul_add(1.0 - u, to.x * u),
+            from.y.mul_add(1.0 - u, to.y * u),
+        )
+    };
+    decoded
+        .words()
+        .into_iter()
+        .map(|span| {
+            let corners = [
+                along(top_left, top_right, span.start),
+                along(top_left, top_right, span.end),
+                along(bottom_left, bottom_right, span.start),
+                along(bottom_left, bottom_right, span.end),
+            ];
+            // Clockwise from the top-left: top start, top end, bottom end,
+            // bottom start. Rounded to the NEAREST pixel, not outward: a cut
+            // point is shared with the neighbour, and both must land on the
+            // same pixel for their outlines to meet exactly.
+            let [top_start, top_end, bottom_start, bottom_end] = corners;
+            let outline = [
+                point_from(top_start),
+                point_from(top_end),
+                point_from(bottom_end),
+                point_from(bottom_start),
+            ];
+            Word {
+                text: span.text,
+                bounds: bounds_of(&outline),
+                outline,
+            }
+        })
+        .collect()
+}
+
+/// The axis-aligned box around an already-rounded word outline.
+///
+/// Derived from the ROUNDED outline, not from the subpixel corners: rounding
+/// the corners outward on their own put a shared cut at `x = 50.25` into the
+/// left word's box as 51 and the right word's as 50, so two upright neighbours
+/// overlapped by a pixel and neither box was the box of its own outline
+/// (review of `#114`, round 3).
+fn bounds_of(outline: &[Point; 4]) -> Rect {
+    let min_x = outline.iter().map(|p| p.x).min().unwrap_or(0);
+    let max_x = outline.iter().map(|p| p.x).max().unwrap_or(0);
+    let min_y = outline.iter().map(|p| p.y).min().unwrap_or(0);
+    let max_y = outline.iter().map(|p| p.y).max().unwrap_or(0);
+    Rect::new(
+        min_x,
+        min_y,
+        (max_x - min_x).unsigned_abs(),
+        (max_y - min_y).unsigned_abs(),
+    )
+}
+
+/// Rounds a subpixel position to the nearest whole pixel, for a word outline.
+fn point_from((x, y): (f32, f32)) -> Point {
+    let clamp = |value: f32| {
+        value
+            .round()
+            .clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i32
+    };
+    Point::new(clamp(x), clamp(y))
 }
 
 /// Groups placed blocks into visual lines and builds the [`Recognition`].
@@ -640,6 +722,106 @@ fn rect_from_bounds(min_x: f32, min_y: f32, max_x: f32, max_y: f32) -> Rect {
 mod tests {
     use super::*;
 
+    /// A decoded "ab ba" whose boundary sits at the middle of the line.
+    fn two_words() -> DecodedText {
+        let character = |text: &str, first: usize, last: usize| recognise::DecodedCharacter {
+            text: text.to_owned(),
+            first,
+            last,
+        };
+        DecodedText {
+            text: "ab ba".to_owned(),
+            confidence: 1.0,
+            characters: vec![
+                character("a", 0, 0),
+                character("b", 1, 1),
+                character(" ", 4, 6),
+                character("b", 7, 7),
+                character("a", 8, 8),
+            ],
+            timesteps: 10,
+        }
+    }
+
+    #[test]
+    fn words_split_an_upright_box_at_the_space() {
+        let quad = quad::Quad::new([
+            quad::PointF::new(100.0, 50.0),
+            quad::PointF::new(300.0, 50.0),
+            quad::PointF::new(300.0, 70.0),
+            quad::PointF::new(100.0, 70.0),
+        ]);
+        let words = place_words(&two_words(), &quad);
+        assert_eq!(words.len(), 2);
+        assert_eq!(words[0].text, "ab");
+        assert_eq!(words[0].bounds, Rect::new(100, 50, 100, 20));
+        assert_eq!(words[1].text, "ba");
+        assert_eq!(words[1].bounds, Rect::new(200, 50, 100, 20));
+    }
+
+    #[test]
+    fn a_tilted_line_cuts_along_its_own_edges_not_the_frames_axes() {
+        // The box rises 20 px across its 200 px, as a rotated line of text
+        // does. Cutting it at its middle must follow the tilt: the left word's
+        // box spans the lower half of the rise and the right word's the upper.
+        let quad = quad::Quad::new([
+            quad::PointF::new(0.0, 40.0),
+            quad::PointF::new(200.0, 20.0),
+            quad::PointF::new(200.0, 40.0),
+            quad::PointF::new(0.0, 60.0),
+        ]);
+        let words = place_words(&two_words(), &quad);
+        assert_eq!(words[0].bounds, Rect::new(0, 30, 100, 30));
+        assert_eq!(words[1].bounds, Rect::new(100, 20, 100, 30));
+    }
+
+    #[test]
+    fn upright_neighbours_at_a_fractional_cut_meet_without_overlapping() {
+        // The review of `#114`, round 3: a box ending at x = 100.5 cut at its
+        // middle puts the shared edge at 50.25. Both words must agree on it.
+        let quad = quad::Quad::new([
+            quad::PointF::new(0.0, 10.0),
+            quad::PointF::new(100.5, 10.0),
+            quad::PointF::new(100.5, 30.0),
+            quad::PointF::new(0.0, 30.0),
+        ]);
+        let words = place_words(&two_words(), &quad);
+        let (left, right) = (words[0].bounds, words[1].bounds);
+        assert_eq!(
+            left.origin.x + left.size.width as i32,
+            right.origin.x,
+            "{left:?} {right:?}"
+        );
+        for word in &words {
+            assert_eq!(word.bounds, bounds_of(&word.outline));
+        }
+    }
+
+    #[test]
+    fn on_a_rotated_line_neighbours_share_their_outline_edge() {
+        // The review of `#114`, round 2: a line rotated 45 degrees. Its words'
+        // axis-aligned `bounds` overlap by construction, so the outline is the
+        // shape that must partition the line, and the two words must share the
+        // cut edge exactly.
+        let quad = quad::Quad::new([
+            quad::PointF::new(0.0, 0.0),
+            quad::PointF::new(100.0, 100.0),
+            quad::PointF::new(90.0, 110.0),
+            quad::PointF::new(-10.0, 10.0),
+        ]);
+        let words = place_words(&two_words(), &quad);
+        let (left, right) = (&words[0].outline, &words[1].outline);
+        assert_eq!(left[1], right[0], "top edges must meet");
+        assert_eq!(left[2], right[3], "bottom edges must meet");
+        assert_eq!(left[1], Point::new(50, 50));
+        assert_eq!(left[2], Point::new(40, 60));
+        // The documented caveat is real: the axis-aligned boxes overlap.
+        let (a, b) = (words[0].bounds, words[1].bounds);
+        let a_right = a.origin.x + a.size.width as i32;
+        let a_bottom = a.origin.y + a.size.height as i32;
+        assert!(b.origin.x < a_right && b.origin.y < a_bottom);
+    }
+
     fn path(text: &str) -> PathBuf {
         PathBuf::from(text)
     }
@@ -691,6 +873,7 @@ mod tests {
             payload: TextBlock {
                 text: text.to_owned(),
                 bounds: rect_from_bounds(left, top, left + 40.0, bottom),
+                words: Vec::new(),
             },
         }
     }

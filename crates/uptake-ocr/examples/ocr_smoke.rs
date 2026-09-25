@@ -152,6 +152,17 @@ fn main() -> ExitCode {
             block.bounds.size.height,
             block.text
         );
+        // Roadmap `1.40`: the words' own boxes, in the same frame-local pixels.
+        for word in &block.words {
+            println!(
+                "      word [{:>4},{:>4} {:>4}x{:>4}]  {}",
+                word.bounds.origin.x,
+                word.bounds.origin.y,
+                word.bounds.size.width,
+                word.bounds.size.height,
+                word.text
+            );
+        }
     }
     println!("--- text() ---");
     println!("{}", recognition.text());
