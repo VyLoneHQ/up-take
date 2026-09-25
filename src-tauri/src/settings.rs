@@ -105,6 +105,21 @@ pub enum HeldPictureQuality {
     Exact,
 }
 
+/// How an OCR area shows what it read (`ADR-0046`, roadmap `1.41`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OcrBehaviour {
+    /// The screen under the area stays visible: the area draws its border and
+    /// a faint mark under each word it read, and in Placement the words can be
+    /// selected. **The default, by the founder's decision of 2026-09-25**
+    /// (*"I also want the "in place" version to be the default one"*).
+    #[default]
+    InPlace,
+    /// The area covers the screen with its own panel and draws the text there,
+    /// which is how every OCR area looked before `ADR-0046`.
+    Rendered,
+}
+
 /// Which language the interface is shown in (roadmap 1.38).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -177,6 +192,10 @@ pub struct Settings {
     pub filter_strength_percent: u8,
     /// Which language the interface is shown in.
     pub language: Language,
+
+    // ---- OCR -----------------------------------------------------------
+    /// How an OCR area shows what it read.
+    pub ocr_behaviour: OcrBehaviour,
 }
 
 impl Default for Settings {
@@ -193,6 +212,7 @@ impl Default for Settings {
             area_opacity_percent: 40,
             filter_strength_percent: 16,
             language: Language::System,
+            ocr_behaviour: OcrBehaviour::InPlace,
         }
     }
 }
@@ -291,7 +311,7 @@ pub fn save(settings: Settings) -> Result<(), String> {
 mod tests {
     use super::{
         FILTER_RANGE, FreezeCovers, HandLaunchState, HeldPictureQuality, Language, OPACITY_RANGE,
-        Settings,
+        OcrBehaviour, Settings,
     };
     use crate::payload_keys::{assert_keys, assert_payload_coverage};
 
@@ -318,6 +338,11 @@ mod tests {
         assert_eq!(settings.area_opacity_percent, 40);
         assert_eq!(settings.filter_strength_percent, 16);
         assert_eq!(settings.language, Language::System);
+        assert_eq!(
+            settings.ocr_behaviour,
+            OcrBehaviour::InPlace,
+            "ADR-0046: in place is the default, the founder's decision"
+        );
     }
 
     #[test]
@@ -374,6 +399,7 @@ mod tests {
                 "area_opacity_percent",
                 "filter_strength_percent",
                 "language",
+                "ocr_behaviour",
             ],
         );
     }
@@ -399,6 +425,10 @@ mod tests {
             serde_json::to_string(&Language::German).unwrap_or_default(),
             "\"german\""
         );
+        assert_eq!(
+            serde_json::to_string(&OcrBehaviour::InPlace).unwrap_or_default(),
+            "\"in_place\""
+        );
     }
 
     #[test]
@@ -422,6 +452,10 @@ mod tests {
                 ),
                 (
                     "Language",
+                    "a field of Settings, covered by its key table and its wire-name test",
+                ),
+                (
+                    "OcrBehaviour",
                     "a field of Settings, covered by its key table and its wire-name test",
                 ),
             ],

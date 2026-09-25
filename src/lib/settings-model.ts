@@ -43,8 +43,17 @@ import { coachCopy, type KeyRow, type TypeRow } from './coach-copy';
 import { kindLabels } from './overlay-state';
 import { type Language, type TextKey, text } from './strings';
 
-/** The four panes, in the sidebar's order (`UI-UX.md` section 3.2). */
-export const PANE_IDS = ['general', 'capture', 'appearance', 'help'] as const;
+/**
+ * The panes, in the sidebar's order (`UI-UX.md` section 3.2). `ocr` joined the
+ * original four by `ADR-0046` (roadmap `1.41`), before Help so Help stays last.
+ */
+export const PANE_IDS = [
+  'general',
+  'capture',
+  'appearance',
+  'ocr',
+  'help',
+] as const;
 
 /** Which pane is showing. */
 export type PaneId = (typeof PANE_IDS)[number];
@@ -60,6 +69,9 @@ export type HeldPictureQuality = 'fast' | 'exact';
 
 /** Which language the interface shows. Rust's `Language`, on the wire. */
 export type LanguageChoice = 'system' | 'english' | 'german';
+
+/** How an OCR area shows what it read. Rust's `OcrBehaviour`, on the wire. */
+export type OcrBehaviour = 'in_place' | 'rendered';
 
 /**
  * Everything the user can change.
@@ -80,6 +92,7 @@ export interface Settings {
   area_opacity_percent: number;
   filter_strength_percent: number;
   language: LanguageChoice;
+  ocr_behaviour: OcrBehaviour;
 }
 
 /** What the window shows and cannot change. Rust's `Facts`. */
@@ -404,6 +417,38 @@ export function panes(
                 { value: 'german', label: say('settings.language.german') },
               ],
               set: (value) => with_({ language: value as LanguageChoice }),
+            },
+          ],
+        },
+      ],
+    },
+    {
+      // ADR-0046 decisions 1 and 4: an OCR area reads in place by default,
+      // and this is where the user picks the other behaviour.
+      id: 'ocr',
+      name: say('settings.pane.ocr'),
+      sections: [
+        {
+          label: say('settings.section.ocr_areas'),
+          rows: [
+            {
+              shape: 'segmented',
+              id: 'ocr-behaviour',
+              name: say('settings.ocr_behaviour.name'),
+              about: say('settings.ocr_behaviour.about'),
+              value: settings.ocr_behaviour,
+              segments: [
+                {
+                  value: 'in_place',
+                  label: say('settings.ocr_behaviour.in_place'),
+                },
+                {
+                  value: 'rendered',
+                  label: say('settings.ocr_behaviour.rendered'),
+                },
+              ],
+              set: (value) =>
+                with_({ ocr_behaviour: value as OcrBehaviour }),
             },
           ],
         },
