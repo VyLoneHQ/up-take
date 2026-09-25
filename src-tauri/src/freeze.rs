@@ -1052,11 +1052,23 @@ fn present_frames_with(mut flush: impl FnMut() -> windows_sys::core::HRESULT) ->
 /// and a freeze that silently contains it again is the defect back,
 /// unannounced. The key doing nothing is logged and visible; that is the better
 /// failure.
-fn step_aside(overlay: &dyn StepAside) -> Result<SteppedAside<'_>, Skipped> {
+///
+/// # One at a time, across every capture
+///
+/// Since UP-TAKE `I-427` every live capture steps aside, not only the freeze
+/// (`overlay::capture_aside`). The page holds one mask and one token, so a
+/// second hide supersedes the first, whose confirmation then never comes and
+/// whose capture is refused. So the whole hide, capture, reveal is serialised
+/// here: a Copy pressed during an OCR read waits for it, at most one capture.
+pub(crate) fn step_aside(overlay: &dyn StepAside) -> Result<SteppedAside<'_>, Skipped> {
+    let serial = STEP_ASIDE.lock().unwrap_or_else(PoisonError::into_inner);
     // Built before the hide, so a reveal is sent even for a hide that was not
     // confirmed: the page may have hidden and only the confirmation been lost,
     // and revealing drawing that is not hidden is harmless.
-    let stepped = SteppedAside { overlay };
+    let stepped = SteppedAside {
+        overlay,
+        _serial: serial,
+    };
     if !overlay.hide() {
         return Err(Skipped::CouldNotStepAside);
     }
@@ -1073,9 +1085,16 @@ fn step_aside(overlay: &dyn StepAside) -> Result<SteppedAside<'_>, Skipped> {
 /// undo anything a later freeze hid, and it does not interact with the state
 /// machine: a transition landing mid-capture decides what the page draws, and
 /// the reveal only removes this freeze's mask from on top of it.
-struct SteppedAside<'a> {
+///
+/// Holds [`STEP_ASIDE`] until after the reveal: fields drop after `drop` runs,
+/// so the next capture cannot hide before this one has shown again.
+pub(crate) struct SteppedAside<'a> {
     overlay: &'a dyn StepAside,
+    _serial: std::sync::MutexGuard<'static, ()>,
 }
+
+/// Held from a hide to its reveal. See [`step_aside`].
+static STEP_ASIDE: Mutex<()> = Mutex::new(());
 
 impl Drop for SteppedAside<'_> {
     fn drop(&mut self) {
@@ -2514,6 +2533,45 @@ mod tests {
         );
         assert!(page.calls().is_empty(), "{:?}", page.calls());
         assert_eq!(VERSION.load(Ordering::SeqCst), version, "nothing published");
+    }
+
+    /// `I-427`: every live capture steps aside now, and the page holds one mask
+    /// and one token, so a second hide while the first capture runs would
+    /// supersede it and get that capture refused. So the serialising lock is
+    /// held from the hide until AFTER the reveal.
+    ///
+    /// Asserted on the lock itself rather than on two threads' ordering: the
+    /// second review of `#111` showed a sleep-based version passes when the
+    /// second thread happens to be scheduled late, with the lock removed.
+    #[test]
+    fn a_step_aside_holds_the_serialising_lock_until_after_its_reveal() {
+        struct RevealSeesLock(Mutex<Option<bool>>);
+        impl StepAside for RevealSeesLock {
+            fn hide(&self) -> bool {
+                true
+            }
+            fn reveal(&self) {
+                *self.0.lock().unwrap_or_else(PoisonError::into_inner) =
+                    Some(STEP_ASIDE.try_lock().is_err());
+            }
+            fn composed(&self) -> bool {
+                true
+            }
+        }
+        let _guard = crate::precapture::frame_store_guard();
+        let page = RevealSeesLock(Mutex::new(None));
+        let stepped = step_aside(&page);
+        assert!(stepped.is_ok());
+        assert!(
+            STEP_ASIDE.try_lock().is_err(),
+            "a second capture could hide now"
+        );
+        drop(stepped);
+        assert_eq!(
+            *page.0.lock().unwrap_or_else(PoisonError::into_inner),
+            Some(true),
+            "the lock was released before the reveal"
+        );
     }
 
     /// `Ctrl+Space` then `Esc`, with the transition landing while the capture

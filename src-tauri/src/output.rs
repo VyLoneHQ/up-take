@@ -162,7 +162,7 @@ fn export_source(
         split.encoded_bytes = pinned.1.len();
         return Ok(pinned);
     }
-    capture(bounds, split)
+    capture(app, bounds, split)
 }
 
 /// Publishes an area's image to the clipboard alone.
@@ -369,7 +369,7 @@ pub(crate) fn grab_monitor(app: &AppHandle) {
         let started = Instant::now();
         let mut split = Split::default();
         let outcome = grab_target(cursor).and_then(|monitor| {
-            let (bitmap, png) = capture(monitor, &mut split)?;
+            let (bitmap, png) = capture(&app, monitor, &mut split)?;
             let publish = Instant::now();
             let result = dibv5_bytes(&bitmap)
                 .and_then(|dib| publish_clipboard(overlay_hwnd(&app)?, &dib, &png));
@@ -589,10 +589,19 @@ impl std::fmt::Display for Source {
 /// they are encoded** so [`frozen_or_live`] can run the sharpening pass over
 /// them. Every caller that wants the PNG as well goes on calling `capture`, so
 /// there is still exactly one encode site per path.
-fn capture_bitmap(bounds: Rect, split: &mut Split) -> Result<RgbaBitmap, String> {
-    let grab = Instant::now();
-    let captured = uptake_capture::capture_region(bounds).map_err(|error| error.to_string())?;
-    split.capture_ms = grab.elapsed().as_millis();
+///
+/// **With UP-TAKE's drawing in the capture, it steps aside first** (`I-427`):
+/// the page hides what it draws inside `bounds` for the length of the capture,
+/// through [`crate::overlay::capture_aside`]. Every live capture comes through
+/// here, which is why this is the one place that does it. `capture_ms` times
+/// the capture alone, not the step-aside around it.
+fn capture_bitmap(app: &AppHandle, bounds: Rect, split: &mut Split) -> Result<RgbaBitmap, String> {
+    let captured = crate::overlay::capture_aside(app, bounds, || {
+        let grab = Instant::now();
+        let captured = uptake_capture::capture_region(bounds).map_err(|error| error.to_string());
+        split.capture_ms = grab.elapsed().as_millis();
+        captured
+    })?;
     // What the capture crate reports it took, never what was asked for: it clamps
     // to the virtual desktop, and the log would otherwise name a rectangle that
     // was not captured. `freeze::capture_still` records the same distinction for
@@ -604,8 +613,12 @@ fn capture_bitmap(bounds: Rect, split: &mut Split) -> Result<RgbaBitmap, String>
 /// Captures `bounds` and encodes it as PNG, returning both the raw bitmap
 /// (needed for the DIB clipboard format, which is not decoded back out of the
 /// PNG) and the encoded bytes, and recording each stage's cost in `split`.
-fn capture(bounds: Rect, split: &mut Split) -> Result<(RgbaBitmap, Vec<u8>), String> {
-    let bitmap = capture_bitmap(bounds, split)?;
+fn capture(
+    app: &AppHandle,
+    bounds: Rect,
+    split: &mut Split,
+) -> Result<(RgbaBitmap, Vec<u8>), String> {
+    let bitmap = capture_bitmap(app, bounds, split)?;
     let encode = Instant::now();
     let png = encode_png(&bitmap)?;
     split.encode_ms = encode.elapsed().as_millis();
@@ -627,8 +640,12 @@ fn capture(bounds: Rect, split: &mut Split) -> Result<(RgbaBitmap, Vec<u8>), Str
 /// Every decline is logged with its reason. A silent fall back to the slow path
 /// would show up as nothing worse than "1.9c did not help much", which is the
 /// hardest kind of regression to notice.
-fn capture_or_crop(bounds: Rect, split: &mut Split) -> Result<(RgbaBitmap, Vec<u8>), String> {
-    let bitmap = frame_or_crop(bounds, split)?;
+fn capture_or_crop(
+    app: &AppHandle,
+    bounds: Rect,
+    split: &mut Split,
+) -> Result<(RgbaBitmap, Vec<u8>), String> {
+    let bitmap = frame_or_crop(app, bounds, split)?;
     let encode = Instant::now();
     let png = encode_png(&bitmap)?;
     split.encode_ms = encode.elapsed().as_millis();
@@ -651,7 +668,7 @@ fn capture_or_crop(bounds: Rect, split: &mut Split) -> Result<(RgbaBitmap, Vec<u
 /// the frozen/held/live precedence cannot come to differ between a Screenshot
 /// area and an OCR area. The order here is ADR-0026 decision 6's, unchanged --
 /// what you see at release is what you get.
-fn frame_or_crop(bounds: Rect, split: &mut Split) -> Result<RgbaBitmap, String> {
+fn frame_or_crop(app: &AppHandle, bounds: Rect, split: &mut Split) -> Result<RgbaBitmap, String> {
     // The frozen still wins when the screen is frozen, and this ordering is
     // ADR-0026 decision 6: **what you see at release is what you get.** The
     // frame source is resolved here, at mouse-up, rather than at mouse-down —
@@ -668,7 +685,15 @@ fn frame_or_crop(bounds: Rect, split: &mut Split) -> Result<RgbaBitmap, String> 
         split.bounds = Some(bounds);
         return Ok(bitmap);
     }
-    match crate::precapture::take(bounds) {
+    // The frame held since mouse-down was taken with the selection box and
+    // every area on screen, and it cannot be stepped aside after the fact. So
+    // while UP-TAKE's drawing is in the capture, it is not used (`I-427`).
+    let held = if crate::overlay::overlay_in_capture() {
+        Err(crate::precapture::Fallback::OverlayInShot)
+    } else {
+        crate::precapture::take(bounds)
+    };
+    match held {
         Ok(bitmap) => {
             // Capture stays at 0 ms, and that is the honest reading rather than
             // a flattering one: the §1 row measures selection release → the
@@ -681,7 +706,7 @@ fn frame_or_crop(bounds: Rect, split: &mut Split) -> Result<RgbaBitmap, String> 
         }
         Err(reason) => {
             split.source = Source::Fell(reason);
-            capture_bitmap(bounds, split)
+            capture_bitmap(app, bounds, split)
         }
     }
 }
@@ -703,10 +728,10 @@ fn frame_or_crop(bounds: Rect, split: &mut Split) -> Result<RgbaBitmap, String> 
 /// # Errors
 ///
 /// Whatever the frame resolution reports, already logged.
-pub(crate) fn frame_for_ocr(bounds: Rect) -> Result<RgbaBitmap, String> {
+pub(crate) fn frame_for_ocr(app: &AppHandle, bounds: Rect) -> Result<RgbaBitmap, String> {
     let started = Instant::now();
     let mut split = Split::default();
-    let outcome = frame_or_crop(bounds, &mut split);
+    let outcome = frame_or_crop(app, bounds, &mut split);
     report(
         None,
         Action::Frame,
@@ -744,7 +769,7 @@ pub(crate) fn capture_into_area(app: &AppHandle, id: AreaId, bounds: Rect) {
     std::thread::spawn(move || {
         let started = Instant::now();
         let mut split = Split::default();
-        let outcome = capture_or_crop(bounds, &mut split).and_then(|(bitmap, png)| {
+        let outcome = capture_or_crop(&app, bounds, &mut split).and_then(|(bitmap, png)| {
             let publish = Instant::now();
             // The pin is stored *and announced* before the clipboard is touched:
             // it is the thing the user can see, and a clipboard failure should
@@ -993,7 +1018,7 @@ pub(crate) fn magnify_into_area(app: &AppHandle, id: AreaId, retake: Retake) {
 fn magnify_once(app: &AppHandle, id: AreaId, retake: Retake, generation: u64) {
     let started = Instant::now();
     let mut split = Split::default();
-    let outcome = frozen_or_live(retake, &mut split).and_then(|(bitmap, png)| {
+    let outcome = frozen_or_live(app, retake, &mut split).and_then(|(bitmap, png)| {
         // **The freshness check and the STORE WRITE are one critical section,
         // and an independent review is why.** Checking and then locking
         // `CaptureStore` separately leaves a window in which
@@ -1078,14 +1103,18 @@ fn magnify_once(app: &AppHandle, id: AreaId, retake: Retake, generation: u64) {
 /// more, and its `encode_ms` and `encoded_bytes` are filled in below with the
 /// live branch's. That is the fix rather than the cost: the two were already
 /// two implementations of one step.
-fn frozen_or_live(retake: Retake, split: &mut Split) -> Result<(RgbaBitmap, Vec<u8>), String> {
+fn frozen_or_live(
+    app: &AppHandle,
+    retake: Retake,
+    split: &mut Split,
+) -> Result<(RgbaBitmap, Vec<u8>), String> {
     let mut bitmap = match crate::freeze::crop(retake.source) {
         Some(frozen) => {
             split.source = Source::Frozen;
             split.bounds = Some(retake.source);
             frozen
         }
-        None => capture_bitmap(retake.source, split)?,
+        None => capture_bitmap(app, retake.source, split)?,
     };
     if retake.sharpen {
         let sharpening = Instant::now();
