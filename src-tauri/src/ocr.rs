@@ -104,7 +104,7 @@
 //! [`ADR-0032`]: ../../../Projects/UP-TAKE/DECISIONS/ADR-0032-onnx-runtime-is-loaded-not-downloaded.md
 //! [`ADR-0035`]: ../../../Projects/UP-TAKE/DECISIONS/ADR-0035-assets-ship-in-the-installer.md
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
@@ -224,14 +224,17 @@ struct Ocr {
     /// The worker answers in submission order, so refusing a stale submission
     /// is enough for the last answer to be the newest reading.
     generation: BTreeMap<u64, u64>,
-    /// How many submissions of each area the worker has not answered.
+    /// Which reading each unanswered submission of an area was, oldest first.
     ///
-    /// The worker answers one area's submissions in order, so an answer that
-    /// arrives while another submission of the SAME area is still outstanding
-    /// is the older reading, already superseded: it is not drawn and it does
-    /// not copy (review of `#115`, round 2). `waiting` cannot say this, being
-    /// a set.
-    outstanding: BTreeMap<u64, u32>,
+    /// The worker answers one area's submissions in order, so the front of the
+    /// queue is the reading an answer belongs to. An answer is used only when
+    /// that reading is still the LATEST one asked for (`generation`): an older
+    /// answer arriving while a newer reading is still being captured, or after
+    /// it was submitted, is superseded; and an answer for a dismissed area,
+    /// whose generation [`forget`] removed, is discarded before it stores
+    /// anything (reviews of `#115`, rounds 2 and 3). `waiting` cannot say
+    /// this, being a set.
+    submitted: BTreeMap<u64, VecDeque<u64>>,
 }
 
 /// The most recent conversion the user asked for, and when they asked.
@@ -274,7 +277,7 @@ impl Ocr {
             words: BTreeMap::new(),
             selection: BTreeMap::new(),
             generation: BTreeMap::new(),
-            outstanding: BTreeMap::new(),
+            submitted: BTreeMap::new(),
         }
     }
 }
@@ -338,20 +341,25 @@ fn claims_clipboard(latest: &mut Option<Request>, id: u64) -> Option<Instant> {
     None
 }
 
-/// Counts one answer for `id` and says whether a newer submission of the same
-/// area is still outstanding, which makes this answer the superseded one.
-fn answered_but_superseded(outstanding: &mut BTreeMap<u64, u32>, id: u64) -> bool {
-    let remaining = match outstanding.get_mut(&id) {
-        Some(count) => {
-            *count = count.saturating_sub(1);
-            *count
-        }
-        None => 0,
+/// Takes the reading an answer for `id` belongs to off the front of its queue,
+/// and says whether that reading is still the latest one asked for.
+///
+/// `false` for a superseded reading (a newer one was asked for, whether or not
+/// it has reached the worker yet), and for an area with no queue or no
+/// generation, which is one that was dismissed: its answer must store nothing.
+fn answer_is_current(
+    submitted: &mut BTreeMap<u64, VecDeque<u64>>,
+    generation: &BTreeMap<u64, u64>,
+    id: u64,
+) -> bool {
+    let Some(queue) = submitted.get_mut(&id) else {
+        return false;
     };
-    if remaining == 0 {
-        outstanding.remove(&id);
+    let answered = queue.pop_front();
+    if queue.is_empty() {
+        submitted.remove(&id);
     }
-    remaining > 0
+    answered.is_some() && answered == generation.get(&id).copied()
 }
 
 static OCR: Mutex<Ocr> = Mutex::new(Ocr::new());
@@ -610,7 +618,11 @@ fn recognise(app: &AppHandle, id: AreaId, bounds: Rect, copies: bool) {
         match service.submit(RequestId::new(id.get()), frame) {
             Ok(()) => {
                 guard.waiting.insert(id.get());
-                *guard.outstanding.entry(id.get()).or_insert(0) += 1;
+                guard
+                    .submitted
+                    .entry(id.get())
+                    .or_default()
+                    .push_back(asked);
                 if !copies {
                     return;
                 }
@@ -672,7 +684,8 @@ pub(crate) fn pump(app: &AppHandle) {
             match outcome {
                 Outcome::Done { id, result } => {
                     guard.waiting.remove(&id.get());
-                    if answered_but_superseded(&mut guard.outstanding, id.get()) {
+                    let ocr = &mut *guard;
+                    if !answer_is_current(&mut ocr.submitted, &ocr.generation, id.get()) {
                         continue;
                     }
                     match result {
@@ -705,7 +718,8 @@ pub(crate) fn pump(app: &AppHandle) {
                 }
                 Outcome::Abandoned { id } => {
                     guard.waiting.remove(&id.get());
-                    if answered_but_superseded(&mut guard.outstanding, id.get()) {
+                    let ocr = &mut *guard;
+                    if !answer_is_current(&mut ocr.submitted, &ocr.generation, id.get()) {
                         continue;
                     }
                     // Its answer is never coming, so it must not keep holding
@@ -734,7 +748,7 @@ pub(crate) fn pump(app: &AppHandle) {
                     // guarantees is delivered first. This clears the residue of
                     // ids whose areas were dismissed in the meantime.
                     guard.waiting.clear();
-                    guard.outstanding.clear();
+                    guard.submitted.clear();
                     // And the promise with them: the worker is gone, so no
                     // outstanding conversion can still deliver text.
                     guard.latest = None;
@@ -819,7 +833,7 @@ pub(crate) fn forget(id: AreaId) {
     guard.words.remove(&id.get());
     guard.selection.remove(&id.get());
     guard.generation.remove(&id.get());
-    guard.outstanding.remove(&id.get());
+    guard.submitted.remove(&id.get());
     // The dismissed area also gives up the clipboard's promise. `pump` would
     // decline to copy it anyway -- `live_area_id` answers `None` for an area
     // that is gone -- but leaving the slot filled would make the *next*
@@ -927,17 +941,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_answer_with_a_newer_submission_outstanding_is_superseded() {
-        let mut outstanding = BTreeMap::new();
-        outstanding.insert(7, 2);
-        // The first of two answers: the second, newer, is still coming.
-        assert!(answered_but_superseded(&mut outstanding, 7));
-        // The last answer is the newest reading, and the count is gone.
-        assert!(!answered_but_superseded(&mut outstanding, 7));
-        assert!(!outstanding.contains_key(&7));
-        // An area with nothing recorded (a reading from before a stop) is not
-        // superseded and does not underflow.
-        assert!(!answered_but_superseded(&mut outstanding, 9));
+    fn only_an_answer_to_the_latest_reading_is_used() {
+        let mut submitted: BTreeMap<u64, VecDeque<u64>> = BTreeMap::new();
+        let mut generation: BTreeMap<u64, u64> = BTreeMap::new();
+
+        // Two readings of area 7 both in the worker: the older answer is
+        // superseded, the newer is used, and the queue is gone after it.
+        submitted.insert(7, VecDeque::from([1, 2]));
+        generation.insert(7, 2);
+        assert!(!answer_is_current(&mut submitted, &generation, 7));
+        assert!(answer_is_current(&mut submitted, &generation, 7));
+        assert!(!submitted.contains_key(&7));
+
+        // Round 3's first case: reading 3 was ASKED FOR (the area moved) but is
+        // still being captured, so only reading 2 is in the worker. Its answer
+        // is already superseded.
+        submitted.insert(7, VecDeque::from([2]));
+        generation.insert(7, 3);
+        assert!(!answer_is_current(&mut submitted, &generation, 7));
+
+        // Round 3's second case: the area was dismissed, so `forget` removed
+        // its generation and queue. A late answer stores nothing.
+        submitted.insert(8, VecDeque::from([1]));
+        assert!(!answer_is_current(&mut submitted, &generation, 8));
+        assert!(!answer_is_current(&mut submitted, &generation, 9));
     }
 
     #[test]
