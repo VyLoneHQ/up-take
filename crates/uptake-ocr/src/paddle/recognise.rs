@@ -126,25 +126,37 @@ impl DecodedText {
             return Vec::new();
         }
         let total = self.timesteps as f32;
-        let mut spans = Vec::new();
+        let mut spans: Vec<WordSpan> = Vec::new();
         let mut current = String::new();
-        let mut start = 0.0_f32;
+        // The whitespace run since the last word character: its first and last
+        // timesteps. A boundary is the middle of the WHOLE run, so two spaces
+        // in a row still give one boundary and no gap (review of `#114`).
+        let mut gap: Option<(usize, usize)> = None;
         for character in &self.characters {
             if character.text.chars().all(char::is_whitespace) {
-                let middle = (character.first + character.last) as f32 / 2.0 / total;
-                if !current.is_empty() {
-                    spans.push(WordSpan {
-                        text: std::mem::take(&mut current),
-                        start,
-                        end: middle,
-                    });
-                }
-                start = middle;
-            } else {
-                current.push_str(&character.text);
+                gap = Some(match gap {
+                    Some((first, _)) => (first, character.last),
+                    None => (character.first, character.last),
+                });
+                continue;
             }
+            if let Some((first, last)) = gap.take()
+                && !current.is_empty()
+            {
+                let middle = (first + last) as f32 / 2.0 / total;
+                let start = spans.last().map_or(0.0, |previous| previous.end);
+                spans.push(WordSpan {
+                    text: std::mem::take(&mut current),
+                    start,
+                    end: middle,
+                });
+            }
+            current.push_str(&character.text);
         }
         if !current.is_empty() {
+            // Leading and trailing whitespace are not boundaries: the first word
+            // starts at the crop's left edge and the last ends at its right.
+            let start = spans.last().map_or(0.0, |previous| previous.end);
             spans.push(WordSpan {
                 text: current,
                 start,
@@ -542,6 +554,49 @@ mod tests {
         assert!((words[0].end - 0.5).abs() < f32::EPSILON);
         assert!((words[1].start - 0.5).abs() < f32::EPSILON);
         assert!((words[1].end - 1.0).abs() < f32::EPSILON);
+    }
+
+    /// Checks that `words` covers `[0, 1]` with no gap and no overlap.
+    fn assert_covers_the_line(words: &[WordSpan]) {
+        assert!((words[0].start - 0.0).abs() < f32::EPSILON, "{words:?}");
+        assert!(
+            (words[words.len() - 1].end - 1.0).abs() < f32::EPSILON,
+            "{words:?}"
+        );
+        for pair in words.windows(2) {
+            assert!(
+                (pair[0].end - pair[1].start).abs() < f32::EPSILON,
+                "{words:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn leading_and_trailing_spaces_do_not_move_the_line_ends() {
+        let dict = dictionary();
+        // [space] a b [space] b a [space], over 10 timesteps.
+        let decoded = ctc_decode(&logits(&[5, 1, 2, 0, 5, 0, 2, 1, 0, 5], 6), 6, &dict);
+        let words = decoded.words();
+        assert_eq!(
+            words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>(),
+            vec!["ab", "ba"]
+        );
+        assert_covers_the_line(&words);
+    }
+
+    #[test]
+    fn two_spaces_in_a_row_are_one_boundary_with_no_gap() {
+        let dict = dictionary();
+        // a [space] blank [space] b: two separate space runs at 1 and 3.
+        let decoded = ctc_decode(&logits(&[1, 5, 0, 5, 2, 0], 6), 6, &dict);
+        let words = decoded.words();
+        assert_eq!(
+            words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+        assert_covers_the_line(&words);
+        // The boundary is the middle of the whole run, 1..=3, so 2 / 6.
+        assert!((words[0].end - 2.0 / 6.0).abs() < f32::EPSILON);
     }
 
     #[test]
