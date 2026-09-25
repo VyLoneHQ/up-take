@@ -25,10 +25,31 @@ pub const REC_HEIGHT: u32 = 48;
 
 /// Widest crop the recogniser is given, in pixels.
 ///
-/// A very long line is scaled down to fit rather than truncated: losing the
-/// right-hand half of a sentence silently is worse than recognising all of it
-/// slightly smaller.
-pub const REC_MAX_WIDTH: u32 = 640;
+/// **Past this width the crop is squeezed, not shrunk**: the height is fixed at
+/// [`REC_HEIGHT`], so a clamp narrows the characters and leaves them just as
+/// tall. The model reads squeezed text as noise, the line's confidence falls
+/// under `drop_score`, and the whole line vanishes from the result.
+///
+/// It was `640` until 2026-09-25, which allowed a 13:1 box. That is a 16 px
+/// line about 550 px wide, and ordinary paragraphs are wider: `BACKLOG.md`
+/// `I-428` is the founder losing the two widest lines of a German paragraph
+/// (about 830 px) on the rig. It was not German. Rendered English and German
+/// lines both read exactly up to about 520 px and came back empty from about
+/// 590 px, at 13 and 16 px, on a grey or a white background. The old value
+/// arrived with the first port (`1.11`) and was never measured.
+///
+/// `3200` is a 66:1 box. Measured 2026-09-25 with `ocr_smoke`: every rendered
+/// line from 200 to 2855 px wide at 12, 13, 14 and 16 px read exactly (the
+/// old value read none past 590 px), and recognising a monitor-wide line went
+/// from about 45 ms to 60 to 100 ms. The 192 cards of `ocr_accuracy` read the
+/// same except one: `invoice_mono_28px` now reads `Tota1` for `Total`. Its box
+/// is 17.5:1, so the old clamp squeezed it to 76 % and happened to read the
+/// Consolas `l` correctly; at its true width the model takes it for a `1`.
+///
+/// A line wider than this still gets squeezed, which is gentler than losing it
+/// only while the squeeze is mild. Splitting such a line into overlapping
+/// pieces would remove the limit; nothing measured so far needs that.
+pub const REC_MAX_WIDTH: u32 = 3200;
 
 /// One recognised line and how sure the model was.
 #[derive(Debug, Clone, PartialEq)]
@@ -508,6 +529,16 @@ mod tests {
         // A 4:1 box at 48 px tall should be about 192 px wide.
         let input = rectify(&bitmap, &axis_aligned(5.0, 5.0, 80.0, 20.0)).unwrap();
         assert_eq!(input.width, REC_HEIGHT * 4);
+    }
+
+    /// `I-428`: a paragraph line is far wider than 13:1, and the old 640 px cap
+    /// squeezed it until the recogniser read it as noise and dropped it. A 30:1
+    /// box is a 16 px line about 700 px wide, and it must keep its full width.
+    #[test]
+    fn an_ordinary_paragraph_line_keeps_its_full_width() {
+        let bitmap = frame(700, 100, [128, 128, 128, 255]);
+        let input = rectify(&bitmap, &axis_aligned(5.0, 5.0, 600.0, 20.0)).unwrap();
+        assert_eq!(input.width, REC_HEIGHT * 30);
     }
 
     #[test]
