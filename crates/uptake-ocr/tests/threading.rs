@@ -99,6 +99,7 @@ impl Engine for GatedEngine {
         Ok(Recognition::from_lines(vec![vec![TextBlock {
             text: format!("width {}", frame.width()),
             bounds: Rect::new(0, 0, frame.width(), frame.height()),
+            words: Vec::new(),
         }]]))
     }
 }

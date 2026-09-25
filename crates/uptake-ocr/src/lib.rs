@@ -44,7 +44,7 @@
 pub mod engine;
 pub mod service;
 
-pub use engine::{Engine, EngineError, Recognition, TextBlock};
+pub use engine::{Engine, EngineError, Recognition, TextBlock, Word};
 // `StopReason` joined this list with roadmap 1.26, which gave the crate its
 // first host: `Outcome::Stopped` carries one, so a caller that matches on an
 // outcome cannot name the thing it is holding without it. Its absence was an

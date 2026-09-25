@@ -35,7 +35,7 @@ use ort::value::TensorRef;
 use uptake_core::bitmap::RgbaBitmap;
 use uptake_core::geometry::Rect;
 
-use crate::engine::{Engine, EngineError, Recognition, TextBlock};
+use crate::engine::{Engine, EngineError, Recognition, TextBlock, Word};
 use detect::{DetectorOptions, ProbabilityMap};
 use reading_order::Placed;
 use recognise::{CharacterDictionary, DecodedText};
@@ -575,6 +575,7 @@ impl Engine for PaddleEngine {
                 continue;
             }
             let (min_x, min_y, max_x, max_y) = found.quad.bounds();
+            let words = place_words(&decoded, &found.quad);
             placed.push(Placed {
                 top: min_y,
                 bottom: max_y,
@@ -582,12 +583,58 @@ impl Engine for PaddleEngine {
                 payload: TextBlock {
                     text,
                     bounds: rect_from_bounds(min_x, min_y, max_x, max_y),
+                    words,
                 },
             });
         }
 
         Ok(assemble(placed))
     }
+}
+
+/// Places a decoded line's words back onto the frame (roadmap `1.40`).
+///
+/// A word's span is a fraction of the crop's width, and the crop was sampled
+/// from the quad by [`recognise::rectify`]'s bilinear map: position `u` along
+/// the crop is `u` of the way along the quad's top edge and, equally, along
+/// its bottom edge. So a word is the quad cut at its two fractions, which keeps
+/// a tilted line's words tilted with it; the frame-local bounds are that cut's
+/// bounding box, rounded in [`rect_from_bounds`] like every other rectangle
+/// here.
+fn place_words(decoded: &DecodedText, quad: &quad::Quad) -> Vec<Word> {
+    let [top_left, top_right, bottom_right, bottom_left] = quad.corners;
+    let along = |from: quad::PointF, to: quad::PointF, u: f32| {
+        (
+            from.x.mul_add(1.0 - u, to.x * u),
+            from.y.mul_add(1.0 - u, to.y * u),
+        )
+    };
+    decoded
+        .words()
+        .into_iter()
+        .map(|span| {
+            let corners = [
+                along(top_left, top_right, span.start),
+                along(top_left, top_right, span.end),
+                along(bottom_left, bottom_right, span.start),
+                along(bottom_left, bottom_right, span.end),
+            ];
+            let min_x = corners.iter().map(|c| c.0).fold(f32::INFINITY, f32::min);
+            let min_y = corners.iter().map(|c| c.1).fold(f32::INFINITY, f32::min);
+            let max_x = corners
+                .iter()
+                .map(|c| c.0)
+                .fold(f32::NEG_INFINITY, f32::max);
+            let max_y = corners
+                .iter()
+                .map(|c| c.1)
+                .fold(f32::NEG_INFINITY, f32::max);
+            Word {
+                text: span.text,
+                bounds: rect_from_bounds(min_x, min_y, max_x, max_y),
+            }
+        })
+        .collect()
 }
 
 /// Groups placed blocks into visual lines and builds the [`Recognition`].
@@ -640,6 +687,59 @@ fn rect_from_bounds(min_x: f32, min_y: f32, max_x: f32, max_y: f32) -> Rect {
 mod tests {
     use super::*;
 
+    /// A decoded "ab ba" whose boundary sits at the middle of the line.
+    fn two_words() -> DecodedText {
+        let character = |text: &str, first: usize, last: usize| recognise::DecodedCharacter {
+            text: text.to_owned(),
+            first,
+            last,
+        };
+        DecodedText {
+            text: "ab ba".to_owned(),
+            confidence: 1.0,
+            characters: vec![
+                character("a", 0, 0),
+                character("b", 1, 1),
+                character(" ", 4, 6),
+                character("b", 7, 7),
+                character("a", 8, 8),
+            ],
+            timesteps: 10,
+        }
+    }
+
+    #[test]
+    fn words_split_an_upright_box_at_the_space() {
+        let quad = quad::Quad::new([
+            quad::PointF::new(100.0, 50.0),
+            quad::PointF::new(300.0, 50.0),
+            quad::PointF::new(300.0, 70.0),
+            quad::PointF::new(100.0, 70.0),
+        ]);
+        let words = place_words(&two_words(), &quad);
+        assert_eq!(words.len(), 2);
+        assert_eq!(words[0].text, "ab");
+        assert_eq!(words[0].bounds, Rect::new(100, 50, 100, 20));
+        assert_eq!(words[1].text, "ba");
+        assert_eq!(words[1].bounds, Rect::new(200, 50, 100, 20));
+    }
+
+    #[test]
+    fn a_tilted_line_cuts_along_its_own_edges_not_the_frames_axes() {
+        // The box rises 20 px across its 200 px, as a rotated line of text
+        // does. Cutting it at its middle must follow the tilt: the left word's
+        // box spans the lower half of the rise and the right word's the upper.
+        let quad = quad::Quad::new([
+            quad::PointF::new(0.0, 40.0),
+            quad::PointF::new(200.0, 20.0),
+            quad::PointF::new(200.0, 40.0),
+            quad::PointF::new(0.0, 60.0),
+        ]);
+        let words = place_words(&two_words(), &quad);
+        assert_eq!(words[0].bounds, Rect::new(0, 30, 100, 30));
+        assert_eq!(words[1].bounds, Rect::new(100, 20, 100, 30));
+    }
+
     fn path(text: &str) -> PathBuf {
         PathBuf::from(text)
     }
@@ -691,6 +791,7 @@ mod tests {
             payload: TextBlock {
                 text: text.to_owned(),
                 bounds: rect_from_bounds(left, top, left + 40.0, bottom),
+                words: Vec::new(),
             },
         }
     }

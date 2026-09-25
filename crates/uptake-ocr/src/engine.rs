@@ -124,6 +124,24 @@ pub struct TextBlock {
     /// project's number one bug source, which is the argument for keeping this
     /// conversion at the call site that already knows the area's bounds.
     pub bounds: Rect,
+    /// The block's words, left to right, each with its own frame-local bounds.
+    ///
+    /// Roadmap `1.40`, for `ADR-0046`'s in-place OCR area: a selection is made
+    /// of words, so the page must know where each one is. Neighbouring words
+    /// meet at the middle of the space between them, so together they cover
+    /// the block with no gap. **Empty when the engine cannot place words**, and
+    /// a caller treats that as one word spanning [`TextBlock::bounds`] rather
+    /// than as no text.
+    pub words: Vec<Word>,
+}
+
+/// One word of a [`TextBlock`] and where it sat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Word {
+    /// The word, with no whitespace in it.
+    pub text: String,
+    /// Where it sat, in frame-local coordinates, like [`TextBlock::bounds`].
+    pub bounds: Rect,
 }
 
 /// A recogniser. `paddle::PaddleEngine` implements this with PP-OCRv6_small.
@@ -234,6 +252,7 @@ mod tests {
         TextBlock {
             text: text.to_owned(),
             bounds: Rect::new(x, y, 40, 20),
+            words: Vec::new(),
         }
     }
 
