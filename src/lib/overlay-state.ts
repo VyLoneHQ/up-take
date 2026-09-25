@@ -225,6 +225,117 @@ export interface OcrPayload {
    * states nothing can draw.
    */
   detail: string | null;
+  /**
+   * The words, in reading order, when `status` is `text`; empty otherwise
+   * (roadmap 1.41). An OCR area that reads in place draws from these.
+   */
+  words: OcrWordPayload[];
+}
+
+/**
+ * One recognised word: Rust's `OcrWordPayload`.
+ *
+ * `outline` is the word's four corners, clockwise from the top-left, as
+ * `[x, y]` pairs in **area-local physical pixels**: `(0, 0)` is the area's
+ * top-left when it was read.
+ */
+export interface OcrWordPayload {
+  text: string;
+  line: number;
+  outline: [number, number][];
+}
+
+/**
+ * The payload of `overlay://ocr-selection`: which words of one area are
+ * selected, as the first and last index into its latest `words`, or `null`.
+ */
+export interface OcrSelectionPayload {
+  id: number;
+  range: [number, number] | null;
+}
+
+/**
+ * Where each word sits inside its area, in CSS pixels (roadmap 1.41).
+ *
+ * The box around each outline, divided by the WebView's own scale (ADR-0011)
+ * and shifted by `inset`, the area's border width: an absolutely positioned
+ * child is measured from inside the border, while the words were measured from
+ * the area's outer edge.
+ */
+export function ocrWordBoxes(
+  words: readonly OcrWordPayload[],
+  dpr: number,
+  inset: number,
+): CssRect[] {
+  return words.map((word) => boxOf([word], dpr, inset));
+}
+
+/**
+ * The selection drawn as ONE connected band per line, gaps included, the way
+ * a phone draws a text selection (`ADR-0046` decision 3, the founder's
+ * reference being Samsung's).
+ *
+ * Each band spans from the first selected word of its line to the last, top
+ * to bottom over those words. `range` may be in either order.
+ */
+export function ocrSelectionBands(
+  words: readonly OcrWordPayload[],
+  range: readonly [number, number] | null,
+  dpr: number,
+  inset: number,
+): CssRect[] {
+  if (range === null || words.length === 0) return [];
+  const first = Math.max(0, Math.min(range[0], range[1]));
+  const last = Math.min(words.length - 1, Math.max(range[0], range[1]));
+  const byLine = new Map<number, OcrWordPayload[]>();
+  for (const word of words.slice(first, last + 1)) {
+    const line = byLine.get(word.line);
+    if (line) line.push(word);
+    else byLine.set(word.line, [word]);
+  }
+  return [...byLine.values()].map((line) => boxOf(line, dpr, inset));
+}
+
+/** The CSS box around every corner of `words`. */
+function boxOf(
+  words: readonly OcrWordPayload[],
+  dpr: number,
+  inset: number,
+): CssRect {
+  const xs = words.flatMap((word) => word.outline.map(([x]) => x));
+  const ys = words.flatMap((word) => word.outline.map(([, y]) => y));
+  const left = Math.min(...xs);
+  const top = Math.min(...ys);
+  return {
+    x: left / dpr - inset,
+    y: top / dpr - inset,
+    width: (Math.max(...xs) - left) / dpr,
+    height: (Math.max(...ys) - top) / dpr,
+  };
+}
+
+/** `Ctrl+C` in Placement: copy the OCR area under the cursor (roadmap 1.41). */
+export function isCopyKey(
+  event: Pick<KeyboardEvent, 'key' | 'ctrlKey' | 'altKey' | 'metaKey'>,
+): boolean {
+  return (
+    event.ctrlKey &&
+    !event.altKey &&
+    !event.metaKey &&
+    event.key.toLowerCase() === 'c'
+  );
+}
+
+/** `Ctrl+A` in Placement: select every word of the OCR area under the cursor. */
+export function isSelectAllKey(
+  event: Pick<KeyboardEvent, 'key' | 'ctrlKey' | 'altKey' | 'metaKey'>,
+): boolean {
+  return (
+    event.ctrlKey &&
+    !event.altKey &&
+    !event.metaKey &&
+    event.key.toLowerCase() === 'a'
+  );
 }
 
 /**
@@ -1010,6 +1121,28 @@ export async function reportFreezeLatency(
  * {@link escapeOverlay} does not: an unhandled rejection in a key handler is a
  * silent failure the user reads as the overlay having hung.
  */
+/** Asks Rust to copy the OCR area under the cursor (roadmap 1.41). */
+export async function copyFocusedOcr(invoke: Invoke): Promise<boolean> {
+  try {
+    await invoke('overlay_ocr_copy_focused');
+    return true;
+  } catch (error) {
+    console.error('Failed to copy the OCR area:', error);
+    return false;
+  }
+}
+
+/** Asks Rust to select every word of the OCR area under the cursor. */
+export async function selectAllFocusedOcr(invoke: Invoke): Promise<boolean> {
+  try {
+    await invoke('overlay_ocr_select_all_focused');
+    return true;
+  } catch (error) {
+    console.error('Failed to select the OCR area:', error);
+    return false;
+  }
+}
+
 export async function dismissFocusedArea(invoke: Invoke): Promise<boolean> {
   try {
     await invoke('overlay_dismiss_focused');

@@ -541,9 +541,13 @@ enum CursorShape {
     /// by overriding again with each slot's genuine cursor, because the alternative
     /// (`SPI_SETCURSORS`) measures 7.9 ms and broadcasts `WM_SETTINGCHANGE`
     /// desktop-wide, which is unaffordable on a per-hover path. Nothing else in
-    /// this enum is a "restore" value; this one exists only to be restored to.
+    /// this enum is a "restore" value but [`Self::IBeam`]; this one exists only
+    /// to be restored to.
     Arrow,
-    /// **The user's own text caret**, the second restore-only value.
+    /// **The user's own text caret.** Restore-only until roadmap `1.41`, which
+    /// also SHOWS it in Placement over a word of an in-place OCR area and while
+    /// a word selection is being dragged: the same caret the user sees over
+    /// text everywhere else, because what is under the pointer is text.
     ///
     /// LIVING claims `OCR_IBEAM` while the pointer rests on an area, so it needs
     /// the genuine caret to hand back on the way out. Restoring that slot to
@@ -1869,6 +1873,12 @@ fn pump_hover(app: &AppHandle, state: &mut PumpState) {
         )
     } else {
         match overlay::area_handle_at(app, point) {
+            // Over a word of an in-place OCR area, the I-beam: that is where
+            // a press selects rather than moves (roadmap 1.41), and the cursor
+            // is the only thing that says so before the press.
+            Some((id, bounds, Handle::Body)) if selects_at(id, bounds, point) => {
+                (CursorShape::IBeam, Some(id.get()))
+            }
             Some((id, _, handle)) => (CursorShape::for_handle(handle), Some(id.get())),
             None => (CursorShape::Cross, None),
         }
@@ -3307,6 +3317,16 @@ fn reread_in_place_ocr(app: &AppHandle, id: AreaId) {
     if let Some(bounds) = overlay::area_bounds(app, id) {
         crate::ocr::recognise_into_area(app, id, bounds);
     }
+}
+
+/// Whether a press at `point` on `id`'s body would start a word selection.
+fn selects_at(id: AreaId, bounds: Rect, point: Point) -> bool {
+    crate::settings::current().ocr_behaviour == crate::settings::OcrBehaviour::InPlace
+        && crate::ocr::word_at(
+            id,
+            Point::new(point.x - bounds.origin.x, point.y - bounds.origin.y),
+        )
+        .is_some()
 }
 
 /// A press on an area's body: a word selection if it landed on a word of an OCR

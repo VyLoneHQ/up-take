@@ -447,8 +447,7 @@ export function panes(
                   label: say('settings.ocr_behaviour.rendered'),
                 },
               ],
-              set: (value) =>
-                with_({ ocr_behaviour: value as OcrBehaviour }),
+              set: (value) => with_({ ocr_behaviour: value as OcrBehaviour }),
             },
           ],
         },

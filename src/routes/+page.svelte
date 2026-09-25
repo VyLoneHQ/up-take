@@ -23,6 +23,7 @@ import {
   armedTypeForKey,
   type CoachPayload,
   type CoachView,
+  copyFocusedOcr,
   dismissFocusedArea,
   escapeOverlay,
   type FlashPayload,
@@ -31,8 +32,10 @@ import {
   frameKey,
   frozenFrameKeys,
   type HoverPayload,
+  isCopyKey,
   isFreezeKey,
   isRemoveKey,
+  isSelectAllKey,
   kindLabels,
   type MenuFrame,
   type MenuPayload,
@@ -40,9 +43,12 @@ import {
   menuFrameCss,
   monitorFramesCss,
   type OcrPayload,
+  type OcrSelectionPayload,
   type Origin,
   type OverlayStateName,
   ocrLine,
+  ocrSelectionBands,
+  ocrWordBoxes,
   type PhysRect,
   type PinPayload,
   physRectsToCss,
@@ -52,13 +58,14 @@ import {
   reportLatency,
   type SelectionPayload,
   type StatePayload,
+  selectAllFocusedOcr,
   showsMenu,
   showsTint,
   stillsFromWire,
   toggleFreeze,
 } from '$lib/overlay-state';
 import { type CssRect, isDismissKey } from '$lib/regions';
-import type { Settings } from '$lib/settings-model';
+import type { OcrBehaviour, Settings } from '$lib/settings-model';
 import { isLanguage, type Language, text } from '$lib/strings';
 
 // The two appearance settings (roadmap 1.14). Held as percentages, exactly as
@@ -151,6 +158,14 @@ let flashes = $state(new SvelteMap<number, number>());
 // A failure and a page of recognised text want different treatment, and both
 // are `detail`.
 let recognitions = $state(new SvelteMap<number, OcrPayload>());
+// Roadmap 1.41 (ADR-0046): how an OCR area shows what it read, and which words
+// of each area are selected. The selection is made by the hook in Rust, word by
+// word, and announced here only so the band can be drawn.
+let ocrBehaviour = $state<OcrBehaviour>('in_place');
+let ocrSelections = $state(new SvelteMap<number, [number, number]>());
+// The area's border width, which an absolutely positioned child is measured
+// from inside of. Kept beside `.area`'s own `border` in the stylesheet.
+const AREA_BORDER_CSS = 1.5;
 // The WebView owns its scale (ADR-0011); refreshed on every state event in case
 // the overlay moved to a monitor at a different DPI.
 let dpr = $state(1);
@@ -286,6 +301,19 @@ function onKeydown(event: KeyboardEvent) {
     void dismissFocusedArea(invoke);
     return;
   }
+  // Roadmap 1.41: copy the OCR area under the cursor, or select all of it.
+  // Rust decides which area and whether it has words; over anything else the
+  // keys do nothing.
+  if (isCopyKey(event)) {
+    event.preventDefault();
+    void copyFocusedOcr(invoke);
+    return;
+  }
+  if (isSelectAllKey(event)) {
+    event.preventDefault();
+    void selectAllFocusedOcr(invoke);
+    return;
+  }
   // A direct key arms the type of the next drag (ADR-0018 §1). Rust owns
   // whether that is legal in the current state, so this fires the intent and
   // lets it decide — the same division as every other key here.
@@ -356,6 +384,9 @@ onMount(() => {
     for (const id of recognitions.keys()) {
       if (!live.has(id)) recognitions.delete(id);
     }
+    for (const id of ocrSelections.keys()) {
+      if (!live.has(id)) ocrSelections.delete(id);
+    }
   });
   const unlistenActiveMonitor = listen<ActiveMonitorPayload>(
     'overlay://active-monitor',
@@ -386,7 +417,18 @@ onMount(() => {
     // Keyed by id, so a re-recognition of the same area overwrites rather than
     // accumulating.
     recognitions.set(event.payload.id, event.payload);
+    // A new reading replaces the words, so a selection over the old ones means
+    // nothing any more. Rust drops its own the same way.
+    ocrSelections.delete(event.payload.id);
   });
+  const unlistenOcrSelection = listen<OcrSelectionPayload>(
+    'overlay://ocr-selection',
+    (event) => {
+      const { id, range } = event.payload;
+      if (range === null) ocrSelections.delete(id);
+      else ocrSelections.set(id, range);
+    },
+  );
   const unlistenSelection = listen<SelectionPayload>(
     'placement://selection',
     (event) => {
@@ -422,6 +464,7 @@ onMount(() => {
     unlistenFlash,
     unlistenPin,
     unlistenOcr,
+    unlistenOcrSelection,
     unlistenSelection,
     unlistenHover,
     unlistenMenu,
@@ -433,6 +476,7 @@ onMount(() => {
     listen<Settings>('settings://changed', (event) => {
       areaOpacityPercent = event.payload.area_opacity_percent;
       filterStrengthPercent = event.payload.filter_strength_percent;
+      ocrBehaviour = event.payload.ocr_behaviour;
     }),
     // A freeze asking the page to take its drawing on the covered monitors out
     // of the shot (ADR-0019 decision 6, I-426). Rust waits for the answer and
@@ -494,6 +538,7 @@ onMount(() => {
       const stored = await invoke<Settings>('settings_read');
       areaOpacityPercent = stored.area_opacity_percent;
       filterStrengthPercent = stored.filter_strength_percent;
+      ocrBehaviour = stored.ocr_behaviour;
     } catch {
       // The shipped defaults stay. An unreadable setting is never a reason
       // not to draw, which is the same rule the language above follows.
@@ -671,15 +716,49 @@ onMount(() => {
                    2026-09-03 and could only report the first line of an error
                    (BACKLOG.md I-353). The fade does not make the rest
                    reachable; resizing the area does. It says there is a rest. -->
-              <div
-                class="ocr"
-                class:working={recognition.status === 'working'}
-                class:problem={recognition.status === 'unavailable' ||
-                  recognition.status === 'failed'}
-                use:overflowFade
-              >
-                {ocrLine(language, recognition)}
-              </div>
+              {#if ocrBehaviour === 'in_place'}
+                <!-- Roadmap 1.41, ADR-0046: the screen under the area stays
+                     visible. Each word gets a faint mark where it sits, and a
+                     selection is one connected band per line (Samsung's text
+                     selection is the founder's reference). Every element is
+                     `pointer-events: none`: the hook selects, in Rust, and the
+                     page only draws what it is told. -->
+                {#if recognition.status === 'text'}
+                  {#each ocrWordBoxes(recognition.words, dpr, AREA_BORDER_CSS) as box, index (index)}
+                    <span
+                      class="ocr-word"
+                      style="transform: translate({box.x}px, {box.y}px); width: {box.width}px; height: {box.height}px"
+                    ></span>
+                  {/each}
+                  {#each ocrSelectionBands(recognition.words, ocrSelections.get(area.id) ?? null, dpr, AREA_BORDER_CSS) as band, index (index)}
+                    <span
+                      class="ocr-band"
+                      style="transform: translate({band.x}px, {band.y}px); width: {band.width}px; height: {band.height}px"
+                    ></span>
+                  {/each}
+                {:else}
+                  <!-- Reading, nothing found, or a problem: a small label in
+                       the corner rather than a panel over the screen, which
+                       in-place reading exists not to cover. -->
+                  <span
+                    class="ocr-status"
+                    class:problem={recognition.status === 'unavailable' ||
+                      recognition.status === 'failed'}
+                  >
+                    {ocrLine(language, recognition)}
+                  </span>
+                {/if}
+              {:else}
+                <div
+                  class="ocr"
+                  class:working={recognition.status === 'working'}
+                  class:problem={recognition.status === 'unavailable' ||
+                    recognition.status === 'failed'}
+                  use:overflowFade
+                >
+                  {ocrLine(language, recognition)}
+                </div>
+              {/if}
             {/if}
           {/if}
           {#if area.zoom > 1}
@@ -1081,6 +1160,47 @@ onMount(() => {
    `pointer-events: none` like every other piece of area chrome. The overlay is
    click-through (ADR-0016) and the hook hit-tests Rust-side rectangles; a DOM
    element that took the pointer would be one the hook does not know about. */
+/* Roadmap 1.41, ADR-0046: an OCR area that reads in place. A word's mark is a
+   faint underline so the text above it stays exactly as the app drew it; the
+   selection is a translucent band over whole runs of words, one per line,
+   in the areas' own blue. Both are positioned by `transform` from the area's
+   inside edge, which is what `ocrWordBoxes` and `ocrSelectionBands` return. */
+.ocr-word,
+.ocr-band {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+}
+.ocr-word {
+  box-shadow: inset 0 -2px 0 rgba(120, 180, 255, 0.45);
+  background: rgba(120, 180, 255, 0.06);
+  border-radius: 2px;
+}
+.ocr-band {
+  background: rgba(90, 150, 255, 0.4);
+  border-radius: 3px;
+}
+.ocr-status {
+  position: absolute;
+  left: 4px;
+  top: 4px;
+  max-width: calc(100% - 8px);
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: rgba(12, 14, 18, 0.82);
+  color: rgba(244, 246, 250, 0.96);
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+.ocr-status.problem {
+  color: #f3c969;
+}
+
 .ocr {
   position: absolute;
   inset: 0;
