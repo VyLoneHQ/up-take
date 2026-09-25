@@ -9,7 +9,7 @@
 use std::fmt;
 
 use uptake_core::bitmap::RgbaBitmap;
-use uptake_core::geometry::Rect;
+use uptake_core::geometry::{Point, Rect};
 
 /// One run of recognition over one frame.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -128,8 +128,11 @@ pub struct TextBlock {
     ///
     /// Roadmap `1.40`, for `ADR-0046`'s in-place OCR area: a selection is made
     /// of words, so the page must know where each one is. Neighbouring words
-    /// meet at the middle of the space between them, so together they cover
-    /// the block with no gap. **Empty when the engine cannot place words**, and
+    /// meet at the middle of the space between them: their [`Word::outline`]s
+    /// share that edge, so together they cover the block's box with no gap and
+    /// no overlap. **Their `bounds` do not have that property on a rotated
+    /// line** (see [`Word::bounds`]). **Empty when the engine cannot place
+    /// words**, and
     /// a caller treats that as one word spanning [`TextBlock::bounds`] rather
     /// than as no text.
     pub words: Vec<Word>,
@@ -140,7 +143,20 @@ pub struct TextBlock {
 pub struct Word {
     /// The word, with no whitespace in it.
     pub text: String,
-    /// Where it sat, in frame-local coordinates, like [`TextBlock::bounds`].
+    /// The word's own four corners, clockwise from the top-left, frame-local.
+    ///
+    /// The detector's box cut at the word's two ends, so it follows a rotated
+    /// line. **This is what to hit-test and draw a selection against**: two
+    /// neighbours' outlines share their cut edge exactly, because both round
+    /// the same two points.
+    pub outline: [Point; 4],
+    /// The axis-aligned box around [`Word::outline`], like [`TextBlock::bounds`].
+    ///
+    /// ⚠️ **On a rotated line two neighbours' `bounds` OVERLAP**, because each
+    /// box grows to contain a slanted edge (found by the independent review of
+    /// `#114`, round 2). On upright text, which is nearly all screen text, they
+    /// only meet. Use it for a quick reject or a layout estimate, never to
+    /// decide which word a point belongs to.
     pub bounds: Rect,
 }
 
