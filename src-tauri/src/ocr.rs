@@ -224,6 +224,14 @@ struct Ocr {
     /// The worker answers in submission order, so refusing a stale submission
     /// is enough for the last answer to be the newest reading.
     generation: BTreeMap<u64, u64>,
+    /// How many submissions of each area the worker has not answered.
+    ///
+    /// The worker answers one area's submissions in order, so an answer that
+    /// arrives while another submission of the SAME area is still outstanding
+    /// is the older reading, already superseded: it is not drawn and it does
+    /// not copy (review of `#115`, round 2). `waiting` cannot say this, being
+    /// a set.
+    outstanding: BTreeMap<u64, u32>,
 }
 
 /// The most recent conversion the user asked for, and when they asked.
@@ -266,6 +274,7 @@ impl Ocr {
             words: BTreeMap::new(),
             selection: BTreeMap::new(),
             generation: BTreeMap::new(),
+            outstanding: BTreeMap::new(),
         }
     }
 }
@@ -327,6 +336,22 @@ fn claims_clipboard(latest: &mut Option<Request>, id: u64) -> Option<Instant> {
         return latest.take().map(|request| request.started);
     }
     None
+}
+
+/// Counts one answer for `id` and says whether a newer submission of the same
+/// area is still outstanding, which makes this answer the superseded one.
+fn answered_but_superseded(outstanding: &mut BTreeMap<u64, u32>, id: u64) -> bool {
+    let remaining = match outstanding.get_mut(&id) {
+        Some(count) => {
+            *count = count.saturating_sub(1);
+            *count
+        }
+        None => 0,
+    };
+    if remaining == 0 {
+        outstanding.remove(&id);
+    }
+    remaining > 0
 }
 
 static OCR: Mutex<Ocr> = Mutex::new(Ocr::new());
@@ -492,6 +517,24 @@ fn resolve_config() -> Result<PaddleConfig, String> {
 /// something the instant it is drawn rather than sitting blank for the several
 /// hundred milliseconds a cold load takes.
 pub(crate) fn recognise_into_area(app: &AppHandle, id: AreaId, bounds: Rect) {
+    recognise(app, id, bounds, true);
+}
+
+/// Reads `id` again because it MOVED, not because the user asked for text
+/// (roadmap `1.41`: an in-place area's marks must describe what it covers now).
+///
+/// **It never copies.** OCR's automatic copy is a promise to a conversion the
+/// user asked for; a move is not one, and a move that replaced the clipboard
+/// would destroy whatever the user had copied last (review of `#115`, round
+/// 2). It also withdraws the promise an earlier reading of this area still
+/// holds, because that reading is now of pixels the area no longer covers.
+pub(crate) fn reread_area(app: &AppHandle, id: AreaId, bounds: Rect) {
+    recognise(app, id, bounds, false);
+}
+
+/// The one reading path. `copies` says whether this reading may take the
+/// clipboard's promise.
+fn recognise(app: &AppHandle, id: AreaId, bounds: Rect, copies: bool) {
     // The clock for `quality-bars.md` §1's *selection release → OCR text on
     // clipboard* row starts here, on the caller's thread, before the frame is
     // captured and before the engine is built. Anything later would exclude
@@ -508,6 +551,14 @@ pub(crate) fn recognise_into_area(app: &AppHandle, id: AreaId, bounds: Rect) {
             .get(&id.get())
             .map_or(1, |n| n.wrapping_add(1));
         guard.generation.insert(id.get(), next);
+        if !copies
+            && guard
+                .latest
+                .as_ref()
+                .is_some_and(|held| held.id == id.get())
+        {
+            guard.latest = None;
+        }
         next
     };
     crate::overlay::emit_ocr(app, id, Status::Working, None, &[]);
@@ -559,6 +610,10 @@ pub(crate) fn recognise_into_area(app: &AppHandle, id: AreaId, bounds: Rect) {
         match service.submit(RequestId::new(id.get()), frame) {
             Ok(()) => {
                 guard.waiting.insert(id.get());
+                *guard.outstanding.entry(id.get()).or_insert(0) += 1;
+                if !copies {
+                    return;
+                }
                 // Promised on submission rather than on the gesture: a
                 // conversion that never reached the worker has no result
                 // coming, and letting it take the slot would mean a later
@@ -617,6 +672,9 @@ pub(crate) fn pump(app: &AppHandle) {
             match outcome {
                 Outcome::Done { id, result } => {
                     guard.waiting.remove(&id.get());
+                    if answered_but_superseded(&mut guard.outstanding, id.get()) {
+                        continue;
+                    }
                     match result {
                         Ok(recognition) if recognition.is_empty() => {
                             guard.words.remove(&id.get());
@@ -647,6 +705,9 @@ pub(crate) fn pump(app: &AppHandle) {
                 }
                 Outcome::Abandoned { id } => {
                     guard.waiting.remove(&id.get());
+                    if answered_but_superseded(&mut guard.outstanding, id.get()) {
+                        continue;
+                    }
                     // Its answer is never coming, so it must not keep holding
                     // the clipboard's promise: an area converted after it would
                     // otherwise land its text on screen and decline to copy it.
@@ -673,6 +734,7 @@ pub(crate) fn pump(app: &AppHandle) {
                     // guarantees is delivered first. This clears the residue of
                     // ids whose areas were dismissed in the meantime.
                     guard.waiting.clear();
+                    guard.outstanding.clear();
                     // And the promise with them: the worker is gone, so no
                     // outstanding conversion can still deliver text.
                     guard.latest = None;
@@ -757,6 +819,7 @@ pub(crate) fn forget(id: AreaId) {
     guard.words.remove(&id.get());
     guard.selection.remove(&id.get());
     guard.generation.remove(&id.get());
+    guard.outstanding.remove(&id.get());
     // The dismissed area also gives up the clipboard's promise. `pump` would
     // decline to copy it anyway -- `live_area_id` answers `None` for an area
     // that is gone -- but leaving the slot filled would make the *next*
@@ -862,6 +925,20 @@ const fn ordered((a, b): (usize, usize)) -> (usize, usize) {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_answer_with_a_newer_submission_outstanding_is_superseded() {
+        let mut outstanding = BTreeMap::new();
+        outstanding.insert(7, 2);
+        // The first of two answers: the second, newer, is still coming.
+        assert!(answered_but_superseded(&mut outstanding, 7));
+        // The last answer is the newest reading, and the count is gone.
+        assert!(!answered_but_superseded(&mut outstanding, 7));
+        assert!(!outstanding.contains_key(&7));
+        // An area with nothing recorded (a reading from before a stop) is not
+        // superseded and does not underflow.
+        assert!(!answered_but_superseded(&mut outstanding, 9));
+    }
 
     #[test]
     fn every_status_has_a_distinct_wire_name() {

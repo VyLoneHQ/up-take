@@ -310,7 +310,9 @@ export interface OcrHandle {
  * hit-tests (`ocr_words::handle_at`): the start handle below the first
  * selected word's bottom-left corner, the end handle below the last one's
  * bottom-right. `reach` is the handle's size in physical pixels, the hook's
- * `SELECTION_HANDLE_REACH`, so what is drawn is what can be grabbed.
+ * `SELECTION_HANDLE_REACH`. The hook's grab target around each corner is
+ * deliberately larger than the teardrop drawn here, so a press slightly off
+ * the handle still takes it.
  */
 export function ocrSelectionHandles(
   words: readonly OcrWordPayload[],

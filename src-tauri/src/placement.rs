@@ -3318,11 +3318,14 @@ fn reread_in_place_ocr(app: &AppHandle, id: AreaId) {
         return;
     }
     if let Some(bounds) = overlay::area_bounds(app, id) {
-        crate::ocr::recognise_into_area(app, id, bounds);
+        crate::ocr::reread_area(app, id, bounds);
     }
 }
 
-/// The reach of a selection handle, in physical pixels (roadmap `1.41`).
+/// The size of a selection handle, in physical pixels (roadmap `1.41`): the
+/// teardrop the page draws is this square. **The grab target is deliberately
+/// larger** (`ocr_words::handle_at`), because a 14 px handle is a small thing
+/// to hit with a mouse.
 const SELECTION_HANDLE_REACH: i32 = 14;
 
 /// Whether `id` is an OCR area and OCR areas read in place: the two conditions

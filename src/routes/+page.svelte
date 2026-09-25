@@ -168,7 +168,7 @@ let ocrSelections = $state(new SvelteMap<number, [number, number]>());
 // from inside of. Kept beside `.area`'s own `border` in the stylesheet.
 const AREA_BORDER_CSS = 1.5;
 // A selection handle's size in physical pixels: Rust's
-// `SELECTION_HANDLE_REACH`, so the handle drawn is the handle the hook grabs.
+// `SELECTION_HANDLE_REACH`. The hook grabs a slightly larger target around it.
 const SELECTION_HANDLE_REACH = 14;
 // The WebView owns its scale (ADR-0011); refreshed on every state event in case
 // the overlay moved to a monitor at a different DPI.

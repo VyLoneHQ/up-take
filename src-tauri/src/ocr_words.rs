@@ -149,10 +149,15 @@ pub(crate) fn nearest(words: &[PlacedWord], point: Point) -> Option<usize> {
 /// the selection's OTHER end.
 ///
 /// The start handle hangs below the first word's bottom-left corner and the end
-/// handle below the last word's bottom-right, each a `radius`-sized square
-/// reaching down and outward from that corner, which is where the page draws
-/// them. The end handle wins where the two overlap (a one-word selection), so
-/// a drag from there extends forward, the common case.
+/// handle below the last word's bottom-right; the page draws each as a
+/// `radius`-sized teardrop reaching down and outward from that corner.
+///
+/// **The grab target is LARGER than the drawn handle, on purpose**: from
+/// `radius` left of the corner to `radius` right of it, and from half a
+/// `radius` above it to two below. A handle is a small target for a mouse, and
+/// the margin lets a press slightly off the teardrop still take it. The end
+/// handle wins where the two overlap (a one-word selection), so a drag from
+/// there extends forward, the common case.
 pub(crate) fn handle_at(
     words: &[PlacedWord],
     first: usize,
