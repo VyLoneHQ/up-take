@@ -598,9 +598,12 @@ impl Engine for PaddleEngine {
 /// from the quad by [`recognise::rectify`]'s bilinear map: position `u` along
 /// the crop is `u` of the way along the quad's top edge and, equally, along
 /// its bottom edge. So a word is the quad cut at its two fractions, which keeps
-/// a tilted line's words tilted with it; the frame-local bounds are that cut's
-/// bounding box, rounded in [`rect_from_bounds`] like every other rectangle
-/// here.
+/// a tilted line's words tilted with it. Each corner of the cut is rounded to
+/// the NEAREST pixel in [`point_from`], so two neighbours land on the same cut
+/// points, and the word's bounds are the box around those rounded corners, from
+/// [`bounds_of`]. **This is the one place the pipeline does not round outward
+/// through [`rect_from_bounds`]**: outward rounding gave neighbours two
+/// different pixels for one shared edge (review of `#114`, round 3).
 fn place_words(decoded: &DecodedText, quad: &quad::Quad) -> Vec<Word> {
     let [top_left, top_right, bottom_right, bottom_left] = quad.corners;
     let along = |from: quad::PointF, to: quad::PointF, u: f32| {
