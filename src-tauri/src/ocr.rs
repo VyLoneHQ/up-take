@@ -104,7 +104,7 @@
 //! [`ADR-0032`]: ../../../Projects/UP-TAKE/DECISIONS/ADR-0032-onnx-runtime-is-loaded-not-downloaded.md
 //! [`ADR-0035`]: ../../../Projects/UP-TAKE/DECISIONS/ADR-0035-assets-ship-in-the-installer.md
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
@@ -113,7 +113,9 @@ use tauri::AppHandle;
 use uptake_assets::install::{AssetState, Installer};
 use uptake_assets::{onnxruntime, ppocr};
 use uptake_core::area::AreaId;
-use uptake_core::geometry::Rect;
+use uptake_core::geometry::{Point, Rect};
+
+use crate::ocr_words::{self, PlacedWord};
 use uptake_ocr::paddle::{PaddleConfig, PaddleEngine, PaddleOptions};
 use uptake_ocr::{Outcome, RequestId, Service, StopReason};
 
@@ -202,6 +204,16 @@ struct Ocr {
     ///
     /// See [`Request`] for why this is one slot rather than a set.
     latest: Option<Request>,
+    /// Each OCR area's words from its latest reading (roadmap `1.41`).
+    ///
+    /// Held here because the selection is made by the **hook**, in Rust: a
+    /// press in Placement is hit-tested against these, and `Ctrl+C` copies
+    /// from them. The page gets its own copy in the `overlay://ocr` payload to
+    /// draw with. Replaced by every reading and dropped by [`forget`].
+    words: BTreeMap<u64, Vec<PlacedWord>>,
+    /// Each area's selection, as the indices of the word the drag started on
+    /// and the word it is on now, in either order.
+    selection: BTreeMap<u64, (usize, usize)>,
 }
 
 /// The most recent conversion the user asked for, and when they asked.
@@ -241,6 +253,8 @@ impl Ocr {
             unavailable: None,
             waiting: BTreeSet::new(),
             latest: None,
+            words: BTreeMap::new(),
+            selection: BTreeMap::new(),
         }
     }
 }
@@ -472,7 +486,14 @@ pub(crate) fn recognise_into_area(app: &AppHandle, id: AreaId, bounds: Rect) {
     // captured and before the engine is built. Anything later would exclude
     // work the bar includes.
     let started = Instant::now();
-    crate::overlay::emit_ocr(app, id, Status::Working, None);
+    // A new reading replaces the words, so the old ones and any selection over
+    // them stop meaning anything now rather than when the answer arrives.
+    {
+        let mut guard = lock();
+        guard.words.remove(&id.get());
+        guard.selection.remove(&id.get());
+    }
+    crate::overlay::emit_ocr(app, id, Status::Working, None, &[]);
     let app = app.clone();
     std::thread::spawn(move || {
         let frame = match crate::output::frame_for_ocr(&app, bounds) {
@@ -482,7 +503,7 @@ pub(crate) fn recognise_into_area(app: &AppHandle, id: AreaId, bounds: Rect) {
                     "ocr: could not capture the area",
                     &format_args!("{id:?}: {error}"),
                 );
-                crate::overlay::emit_ocr(&app, id, Status::Failed, Some(error));
+                crate::overlay::emit_ocr(&app, id, Status::Failed, Some(error), &[]);
                 return;
             }
         };
@@ -505,7 +526,7 @@ pub(crate) fn recognise_into_area(app: &AppHandle, id: AreaId, bounds: Rect) {
         }
         if let Some(reason) = guard.unavailable.clone() {
             drop(guard);
-            crate::overlay::emit_ocr(&app, id, Status::Unavailable, Some(reason));
+            crate::overlay::emit_ocr(&app, id, Status::Unavailable, Some(reason), &[]);
             return;
         }
         let Some(service) = guard.service.as_ref() else {
@@ -537,7 +558,7 @@ pub(crate) fn recognise_into_area(app: &AppHandle, id: AreaId, bounds: Rect) {
                 let reason = error.to_string();
                 guard.unavailable = Some(reason.clone());
                 drop(guard);
-                crate::overlay::emit_ocr(&app, id, Status::Failed, Some(reason));
+                crate::overlay::emit_ocr(&app, id, Status::Failed, Some(reason), &[]);
             }
         }
     });
@@ -553,7 +574,7 @@ pub(crate) fn pump(app: &AppHandle) {
     // arbitrary listener bookkeeping inside Tauri, and holding this lock across
     // it would put an unrelated subsystem inside OCR's critical section for no
     // reason.
-    let mut announcements: Vec<(u64, Status, Option<String>)> = Vec::new();
+    let mut announcements: Vec<(u64, Status, Option<String>, Vec<PlacedWord>)> = Vec::new();
     // The one text result, if any, that `1.13` puts on the clipboard. Decided
     // under the lock and acted on outside it, for the same reason the
     // announcements are: publishing touches a global system resource that every
@@ -575,17 +596,29 @@ pub(crate) fn pump(app: &AppHandle) {
                     guard.waiting.remove(&id.get());
                     match result {
                         Ok(recognition) if recognition.is_empty() => {
-                            announcements.push((id.get(), Status::Empty, None));
+                            guard.words.remove(&id.get());
+                            guard.selection.remove(&id.get());
+                            announcements.push((id.get(), Status::Empty, None, Vec::new()));
                         }
                         Ok(recognition) => {
                             let text = recognition.text();
                             if let Some(started) = claims_clipboard(&mut guard.latest, id.get()) {
                                 clipboard = Some((id.get(), text.clone(), started));
                             }
-                            announcements.push((id.get(), Status::Text, Some(text)));
+                            let words = ocr_words::from_recognition(&recognition);
+                            guard.words.insert(id.get(), words.clone());
+                            guard.selection.remove(&id.get());
+                            announcements.push((id.get(), Status::Text, Some(text), words));
                         }
                         Err(error) => {
-                            announcements.push((id.get(), Status::Failed, Some(error.to_string())));
+                            guard.words.remove(&id.get());
+                            guard.selection.remove(&id.get());
+                            announcements.push((
+                                id.get(),
+                                Status::Failed,
+                                Some(error.to_string()),
+                                Vec::new(),
+                            ));
                         }
                     }
                 }
@@ -600,6 +633,7 @@ pub(crate) fn pump(app: &AppHandle) {
                         id.get(),
                         Status::Failed,
                         Some("the OCR worker stopped before reaching this area".to_string()),
+                        Vec::new(),
                     ));
                 }
                 Outcome::Stopped(reason) => {
@@ -633,14 +667,14 @@ pub(crate) fn pump(app: &AppHandle) {
             }
         }
     }
-    for (raw, status, detail) in announcements {
+    for (raw, status, detail, words) in announcements {
         // Asked area by area rather than emitted blind: an area dismissed while
         // its frame was in the worker has nothing to draw on, and announcing a
         // result for it is the shape `captures::still_holds` exists to refuse
         // for a pin (`I-61`). A missing area here is the ordinary case, not an
         // error.
         if let Some(id) = crate::overlay::live_area_id(app, raw) {
-            crate::overlay::emit_ocr(app, id, status, detail);
+            crate::overlay::emit_ocr(app, id, status, detail, &words);
         }
     }
     // After the announcements, not before them: the copy fires the same flash
@@ -697,6 +731,8 @@ fn describe_stop(reason: &StopReason) -> String {
 pub(crate) fn forget(id: AreaId) {
     let mut guard = lock();
     guard.waiting.remove(&id.get());
+    guard.words.remove(&id.get());
+    guard.selection.remove(&id.get());
     // The dismissed area also gives up the clipboard's promise. `pump` would
     // decline to copy it anyway -- `live_area_id` answers `None` for an area
     // that is gone -- but leaving the slot filled would make the *next*
@@ -704,6 +740,61 @@ pub(crate) fn forget(id: AreaId) {
     // would not copy either. One dismissal must not cost two copies.
     // The instant is discarded: there is no copy to time.
     let _ = claims_clipboard(&mut guard.latest, id.get());
+}
+
+/// The word of `id`'s latest reading under `local`, a frame-local point.
+///
+/// `None` when the area has no words, which is the answer for every area that
+/// is not an OCR area that has read something.
+pub(crate) fn word_at(id: AreaId, local: Point) -> Option<usize> {
+    let guard = lock();
+    ocr_words::word_at(guard.words.get(&id.get())?, local)
+}
+
+/// Starts a selection on word `index` of `id` (roadmap `1.41`).
+pub(crate) fn begin_selection(id: AreaId, index: usize) {
+    lock().selection.insert(id.get(), (index, index));
+}
+
+/// Moves the end of `id`'s selection to the word nearest `local`.
+///
+/// Returns the selection as `(first, last)` when it CHANGED, so the caller
+/// emits only on a change rather than on every poll tick of a drag.
+pub(crate) fn extend_selection(id: AreaId, local: Point) -> Option<(usize, usize)> {
+    let mut guard = lock();
+    let nearest = ocr_words::nearest(guard.words.get(&id.get())?, local)?;
+    let entry = guard.selection.get_mut(&id.get())?;
+    if entry.1 == nearest {
+        return None;
+    }
+    entry.1 = nearest;
+    Some(ordered(*entry))
+}
+
+/// Selects every word of `id`. `None` when the area has no words.
+pub(crate) fn select_all(id: AreaId) -> Option<(usize, usize)> {
+    let mut guard = lock();
+    let count = guard.words.get(&id.get())?.len();
+    let last = count.checked_sub(1)?;
+    guard.selection.insert(id.get(), (0, last));
+    Some((0, last))
+}
+
+/// The text `Ctrl+C` copies from `id`: the selection, or everything read when
+/// nothing is selected. `None` when the area has no words.
+pub(crate) fn copy_text(id: AreaId) -> Option<String> {
+    let guard = lock();
+    let words = guard.words.get(&id.get())?;
+    let (first, last) = match guard.selection.get(&id.get()) {
+        Some(&range) => ordered(range),
+        None => (0, words.len().checked_sub(1)?),
+    };
+    Some(ocr_words::text_between(words, first, last))
+}
+
+/// A selection's two ends in reading order.
+const fn ordered((a, b): (usize, usize)) -> (usize, usize) {
+    if a <= b { (a, b) } else { (b, a) }
 }
 
 #[cfg(test)]

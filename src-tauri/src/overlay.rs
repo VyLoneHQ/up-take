@@ -956,6 +956,9 @@ const PIN_EVENT: &str = "overlay://pin";
 /// either delay the area or re-emit every area on every recognition.
 const OCR_EVENT: &str = "overlay://ocr";
 
+/// One OCR area's selection changed (roadmap `1.41`, `ADR-0046`).
+const OCR_SELECTION_EVENT: &str = "overlay://ocr-selection";
+
 /// One area as the frontend draws it.
 #[derive(Serialize, Clone)]
 struct AreaPayload {
@@ -1644,6 +1647,12 @@ pub(crate) fn area_bounds(app: &AppHandle, id: AreaId) -> Option<Rect> {
     lock(&store).get(id).map(|area| area.bounds)
 }
 
+/// The type of `id`, if it is still live.
+pub(crate) fn area_kind(app: &AppHandle, id: AreaId) -> Option<AreaType> {
+    let store = app.state::<Mutex<AreaStore>>();
+    lock(&store).get(id).map(|area| area.kind)
+}
+
 /// The monitor rectangles, cached.
 ///
 /// Enumerating monitors is a Win32 round trip that allocates, and the placement
@@ -1965,6 +1974,55 @@ struct OcrPayload {
     /// nullable fields would let a payload carry both or neither, which is two
     /// states nothing can draw.
     detail: Option<String>,
+    /// The words, in reading order, when `status` is `text`; empty otherwise.
+    ///
+    /// Roadmap `1.41`: an area that reads **in place** (`ADR-0046`) draws a mark
+    /// under each word and a selection band over some of them, so it needs to
+    /// know where each word is. Frame-local, which for an OCR area is
+    /// area-local: `(0, 0)` is the area's top-left when it was read.
+    words: Vec<OcrWordPayload>,
+}
+
+/// One recognised word, as the page draws it.
+#[derive(Serialize, Clone)]
+struct OcrWordPayload {
+    /// The word.
+    text: String,
+    /// The visual line it sits on, from `0` at the top. The page draws one
+    /// selection band per line, so it groups by this.
+    line: u32,
+    /// Its four corners, clockwise from the top-left, as `[x, y]` pairs in
+    /// area-local physical pixels.
+    outline: [[i32; 2]; 4],
+}
+
+/// The payload of `overlay://ocr-selection`: which words of one area are
+/// selected.
+#[derive(Serialize, Clone)]
+struct OcrSelectionPayload {
+    id: u64,
+    /// The first and last selected word, indices into that area's latest
+    /// `words`, in reading order; `None` when nothing is selected.
+    range: Option<(u64, u64)>,
+}
+
+/// Announces `id`'s selection, so the page can draw its band.
+pub(crate) fn emit_ocr_selection(app: &AppHandle, id: AreaId, range: Option<(usize, usize)>) {
+    let range = range.map(|(first, last)| {
+        (
+            u64::try_from(first).unwrap_or(u64::MAX),
+            u64::try_from(last).unwrap_or(u64::MAX),
+        )
+    });
+    if let Err(error) = app.emit(
+        OCR_SELECTION_EVENT,
+        OcrSelectionPayload {
+            id: id.get(),
+            range,
+        },
+    ) {
+        crate::diagnostics::trouble("overlay: could not emit the OCR selection", &error);
+    }
 }
 
 /// Announces `id`'s OCR state, so the area can draw it.
@@ -1977,13 +2035,23 @@ pub(crate) fn emit_ocr(
     id: AreaId,
     status: crate::ocr::Status,
     detail: Option<String>,
+    words: &[crate::ocr_words::PlacedWord],
 ) {
+    let words = words
+        .iter()
+        .map(|word| OcrWordPayload {
+            text: word.text.clone(),
+            line: word.line,
+            outline: word.outline.map(|corner| [corner.x, corner.y]),
+        })
+        .collect();
     if let Err(error) = app.emit(
         OCR_EVENT,
         OcrPayload {
             id: id.get(),
             status: status.as_str(),
             detail,
+            words,
         },
     ) {
         crate::diagnostics::trouble("overlay: could not emit the OCR state", &error);
@@ -2311,23 +2379,65 @@ pub fn overlay_arm_type(app: AppHandle, kind: String) -> Result<(), String> {
 /// "the topmost area", which would be a deletion the user never pointed at.
 #[tauri::command]
 pub fn overlay_dismiss_focused(app: AppHandle) -> Result<(), String> {
-    // Read the cursor from the window rather than from the placement hook's last
-    // reported position: the hook only reports while it is installed, so a
-    // `Delete` pressed before the mouse has moved since entering Placement would
-    // act on a stale point.
-    let window = overlay_window(&app)?;
-    let position = window
-        .cursor_position()
-        .map_err(|e| format!("Could not read the cursor position: {e}"))?;
-    let Some(point) = Point::from_physical_f64(position.x, position.y) else {
-        return Ok(());
-    };
-    let Some(area) = area_at(&app, point) else {
+    let Some(area) = area_under_cursor(&app)? else {
         return Ok(());
     };
     if dismiss_area(&app, area.id) {
         placement::close_menu(&app);
         emit_areas(&app)?;
+    }
+    Ok(())
+}
+
+/// The area under the cursor, the one a key like `Delete` acts on.
+///
+/// Read from the window rather than from the placement hook's last reported
+/// position: the hook only reports while it is installed, so a key pressed
+/// before the mouse has moved since entering Placement would act on a stale
+/// point. `None` over empty overlay, which is deliberately not "the topmost
+/// area": a key acts only on what the user is pointing at.
+fn area_under_cursor(app: &AppHandle) -> Result<Option<AreaSummary>, String> {
+    let window = overlay_window(app)?;
+    let position = window
+        .cursor_position()
+        .map_err(|e| format!("Could not read the cursor position: {e}"))?;
+    let Some(point) = Point::from_physical_f64(position.x, position.y) else {
+        return Ok(None);
+    };
+    Ok(area_at(app, point))
+}
+
+/// IPC surface and hook route for `Ctrl+C` in Placement (roadmap `1.41`).
+///
+/// Copies the OCR area under the cursor: its selection, or everything it read
+/// when nothing is selected. Over any other area, or empty overlay, it does
+/// nothing. The copy goes through the same path as OCR's automatic copy, so it
+/// flashes the area the same way, and it is spawned for the same reason: the
+/// clipboard is a global resource another process can hold.
+#[tauri::command]
+pub fn overlay_ocr_copy_focused(app: AppHandle) -> Result<(), String> {
+    let Some(area) = area_under_cursor(&app)? else {
+        return Ok(());
+    };
+    let Some(text) = crate::ocr::copy_text(area.id) else {
+        return Ok(());
+    };
+    let started = std::time::Instant::now();
+    std::thread::spawn(move || {
+        crate::output::copy_text_to_clipboard(&app, area.id, &text, started);
+    });
+    Ok(())
+}
+
+/// IPC surface and hook route for `Ctrl+A` in Placement (roadmap `1.41`):
+/// selects every word of the OCR area under the cursor.
+#[tauri::command]
+pub fn overlay_ocr_select_all_focused(app: AppHandle) -> Result<(), String> {
+    let Some(area) = area_under_cursor(&app)? else {
+        return Ok(());
+    };
+    if let Some(range) = crate::ocr::select_all(area.id) {
+        emit_ocr_selection(&app, area.id, Some(range));
     }
     Ok(())
 }
@@ -2486,8 +2596,26 @@ mod tests {
                 id: 1,
                 status: crate::ocr::Status::Text.as_str(),
                 detail: Some("Total: 12".to_string()),
+                words: Vec::new(),
             },
-            &["id", "status", "detail"],
+            &["id", "status", "detail", "words"],
+        );
+        assert_keys(
+            "OcrWordPayload",
+            &OcrWordPayload {
+                text: "Total:".to_string(),
+                line: 0,
+                outline: [[0, 0], [10, 0], [10, 5], [0, 5]],
+            },
+            &["text", "line", "outline"],
+        );
+        assert_keys(
+            "OcrSelectionPayload",
+            &OcrSelectionPayload {
+                id: 1,
+                range: Some((0, 2)),
+            },
+            &["id", "range"],
         );
         assert_keys(
             "FreezeHidePayload",
@@ -2523,6 +2651,8 @@ mod tests {
                 "FlashPayload",
                 "PinPayload",
                 "OcrPayload",
+                "OcrWordPayload",
+                "OcrSelectionPayload",
                 "FreezeHidePayload",
                 "FreezeRevealPayload",
             ],
