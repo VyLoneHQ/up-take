@@ -48,6 +48,7 @@ import {
   type OverlayStateName,
   ocrLine,
   ocrSelectionBands,
+  ocrSelectionHandles,
   ocrWordBoxes,
   type PhysRect,
   type PinPayload,
@@ -166,6 +167,9 @@ let ocrSelections = $state(new SvelteMap<number, [number, number]>());
 // The area's border width, which an absolutely positioned child is measured
 // from inside of. Kept beside `.area`'s own `border` in the stylesheet.
 const AREA_BORDER_CSS = 1.5;
+// A selection handle's size in physical pixels: Rust's
+// `SELECTION_HANDLE_REACH`, so the handle drawn is the handle the hook grabs.
+const SELECTION_HANDLE_REACH = 14;
 // The WebView owns its scale (ADR-0011); refreshed on every state event in case
 // the overlay moved to a monitor at a different DPI.
 let dpr = $state(1);
@@ -736,6 +740,12 @@ onMount(() => {
                       style="transform: translate({band.x}px, {band.y}px); width: {band.width}px; height: {band.height}px"
                     ></span>
                   {/each}
+                  {#each ocrSelectionHandles(recognition.words, ocrSelections.get(area.id) ?? null, dpr, AREA_BORDER_CSS, SELECTION_HANDLE_REACH) as handle (handle.end)}
+                    <span
+                      class="ocr-handle {handle.end}"
+                      style="transform: translate({handle.x}px, {handle.y}px); width: {handle.size}px; height: {handle.size}px"
+                    ></span>
+                  {/each}
                 {:else}
                   <!-- Reading, nothing found, or a problem: a small label in
                        the corner rather than a panel over the screen, which
@@ -1180,6 +1190,22 @@ onMount(() => {
 .ocr-band {
   background: rgba(90, 150, 255, 0.4);
   border-radius: 3px;
+}
+/* The selection's two handles, teardrops pointing at the corner they hang
+   from, as on a phone (the founder's approved mock). */
+.ocr-handle {
+  position: absolute;
+  left: 0;
+  top: 0;
+  background: rgb(90, 150, 255);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+}
+.ocr-handle.start {
+  border-radius: 50% 0 50% 50%;
+}
+.ocr-handle.end {
+  border-radius: 0 50% 50% 50%;
 }
 .ocr-status {
   position: absolute;

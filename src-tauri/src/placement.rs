@@ -254,6 +254,12 @@ enum Mode {
 /// The current [`Mode`], as its discriminant.
 static MODE: AtomicU8 = AtomicU8::new(Mode::Hidden as u8);
 
+/// Whether UP-TAKE is in Placement, for callers outside this module that act
+/// only there (roadmap `1.41`'s word selection and copy, per `ADR-0016`).
+pub(crate) fn is_placing() -> bool {
+    mode() == Mode::Placement
+}
+
 /// Reads the current [`Mode`].
 fn mode() -> Mode {
     match MODE.load(Ordering::SeqCst) {
@@ -1876,7 +1882,7 @@ fn pump_hover(app: &AppHandle, state: &mut PumpState) {
             // Over a word of an in-place OCR area, the I-beam: that is where
             // a press selects rather than moves (roadmap 1.41), and the cursor
             // is the only thing that says so before the press.
-            Some((id, bounds, Handle::Body)) if selects_at(id, bounds, point) => {
+            Some((id, bounds, Handle::Body)) if selects_at(app, id, bounds, point) => {
                 (CursorShape::IBeam, Some(id.get()))
             }
             Some((id, _, handle)) => (CursorShape::for_handle(handle), Some(id.get())),
@@ -3308,10 +3314,7 @@ fn shadowed_by_another_window(point: Point) -> bool {
 /// Only in place: a *Rendered* area shows text rather than marks over the
 /// screen, and it has never re-read on a move, which this change leaves alone.
 fn reread_in_place_ocr(app: &AppHandle, id: AreaId) {
-    if crate::settings::current().ocr_behaviour != crate::settings::OcrBehaviour::InPlace {
-        return;
-    }
-    if overlay::area_kind(app, id) != Some(AreaType::Ocr) {
+    if !reads_in_place(app, id) {
         return;
     }
     if let Some(bounds) = overlay::area_bounds(app, id) {
@@ -3319,14 +3322,45 @@ fn reread_in_place_ocr(app: &AppHandle, id: AreaId) {
     }
 }
 
-/// Whether a press at `point` on `id`'s body would start a word selection.
-fn selects_at(id: AreaId, bounds: Rect, point: Point) -> bool {
+/// The reach of a selection handle, in physical pixels (roadmap `1.41`).
+const SELECTION_HANDLE_REACH: i32 = 14;
+
+/// Whether `id` is an OCR area and OCR areas read in place: the two conditions
+/// every word gesture needs. The type is asked of the store rather than
+/// inferred from the words `ocr.rs` holds, so an area converted away from OCR
+/// can never be selected even if its words outlived the conversion (review of
+/// `#115`, round 1).
+pub(crate) fn reads_in_place(app: &AppHandle, id: AreaId) -> bool {
     crate::settings::current().ocr_behaviour == crate::settings::OcrBehaviour::InPlace
-        && crate::ocr::word_at(
-            id,
-            Point::new(point.x - bounds.origin.x, point.y - bounds.origin.y),
-        )
-        .is_some()
+        && overlay::area_kind(app, id) == Some(AreaType::Ocr)
+}
+
+/// Where a press at `point` on `id`'s body would start a word selection, as
+/// `(anchor, focus)`, or `None` when it would move the area.
+///
+/// A selection handle wins over a word, so a handle that hangs over the next
+/// line's text grabs the selection's end rather than starting a new one.
+fn selection_start_at(
+    app: &AppHandle,
+    id: AreaId,
+    bounds: Rect,
+    point: Point,
+) -> Option<(usize, usize)> {
+    if !reads_in_place(app, id) {
+        return None;
+    }
+    let local = Point::new(point.x - bounds.origin.x, point.y - bounds.origin.y);
+    if let Some(anchor) = crate::ocr::handle_at(id, local, SELECTION_HANDLE_REACH) {
+        let (first, last) = crate::ocr::selection_of(id)?;
+        let focus = if anchor == first { last } else { first };
+        return Some((anchor, focus));
+    }
+    crate::ocr::word_at(id, local).map(|index| (index, index))
+}
+
+/// Whether a press at `point` on `id`'s body would start a word selection.
+fn selects_at(app: &AppHandle, id: AreaId, bounds: Rect, point: Point) -> bool {
+    selection_start_at(app, id, bounds, point).is_some()
 }
 
 /// A press on an area's body: a word selection if it landed on a word of an OCR
@@ -3337,12 +3371,9 @@ fn selects_at(id: AreaId, bounds: Rect, point: Point) -> bool {
 /// area stays as movable as every other area; a press can never be ambiguous
 /// between the two, because a word either contains the point or does not.
 fn select_or_move(app: &AppHandle, id: AreaId, bounds: Rect, point: Point) -> Gesture {
-    let in_place =
-        crate::settings::current().ocr_behaviour == crate::settings::OcrBehaviour::InPlace;
-    let local = Point::new(point.x - bounds.origin.x, point.y - bounds.origin.y);
-    if in_place && let Some(index) = crate::ocr::word_at(id, local) {
-        crate::ocr::begin_selection(id, index);
-        overlay::emit_ocr_selection(app, id, Some((index, index)));
+    if let Some((anchor, focus)) = selection_start_at(app, id, bounds, point) {
+        let range = crate::ocr::begin_selection(id, anchor, focus);
+        overlay::emit_ocr_selection(app, id, Some(range));
         return Gesture::Select {
             id,
             origin: bounds.origin,

@@ -214,6 +214,16 @@ struct Ocr {
     /// Each area's selection, as the indices of the word the drag started on
     /// and the word it is on now, in either order.
     selection: BTreeMap<u64, (usize, usize)>,
+    /// How many readings each area has asked for, so a capture that finishes
+    /// after a NEWER reading of the same area was asked for is not submitted.
+    ///
+    /// Roadmap `1.41` made a second reading of one area ordinary (an in-place
+    /// area reads again after every move), and each reading captures on its
+    /// own thread, so an older capture can reach the worker after a newer one
+    /// and its words would replace the newer words (review of `#115`, round 1).
+    /// The worker answers in submission order, so refusing a stale submission
+    /// is enough for the last answer to be the newest reading.
+    generation: BTreeMap<u64, u64>,
 }
 
 /// The most recent conversion the user asked for, and when they asked.
@@ -255,6 +265,7 @@ impl Ocr {
             latest: None,
             words: BTreeMap::new(),
             selection: BTreeMap::new(),
+            generation: BTreeMap::new(),
         }
     }
 }
@@ -488,11 +499,17 @@ pub(crate) fn recognise_into_area(app: &AppHandle, id: AreaId, bounds: Rect) {
     let started = Instant::now();
     // A new reading replaces the words, so the old ones and any selection over
     // them stop meaning anything now rather than when the answer arrives.
-    {
+    let asked = {
         let mut guard = lock();
         guard.words.remove(&id.get());
         guard.selection.remove(&id.get());
-    }
+        let next = guard
+            .generation
+            .get(&id.get())
+            .map_or(1, |n| n.wrapping_add(1));
+        guard.generation.insert(id.get(), next);
+        next
+    };
     crate::overlay::emit_ocr(app, id, Status::Working, None, &[]);
     let app = app.clone();
     std::thread::spawn(move || {
@@ -527,6 +544,12 @@ pub(crate) fn recognise_into_area(app: &AppHandle, id: AreaId, bounds: Rect) {
         if let Some(reason) = guard.unavailable.clone() {
             drop(guard);
             crate::overlay::emit_ocr(&app, id, Status::Unavailable, Some(reason), &[]);
+            return;
+        }
+        // A newer reading of this area was asked for while this frame was being
+        // captured: it answers for the area, and this one would only replace
+        // its words with older ones if it reached the worker second.
+        if guard.generation.get(&id.get()) != Some(&asked) {
             return;
         }
         let Some(service) = guard.service.as_ref() else {
@@ -733,6 +756,7 @@ pub(crate) fn forget(id: AreaId) {
     guard.waiting.remove(&id.get());
     guard.words.remove(&id.get());
     guard.selection.remove(&id.get());
+    guard.generation.remove(&id.get());
     // The dismissed area also gives up the clipboard's promise. `pump` would
     // decline to copy it anyway -- `live_area_id` answers `None` for an area
     // that is gone -- but leaving the slot filled would make the *next*
@@ -751,9 +775,37 @@ pub(crate) fn word_at(id: AreaId, local: Point) -> Option<usize> {
     ocr_words::word_at(guard.words.get(&id.get())?, local)
 }
 
-/// Starts a selection on word `index` of `id` (roadmap `1.41`).
-pub(crate) fn begin_selection(id: AreaId, index: usize) {
-    lock().selection.insert(id.get(), (index, index));
+/// Drops `id`'s words and selection, for an area converted away from OCR.
+///
+/// Unlike [`forget`] it leaves any outstanding request alone: the area still
+/// exists, and a reading already in the worker answers into `pump`, which
+/// replaces the words; the page shows them only while the area is OCR.
+pub(crate) fn forget_words(id: AreaId) {
+    let mut guard = lock();
+    guard.words.remove(&id.get());
+    guard.selection.remove(&id.get());
+}
+
+/// Starts a selection of `id` from word `anchor` to word `focus` (roadmap
+/// `1.41`): a press on a word passes the same index twice, and a press on one
+/// of the selection's handles passes the OTHER end as the anchor, so the drag
+/// moves the end that was grabbed.
+pub(crate) fn begin_selection(id: AreaId, anchor: usize, focus: usize) -> (usize, usize) {
+    lock().selection.insert(id.get(), (anchor, focus));
+    ordered((anchor, focus))
+}
+
+/// The selection handle of `id` under `local`, if one is: the index of the
+/// selection's OTHER end, which becomes the anchor of a drag from the handle.
+///
+/// `radius` is the handle's reach in physical pixels, from the corner it hangs
+/// off: the start handle below the first selected word's bottom-left, the end
+/// handle below the last one's bottom-right (the founder's approved mock).
+pub(crate) fn handle_at(id: AreaId, local: Point, radius: i32) -> Option<usize> {
+    let guard = lock();
+    let words = guard.words.get(&id.get())?;
+    let (first, last) = ordered(*guard.selection.get(&id.get())?);
+    ocr_words::handle_at(words, first, last, local, radius)
 }
 
 /// Moves the end of `id`'s selection to the word nearest `local`.
@@ -769,6 +821,11 @@ pub(crate) fn extend_selection(id: AreaId, local: Point) -> Option<(usize, usize
     }
     entry.1 = nearest;
     Some(ordered(*entry))
+}
+
+/// `id`'s selection as `(first, last)` in reading order, if it has one.
+pub(crate) fn selection_of(id: AreaId) -> Option<(usize, usize)> {
+    lock().selection.get(&id.get()).copied().map(ordered)
 }
 
 /// Selects every word of `id`. `None` when the area has no words.

@@ -145,6 +145,38 @@ pub(crate) fn nearest(words: &[PlacedWord], point: Point) -> Option<usize> {
         .map(|(index, _)| index)
 }
 
+/// The handle of the selection `first..=last` under `point`, as the index of
+/// the selection's OTHER end.
+///
+/// The start handle hangs below the first word's bottom-left corner and the end
+/// handle below the last word's bottom-right, each a `radius`-sized square
+/// reaching down and outward from that corner, which is where the page draws
+/// them. The end handle wins where the two overlap (a one-word selection), so
+/// a drag from there extends forward, the common case.
+pub(crate) fn handle_at(
+    words: &[PlacedWord],
+    first: usize,
+    last: usize,
+    point: Point,
+    radius: i32,
+) -> Option<usize> {
+    let bottom_left = |word: &PlacedWord| word.outline[3];
+    let bottom_right = |word: &PlacedWord| word.outline[2];
+    let end = bottom_right(words.get(last)?);
+    if (end.x - radius..=end.x + radius).contains(&point.x)
+        && (end.y - radius / 2..=end.y + radius * 2).contains(&point.y)
+    {
+        return Some(first);
+    }
+    let start = bottom_left(words.get(first)?);
+    if (start.x - radius..=start.x + radius).contains(&point.x)
+        && (start.y - radius / 2..=start.y + radius * 2).contains(&point.y)
+    {
+        return Some(last);
+    }
+    None
+}
+
 /// The text of words `a` to `b` inclusive, in either order.
 ///
 /// Words on one line are joined by a space and lines by a newline, which is
@@ -256,6 +288,21 @@ mod tests {
         assert_eq!(text_between(&words, 3, 3), "Anfänger");
         assert_eq!(text_between(&words, 2, 99), "für Anfänger");
         assert_eq!(text_between(&[], 0, 0), "");
+    }
+
+    #[test]
+    fn a_handle_grabs_the_end_it_hangs_off_and_anchors_the_other() {
+        let words = two_lines();
+        // Selection Texte (1) to für (2). The end handle hangs below für's
+        // bottom-right, (30, 50); the start handle below Texte's bottom-left,
+        // (30, 20). A grab on the end handle anchors the start, and the other
+        // way round.
+        assert_eq!(handle_at(&words, 1, 2, Point::new(32, 58), 10), Some(1));
+        assert_eq!(handle_at(&words, 1, 2, Point::new(28, 26), 10), Some(2));
+        // Far from both: no handle, so the press is a word or a move.
+        assert_eq!(handle_at(&words, 1, 2, Point::new(90, 58), 10), None);
+        // A stale selection past the words has no handles.
+        assert_eq!(handle_at(&words, 1, 9, Point::new(32, 58), 10), None);
     }
 
     #[test]

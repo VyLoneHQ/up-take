@@ -296,6 +296,47 @@ export function ocrSelectionBands(
   return [...byLine.values()].map((line) => boxOf(line, dpr, inset));
 }
 
+/** One selection handle: where it hangs from, and which way it points. */
+export interface OcrHandle {
+  /** `start` hangs down-left of the first word, `end` down-right of the last. */
+  end: 'start' | 'end';
+  x: number;
+  y: number;
+  size: number;
+}
+
+/**
+ * The two handles of a selection, Samsung style, at the corners the hook
+ * hit-tests (`ocr_words::handle_at`): the start handle below the first
+ * selected word's bottom-left corner, the end handle below the last one's
+ * bottom-right. `reach` is the handle's size in physical pixels, the hook's
+ * `SELECTION_HANDLE_REACH`, so what is drawn is what can be grabbed.
+ */
+export function ocrSelectionHandles(
+  words: readonly OcrWordPayload[],
+  range: readonly [number, number] | null,
+  dpr: number,
+  inset: number,
+  reach: number,
+): OcrHandle[] {
+  if (range === null || words.length === 0) return [];
+  const first = words[Math.max(0, Math.min(range[0], range[1]))];
+  const last = words[Math.min(words.length - 1, Math.max(range[0], range[1]))];
+  if (!first || !last) return [];
+  const size = reach / dpr;
+  const [startX, startY] = first.outline[3] ?? [0, 0];
+  const [endX, endY] = last.outline[2] ?? [0, 0];
+  return [
+    {
+      end: 'start',
+      x: startX / dpr - inset - size,
+      y: startY / dpr - inset,
+      size,
+    },
+    { end: 'end', x: endX / dpr - inset, y: endY / dpr - inset, size },
+  ];
+}
+
 /** The CSS box around every corner of `words`. */
 function boxOf(
   words: readonly OcrWordPayload[],

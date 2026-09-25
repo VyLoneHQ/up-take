@@ -1318,6 +1318,12 @@ pub(crate) fn convert_area(app: &AppHandle, id: AreaId, kind: AreaType) -> bool 
     // this type recognise?*, reached by both of its callers.
     if conversion.changed && placement::recognises_on_create(kind) {
         crate::ocr::recognise_into_area(app, id, bounds);
+    } else if conversion.changed {
+        // A conversion AWAY from OCR takes its words with it (roadmap 1.41):
+        // otherwise a press on where a word was would still select, and
+        // `Ctrl+C` would still copy text the area no longer shows (review of
+        // `#115`, round 1). Harmless for an area that never was OCR.
+        crate::ocr::forget_words(id);
     }
     // **AND A CONVERSION INTO A BORN-MAGNIFIED TYPE HAS TO TAKE ITS FIRST
     // MAGNIFIED CAPTURE**, which is the same argument one paragraph up wearing
@@ -2416,9 +2422,17 @@ fn area_under_cursor(app: &AppHandle) -> Result<Option<AreaSummary>, String> {
 /// clipboard is a global resource another process can hold.
 #[tauri::command]
 pub fn overlay_ocr_copy_focused(app: AppHandle) -> Result<(), String> {
+    // Placement only, like the selection it copies (`ADR-0016`; review of
+    // `#115`, round 1), and only from an area that is OCR now.
+    if !placement::is_placing() {
+        return Ok(());
+    }
     let Some(area) = area_under_cursor(&app)? else {
         return Ok(());
     };
+    if area.kind != AreaType::Ocr {
+        return Ok(());
+    }
     let Some(text) = crate::ocr::copy_text(area.id) else {
         return Ok(());
     };
@@ -2433,9 +2447,15 @@ pub fn overlay_ocr_copy_focused(app: AppHandle) -> Result<(), String> {
 /// selects every word of the OCR area under the cursor.
 #[tauri::command]
 pub fn overlay_ocr_select_all_focused(app: AppHandle) -> Result<(), String> {
+    if !placement::is_placing() {
+        return Ok(());
+    }
     let Some(area) = area_under_cursor(&app)? else {
         return Ok(());
     };
+    if !placement::reads_in_place(&app, area.id) {
+        return Ok(());
+    }
     if let Some(range) = crate::ocr::select_all(area.id) {
         emit_ocr_selection(&app, area.id, Some(range));
     }

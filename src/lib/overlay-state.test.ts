@@ -21,6 +21,7 @@ import {
   type OcrWordPayload,
   ocrLine,
   ocrSelectionBands,
+  ocrSelectionHandles,
   ocrWordBoxes,
   type PhysRect,
   physRectsToCss,
@@ -840,6 +841,16 @@ describe('in-place OCR (roadmap 1.41)', () => {
     ]);
     expect(ocrSelectionBands(words, null, 1, 0)).toEqual([]);
     expect(ocrSelectionBands([], [0, 0], 1, 0)).toEqual([]);
+  });
+
+  it('hangs the handles off the corners the hook grabs them by', () => {
+    // Selection Texte (1) to für (2): start below Texte's bottom-left (40, 20),
+    // end below für's bottom-right (40, 50), both 14 physical px at 2x scale.
+    expect(ocrSelectionHandles(words, [2, 1], 2, 0, 14)).toEqual([
+      { end: 'start', x: 20 - 7, y: 10, size: 7 },
+      { end: 'end', x: 20, y: 25, size: 7 },
+    ]);
+    expect(ocrSelectionHandles(words, null, 1, 0, 14)).toEqual([]);
   });
 
   it('takes Ctrl+C and Ctrl+A only as plain Ctrl chords', () => {
