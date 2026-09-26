@@ -937,13 +937,19 @@ pub(crate) fn select_all(id: AreaId) -> Option<(usize, usize)> {
     Some((0, last))
 }
 
-/// The text `Ctrl+C` copies from `id`: the selection, or everything read when
-/// nothing is selected. `None` when the area has no words.
-pub(crate) fn copy_text(id: AreaId) -> Option<String> {
+/// The text `Ctrl+C` copies from `id`: the selection when `selection` says it
+/// is drawn and there is one, otherwise everything read. `None` when the area
+/// has no words.
+pub(crate) fn copy_text(id: AreaId, selection: bool) -> Option<String> {
     let guard = lock();
     let words = guard.words.get(&id.get())?;
-    let (first, last) = match guard.selection.get(&id.get()) {
-        Some(&range) => ordered(range),
+    let selected = if selection {
+        guard.selection.get(&id.get()).copied()
+    } else {
+        None
+    };
+    let (first, last) = match selected {
+        Some(range) => ordered(range),
         None => (0, words.len().checked_sub(1)?),
     };
     Some(ocr_words::text_between(words, first, last))

@@ -289,7 +289,7 @@ pub fn run() -> tauri::Result<()> {
             // starting the sessions and `freeze` consulting them would leak
             // four held sessions. Still an environment variable: 1.9f's warm
             // path is settings-gated in the roadmap and is NOT one of the
-            // fourteen rows `UI-UX.md` section 4 inventories, so giving it a
+            // fifteen rows `UI-UX.md` section 4 inventories, so giving it a
             // control here would be inventing a row that window's own rule
             // forbids. Recorded rather than decided in passing.
             freeze::init_warm_capture();

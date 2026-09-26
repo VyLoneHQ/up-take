@@ -3396,17 +3396,24 @@ fn select_or_move(app: &AppHandle, id: AreaId, bounds: Rect, point: Point) -> Ge
 
 /// A press on the selection handle of any area that reads in place, topmost
 /// area first, as the selection gesture that handle starts.
+///
+/// **Only areas at or above the topmost one covering `point`.** A handle of an
+/// area below it is hidden under that area, and grabbing it through the area on
+/// top would contradict what the user sees (review of `#115`, round 8).
 fn selection_handle_press(app: &AppHandle, point: Point) -> Option<Gesture> {
-    overlay::areas_top_down(app)
-        .into_iter()
-        .find_map(|(id, bounds)| {
-            if !reads_in_place(app, id) {
-                return None;
-            }
+    let covering = overlay::area_handle_at(app, point).map(|(id, _, _)| id);
+    for (id, bounds) in overlay::areas_top_down(app) {
+        if reads_in_place(app, id) {
             let local = Point::new(point.x - bounds.origin.x, point.y - bounds.origin.y);
-            crate::ocr::handle_at(id, local, SELECTION_HANDLE_REACH)
-                .map(|_| select_or_move(app, id, bounds, point))
-        })
+            if crate::ocr::handle_at(id, local, SELECTION_HANDLE_REACH).is_some() {
+                return Some(select_or_move(app, id, bounds, point));
+            }
+        }
+        if Some(id) == covering {
+            break;
+        }
+    }
+    None
 }
 
 fn classify_press(point: Point) -> Gesture {

@@ -2447,7 +2447,11 @@ pub fn overlay_ocr_copy_focused(app: AppHandle) -> Result<(), String> {
     if area.kind != AreaType::Ocr {
         return Ok(());
     }
-    let Some(text) = crate::ocr::copy_text(area.id) else {
+    // The selection only while it is drawn. A Rendered area shows no band, so
+    // a selection made before the switch would copy text the user cannot see
+    // is selected (review of `#115`, round 8); it copies all of it instead.
+    let selection = placement::reads_in_place(&app, area.id);
+    let Some(text) = crate::ocr::copy_text(area.id, selection) else {
         return Ok(());
     };
     let started = std::time::Instant::now();
