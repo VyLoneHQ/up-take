@@ -36,7 +36,10 @@
 //! `cargo clippy` and `cargo test` all fail on any machine without 47.6 MB of
 //! acquired assets. They live in `tauri.release.conf.json`, merged in with
 //! `--config` when an installer is built, so an ordinary build and `tauri dev`
-//! need nothing. **CI found this after a local run and an independent review
+//! need nothing **to compile**. To actually read text, a debug build takes them
+//! from this same staging directory when none sit beside the executable
+//! (`DEV_STAGING`, UP-TAKE `I-429`), and `UPTAKE_MODELS_DIR` overrides both.
+//! **CI found this after a local run and an independent review
 //! had both passed** -- both ran where the assets already existed, which is the
 //! oldest shape there is.
 //!
@@ -334,7 +337,48 @@ fn models_directory() -> Result<PathBuf, String> {
     let directory = executable
         .parent()
         .ok_or_else(|| "UP-TAKE's own path has no directory".to_string())?;
-    Ok(directory.join(MODELS_SUBDIRECTORY))
+    Ok(beside_or_staged(
+        directory.join(MODELS_SUBDIRECTORY),
+        DEV_STAGING.map(|staging| std::path::Path::new(staging).join(MODELS_SUBDIRECTORY)),
+    ))
+}
+
+/// Where the acquisition scripts stage the verified runtime and models, in a
+/// **debug** build only; `None` in a release build.
+///
+/// `scripts/acquire-*.py` write to `src-tauri/assets` by default, in the same
+/// layout an installed UP-TAKE has beside its executable (`models/` and
+/// `onnxruntime.dll`), and the installer packages them from there. `cargo
+/// build` copies none of it into `target/debug`, so a fresh worktree's dev
+/// build said `no usable OCR models` and read like a broken install (UP-TAKE
+/// `I-429`). A debug build therefore also looks here.
+///
+/// **Nothing about the check changes.** Whatever this names goes through the
+/// same `Installer::state_of` digest check as a file beside the executable, so
+/// a wrong file here is refused exactly as it would be there (`ADR-0032`
+/// decision 2). A release build compiles this to `None` and never embeds the
+/// build machine's path.
+#[cfg(debug_assertions)]
+const DEV_STAGING: Option<&str> = Some(concat!(env!("CARGO_MANIFEST_DIR"), "/assets"));
+#[cfg(not(debug_assertions))]
+const DEV_STAGING: Option<&str> = None;
+
+/// `beside`, unless it does not exist and `staged` does.
+///
+/// Anything present beside the executable wins, even a corrupt file: that
+/// file is then refused by its digest check rather than quietly replaced by
+/// the staged copy, because a bad file beside the executable is exactly what
+/// the check exists to report.
+///
+/// **Absent means `Ok(false)` from `try_exists`, not `!exists()`.** `exists()`
+/// also answers `false` when the path's metadata cannot be read, which would
+/// have swapped an unreadable install for the staged copy instead of refusing
+/// it (review of `#116`, round 1).
+fn beside_or_staged(beside: PathBuf, staged: Option<PathBuf>) -> PathBuf {
+    match staged {
+        Some(staged) if matches!(beside.try_exists(), Ok(false)) && staged.exists() => staged,
+        _ => beside,
+    }
 }
 
 /// ONNX Runtime's **verified** path, or `None` to let `ORT_DYLIB_PATH` decide.
@@ -370,7 +414,11 @@ fn runtime_library() -> Result<Option<PathBuf>, String> {
     let Some(directory) = executable.parent() else {
         return Ok(None);
     };
-    verified_runtime_in(directory)
+    let runtime = beside_or_staged(
+        directory.join(RUNTIME_FILE_NAME),
+        DEV_STAGING.map(|staging| std::path::Path::new(staging).join(RUNTIME_FILE_NAME)),
+    );
+    verified_runtime_in(runtime.parent().unwrap_or(directory))
 }
 
 /// [`runtime_library`]'s answer for an arbitrary directory.
@@ -382,8 +430,18 @@ fn runtime_library() -> Result<Option<PathBuf>, String> {
 /// test can write a wrong DLL into a temporary one and watch it go red.
 fn verified_runtime_in(directory: &std::path::Path) -> Result<Option<PathBuf>, String> {
     let beside_executable = directory.join(RUNTIME_FILE_NAME);
-    if !beside_executable.exists() {
-        return Ok(None);
+    // `try_exists`, not `exists`: the latter also answers `false` when the
+    // metadata cannot be read, which let an unreadable runtime fall through to
+    // `ORT_DYLIB_PATH` instead of being refused (review of `#116`, round 2).
+    match beside_executable.try_exists() {
+        Ok(false) => return Ok(None),
+        Ok(true) => {}
+        Err(error) => {
+            return Err(format!(
+                "{} could not be checked: {error}",
+                beside_executable.display()
+            ));
+        }
     }
 
     let manifest = onnxruntime::onnxruntime()
@@ -448,6 +506,14 @@ fn resolve_config() -> Result<PaddleConfig, String> {
         }
         if !corrupt.is_empty() {
             reason.push_str(&format!("; corrupt: {}", corrupt.join(", ")));
+        }
+        if let Some(staging) = DEV_STAGING {
+            // A development build only. Says what a developer does next, where
+            // a user's message stays about their install.
+            reason.push_str(&format!(
+                "; a development build also looks in {staging}/{MODELS_SUBDIRECTORY}, which \
+                 scripts/acquire-ppocr-detector.py and scripts/acquire-ppocr-recogniser.py fill"
+            ));
         }
         return Err(reason);
     }
@@ -1175,6 +1241,50 @@ mod tests {
 
         let _ = std::fs::remove_file(&planted);
         let _ = std::fs::remove_dir(&directory);
+    }
+
+    #[test]
+    fn a_dev_build_falls_back_to_staging_only_when_nothing_is_beside_the_executable() {
+        // I-429. Four cases, because the one that matters for ADR-0032 is the
+        // third: a file beside the executable must never be swapped for the
+        // staged copy, or a corrupt install would be hidden rather than refused.
+        let root = std::env::temp_dir().join("uptake-i429-staging-drill");
+        let _ = std::fs::remove_dir_all(&root);
+        let beside = root.join("exe").join(MODELS_SUBDIRECTORY);
+        let staged = root.join("assets").join(MODELS_SUBDIRECTORY);
+
+        // Neither exists: the beside path, so the error names the install.
+        assert_eq!(
+            beside_or_staged(beside.clone(), Some(staged.clone())),
+            beside
+        );
+
+        // Only the staged copy exists: a fresh worktree's dev build.
+        std::fs::create_dir_all(&staged).unwrap();
+        assert_eq!(
+            beside_or_staged(beside.clone(), Some(staged.clone())),
+            staged
+        );
+
+        // Both exist: beside wins, whatever it holds.
+        std::fs::create_dir_all(&beside).unwrap();
+        assert_eq!(
+            beside_or_staged(beside.clone(), Some(staged.clone())),
+            beside
+        );
+
+        // A release build has no staging at all.
+        std::fs::remove_dir_all(&beside).unwrap();
+        assert_eq!(beside_or_staged(beside.clone(), None), beside);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn dev_staging_exists_only_in_a_debug_build() {
+        // The staging path is the build machine's; a release binary must not
+        // carry it, or an installed UP-TAKE would look in a developer's folder.
+        assert_eq!(DEV_STAGING.is_some(), cfg!(debug_assertions));
     }
 
     #[test]
