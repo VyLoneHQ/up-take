@@ -115,6 +115,9 @@ const PAIRS_EXEMPT: Record<string, string> = {
     'coach-copy.ts. One line of the keybind reference, composed on this side ' +
     'from a key name written in that file and a translated sentence.',
   TypeRow: 'coach-copy.ts. One area type on the tour step 2, like KeyRow.',
+  OcrHandle:
+    'overlay-state.ts. One selection handle of an in-place OCR area, computed ' +
+    'on this side from the words and selection that DID arrive (roadmap 1.41).',
   CssRect:
     'regions.ts. CSS pixels, converted on this side from the physical ' +
     'geometry Rust sends (ADR-0011 makes the WebView the authority on scale, ' +

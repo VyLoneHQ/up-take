@@ -60,6 +60,7 @@ const INVENTORY: { pane: PaneId; id: string; shape: Row['shape'] }[] = [
   { pane: 'appearance', id: 'area-opacity', shape: 'slider' },
   { pane: 'appearance', id: 'filter-strength', shape: 'slider' },
   { pane: 'appearance', id: 'language', shape: 'segmented' },
+  { pane: 'ocr', id: 'ocr-behaviour', shape: 'segmented' },
 ];
 
 /** The shipped defaults, which `settings.rs` asserts from the other side. */
@@ -75,6 +76,7 @@ const DEFAULTS: Settings = {
   area_opacity_percent: 40,
   filter_strength_percent: 16,
   language: 'system',
+  ocr_behaviour: 'in_place',
 };
 
 const FACTS: Facts = {
@@ -203,7 +205,13 @@ describe('the inventory', () => {
 
   it('names the panes in the sidebar order section 3.2 gives', () => {
     expect(view().map((pane) => pane.id)).toEqual([...PANE_IDS]);
-    expect(PANE_IDS).toEqual(['general', 'capture', 'appearance', 'help']);
+    expect(PANE_IDS).toEqual([
+      'general',
+      'capture',
+      'appearance',
+      'ocr',
+      'help',
+    ]);
   });
 
   it('reads the keybind rows from the tour rather than restating them', () => {
@@ -290,6 +298,7 @@ describe('a control', () => {
     ]);
     expect(segments('held-picture-quality')).toEqual(['fast', 'exact']);
     expect(segments('language')).toEqual(['system', 'english', 'german']);
+    expect(segments('ocr-behaviour')).toEqual(['in_place', 'rendered']);
   });
 
   it('empties the save folder back to the default rather than to a path', () => {
@@ -374,6 +383,7 @@ describe('the words', () => {
       'Allgemein',
       'Aufnahme',
       'Darstellung',
+      'OCR',
       'Hilfe',
     ]);
   });
