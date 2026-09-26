@@ -873,7 +873,14 @@ pub(crate) fn pump(app: &AppHandle) {
     {
         let app = app.clone();
         std::thread::spawn(move || {
-            crate::output::copy_text_to_clipboard(&app, id, &text, started);
+            // Asked again on the publishing thread, right before the write: the
+            // thread can start late, and a move in that gap withdrew the copy
+            // (review of `#115`, third GPT-6 Astra round). The lock is not held
+            // across the write, because the clipboard can be held by another
+            // process; the gap left is between this check and the write.
+            if lock().generation.get(&raw).copied() == clipboard_stamp {
+                crate::output::copy_text_to_clipboard(&app, id, &text, started);
+            }
         });
     }
 }
@@ -955,6 +962,17 @@ pub(crate) fn handle_at(id: AreaId, local: Point, radius: i32) -> Option<usize> 
     let words = guard.words.get(&id.get())?;
     let (first, last) = ordered(*guard.selection.get(&id.get())?);
     ocr_words::handle_at(words, first, last, local, radius)
+}
+
+/// The centre of word `index` of `id`, frame-local: the mean of its outline.
+pub(crate) fn word_centre(id: AreaId, index: usize) -> Option<Point> {
+    let guard = lock();
+    let word = guard.words.get(&id.get())?.get(index)?;
+    let (x, y) = word
+        .outline
+        .iter()
+        .fold((0, 0), |(x, y), corner| (x + corner.x, y + corner.y));
+    Some(Point::new(x / 4, y / 4))
 }
 
 /// Moves the end of `id`'s selection to the word nearest `local`.

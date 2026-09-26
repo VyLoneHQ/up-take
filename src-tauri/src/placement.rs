@@ -377,9 +377,13 @@ enum Gesture {
     /// Move an existing area, from the bounds it had at button-down.
     Move { id: AreaId, start: Rect },
     /// Select words in an OCR area that reads in place (roadmap `1.41`,
-    /// `ADR-0046`). Started by a press ON a word; `origin` is the area's
-    /// top-left, which turns the pointer into the frame-local point the words
-    /// are stored in.
+    /// `ADR-0046`). Started by a press ON a word or on a selection handle;
+    /// subtracting `origin` turns the pointer into the frame-local point the
+    /// words are stored in. For a handle, `origin` also carries the grab
+    /// offset from the pointer to the grabbed word's centre, because the handle
+    /// hangs below its word: without it, a click on the handle picked the
+    /// nearest word on the NEXT line (review of `#115`, third GPT-6 Astra
+    /// round).
     Select { id: AreaId, origin: Point },
     /// Resize an existing area from one edge or corner.
     Resize {
@@ -3357,7 +3361,7 @@ fn selection_start_at(
     id: AreaId,
     bounds: Rect,
     point: Point,
-) -> Option<(usize, usize)> {
+) -> Option<(usize, usize, bool)> {
     if !reads_in_place(app, id) {
         return None;
     }
@@ -3365,9 +3369,9 @@ fn selection_start_at(
     if let Some(anchor) = crate::ocr::handle_at(id, local, SELECTION_HANDLE_REACH) {
         let (first, last) = crate::ocr::selection_of(id)?;
         let focus = if anchor == first { last } else { first };
-        return Some((anchor, focus));
+        return Some((anchor, focus, true));
     }
-    crate::ocr::word_at(id, local).map(|index| (index, index))
+    crate::ocr::word_at(id, local).map(|index| (index, index, false))
 }
 
 /// Whether a press at `point` on `id`'s body would start a word selection.
@@ -3383,13 +3387,20 @@ fn selects_at(app: &AppHandle, id: AreaId, bounds: Rect, point: Point) -> bool {
 /// area stays as movable as every other area; a press can never be ambiguous
 /// between the two, because a word either contains the point or does not.
 fn select_or_move(app: &AppHandle, id: AreaId, bounds: Rect, point: Point) -> Gesture {
-    if let Some((anchor, focus)) = selection_start_at(app, id, bounds, point) {
+    if let Some((anchor, focus, from_handle)) = selection_start_at(app, id, bounds, point) {
         let range = crate::ocr::begin_selection(id, anchor, focus);
         overlay::emit_ocr_selection(app, id, Some(range));
-        return Gesture::Select {
-            id,
-            origin: bounds.origin,
-        };
+        // From a handle, the pointer stands for the grabbed word's centre, not
+        // for wherever below it the handle was pressed.
+        let mut origin = bounds.origin;
+        if from_handle && let Some(centre) = crate::ocr::word_centre(id, focus) {
+            let local = Point::new(point.x - bounds.origin.x, point.y - bounds.origin.y);
+            origin = Point::new(
+                origin.x - (centre.x - local.x),
+                origin.y - (centre.y - local.y),
+            );
+        }
+        return Gesture::Select { id, origin };
     }
     Gesture::Move { id, start: bounds }
 }

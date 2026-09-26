@@ -233,6 +233,22 @@ mod tests {
     }
 
     /// Two lines: "Die Texte" at y 0 and "für Anfänger" at y 30.
+    #[test]
+    fn a_words_centre_is_nearest_to_that_word() {
+        // The grab offset of a selection handle (review of `#115`, third GPT-6
+        // Astra round) moves the pointer to the grabbed word's centre, so a
+        // click on the handle must resolve back to that word, never to one on
+        // the next line.
+        let words = two_lines();
+        for (index, word) in words.iter().enumerate() {
+            let (x, y) = word
+                .outline
+                .iter()
+                .fold((0, 0), |(x, y), corner| (x + corner.x, y + corner.y));
+            assert_eq!(nearest(&words, Point::new(x / 4, y / 4)), Some(index));
+        }
+    }
+
     fn two_lines() -> Vec<PlacedWord> {
         vec![
             word("Die", 0, 0, 30, 0),
