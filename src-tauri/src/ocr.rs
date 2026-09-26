@@ -366,9 +366,14 @@ const DEV_STAGING: Option<&str> = None;
 /// file is then refused by its digest check rather than quietly replaced by
 /// the staged copy, because a bad file beside the executable is exactly what
 /// the check exists to report.
+///
+/// **Absent means `Ok(false)` from `try_exists`, not `!exists()`.** `exists()`
+/// also answers `false` when the path's metadata cannot be read, which would
+/// have swapped an unreadable install for the staged copy instead of refusing
+/// it (review of `#116`, round 1).
 fn beside_or_staged(beside: PathBuf, staged: Option<PathBuf>) -> PathBuf {
     match staged {
-        Some(staged) if !beside.exists() && staged.exists() => staged,
+        Some(staged) if matches!(beside.try_exists(), Ok(false)) && staged.exists() => staged,
         _ => beside,
     }
 }
