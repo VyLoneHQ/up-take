@@ -36,7 +36,10 @@
 //! `cargo clippy` and `cargo test` all fail on any machine without 47.6 MB of
 //! acquired assets. They live in `tauri.release.conf.json`, merged in with
 //! `--config` when an installer is built, so an ordinary build and `tauri dev`
-//! need nothing. **CI found this after a local run and an independent review
+//! need nothing **to compile**. To actually read text, a debug build takes them
+//! from this same staging directory when none sit beside the executable
+//! (`DEV_STAGING`, UP-TAKE `I-429`), and `UPTAKE_MODELS_DIR` overrides both.
+//! **CI found this after a local run and an independent review
 //! had both passed** -- both ran where the assets already existed, which is the
 //! oldest shape there is.
 //!
