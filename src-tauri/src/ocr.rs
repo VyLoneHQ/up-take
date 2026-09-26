@@ -580,9 +580,13 @@ fn recognise(app: &AppHandle, id: AreaId, bounds: Rect, copies: bool) {
         {
             guard.latest = None;
         }
+        // Announced under the lock, like every error below: a reading checks
+        // that it is current and speaks in one step, so an older reading's error
+        // cannot land between this reading's check and its words (review of
+        // `#115`, round 6). `emit_ocr` never takes this lock.
+        crate::overlay::emit_ocr(app, id, Status::Working, None, &[]);
         next
     };
-    crate::overlay::emit_ocr(app, id, Status::Working, None, &[]);
     let app = app.clone();
     std::thread::spawn(move || {
         let frame = match crate::output::frame_for_ocr(&app, bounds) {
@@ -594,9 +598,11 @@ fn recognise(app: &AppHandle, id: AreaId, bounds: Rect, copies: bool) {
                 );
                 // Only the latest reading speaks for the area. A newer one may
                 // already have put its words there.
-                if reading_is_current(&lock().generation, id.get(), asked) {
+                let guard = lock();
+                if reading_is_current(&guard.generation, id.get(), asked) {
                     crate::overlay::emit_ocr(&app, id, Status::Failed, Some(error), &[]);
                 }
+                drop(guard);
                 return;
             }
         };
@@ -624,8 +630,8 @@ fn recognise(app: &AppHandle, id: AreaId, bounds: Rect, copies: bool) {
             }
         }
         if let Some(reason) = guard.unavailable.clone() {
-            drop(guard);
             crate::overlay::emit_ocr(&app, id, Status::Unavailable, Some(reason), &[]);
+            drop(guard);
             return;
         }
         let Some(service) = guard.service.as_ref() else {
@@ -664,8 +670,8 @@ fn recognise(app: &AppHandle, id: AreaId, bounds: Rect, copies: bool) {
                 guard.service = None;
                 let reason = error.to_string();
                 guard.unavailable = Some(reason.clone());
-                drop(guard);
                 crate::overlay::emit_ocr(&app, id, Status::Failed, Some(reason), &[]);
+                drop(guard);
             }
         }
     });

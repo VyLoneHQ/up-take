@@ -307,13 +307,15 @@ function onKeydown(event: KeyboardEvent) {
   }
   // Roadmap 1.41: copy the OCR area under the cursor, or select all of it.
   // Rust decides which area and whether it has words; over anything else the
-  // keys do nothing.
-  if (isCopyKey(event)) {
+  // keys do nothing. Claimed in Placement only: outside it the overlay may
+  // still hold focus, and cancelling them there would take copy and select-all
+  // away from the user (review of `#115`, round 6).
+  if (overlayState === 'placement' && isCopyKey(event)) {
     event.preventDefault();
     void copyFocusedOcr(invoke);
     return;
   }
-  if (isSelectAllKey(event)) {
+  if (overlayState === 'placement' && isSelectAllKey(event)) {
     event.preventDefault();
     void selectAllFocusedOcr(invoke);
     return;
