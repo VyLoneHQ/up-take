@@ -3565,9 +3565,19 @@ fn finish_gesture(release: Point) {
             }
             return;
         }
-        // The selection was made during the drag, one word at a time, in
-        // `pump_gesture`; the release has nothing left to commit.
-        Gesture::Select { .. } | Gesture::Inert => return,
+        // The selection follows the pointer during the drag, in
+        // `pump_gesture`, but only at the poll's rate. A quick drag can reach
+        // another word and release between two ticks, so the release point is
+        // applied too, or the selection would end one sample short (review of
+        // `#115`, the GPT-6 Astra round).
+        Gesture::Select { id, origin } => {
+            let local = Point::new(release.x - origin.x, release.y - origin.y);
+            if let Some(range) = crate::ocr::extend_selection(id, local) {
+                overlay::emit_ocr_selection(app, id, Some(range));
+            }
+            return;
+        }
+        Gesture::Inert => return,
     };
     if changed && let Err(error) = overlay::emit_areas(app) {
         crate::diagnostics::trouble(

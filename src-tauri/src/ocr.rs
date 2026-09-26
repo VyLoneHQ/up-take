@@ -377,6 +377,43 @@ fn reading_is_current(generation: &BTreeMap<u64, u64>, id: u64, asked: u64) -> b
 
 static OCR: Mutex<Ocr> = Mutex::new(Ocr::new());
 
+/// Serialises building the OCR service, and nothing else.
+///
+/// Building hashes the model files and the runtime, about 47 MB of disk, and
+/// used to happen while holding [`OCR`]. The mouse hook takes [`OCR`] too (a
+/// new reading's generation, a selection hit test), so the first reading of a
+/// session could stall the hook on disk work, and a hook that stalls past
+/// `LowLevelHooksTimeout` is removed by Windows (review of `#115`, the GPT-6
+/// Astra round). Building now holds this instead, and [`OCR`] only long enough
+/// to install the result.
+static BUILDING: Mutex<()> = Mutex::new(());
+
+/// Builds the OCR service if there is none and none has failed, without
+/// holding [`OCR`] while the files are verified.
+fn ensure_service() {
+    let needed = |ocr: &Ocr| ocr.service.is_none() && ocr.unavailable.is_none();
+    if !needed(&lock()) {
+        return;
+    }
+    let _building = BUILDING.lock().unwrap_or_else(PoisonError::into_inner);
+    // Another reading may have built it while this one waited.
+    if !needed(&lock()) {
+        return;
+    }
+    // Built once and kept. `service` is `None` only before the first OCR area
+    // of the session or after the worker has stopped, and `unavailable` is what
+    // stops a second area re-hashing the models to rediscover the same absence.
+    let built = resolve_config().and_then(|config| {
+        Service::spawn(move || PaddleEngine::load(&config, PaddleOptions::default()))
+            .map_err(|error| error.to_string())
+    });
+    let mut guard = lock();
+    match built {
+        Ok(service) => guard.service = Some(service),
+        Err(reason) => guard.unavailable = Some(reason),
+    }
+}
+
 /// The lock, poison-tolerant.
 ///
 /// A panicked holder leaves the bookkeeping consistent -- every mutation here
@@ -607,27 +644,17 @@ fn recognise(app: &AppHandle, id: AreaId, bounds: Rect, copies: bool) {
             }
         };
 
-        let mut guard = lock();
         // A newer reading of this area was asked for while this frame was being
         // captured: it answers for the area, and this one would only replace
         // its words with older ones, or with an error, if it spoke second.
-        if !reading_is_current(&guard.generation, id.get(), asked) {
+        if !reading_is_current(&lock().generation, id.get(), asked) {
             return;
         }
-        // Built once and kept. `service` is `None` only before the first OCR
-        // area of the session or after the worker has stopped, and `unavailable`
-        // is what stops a second area re-hashing the models to rediscover the
-        // same absence.
-        if guard.service.is_none() && guard.unavailable.is_none() {
-            match resolve_config() {
-                Ok(config) => match Service::spawn(move || {
-                    PaddleEngine::load(&config, PaddleOptions::default())
-                }) {
-                    Ok(service) => guard.service = Some(service),
-                    Err(error) => guard.unavailable = Some(error.to_string()),
-                },
-                Err(reason) => guard.unavailable = Some(reason),
-            }
+        ensure_service();
+        let mut guard = lock();
+        // Asked again: the service may have taken a while to build.
+        if !reading_is_current(&guard.generation, id.get(), asked) {
+            return;
         }
         if let Some(reason) = guard.unavailable.clone() {
             crate::overlay::emit_ocr(&app, id, Status::Unavailable, Some(reason), &[]);
