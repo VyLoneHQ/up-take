@@ -362,6 +362,19 @@ fn answer_is_current(
     answered.is_some() && answered == generation.get(&id).copied()
 }
 
+/// Whether reading `asked` of `id` is still the latest one asked for, before it
+/// has reached the worker.
+///
+/// **Every announcement a reading makes after its capture asks this first**:
+/// failure and unavailability as well as submission. A superseded reading that
+/// failed to capture used to emit `Failed` anyway, and if the newer reading had
+/// already answered, that replaced its words with an error for an area that
+/// was fine (review of `#115`, round 4). `false` too for a dismissed area,
+/// whose generation `forget` removed.
+fn reading_is_current(generation: &BTreeMap<u64, u64>, id: u64, asked: u64) -> bool {
+    generation.get(&id) == Some(&asked)
+}
+
 static OCR: Mutex<Ocr> = Mutex::new(Ocr::new());
 
 /// The lock, poison-tolerant.
@@ -579,12 +592,22 @@ fn recognise(app: &AppHandle, id: AreaId, bounds: Rect, copies: bool) {
                     "ocr: could not capture the area",
                     &format_args!("{id:?}: {error}"),
                 );
-                crate::overlay::emit_ocr(&app, id, Status::Failed, Some(error), &[]);
+                // Only the latest reading speaks for the area. A newer one may
+                // already have put its words there.
+                if reading_is_current(&lock().generation, id.get(), asked) {
+                    crate::overlay::emit_ocr(&app, id, Status::Failed, Some(error), &[]);
+                }
                 return;
             }
         };
 
         let mut guard = lock();
+        // A newer reading of this area was asked for while this frame was being
+        // captured: it answers for the area, and this one would only replace
+        // its words with older ones, or with an error, if it spoke second.
+        if !reading_is_current(&guard.generation, id.get(), asked) {
+            return;
+        }
         // Built once and kept. `service` is `None` only before the first OCR
         // area of the session or after the worker has stopped, and `unavailable`
         // is what stops a second area re-hashing the models to rediscover the
@@ -603,12 +626,6 @@ fn recognise(app: &AppHandle, id: AreaId, bounds: Rect, copies: bool) {
         if let Some(reason) = guard.unavailable.clone() {
             drop(guard);
             crate::overlay::emit_ocr(&app, id, Status::Unavailable, Some(reason), &[]);
-            return;
-        }
-        // A newer reading of this area was asked for while this frame was being
-        // captured: it answers for the area, and this one would only replace
-        // its words with older ones if it reached the worker second.
-        if guard.generation.get(&id.get()) != Some(&asked) {
             return;
         }
         let Some(service) = guard.service.as_ref() else {
@@ -965,6 +982,18 @@ mod tests {
         submitted.insert(8, VecDeque::from([1]));
         assert!(!answer_is_current(&mut submitted, &generation, 8));
         assert!(!answer_is_current(&mut submitted, &generation, 9));
+    }
+
+    #[test]
+    fn only_the_latest_reading_may_announce_before_the_worker() {
+        // Round 4: a superseded reading whose capture failed must not emit
+        // `Failed` over the newer reading's words.
+        let mut generation: BTreeMap<u64, u64> = BTreeMap::new();
+        generation.insert(7, 2);
+        assert!(reading_is_current(&generation, 7, 2));
+        assert!(!reading_is_current(&generation, 7, 1), "superseded");
+        // Dismissed: `forget` removed the generation.
+        assert!(!reading_is_current(&generation, 8, 1), "dismissed");
     }
 
     #[test]
