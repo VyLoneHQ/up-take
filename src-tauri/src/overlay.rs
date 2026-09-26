@@ -1352,6 +1352,20 @@ pub(crate) fn convert_area(app: &AppHandle, id: AreaId, kind: AreaType) -> bool 
     conversion.changed
 }
 
+/// Every area's id and bounds, topmost first.
+///
+/// For hit tests that are not the area's own interaction surface: an in-place
+/// OCR selection's handles hang below their words and can lie on the resize
+/// band or outside the area altogether (review of `#115`, round 5).
+pub(crate) fn areas_top_down(app: &AppHandle) -> Vec<(AreaId, Rect)> {
+    let store = app.state::<Mutex<AreaStore>>();
+    let guard = lock(&store);
+    guard
+        .iter_top_down()
+        .map(|area| (area.id, area.bounds))
+        .collect()
+}
+
 /// The topmost area whose *interaction surface* contains `point`, and which
 /// part of it was grabbed.
 ///

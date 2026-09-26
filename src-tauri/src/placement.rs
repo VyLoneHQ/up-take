@@ -3385,6 +3385,21 @@ fn select_or_move(app: &AppHandle, id: AreaId, bounds: Rect, point: Point) -> Ge
     Gesture::Move { id, start: bounds }
 }
 
+/// A press on the selection handle of any area that reads in place, topmost
+/// area first, as the selection gesture that handle starts.
+fn selection_handle_press(app: &AppHandle, point: Point) -> Option<Gesture> {
+    overlay::areas_top_down(app)
+        .into_iter()
+        .find_map(|(id, bounds)| {
+            if !reads_in_place(app, id) {
+                return None;
+            }
+            let local = Point::new(point.x - bounds.origin.x, point.y - bounds.origin.y);
+            crate::ocr::handle_at(id, local, SELECTION_HANDLE_REACH)
+                .map(|_| select_or_move(app, id, bounds, point))
+        })
+}
+
 fn classify_press(point: Point) -> Gesture {
     if menu_contains(point) {
         return match menu_item_at(point) {
@@ -3407,6 +3422,14 @@ fn classify_press(point: Point) -> Gesture {
         // dealt with. A press on it never starts a drag.
         if let Some(button) = crate::first_run::hit(point) {
             return Gesture::Coach { button };
+        }
+        // A selection handle before the area's own chrome. It hangs below its
+        // word, so on the bottom line it can sit on the resize band or outside
+        // the area, where the classification below would resize the area or
+        // create a new one instead of extending the selection (review of
+        // `#115`, round 5).
+        if let Some(gesture) = selection_handle_press(app, point) {
+            return gesture;
         }
         if let Some((id, bounds, handle)) = overlay::area_handle_at(app, point) {
             return match handle {
