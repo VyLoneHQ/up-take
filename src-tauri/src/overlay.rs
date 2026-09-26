@@ -2441,22 +2441,33 @@ pub fn overlay_ocr_copy_focused(app: AppHandle) -> Result<(), String> {
     if !placement::is_placing() {
         return Ok(());
     }
-    let Some(area) = area_under_cursor(&app)? else {
+    // The OCR area under the cursor; failing that, the topmost area with a
+    // visible selection. A selection drag follows the nearest word outside the
+    // area and its handles hang below it, so the release can leave the cursor
+    // off the area while the band is still drawn (review of `#115`, round 9).
+    let under = area_under_cursor(&app)?
+        .filter(|area| area.kind == AreaType::Ocr)
+        .map(|area| area.id);
+    let Some(id) = under.or_else(|| {
+        areas_top_down(&app)
+            .into_iter()
+            .map(|(id, _)| id)
+            .find(|&id| {
+                placement::reads_in_place(&app, id) && crate::ocr::selection_of(id).is_some()
+            })
+    }) else {
         return Ok(());
     };
-    if area.kind != AreaType::Ocr {
-        return Ok(());
-    }
     // The selection only while it is drawn. A Rendered area shows no band, so
     // a selection made before the switch would copy text the user cannot see
     // is selected (review of `#115`, round 8); it copies all of it instead.
-    let selection = placement::reads_in_place(&app, area.id);
-    let Some(text) = crate::ocr::copy_text(area.id, selection) else {
+    let selection = placement::reads_in_place(&app, id);
+    let Some(text) = crate::ocr::copy_text(id, selection) else {
         return Ok(());
     };
     let started = std::time::Instant::now();
     std::thread::spawn(move || {
-        crate::output::copy_text_to_clipboard(&app, area.id, &text, started);
+        crate::output::copy_text_to_clipboard(&app, id, &text, started);
     });
     Ok(())
 }

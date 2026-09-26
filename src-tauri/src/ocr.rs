@@ -694,6 +694,11 @@ pub(crate) fn pump(app: &AppHandle) {
     // other process blocks on, and that does not belong inside OCR's critical
     // section.
     let mut clipboard: Option<(u64, String, Instant)> = None;
+    // The generation each announcement was accepted under, taken before the
+    // lock is released and checked again when it is published: a reading
+    // started in between (a move) must not have an older result drawn over its
+    // Working (review of `#115`, round 9).
+    let stamps: Vec<Option<u64>>;
     {
         let mut guard = lock();
         let Some(service) = guard.service.as_ref() else {
@@ -788,15 +793,24 @@ pub(crate) fn pump(app: &AppHandle) {
                 ),
             }
         }
+        stamps = announcements
+            .iter()
+            .map(|(raw, ..)| guard.generation.get(raw).copied())
+            .collect();
     }
-    for (raw, status, detail, words) in announcements {
+    for ((raw, status, detail, words), stamp) in announcements.into_iter().zip(stamps) {
         // Asked area by area rather than emitted blind: an area dismissed while
         // its frame was in the worker has nothing to draw on, and announcing a
         // result for it is the shape `captures::still_holds` exists to refuse
         // for a pin (`I-61`). A missing area here is the ordinary case, not an
         // error.
         if let Some(id) = crate::overlay::live_area_id(app, raw) {
-            crate::overlay::emit_ocr(app, id, status, detail, &words);
+            // Checked and published in one step, as `recognise` does.
+            let guard = lock();
+            if guard.generation.get(&raw).copied() == stamp {
+                crate::overlay::emit_ocr(app, id, status, detail, &words);
+            }
+            drop(guard);
         }
     }
     // After the announcements, not before them: the copy fires the same flash
