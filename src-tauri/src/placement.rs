@@ -3322,6 +3322,15 @@ fn reread_in_place_ocr(app: &AppHandle, id: AreaId) {
     }
 }
 
+/// Reads every OCR area again, if OCR areas read in place: called when the
+/// behaviour switches to In place, because a Rendered area kept the words of
+/// wherever it was last read.
+pub(crate) fn reread_every_in_place_ocr(app: &AppHandle) {
+    for (id, _) in overlay::areas_top_down(app) {
+        reread_in_place_ocr(app, id);
+    }
+}
+
 /// The size of a selection handle, in physical pixels (roadmap `1.41`): the
 /// teardrop the page draws is this square. **The grab target is deliberately
 /// larger** (`ocr_words::handle_at`), because a 14 px handle is a small thing
