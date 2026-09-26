@@ -721,6 +721,8 @@ pub(crate) fn pump(app: &AppHandle) {
     // other process blocks on, and that does not belong inside OCR's critical
     // section.
     let mut clipboard: Option<(u64, String, Instant)> = None;
+    // The generation the clipboard's text was accepted under; see `stamps`.
+    let mut clipboard_stamp: Option<u64> = None;
     // The generation each announcement was accepted under, taken before the
     // lock is released and checked again when it is published: a reading
     // started in between (a move) must not have an older result drawn over its
@@ -753,6 +755,7 @@ pub(crate) fn pump(app: &AppHandle) {
                             let text = recognition.text();
                             if let Some(started) = claims_clipboard(&mut guard.latest, id.get()) {
                                 clipboard = Some((id.get(), text.clone(), started));
+                                clipboard_stamp = guard.generation.get(&id.get()).copied();
                             }
                             let words = ocr_words::from_recognition(&recognition);
                             guard.words.insert(id.get(), words.clone());
@@ -860,8 +863,13 @@ pub(crate) fn pump(app: &AppHandle) {
     // arm), and this path was the exception until the independent review of
     // `PR #83` raised it. Non-binding there and taken anyway: the cost is one
     // thread per conversion and the risk was a met bar.
+    // Checked against the generation, as the announcement is: a move between
+    // accepting this result and publishing it withdrew the promise, and the
+    // area still being alive does not say its text is still current (review
+    // of `#115`, the second GPT-6 Astra round).
     if let Some((raw, text, started)) = clipboard
         && let Some(id) = crate::overlay::live_area_id(app, raw)
+        && lock().generation.get(&raw).copied() == clipboard_stamp
     {
         let app = app.clone();
         std::thread::spawn(move || {
