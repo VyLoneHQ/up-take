@@ -427,8 +427,18 @@ fn runtime_library() -> Result<Option<PathBuf>, String> {
 /// test can write a wrong DLL into a temporary one and watch it go red.
 fn verified_runtime_in(directory: &std::path::Path) -> Result<Option<PathBuf>, String> {
     let beside_executable = directory.join(RUNTIME_FILE_NAME);
-    if !beside_executable.exists() {
-        return Ok(None);
+    // `try_exists`, not `exists`: the latter also answers `false` when the
+    // metadata cannot be read, which let an unreadable runtime fall through to
+    // `ORT_DYLIB_PATH` instead of being refused (review of `#116`, round 2).
+    match beside_executable.try_exists() {
+        Ok(false) => return Ok(None),
+        Ok(true) => {}
+        Err(error) => {
+            return Err(format!(
+                "{} could not be checked: {error}",
+                beside_executable.display()
+            ));
+        }
     }
 
     let manifest = onnxruntime::onnxruntime()
