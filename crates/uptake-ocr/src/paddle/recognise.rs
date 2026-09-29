@@ -93,6 +93,69 @@ pub struct WordSpan {
     pub start: f32,
     /// Where it ends, `1.0` being the crop's right edge.
     pub end: f32,
+    /// The word's characters, left to right, splitting `start..end` between
+    /// them with no gap and no overlap (roadmap `1.44`). Joining their `text`
+    /// gives the word's.
+    pub characters: Vec<CharacterSpan>,
+}
+
+/// One character of a word, positioned as a fraction of the line's width.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CharacterSpan {
+    /// The character, as the dictionary spells it.
+    pub text: String,
+    /// Where the character starts.
+    pub start: f32,
+    /// Where it ends.
+    pub end: f32,
+}
+
+/// How far right of the midpoint between two characters' runs their boundary
+/// sits, in timesteps (roadmap `1.44`).
+///
+/// **A measurement, not a guess.** On 2026-09-29, 175 rendered lines read
+/// exactly (6026 glyphs: Segoe UI, Arial, Consolas, Times and Georgia at 12 to
+/// 20 px, both polarities; `scripts/measure-ocr-characters.py`) were compared
+/// with their true ink. A timestep is a median 3.45 source pixels and a
+/// character usually fires on one. The plain midpoint put 96.3% of glyph
+/// centres inside their own cell, with cuts a median 1.3 px LEFT of the gap
+/// between two glyphs; half a timestep right gave 98.0% and 0.44 px right. The
+/// best measured point was 0.35: 98.8%, and the misses are narrow glyphs (`i`,
+/// `j`, `l`) off by a median 0.44 px.
+pub const CHARACTER_CUT_SHIFT: f32 = 0.35;
+
+/// Splits a word's span between its characters.
+///
+/// The boundary between two characters is the midpoint of the first one's last
+/// timestep and the second one's first, [`CHARACTER_CUT_SHIFT`] to the right.
+/// The first character starts where the word does and the last ends where it
+/// does, so the characters tile the word exactly. A boundary is clamped into
+/// the word and never falls before the previous one, so a cell can be empty but
+/// never inverted.
+fn character_spans(
+    characters: &[&DecodedCharacter],
+    start: f32,
+    end: f32,
+    total: f32,
+) -> Vec<CharacterSpan> {
+    let mut spans: Vec<CharacterSpan> = Vec::with_capacity(characters.len());
+    let mut from = start;
+    for (index, character) in characters.iter().enumerate() {
+        let to = match characters.get(index + 1) {
+            Some(next) => {
+                let middle = (character.last + next.first) as f32 / 2.0;
+                ((middle + CHARACTER_CUT_SHIFT) / total).clamp(from, end)
+            }
+            None => end,
+        };
+        spans.push(CharacterSpan {
+            text: character.text.clone(),
+            start: from,
+            end: to,
+        });
+        from = to;
+    }
+    spans
 }
 
 impl DecodedText {
@@ -128,6 +191,7 @@ impl DecodedText {
         let total = self.timesteps as f32;
         let mut spans: Vec<WordSpan> = Vec::new();
         let mut current = String::new();
+        let mut letters: Vec<&DecodedCharacter> = Vec::new();
         // The whitespace run since the last word character: its first and last
         // timesteps. A boundary is the middle of the WHOLE run, so two spaces
         // in a row still give one boundary and no gap (review of `#114`).
@@ -156,9 +220,12 @@ impl DecodedText {
                     text: std::mem::take(&mut current),
                     start,
                     end: middle,
+                    characters: character_spans(&letters, start, middle, total),
                 });
+                letters.clear();
             }
             current.push_str(&character.text);
+            letters.push(character);
         }
         if !current.is_empty() {
             // Leading and trailing whitespace are not boundaries: the first word
@@ -168,6 +235,7 @@ impl DecodedText {
                 text: current,
                 start,
                 end: 1.0,
+                characters: character_spans(&letters, start, 1.0, total),
             });
         }
         spans
@@ -561,6 +629,54 @@ mod tests {
         assert!((words[0].end - 0.5).abs() < f32::EPSILON);
         assert!((words[1].start - 0.5).abs() < f32::EPSILON);
         assert!((words[1].end - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn characters_tile_their_word_and_cut_right_of_the_runs_midpoint() {
+        let dict = dictionary();
+        // a b [space at 4..=6] b a, over 10 timesteps.
+        let decoded = ctc_decode(&logits(&[1, 2, 0, 0, 5, 5, 5, 2, 1, 0], 6), 6, &dict);
+        let words = decoded.words();
+        for word in &words {
+            let joined: String = word.characters.iter().map(|c| c.text.as_str()).collect();
+            assert_eq!(joined, word.text);
+            assert!((word.characters[0].start - word.start).abs() < f32::EPSILON);
+            let last = &word.characters[word.characters.len() - 1];
+            assert!((last.end - word.end).abs() < f32::EPSILON);
+            for pair in word.characters.windows(2) {
+                assert!((pair[0].end - pair[1].start).abs() < f32::EPSILON);
+            }
+        }
+        // `a` ends at timestep 0 and `b` starts at 1: the midpoint 0.5, then
+        // CHARACTER_CUT_SHIFT to the right, over 10 timesteps.
+        let expected = (0.5 + CHARACTER_CUT_SHIFT) / 10.0;
+        assert!((words[0].characters[0].end - expected).abs() < 1e-6);
+        let expected = (7.5 + CHARACTER_CUT_SHIFT) / 10.0;
+        assert!((words[1].characters[0].end - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_cut_past_its_word_is_clamped_and_never_inverts_a_cell() {
+        let character = |text: &str, first: usize, last: usize| DecodedCharacter {
+            text: text.to_owned(),
+            first,
+            last,
+        };
+        let (a, b, c) = (
+            character("a", 8, 8),
+            character("b", 9, 9),
+            character("c", 2, 2),
+        );
+        // The word ends at 0.5 but its runs sit past it, and `c` fires before
+        // `b`: every cut must stay inside the word and in order.
+        let spans = character_spans(&[&a, &b, &c], 0.2, 0.5, 10.0);
+        assert_eq!(spans.len(), 3);
+        assert!((spans[0].start - 0.2).abs() < f32::EPSILON);
+        assert!((spans[2].end - 0.5).abs() < f32::EPSILON);
+        for span in &spans {
+            assert!(span.start <= span.end, "{spans:?}");
+            assert!(span.start >= 0.2 && span.end <= 0.5, "{spans:?}");
+        }
     }
 
     /// Checks that `words` covers `[0, 1]` with no gap and no overlap.

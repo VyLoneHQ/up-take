@@ -158,6 +158,29 @@ pub struct Word {
     /// only meet. Use it for a quick reject or a layout estimate, never to
     /// decide which word a point belongs to.
     pub bounds: Rect,
+    /// The word's characters, left to right (roadmap `1.44`, `ADR-0046`
+    /// decision 8: a selection end lands between two characters).
+    ///
+    /// Their outlines tile [`Word::outline`] the way words tile a block: the
+    /// first starts at the word's start, the last ends at its end, and
+    /// neighbours share their cut edge. **Rounded to whole pixels, and a
+    /// character at 12 px is 4 to 7 px wide**, so a narrow letter's outline can
+    /// be a pixel off its ink; `CHARACTER_CUT_SHIFT` in the recogniser records
+    /// what was measured. **Empty when the engine cannot place characters**, and
+    /// a caller then treats the word as one unit.
+    pub characters: Vec<Character>,
+}
+
+/// One character of a [`Word`] and where it sat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Character {
+    /// The character, as the recogniser's dictionary spells it. Usually one
+    /// code point.
+    pub text: String,
+    /// Its four corners, clockwise from the top-left, frame-local: the word's
+    /// outline cut at the character's two ends. Hit-test against this, as with
+    /// [`Word::outline`].
+    pub outline: [Point; 4],
 }
 
 /// A recogniser. `paddle::PaddleEngine` implements this with PP-OCRv6_small.

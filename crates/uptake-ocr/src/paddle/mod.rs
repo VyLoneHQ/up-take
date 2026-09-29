@@ -35,7 +35,7 @@ use ort::value::TensorRef;
 use uptake_core::bitmap::RgbaBitmap;
 use uptake_core::geometry::{Point, Rect};
 
-use crate::engine::{Engine, EngineError, Recognition, TextBlock, Word};
+use crate::engine::{Character, Engine, EngineError, Recognition, TextBlock, Word};
 use detect::{DetectorOptions, ProbabilityMap};
 use reading_order::Placed;
 use recognise::{CharacterDictionary, DecodedText};
@@ -268,6 +268,33 @@ impl PaddleEngine {
     }
 
     /// Runs the recogniser over one crop.
+    /// Every detected line with its raw decode, before any filtering: the
+    /// detector's quad and the recogniser's per-character timestep runs.
+    ///
+    /// **A measurement seam, not a product path** (roadmap `1.44`). Where a
+    /// character sits comes from those runs, and the rule that turns runs into
+    /// positions is decided by comparing them with rendered text whose true
+    /// positions are known (`examples/ocr_characters.rs`). `recognise` drops
+    /// low-confidence lines and keeps only the placed words; a measurement
+    /// needs what came before both.
+    ///
+    /// # Errors
+    ///
+    /// As [`Engine::recognise`].
+    pub fn decode_lines(
+        &mut self,
+        frame: &RgbaBitmap,
+    ) -> Result<Vec<(quad::Quad, DecodedText)>, EngineError> {
+        let detected = self.detect(frame)?;
+        let mut lines = Vec::with_capacity(detected.len());
+        for found in detected {
+            if let Some(decoded) = self.recognise_crop(frame, &found.quad)? {
+                lines.push((found.quad, decoded));
+            }
+        }
+        Ok(lines)
+    }
+
     fn recognise_crop(
         &mut self,
         frame: &RgbaBitmap,
@@ -612,31 +639,37 @@ fn place_words(decoded: &DecodedText, quad: &quad::Quad) -> Vec<Word> {
             from.y.mul_add(1.0 - u, to.y * u),
         )
     };
+    // Clockwise from the top-left: top start, top end, bottom end, bottom
+    // start. Rounded to the NEAREST pixel, not outward: a cut point is shared
+    // with the neighbour, and both must land on the same pixel for their
+    // outlines to meet exactly. Characters are cut by the same function from
+    // the same fractions, so a word's first and last characters share its
+    // edges exactly too (roadmap `1.44`).
+    let cut = |start: f32, end: f32| {
+        [
+            point_from(along(top_left, top_right, start)),
+            point_from(along(top_left, top_right, end)),
+            point_from(along(bottom_left, bottom_right, end)),
+            point_from(along(bottom_left, bottom_right, start)),
+        ]
+    };
     decoded
         .words()
         .into_iter()
         .map(|span| {
-            let corners = [
-                along(top_left, top_right, span.start),
-                along(top_left, top_right, span.end),
-                along(bottom_left, bottom_right, span.start),
-                along(bottom_left, bottom_right, span.end),
-            ];
-            // Clockwise from the top-left: top start, top end, bottom end,
-            // bottom start. Rounded to the NEAREST pixel, not outward: a cut
-            // point is shared with the neighbour, and both must land on the
-            // same pixel for their outlines to meet exactly.
-            let [top_start, top_end, bottom_start, bottom_end] = corners;
-            let outline = [
-                point_from(top_start),
-                point_from(top_end),
-                point_from(bottom_end),
-                point_from(bottom_start),
-            ];
+            let outline = cut(span.start, span.end);
             Word {
                 text: span.text,
                 bounds: bounds_of(&outline),
                 outline,
+                characters: span
+                    .characters
+                    .into_iter()
+                    .map(|character| Character {
+                        outline: cut(character.start, character.end),
+                        text: character.text,
+                    })
+                    .collect(),
             }
         })
         .collect()
@@ -757,6 +790,34 @@ mod tests {
         assert_eq!(words[0].bounds, Rect::new(100, 50, 100, 20));
         assert_eq!(words[1].text, "ba");
         assert_eq!(words[1].bounds, Rect::new(200, 50, 100, 20));
+    }
+
+    #[test]
+    fn characters_share_their_words_edges_and_each_others() {
+        let quad = quad::Quad::new([
+            quad::PointF::new(100.0, 50.0),
+            quad::PointF::new(300.0, 50.0),
+            quad::PointF::new(300.0, 70.0),
+            quad::PointF::new(100.0, 70.0),
+        ]);
+        let words = place_words(&two_words(), &quad);
+        for word in &words {
+            let joined: String = word.characters.iter().map(|c| c.text.as_str()).collect();
+            assert_eq!(joined, word.text);
+            let first = &word.characters[0];
+            let last = &word.characters[word.characters.len() - 1];
+            assert_eq!(first.outline[0], word.outline[0], "{word:?}");
+            assert_eq!(first.outline[3], word.outline[3], "{word:?}");
+            assert_eq!(last.outline[1], word.outline[1], "{word:?}");
+            assert_eq!(last.outline[2], word.outline[2], "{word:?}");
+            for pair in word.characters.windows(2) {
+                assert_eq!(pair[0].outline[1], pair[1].outline[0], "{word:?}");
+                assert_eq!(pair[0].outline[2], pair[1].outline[3], "{word:?}");
+            }
+        }
+        // `a` at timestep 0 and `b` at 1 over 10: the cut is at
+        // (0.5 + CHARACTER_CUT_SHIFT) / 10 of 200 px, 17 px, after rounding.
+        assert_eq!(words[0].characters[0].outline[1].x, 117);
     }
 
     #[test]
