@@ -112,6 +112,38 @@ def test_parity_fails_when_nothing_was_compared(module) -> None:
     assert module.parity_verdict(0, 0) is not None
 
 
+def one_line_corpus(module, drop: int) -> tuple[dict, dict]:
+    """A 200-line corpus of "ab ba" whose engine output matches `cells`, with
+    the last `drop` glyphs of one line missing from the engine's side."""
+    truth = {f"line{n}.rgba": {"text": "ab ba"} for n in range(200)}
+    lines = {name: [two_words_line()] for name in truth}
+    module.GLYPHS.clear()
+    for name in truth:
+        cells = module.cells(two_words_line(), module.SHIPPED_SHIFT)
+        inked = [cell for cell, char in zip(cells, two_words_line()["chars"]) if char["text"] != " "]
+        module.GLYPHS[name] = [
+            {"block": 0, "text": text, "left": int(left + 0.5), "right": int(right + 0.5)}
+            for text, (left, right) in zip("abba", inked)
+        ]
+    if drop:
+        del module.GLYPHS["line0.rgba"][-drop:]
+    return truth, lines
+
+
+def test_parity_passes_a_corpus_that_matches(module) -> None:
+    truth, lines = one_line_corpus(module, drop=0)
+    assert module.parity(truth, lines) is True
+
+
+def test_parity_charges_every_glyph_of_a_mismatched_line(module) -> None:
+    # Round 3: a line missing glyphs counted as ONE difference. One line of
+    # 200 loses a glyph: charged as its 4 cells, 4 of 800 is 0.5% and fails;
+    # counted as one, 1 of 797 is 0.13% and would pass. The corpus is sized
+    # so the two answers differ.
+    truth, lines = one_line_corpus(module, drop=1)
+    assert module.parity(truth, lines) is False
+
+
 def main() -> int:
     module = load_module()
     tests = [

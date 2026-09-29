@@ -222,7 +222,12 @@ def parity(truth: dict[str, dict], lines: dict[str, list[dict]]) -> bool:
             if char["text"] and not char["text"].isspace()
         ]
         if len(mirrored) != len(placed):
-            differ += 1
+            # Every cell of the longer side is unmatched, and is charged as
+            # such: counting a whole line as one difference let it pass under
+            # the tolerance (review of `#119`, round 3).
+            unmatched = max(len(mirrored), len(placed))
+            compared += unmatched
+            differ += unmatched
             continue
         for (left, right), glyph in zip(mirrored, placed):
             compared += 1
