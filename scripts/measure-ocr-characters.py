@@ -183,13 +183,30 @@ def score_engine(truth: dict[str, dict]) -> None:
 SHIPPED_SHIFT = 0.35
 
 
-def parity(truth: dict[str, dict], lines: dict[str, list[dict]]) -> None:
+#: Float rounding at half pixels legitimately moves a few cells: 4 of 6026 on
+#: 2026-09-29. A shift 0.01 away from the engine's moved 336, so 0.2% separates
+#: the two by two orders of magnitude.
+PARITY_TOLERANCE = 0.002
+
+
+def parity_verdict(compared: int, differ: int) -> str | None:
+    """None when the sweep mirrors the engine, else why it does not."""
+    if compared == 0:
+        return "no glyph was comparable, so parity was not checked at all"
+    if differ > compared * PARITY_TOLERANCE:
+        return f"{differ} of {compared} cells differ, over {PARITY_TOLERANCE:.1%}"
+    return None
+
+
+def parity(truth: dict[str, dict], lines: dict[str, list[dict]]) -> bool:
     """Checks that `cells` at the shipped shift reproduces the engine's outlines.
 
     The shift sweep is only evidence for the shipped constant if it scores the
     shipped algorithm; the first version did not (review of `#119`, F1). Each
     inked glyph's cell is rounded as `point_from` rounds (half away from zero)
-    and compared with the `glyph` record for the same character.
+    and compared with the `glyph` record for the same character. Returns
+    False, and `main` exits 1, when they disagree or nothing was compared
+    (review of `#119`, round 2: a check that only prints cannot fail).
     """
     compared = differ = 0
     for name, expected in sorted(truth.items()):
@@ -213,6 +230,11 @@ def parity(truth: dict[str, dict], lines: dict[str, list[dict]]) -> None:
             if rounded != (glyph["left"], glyph["right"]):
                 differ += 1
     print(f"parity at shift {SHIPPED_SHIFT}: {differ} of {compared} glyph cells differ from the engine's")
+    verdict = parity_verdict(compared, differ)
+    if verdict is not None:
+        print(f"PARITY FAILED: {verdict}. The sweep does not score the shipped algorithm.")
+        return False
+    return True
 
 
 def run_engine(exe: Path, models: Path, runtime: Path, out: Path) -> dict[str, list[dict]]:
@@ -398,8 +420,7 @@ def main() -> int:
     lines = run_engine(arguments.exe, arguments.models, arguments.runtime, arguments.out)
     score(truth, lines, [float(value) for value in arguments.shifts.split(",")])
     score_engine(truth)
-    parity(truth, lines)
-    return 0
+    return 0 if parity(truth, lines) else 1
 
 
 if __name__ == "__main__":
