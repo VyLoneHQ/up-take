@@ -38,6 +38,7 @@ USAGE
 from __future__ import annotations
 
 import argparse
+import math
 import statistics
 import struct
 import subprocess
@@ -177,6 +178,43 @@ def score_engine(truth: dict[str, dict]) -> None:
     )
 
 
+#: The shipping constant, `CHARACTER_CUT_SHIFT` in `recognise.rs`, restated
+#: here only so the parity check below can say whether `cells` still mirrors it.
+SHIPPED_SHIFT = 0.35
+
+
+def parity(truth: dict[str, dict], lines: dict[str, list[dict]]) -> None:
+    """Checks that `cells` at the shipped shift reproduces the engine's outlines.
+
+    The shift sweep is only evidence for the shipped constant if it scores the
+    shipped algorithm; the first version did not (review of `#119`, F1). Each
+    inked glyph's cell is rounded as `point_from` rounds (half away from zero)
+    and compared with the `glyph` record for the same character.
+    """
+    compared = differ = 0
+    for name, expected in sorted(truth.items()):
+        found = lines.get(name, [])
+        placed = GLYPHS.get(name, [])
+        if len(found) != 1 or not placed or {glyph["block"] for glyph in placed} != {0}:
+            continue
+        if "".join(char["text"] for char in found[0]["chars"]) != expected["text"]:
+            continue
+        mirrored = [
+            cell
+            for cell, char in zip(cells(found[0], SHIPPED_SHIFT), found[0]["chars"])
+            if char["text"] and not char["text"].isspace()
+        ]
+        if len(mirrored) != len(placed):
+            differ += 1
+            continue
+        for (left, right), glyph in zip(mirrored, placed):
+            compared += 1
+            rounded = (math.floor(left + 0.5), math.floor(right + 0.5))
+            if rounded != (glyph["left"], glyph["right"]):
+                differ += 1
+    print(f"parity at shift {SHIPPED_SHIFT}: {differ} of {compared} glyph cells differ from the engine's")
+
+
 def run_engine(exe: Path, models: Path, runtime: Path, out: Path) -> dict[str, list[dict]]:
     result = subprocess.run(
         [str(exe), "--models", str(models), "--runtime", str(runtime), "--lines", str(out)],
@@ -211,21 +249,71 @@ def run_engine(exe: Path, models: Path, runtime: Path, out: Path) -> dict[str, l
 def cells(line: dict, shift: float) -> list[tuple[float, float]]:
     """Each emitted character's cell in source x, for boundary rule `shift`.
 
-    The boundary between two consecutive characters is the midpoint of the
-    first one's last timestep and the second's first, plus `shift` timesteps,
-    as a fraction of the line, mapped along the quad's top edge. The first cell
-    starts at the quad's left edge and the last ends at its right, as 1.40's
-    words do.
+    Mirrors the engine, `DecodedText::words` then `character_spans`, so a shift
+    is scored on the algorithm that ships (review of `#119`, F1): words meet at
+    the middle timestep index of the whole whitespace run between them, the
+    first word starts at the quad's left edge and the last ends at its right,
+    and ONLY the cuts between two characters inside one word move with `shift`,
+    clamped into the word. A whitespace character gets an empty cell at its
+    word boundary, since it names no ink. Fractions map along the quad's top
+    edge.
     """
     total = line["timesteps"]
     x0, _, x1, _ = line["corners"][:4]
     chars = line["chars"]
-    cuts = [0.0]
-    for left, right in zip(chars, chars[1:]):
-        u = ((left["last"] + right["first"]) / 2 + shift) / total
-        cuts.append(min(1.0, max(0.0, u)))
-    cuts.append(1.0)
-    return [(x0 + (x1 - x0) * a, x0 + (x1 - x0) * b) for a, b in zip(cuts, cuts[1:])]
+    is_space = [char["text"] != "" and char["text"].isspace() for char in chars]
+    # Split into words exactly as `words()` does.
+    words: list[list[int]] = []
+    gaps: list[tuple[int, int] | None] = []  # the whitespace run before each word
+    current: list[int] = []
+    gap: tuple[int, int] | None = None
+    pending_gap: tuple[int, int] | None = None
+    for index, char in enumerate(chars):
+        if char["text"] == "":
+            continue
+        if is_space[index]:
+            gap = (gap[0], char["last"]) if gap else (char["first"], char["last"])
+            continue
+        if gap is not None and current:
+            words.append(current)
+            gaps.append(pending_gap)
+            pending_gap = gap
+            current = []
+        elif gap is not None:
+            pending_gap = None
+        gap = None
+        current.append(index)
+    if current:
+        words.append(current)
+        gaps.append(pending_gap)
+    placed: list[tuple[float, float] | None] = [None] * len(chars)
+    word_start = 0.0
+    for number, members in enumerate(words):
+        if number + 1 < len(words):
+            first, last = gaps[number + 1]
+            word_end = (first + last) / 2 / total
+        else:
+            word_end = 1.0
+        begin = word_start
+        for position, index in enumerate(members):
+            if position + 1 < len(members):
+                following = chars[members[position + 1]]
+                middle = (chars[index]["last"] + following["first"]) / 2
+                finish = min(word_end, max(begin, (middle + shift) / total))
+            else:
+                finish = word_end
+            placed[index] = (begin, finish)
+            begin = finish
+        word_start = word_end
+    result = []
+    for index, cell in enumerate(placed):
+        if cell is None:
+            # Whitespace or an empty entry: an empty cell at the preceding cut.
+            previous = next((c for c in reversed(placed[:index]) if c is not None), (0.0, 0.0))
+            cell = (previous[1], previous[1])
+        a, b = cell
+        result.append((x0 + (x1 - x0) * a, x0 + (x1 - x0) * b))
+    return result
 
 
 def score(truth: dict[str, dict], lines: dict[str, list[dict]], shifts: list[float]) -> None:
@@ -310,6 +398,7 @@ def main() -> int:
     lines = run_engine(arguments.exe, arguments.models, arguments.runtime, arguments.out)
     score(truth, lines, [float(value) for value in arguments.shifts.split(",")])
     score_engine(truth)
+    parity(truth, lines)
     return 0
 
 

@@ -117,11 +117,14 @@ pub struct CharacterSpan {
 /// exactly (6026 glyphs: Segoe UI, Arial, Consolas, Times and Georgia at 12 to
 /// 20 px, both polarities; `scripts/measure-ocr-characters.py`) were compared
 /// with their true ink. A timestep is a median 3.45 source pixels and a
-/// character usually fires on one. The plain midpoint put 96.3% of glyph
+/// character usually fires on one. Scored on this algorithm (word edges from
+/// `words`, only in-word cuts shifted): the plain midpoint put 97.8% of glyph
 /// centres inside their own cell, with cuts a median 1.3 px LEFT of the gap
-/// between two glyphs; half a timestep right gave 98.0% and 0.44 px right. The
-/// best measured point was 0.35: 98.8%, and the misses are narrow glyphs (`i`,
-/// `j`, `l`) off by a median 0.44 px.
+/// between two glyphs; half a timestep right gave 99.2% and 0.44 px right.
+/// 0.35 and 0.40 both gave 99.4%, and 0.35 is kept for the smaller error
+/// (0.07 px) and fewer cuts into ink. The misses are narrow glyphs, mostly `i`
+/// and `l`, off by a median 0.56 px. The engine's own whole-pixel outlines
+/// score 99.0%.
 pub const CHARACTER_CUT_SHIFT: f32 = 0.35;
 
 /// Splits a word's span between its characters.
