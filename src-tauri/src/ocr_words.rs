@@ -129,6 +129,16 @@ pub(crate) fn nearest(chars: &[PlacedChar], point: Point) -> Option<usize> {
             0
         }
     };
+    // A pointer INSIDE a character means that character, whatever its line:
+    // rotated lines can overlap in their vertical extents, so the line rule
+    // below can pick the wrong one (review of `#122`, round 3). The line rule
+    // is for a pointer between characters or past a line's end.
+    if let Some(inside) = chars
+        .iter()
+        .position(|unit| outline_distance(&unit.outline, point) == 0.0)
+    {
+        return Some(inside);
+    }
     // The line whose vertical extent is closest to the pointer.
     let mut best_line: Option<(u32, i64)> = None;
     for unit in chars {
@@ -413,6 +423,30 @@ mod tests {
         for (index, character) in rotated.iter().enumerate() {
             assert_eq!(nearest(&rotated, centre(character)), Some(index));
         }
+    }
+
+    #[test]
+    fn a_pointer_inside_a_character_of_an_overlapping_line_selects_that_line() {
+        // Review of `#122`, round 3: two lines slanted so their vertical
+        // extents overlap. By the line rule alone, line 0 (y 0 to 40) and line
+        // 1 (y 20 to 60) are both at distance 0 from y 40, the first won, and
+        // the character under the pointer on line 1 could never be chosen.
+        let slanted = |line: u32, word: u32, x: i32, y: i32| PlacedChar {
+            text: format!("{line}"),
+            line,
+            word,
+            outline: [
+                Point::new(x, y),
+                Point::new(x + 20, y + 20),
+                Point::new(x + 20, y + 40),
+                Point::new(x, y + 20),
+            ],
+        };
+        let lines = vec![slanted(0, 0, 0, 0), slanted(1, 1, 60, 20)];
+        // Inside line 1's character, at y 40, where line 0's extent also is.
+        assert_eq!(nearest(&lines, Point::new(70, 40)), Some(1));
+        // Inside line 0's character.
+        assert_eq!(nearest(&lines, Point::new(10, 20)), Some(0));
     }
 
     fn quad(x: i32, y: i32, width: i32) -> [Point; 4] {
