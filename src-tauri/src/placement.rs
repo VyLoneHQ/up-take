@@ -255,7 +255,7 @@ enum Mode {
 static MODE: AtomicU8 = AtomicU8::new(Mode::Hidden as u8);
 
 /// Whether UP-TAKE is in Placement, for callers outside this module that act
-/// only there (roadmap `1.41`'s word selection and copy, per `ADR-0016`).
+/// only there (roadmap `1.41`'s OCR selection and copy, per `ADR-0016`).
 pub(crate) fn is_placing() -> bool {
     mode() == Mode::Placement
 }
@@ -376,14 +376,14 @@ enum Gesture {
     Create,
     /// Move an existing area, from the bounds it had at button-down.
     Move { id: AreaId, start: Rect },
-    /// Select words in an OCR area that reads in place (roadmap `1.41`,
-    /// `ADR-0046`). Started by a press ON a word or on a selection handle;
-    /// subtracting `origin` turns the pointer into the frame-local point the
-    /// words are stored in. For a handle, `origin` also carries the grab
-    /// offset from the pointer to the grabbed word's centre, because the handle
-    /// hangs below its word: without it, a click on the handle picked the
-    /// nearest word on the NEXT line (review of `#115`, third GPT-6 Astra
-    /// round).
+    /// Select characters in an OCR area that reads in place (roadmap `1.41`
+    /// and `1.44`, `ADR-0046`). Started by any press on the body or on a
+    /// selection handle; subtracting `origin` turns the pointer into the
+    /// frame-local point the characters are stored in. For a handle, `origin`
+    /// also carries the grab offset from the pointer to the grabbed
+    /// character's centre, because the handle hangs below it: without it, a
+    /// click on the handle picked the nearest character on the NEXT line
+    /// (review of `#115`, third GPT-6 Astra round).
     Select { id: AreaId, origin: Point },
     /// Resize an existing area from one edge or corner.
     Resize {
@@ -555,8 +555,9 @@ enum CursorShape {
     /// to be restored to.
     Arrow,
     /// **The user's own text caret.** Restore-only until roadmap `1.41`, which
-    /// also SHOWS it in Placement over a word of an in-place OCR area and while
-    /// a word selection is being dragged: the same caret the user sees over
+    /// also SHOWS it in Placement over the body of an in-place OCR area (since
+    /// `1.44`; over its words only, before) and while a selection is being
+    /// dragged: the same caret the user sees over
     /// text everywhere else, because what is under the pointer is text.
     ///
     /// LIVING claims `OCR_IBEAM` while the pointer rests on an area, so it needs
@@ -1304,8 +1305,8 @@ fn reinstall_on_main_thread() {
 /// Publishes the live gesture rectangle, and clears it once when the gesture
 /// ends.
 fn pump_gesture(app: &AppHandle, state: &mut PumpState) {
-    // A word selection draws no rectangle: it moves the end of the selection
-    // to the word nearest the pointer, and announces only a change.
+    // An OCR selection draws no rectangle: it moves the end of the selection
+    // to the character nearest the pointer, and announces only a change.
     if is_dragging()
         && let Some(Gesture::Select { id, origin }) = *lock(&GESTURE)
     {

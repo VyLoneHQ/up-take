@@ -2452,7 +2452,7 @@ pub fn overlay_ocr_copy_focused(app: AppHandle) -> Result<(), String> {
         return Ok(());
     }
     // The OCR area under the cursor; failing that, the topmost area with a
-    // visible selection. A selection drag follows the nearest word outside the
+    // visible selection. A selection drag follows the nearest character outside the
     // area and its handles hang below it, so the release can leave the cursor
     // off the area while the band is still drawn (review of `#115`, round 9).
     let under = area_under_cursor(&app)?
