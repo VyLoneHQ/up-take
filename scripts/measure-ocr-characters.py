@@ -193,6 +193,12 @@ def score_engine(truth: dict[str, dict]) -> None:
 #: here only so the parity check below can say whether `cells` still mirrors it.
 SHIPPED_SHIFT = 0.35
 
+#: The sweep's default candidates. They must include `SHIPPED_SHIFT` and 0.40,
+#: the value it was chosen over (`recognise.rs`: both held 99.4% of glyph
+#: centres, and 0.35 had the smaller cut error), so the documented invocation
+#: reproduces that comparison (review of `#119`, round 5).
+DEFAULT_SHIFTS = (-0.5, 0.0, 0.25, 0.3, 0.35, 0.4, 0.5, 0.75, 1.0)
+
 
 #: Float rounding at half pixels legitimately moves a few cells: 4 of 6026 on
 #: 2026-09-29. A shift 0.01 away from the engine's moved 336, so 0.2% separates
@@ -430,7 +436,7 @@ def main() -> int:
     parser.add_argument("--exe", type=Path, default=Path("target/release/examples/ocr_characters.exe"))
     parser.add_argument("--models", type=Path, default=Path("src-tauri/assets/models"))
     parser.add_argument("--runtime", type=Path, required=True)
-    parser.add_argument("--shifts", default="-0.5,0,0.25,0.5,0.75,1.0")
+    parser.add_argument("--shifts", default=",".join(str(shift) for shift in DEFAULT_SHIFTS))
     arguments = parser.parse_args()
     truth = render_all(arguments.out)
     lines = run_engine(arguments.exe, arguments.models, arguments.runtime, arguments.out)
