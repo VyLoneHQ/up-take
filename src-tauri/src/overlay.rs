@@ -2022,13 +2022,14 @@ struct OcrWordPayload {
     outline: [[i32; 2]; 4],
 }
 
-/// The payload of `overlay://ocr-selection`: which words of one area are
+/// The payload of `overlay://ocr-selection`: which characters of one area are
 /// selected.
 #[derive(Serialize, Clone)]
 struct OcrSelectionPayload {
     id: u64,
-    /// The first and last selected word, indices into that area's latest
-    /// `words`, in reading order; `None` when nothing is selected.
+    /// The first and last selected character, indices into that area's latest
+    /// `words` (characters since roadmap `1.44`), in reading order; `None`
+    /// when nothing is selected.
     range: Option<(u64, u64)>,
 }
 
@@ -2480,7 +2481,7 @@ pub fn overlay_ocr_copy_focused(app: AppHandle) -> Result<(), String> {
 }
 
 /// IPC surface and hook route for `Ctrl+A` in Placement (roadmap `1.41`):
-/// selects every word of the OCR area under the cursor.
+/// selects all the text of the OCR area under the cursor.
 #[tauri::command]
 pub fn overlay_ocr_select_all_focused(app: AppHandle) -> Result<(), String> {
     if !placement::is_placing() {

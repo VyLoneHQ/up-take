@@ -251,8 +251,9 @@ export interface OcrWordPayload {
 }
 
 /**
- * The payload of `overlay://ocr-selection`: which words of one area are
- * selected, as the first and last index into its latest `words`, or `null`.
+ * The payload of `overlay://ocr-selection`: which characters of one area are
+ * selected, as the first and last index into its latest `words` (characters
+ * since roadmap 1.44), or `null`.
  */
 export interface OcrSelectionPayload {
   id: number;
@@ -286,8 +287,8 @@ export function ocrWordBoxes(
  * a phone draws a text selection (`ADR-0046` decision 3, the founder's
  * reference being Samsung's).
  *
- * Each band spans from the first selected word of its line to the last, top
- * to bottom over those words. `range` may be in either order.
+ * Each band spans from the first selected character of its line to the last,
+ * top to bottom over those characters. `range` may be in either order.
  */
 export function ocrSelectionBands(
   words: readonly OcrWordPayload[],
@@ -309,7 +310,7 @@ export function ocrSelectionBands(
 
 /** One selection handle: where it hangs from, and which way it points. */
 export interface OcrHandle {
-  /** `start` hangs down-left of the first word, `end` down-right of the last. */
+  /** `start` hangs down-left of the first character, `end` down-right of the last. */
   end: 'start' | 'end';
   x: number;
   y: number;
@@ -319,7 +320,7 @@ export interface OcrHandle {
 /**
  * The two handles of a selection, Samsung style, at the corners the hook
  * hit-tests (`ocr_words::handle_at`): the start handle below the first
- * selected word's bottom-left corner, the end handle below the last one's
+ * selected character's bottom-left corner, the end handle below the last one's
  * bottom-right. `reach` is the handle's size in physical pixels, the hook's
  * `SELECTION_HANDLE_REACH`. The hook's grab target around each corner is
  * deliberately larger than the teardrop drawn here, so a press slightly off
@@ -380,7 +381,7 @@ export function isCopyKey(
   );
 }
 
-/** `Ctrl+A` in Placement: select every word of the OCR area under the cursor. */
+/** `Ctrl+A` in Placement: select all the text of the OCR area under the cursor. */
 export function isSelectAllKey(
   event: Pick<KeyboardEvent, 'key' | 'ctrlKey' | 'altKey' | 'metaKey'>,
 ): boolean {
@@ -1186,7 +1187,7 @@ export async function copyFocusedOcr(invoke: Invoke): Promise<boolean> {
   }
 }
 
-/** Asks Rust to select every word of the OCR area under the cursor. */
+/** Asks Rust to select all the text of the OCR area under the cursor. */
 export async function selectAllFocusedOcr(invoke: Invoke): Promise<boolean> {
   try {
     await invoke('overlay_ocr_select_all_focused');

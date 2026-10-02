@@ -2085,7 +2085,7 @@ enum PlacementKey {
     /// cursor, its selection or all of it (roadmap `1.41`). The page's
     /// `isCopyKey`.
     Copy,
-    /// `Ctrl+A` without `Alt` or the Windows key: select every word of the OCR
+    /// `Ctrl+A` without `Alt` or the Windows key: select all the text of the OCR
     /// area under the cursor. The page's `isSelectAllKey`.
     SelectAll,
 }

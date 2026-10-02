@@ -211,8 +211,9 @@ struct Ocr {
     /// from them. The page gets its own copy in the `overlay://ocr` payload to
     /// draw with. Replaced by every reading and dropped by [`forget`].
     words: BTreeMap<u64, Vec<PlacedChar>>,
-    /// Each area's selection, as the indices of the word the drag started on
-    /// and the word it is on now, in either order.
+    /// Each area's selection, as the indices of the character the drag
+    /// started on and the character it is on now, in either order (indices
+    /// into `words`, which holds characters since roadmap `1.44`).
     selection: BTreeMap<u64, (usize, usize)>,
     /// A press inside an area that has not become a selection yet: the
     /// character nearest the press and the press itself, frame-local
@@ -987,8 +988,9 @@ pub(crate) fn begin_selection(id: AreaId, anchor: usize, focus: usize) -> (usize
 /// selection's OTHER end, which becomes the anchor of a drag from the handle.
 ///
 /// `radius` is the handle's reach in physical pixels, from the corner it hangs
-/// off: the start handle below the first selected word's bottom-left, the end
-/// handle below the last one's bottom-right (the founder's approved mock).
+/// off: the start handle below the first selected character's bottom-left,
+/// the end handle below the last one's bottom-right (the founder's approved
+/// mock).
 pub(crate) fn handle_at(id: AreaId, local: Point, radius: i32) -> Option<usize> {
     let guard = lock();
     let words = guard.words.get(&id.get())?;
