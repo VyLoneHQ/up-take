@@ -169,6 +169,19 @@ jobs:
       - name: Test the card corpus
         run: python3 scripts/test_render_ocr_cards.py
 
+      # 1.44: the character measurement's sweep must score the algorithm the
+      # engine ships, its copy of CHARACTER_CUT_SHIFT must match recognise.rs,
+      # and its parity check must be able to fail (review of #119, rounds 1
+      # and 2). No model or runtime: PIL is stubbed as above.
+      - name: Test the character measurement
+        run: python3 scripts/test_measure_ocr_characters.py
+
+      # 1.44's rig half is a picture judged by eye, so a parse that dropped
+      # records would draw no boxes and read as the engine finding none
+      # (review of #119, round 6). PIL is stubbed as above.
+      - name: Test the character picture
+        run: python3 scripts/test_draw_ocr_characters.py
+
       - name: Em-dash ratchet
         run: python3 scripts/dash-ratchet.py --against origin/main
 
