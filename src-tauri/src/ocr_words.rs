@@ -104,10 +104,15 @@ pub(crate) fn from_recognition(recognition: &Recognition) -> Vec<PlacedChar> {
 /// character), and it never answers "none" while there are characters: a
 /// selection follows the pointer across the gaps between lines and past the
 /// ends of a line, the way every text selection does. The line is chosen first,
-/// by vertical distance to the line's extent, and then the character within it
-/// by horizontal distance, so a pointer to the right of a line's last character
-/// selects to the end of that line rather than jumping to whichever character
-/// on another line happens to be closer as the crow flies.
+/// by vertical distance to the line's extent, so a pointer to the right of a
+/// line's last character selects to the end of that line rather than jumping to
+/// whichever character on another line happens to be closer as the crow flies.
+///
+/// **Within the line, the character is the one whose OUTLINE is nearest**, by
+/// true distance, zero inside it. Horizontal distance alone, which words used
+/// before `1.44`, ties every character of a vertical or steeply rotated line
+/// that shares the pointer's x, and the first of them won (review of `#122`,
+/// round 2).
 pub(crate) fn nearest(chars: &[PlacedChar], point: Point) -> Option<usize> {
     let span = |unit: &PlacedChar, axis: fn(Point) -> i32| {
         let values = unit.outline.map(axis);
@@ -138,8 +143,45 @@ pub(crate) fn nearest(chars: &[PlacedChar], point: Point) -> Option<usize> {
         .iter()
         .enumerate()
         .filter(|(_, unit)| unit.line == line)
-        .min_by_key(|(_, unit)| distance(span(unit, |p| p.x), point.x))
+        .min_by(|(_, a), (_, b)| {
+            outline_distance(&a.outline, point).total_cmp(&outline_distance(&b.outline, point))
+        })
         .map(|(index, _)| index)
+}
+
+/// How far `point` is from `outline`: `0.0` inside it or on its edge,
+/// otherwise the distance to the nearest of its four edges.
+///
+/// The outline is a convex quadrilateral (a detector box cut across), so a
+/// point is inside when it is on the same side of all four edges, in either
+/// winding.
+fn outline_distance(outline: &[Point; 4], point: Point) -> f64 {
+    let mut positive = false;
+    let mut negative = false;
+    let mut nearest = f64::INFINITY;
+    let (px, py) = (f64::from(point.x), f64::from(point.y));
+    for index in 0..4 {
+        let from = outline[index];
+        let to = outline[(index + 1) % 4];
+        let cross = i64::from(to.x - from.x) * i64::from(point.y - from.y)
+            - i64::from(to.y - from.y) * i64::from(point.x - from.x);
+        if cross > 0 {
+            positive = true;
+        } else if cross < 0 {
+            negative = true;
+        }
+        let (ax, ay) = (f64::from(from.x), f64::from(from.y));
+        let (dx, dy) = (f64::from(to.x) - ax, f64::from(to.y) - ay);
+        let length = dx.mul_add(dx, dy * dy);
+        let t = if length > 0.0 {
+            ((px - ax).mul_add(dx, (py - ay) * dy) / length).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let (ex, ey) = (t.mul_add(dx, ax) - px, t.mul_add(dy, ay) - py);
+        nearest = nearest.min(ex.mul_add(ex, ey * ey).sqrt());
+    }
+    if positive && negative { nearest } else { 0.0 }
 }
 
 /// The handle of the selection `first..=last` under `point`, as the index of
@@ -321,6 +363,56 @@ mod tests {
         assert_eq!(handle_at(&all, 3, 8, Point::new(90, 58), 6), None);
         // A stale selection past the characters has no handles.
         assert_eq!(handle_at(&all, 3, 99, Point::new(12, 58), 6), None);
+    }
+
+    #[test]
+    fn on_a_vertical_or_rotated_line_the_character_under_the_pointer_wins() {
+        // Review of `#122`, round 2: by horizontal distance alone, every
+        // character sharing the pointer's x tied and the first one won.
+        let unit = |n: i32, outline: [Point; 4]| PlacedChar {
+            text: n.to_string(),
+            line: 0,
+            word: 0,
+            outline,
+        };
+        // Vertical text: three 10 x 10 characters stacked on one line, all
+        // spanning x 0 to 10.
+        let stacked: Vec<PlacedChar> = (0..3)
+            .map(|n| {
+                let top = n * 10;
+                unit(
+                    n,
+                    [
+                        Point::new(0, top),
+                        Point::new(10, top),
+                        Point::new(10, top + 10),
+                        Point::new(0, top + 10),
+                    ],
+                )
+            })
+            .collect();
+        assert_eq!(nearest(&stacked, Point::new(5, 25)), Some(2));
+        assert_eq!(nearest(&stacked, Point::new(5, 15)), Some(1));
+        assert_eq!(nearest(&stacked, Point::new(5, 5)), Some(0));
+        // A line at 45 degrees: neighbours share an edge, their x-spans
+        // overlap, and each character's centre must still name it.
+        let rotated: Vec<PlacedChar> = (0..4)
+            .map(|n| {
+                let o = n * 10;
+                unit(
+                    n,
+                    [
+                        Point::new(o, o),
+                        Point::new(o + 10, o + 10),
+                        Point::new(o + 5, o + 15),
+                        Point::new(o - 5, o + 5),
+                    ],
+                )
+            })
+            .collect();
+        for (index, character) in rotated.iter().enumerate() {
+            assert_eq!(nearest(&rotated, centre(character)), Some(index));
+        }
     }
 
     fn quad(x: i32, y: i32, width: i32) -> [Point; 4] {
