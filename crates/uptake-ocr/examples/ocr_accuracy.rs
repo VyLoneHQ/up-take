@@ -186,7 +186,9 @@ impl Tally {
 }
 
 fn main() -> ExitCode {
-    let mut models = PathBuf::from("dist/models");
+    // The staging directory the acquisition scripts write to (UP-TAKE
+    // `I-429`, `I-437`); the cards stay in `dist/cards`.
+    let mut models = PathBuf::from("src-tauri/assets/models");
     let mut cards_dir = PathBuf::from("dist/cards");
     let mut runtime: Option<PathBuf> = None;
     let mut drop_scores: Vec<f32> = Vec::new();

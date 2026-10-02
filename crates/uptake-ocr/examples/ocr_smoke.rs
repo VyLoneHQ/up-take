@@ -20,12 +20,12 @@
 //! # Usage
 //!
 //! ```text
-//! python scripts/acquire-ppocr-detector.py --out dist/models
-//! python scripts/acquire-ppocr-recogniser.py --out dist/models
+//! python scripts/acquire-ppocr-detector.py --out src-tauri/assets/models
+//! python scripts/acquire-ppocr-recogniser.py --out src-tauri/assets/models
 //!
 //! set ORT_DYLIB_PATH=C:\Windows\System32\onnxruntime.dll
 //! cargo run -p uptake-ocr --example ocr_smoke -- ^
-//!     --models dist/models --image dist/smoke.rgba
+//!     --models src-tauri/assets/models --image dist/smoke.rgba
 //! ```
 //!
 //! **`ORT_DYLIB_PATH` pointing at System32 is a DEVELOPER convenience and never
@@ -73,7 +73,10 @@ const BYTES_PER_PIXEL: usize = 4;
 const HEADER_BYTES: usize = 8;
 
 fn main() -> ExitCode {
-    let mut models = PathBuf::from("dist/models");
+    // The staging directory the acquisition scripts write to and a debug
+    // build reads (UP-TAKE `I-429`). `dist/models` held the retired
+    // PP-OCRv4 files (`I-437`).
+    let mut models = PathBuf::from("src-tauri/assets/models");
     let mut image = PathBuf::from("dist/smoke.rgba");
     let mut runtime: Option<PathBuf> = None;
 
