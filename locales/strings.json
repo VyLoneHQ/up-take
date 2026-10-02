@@ -734,6 +734,36 @@
       "en": "no key",
       "de": "keine Taste",
       "de_from": "d73857d5"
+    },
+    "settings.pane.ocr": {
+      "en": "OCR",
+      "de": "OCR",
+      "de_from": "f421768f"
+    },
+    "settings.section.ocr_areas": {
+      "en": "OCR areas",
+      "de": "OCR-Bereiche",
+      "de_from": "10a6f9fd"
+    },
+    "settings.ocr_behaviour.name": {
+      "en": "Behaviour",
+      "de": "Verhalten",
+      "de_from": "3856d9b4"
+    },
+    "settings.ocr_behaviour.about": {
+      "en": "How an OCR area shows what it read. In place keeps the screen visible and marks each word, and while placing you can drag across words to select them. Rendered covers the area and shows the text in UP-TAKE's own style.",
+      "de": "Wie ein OCR-Bereich zeigt, was er gelesen hat. Direkt lässt den Bildschirm sichtbar und markiert jedes Wort, und beim Platzieren kannst du Wörter mit der Maus auswählen. Als Text deckt den Bereich ab und zeigt den Text in der Darstellung von UP-TAKE.",
+      "de_from": "a486940a"
+    },
+    "settings.ocr_behaviour.in_place": {
+      "en": "In place",
+      "de": "Direkt",
+      "de_from": "263bf5e5"
+    },
+    "settings.ocr_behaviour.rendered": {
+      "en": "Rendered",
+      "de": "Als Text",
+      "de_from": "6b4a5574"
     }
   }
 }
