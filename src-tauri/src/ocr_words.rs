@@ -103,46 +103,58 @@ pub(crate) fn from_recognition(recognition: &Recognition) -> Vec<PlacedChar> {
 /// starting anywhere inside an in-place OCR area selects from the nearest
 /// character), and it never answers "none" while there are characters: a
 /// selection follows the pointer across the gaps between lines and past the
-/// ends of a line, the way every text selection does. The line is chosen first,
-/// by vertical distance to the line's extent, so a pointer to the right of a
-/// line's last character selects to the end of that line rather than jumping to
-/// whichever character on another line happens to be closer as the crow flies.
+/// ends of a line, the way every text selection does.
 ///
-/// **Within the line, the character is the one whose OUTLINE is nearest**, by
-/// true distance, zero inside it. Horizontal distance alone, which words used
-/// before `1.44`, ties every character of a vertical or steeply rotated line
-/// that shares the pointer's x, and the first of them won (review of `#122`,
-/// round 2).
+/// Three rules, in order:
+///
+/// 1. **A pointer inside a character means that character**, whatever its line.
+/// 2. Otherwise **the line is chosen by distance ACROSS it**: perpendicular to
+///    the line's own direction, taken from its first character's top edge, and
+///    ignoring how far along the line the pointer is. So a pointer to the right
+///    of a line's last character selects to the end of that line rather than
+///    jumping to whichever character on another line happens to be closer as
+///    the crow flies. For upright text "across" is vertical, which is exactly
+///    the rule words used before `1.44`; measuring it vertically on ROTATED
+///    lines, whose vertical extents can overlap, picked the wrong line (review
+///    of `#122`, rounds 3 and 4).
+/// 3. **Within the line, the character whose outline is nearest**, by true
+///    distance. Horizontal distance alone ties every character of a vertical or
+///    steeply rotated line that shares the pointer's x (review of `#122`,
+///    round 2).
 pub(crate) fn nearest(chars: &[PlacedChar], point: Point) -> Option<usize> {
-    let span = |unit: &PlacedChar, axis: fn(Point) -> i32| {
-        let values = unit.outline.map(axis);
-        let low = values.iter().copied().min().unwrap_or(0);
-        let high = values.iter().copied().max().unwrap_or(0);
-        (low, high)
-    };
-    let distance = |(low, high): (i32, i32), at: i32| {
-        if at < low {
-            i64::from(low) - i64::from(at)
-        } else if at > high {
-            i64::from(at) - i64::from(high)
-        } else {
-            0
-        }
-    };
-    // A pointer INSIDE a character means that character, whatever its line:
-    // rotated lines can overlap in their vertical extents, so the line rule
-    // below can pick the wrong one (review of `#122`, round 3). The line rule
-    // is for a pointer between characters or past a line's end.
     if let Some(inside) = chars
         .iter()
         .position(|unit| outline_distance(&unit.outline, point) == 0.0)
     {
         return Some(inside);
     }
-    // The line whose vertical extent is closest to the pointer.
-    let mut best_line: Option<(u32, i64)> = None;
+    // Each line's "across" axis, from the first character of it in reading
+    // order.
+    let mut normals: std::collections::BTreeMap<u32, (f64, f64)> =
+        std::collections::BTreeMap::new();
     for unit in chars {
-        let d = distance(span(unit, |p| p.y), point.y);
+        normals
+            .entry(unit.line)
+            .or_insert_with(|| across_axis(&unit.outline));
+    }
+    let across = |unit: &PlacedChar| {
+        let (nx, ny) = normals.get(&unit.line).copied().unwrap_or((0.0, 1.0));
+        let project = |p: Point| f64::from(p.x).mul_add(nx, f64::from(p.y) * ny);
+        let values = unit.outline.map(project);
+        let low = values.iter().copied().fold(f64::INFINITY, f64::min);
+        let high = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let at = project(point);
+        if at < low {
+            low - at
+        } else if at > high {
+            at - high
+        } else {
+            0.0
+        }
+    };
+    let mut best_line: Option<(u32, f64)> = None;
+    for unit in chars {
+        let d = across(unit);
         match best_line {
             Some((_, best)) if best <= d => {}
             _ => best_line = Some((unit.line, d)),
@@ -157,6 +169,20 @@ pub(crate) fn nearest(chars: &[PlacedChar], point: Point) -> Option<usize> {
             outline_distance(&a.outline, point).total_cmp(&outline_distance(&b.outline, point))
         })
         .map(|(index, _)| index)
+}
+
+/// The unit vector across a line, perpendicular to `outline`'s top edge:
+/// `(0.0, 1.0)` for upright text, and for an outline whose top edge has no
+/// length.
+fn across_axis(outline: &[Point; 4]) -> (f64, f64) {
+    let dx = f64::from(outline[1].x - outline[0].x);
+    let dy = f64::from(outline[1].y - outline[0].y);
+    let length = dx.hypot(dy);
+    if length > 0.0 {
+        (-dy / length, dx / length)
+    } else {
+        (0.0, 1.0)
+    }
 }
 
 /// How far `point` is from `outline`: `0.0` inside it or on its edge,
@@ -447,6 +473,15 @@ mod tests {
         assert_eq!(nearest(&lines, Point::new(70, 40)), Some(1));
         // Inside line 0's character.
         assert_eq!(nearest(&lines, Point::new(10, 20)), Some(0));
+        // Round 4: ONE pixel left of line 1's character, outside both. Both
+        // vertical extents contain y 40, so measured vertically line 0 won;
+        // measured across the slanted lines, line 1 is the near one.
+        assert_eq!(nearest(&lines, Point::new(59, 40)), Some(1));
+    }
+
+    #[test]
+    fn across_is_vertical_for_upright_text() {
+        assert_eq!(across_axis(&quad(0, 0, 10)), (0.0, 1.0));
     }
 
     fn quad(x: i32, y: i32, width: i32) -> [Point; 4] {
