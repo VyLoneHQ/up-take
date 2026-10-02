@@ -255,7 +255,7 @@ enum Mode {
 static MODE: AtomicU8 = AtomicU8::new(Mode::Hidden as u8);
 
 /// Whether UP-TAKE is in Placement, for callers outside this module that act
-/// only there (roadmap `1.41`'s word selection and copy, per `ADR-0016`).
+/// only there (roadmap `1.41`'s OCR selection and copy, per `ADR-0016`).
 pub(crate) fn is_placing() -> bool {
     mode() == Mode::Placement
 }
@@ -376,14 +376,14 @@ enum Gesture {
     Create,
     /// Move an existing area, from the bounds it had at button-down.
     Move { id: AreaId, start: Rect },
-    /// Select words in an OCR area that reads in place (roadmap `1.41`,
-    /// `ADR-0046`). Started by a press ON a word or on a selection handle;
-    /// subtracting `origin` turns the pointer into the frame-local point the
-    /// words are stored in. For a handle, `origin` also carries the grab
-    /// offset from the pointer to the grabbed word's centre, because the handle
-    /// hangs below its word: without it, a click on the handle picked the
-    /// nearest word on the NEXT line (review of `#115`, third GPT-6 Astra
-    /// round).
+    /// Select characters in an OCR area that reads in place (roadmap `1.41`
+    /// and `1.44`, `ADR-0046`). Started by any press on the body or on a
+    /// selection handle; subtracting `origin` turns the pointer into the
+    /// frame-local point the characters are stored in. For a handle, `origin`
+    /// also carries the grab offset from the pointer to the grabbed
+    /// character's centre, because the handle hangs below it: without it, a
+    /// click on the handle picked the nearest character on the NEXT line
+    /// (review of `#115`, third GPT-6 Astra round).
     Select { id: AreaId, origin: Point },
     /// Resize an existing area from one edge or corner.
     Resize {
@@ -555,8 +555,9 @@ enum CursorShape {
     /// to be restored to.
     Arrow,
     /// **The user's own text caret.** Restore-only until roadmap `1.41`, which
-    /// also SHOWS it in Placement over a word of an in-place OCR area and while
-    /// a word selection is being dragged: the same caret the user sees over
+    /// also SHOWS it in Placement over the body of an in-place OCR area (since
+    /// `1.44`; over its words only, before) and while a selection is being
+    /// dragged: the same caret the user sees over
     /// text everywhere else, because what is under the pointer is text.
     ///
     /// LIVING claims `OCR_IBEAM` while the pointer rests on an area, so it needs
@@ -1304,8 +1305,8 @@ fn reinstall_on_main_thread() {
 /// Publishes the live gesture rectangle, and clears it once when the gesture
 /// ends.
 fn pump_gesture(app: &AppHandle, state: &mut PumpState) {
-    // A word selection draws no rectangle: it moves the end of the selection
-    // to the word nearest the pointer, and announces only a change.
+    // An OCR selection draws no rectangle: it moves the end of the selection
+    // to the character nearest the pointer, and announces only a change.
     if is_dragging()
         && let Some(Gesture::Select { id, origin }) = *lock(&GESTURE)
     {
@@ -1883,10 +1884,10 @@ fn pump_hover(app: &AppHandle, state: &mut PumpState) {
         )
     } else {
         match overlay::area_handle_at(app, point) {
-            // Over a word of an in-place OCR area, the I-beam: that is where
-            // a press selects rather than moves (roadmap 1.41), and the cursor
-            // is the only thing that says so before the press.
-            Some((id, bounds, Handle::Body)) if selects_at(app, id, bounds, point) => {
+            // Over the body of an in-place OCR area, the I-beam: a press there
+            // selects and never moves (roadmap 1.44), and the cursor is the
+            // only thing that says so before the press.
+            Some((id, _, Handle::Body)) if selects_at(app, id) => {
                 (CursorShape::IBeam, Some(id.get()))
             }
             Some((id, _, handle)) => (CursorShape::for_handle(handle), Some(id.get())),
@@ -2085,7 +2086,7 @@ enum PlacementKey {
     /// cursor, its selection or all of it (roadmap `1.41`). The page's
     /// `isCopyKey`.
     Copy,
-    /// `Ctrl+A` without `Alt` or the Windows key: select every word of the OCR
+    /// `Ctrl+A` without `Alt` or the Windows key: select all the text of the OCR
     /// area under the cursor. The page's `isSelectAllKey`.
     SelectAll,
 }
@@ -3351,49 +3352,44 @@ pub(crate) fn reads_in_place(app: &AppHandle, id: AreaId) -> bool {
         && overlay::area_kind(app, id) == Some(AreaType::Ocr)
 }
 
-/// Where a press at `point` on `id`'s body would start a word selection, as
-/// `(anchor, focus)`, or `None` when it would move the area.
-///
-/// A selection handle wins over a word, so a handle that hangs over the next
-/// line's text grabs the selection's end rather than starting a new one.
-fn selection_start_at(
-    app: &AppHandle,
-    id: AreaId,
-    bounds: Rect,
-    point: Point,
-) -> Option<(usize, usize, bool)> {
-    if !reads_in_place(app, id) {
-        return None;
-    }
+/// The selection handle of `id` under `point`, as `(anchor, focus)`: the
+/// grabbed end becomes the focus a drag moves, the other end the anchor.
+fn handle_grab_at(id: AreaId, bounds: Rect, point: Point) -> Option<(usize, usize)> {
     let local = Point::new(point.x - bounds.origin.x, point.y - bounds.origin.y);
-    if let Some(anchor) = crate::ocr::handle_at(id, local, SELECTION_HANDLE_REACH) {
-        let (first, last) = crate::ocr::selection_of(id)?;
-        let focus = if anchor == first { last } else { first };
-        return Some((anchor, focus, true));
-    }
-    crate::ocr::word_at(id, local).map(|index| (index, index, false))
+    let anchor = crate::ocr::handle_at(id, local, SELECTION_HANDLE_REACH)?;
+    let (first, last) = crate::ocr::selection_of(id)?;
+    let focus = if anchor == first { last } else { first };
+    Some((anchor, focus))
 }
 
-/// Whether a press at `point` on `id`'s body would start a word selection.
-fn selects_at(app: &AppHandle, id: AreaId, bounds: Rect, point: Point) -> bool {
-    selection_start_at(app, id, bounds, point).is_some()
+/// Whether a press on `id`'s body selects rather than moves: true over the
+/// whole body of an OCR area that reads in place (roadmap `1.44`).
+fn selects_at(app: &AppHandle, id: AreaId) -> bool {
+    reads_in_place(app, id)
 }
 
-/// A press on an area's body: a word selection if it landed on a word of an OCR
-/// area that reads in place, and the move it has always been otherwise.
+/// A press on an area's body: a selection in an OCR area that reads in place,
+/// and the move it has always been otherwise.
 ///
-/// **Only a press ON a word selects** (`ADR-0046` decision 3). The gaps between
-/// lines, the margins and the grab bar still move the area, so an in-place OCR
-/// area stays as movable as every other area; a press can never be ambiguous
-/// between the two, because a word either contains the point or does not.
+/// **In an in-place OCR area the body never moves the area** (`ADR-0046`
+/// decision 7, roadmap `1.44`, the founder after his 2026-09-26 rig pass): only
+/// the border (the resize band) and the grab bar move or resize it. A press on
+/// a selection handle moves that end of the selection. Any other press selects
+/// from the nearest character once the pointer moves (`ocr::press_selection`),
+/// and a plain click selects nothing, clearing any selection there was. Before
+/// `1.44` only a press ON a word selected and the rest of the body moved the
+/// area, which the founder found clunky.
 fn select_or_move(app: &AppHandle, id: AreaId, bounds: Rect, point: Point) -> Gesture {
-    if let Some((anchor, focus, from_handle)) = selection_start_at(app, id, bounds, point) {
+    if !selects_at(app, id) {
+        return Gesture::Move { id, start: bounds };
+    }
+    if let Some((anchor, focus)) = handle_grab_at(id, bounds, point) {
         let range = crate::ocr::begin_selection(id, anchor, focus);
         overlay::emit_ocr_selection(app, id, Some(range));
-        // From a handle, the pointer stands for the grabbed word's centre, not
-        // for wherever below it the handle was pressed.
+        // From a handle, the pointer stands for the grabbed character's centre,
+        // not for wherever below it the handle was pressed.
         let mut origin = bounds.origin;
-        if from_handle && let Some(centre) = crate::ocr::word_centre(id, focus) {
+        if let Some(centre) = crate::ocr::char_centre(id, focus) {
             let local = Point::new(point.x - bounds.origin.x, point.y - bounds.origin.y);
             origin = Point::new(
                 origin.x - (centre.x - local.x),
@@ -3402,7 +3398,13 @@ fn select_or_move(app: &AppHandle, id: AreaId, bounds: Rect, point: Point) -> Ge
         }
         return Gesture::Select { id, origin };
     }
-    Gesture::Move { id, start: bounds }
+    let local = Point::new(point.x - bounds.origin.x, point.y - bounds.origin.y);
+    crate::ocr::press_selection(id, local);
+    overlay::emit_ocr_selection(app, id, None);
+    Gesture::Select {
+        id,
+        origin: bounds.origin,
+    }
 }
 
 /// A press on the selection handle of any area that reads in place, topmost

@@ -1994,20 +1994,28 @@ struct OcrPayload {
     /// nullable fields would let a payload carry both or neither, which is two
     /// states nothing can draw.
     detail: Option<String>,
-    /// The words, in reading order, when `status` is `text`; empty otherwise.
+    /// The CHARACTERS, in reading order, when `status` is `text`; empty
+    /// otherwise. Each carries the word it belongs to (roadmap `1.44`; the name
+    /// `words` is kept from `1.41`, when each entry was a word).
     ///
-    /// Roadmap `1.41`: an area that reads **in place** (`ADR-0046`) draws a mark
-    /// under each word and a selection band over some of them, so it needs to
-    /// know where each word is. Frame-local, which for an OCR area is
-    /// area-local: `(0, 0)` is the area's top-left when it was read.
+    /// An area that reads **in place** (`ADR-0046`) draws a mark under each
+    /// word, by grouping these on their word, and a selection band over some of
+    /// them, so it needs to know where each sits. Frame-local, which for an OCR
+    /// area is area-local: `(0, 0)` is the area's top-left when it was read.
     words: Vec<OcrWordPayload>,
 }
 
-/// One recognised word, as the page draws it.
+/// One recognised CHARACTER, as the page draws it (roadmap `1.44`: before
+/// it, one word; the event and type keep the word name so the page's contract
+/// changed by one field rather than by a rename).
 #[derive(Serialize, Clone)]
 struct OcrWordPayload {
-    /// The word.
+    /// The character, or the whole text of a word or block the engine could
+    /// not split further.
     text: String,
+    /// Which word it belongs to, from `0` across the area's reading. The page
+    /// draws one mark per word, so it groups by this.
+    word: u32,
     /// The visual line it sits on, from `0` at the top. The page draws one
     /// selection band per line, so it groups by this.
     line: u32,
@@ -2016,13 +2024,14 @@ struct OcrWordPayload {
     outline: [[i32; 2]; 4],
 }
 
-/// The payload of `overlay://ocr-selection`: which words of one area are
+/// The payload of `overlay://ocr-selection`: which characters of one area are
 /// selected.
 #[derive(Serialize, Clone)]
 struct OcrSelectionPayload {
     id: u64,
-    /// The first and last selected word, indices into that area's latest
-    /// `words`, in reading order; `None` when nothing is selected.
+    /// The first and last selected character, indices into that area's latest
+    /// `words` (characters since roadmap `1.44`), in reading order; `None`
+    /// when nothing is selected.
     range: Option<(u64, u64)>,
 }
 
@@ -2055,14 +2064,15 @@ pub(crate) fn emit_ocr(
     id: AreaId,
     status: crate::ocr::Status,
     detail: Option<String>,
-    words: &[crate::ocr_words::PlacedWord],
+    words: &[crate::ocr_words::PlacedChar],
 ) {
     let words = words
         .iter()
-        .map(|word| OcrWordPayload {
-            text: word.text.clone(),
-            line: word.line,
-            outline: word.outline.map(|corner| [corner.x, corner.y]),
+        .map(|unit| OcrWordPayload {
+            text: unit.text.clone(),
+            line: unit.line,
+            word: unit.word,
+            outline: unit.outline.map(|corner| [corner.x, corner.y]),
         })
         .collect();
     if let Err(error) = app.emit(
@@ -2442,7 +2452,7 @@ pub fn overlay_ocr_copy_focused(app: AppHandle) -> Result<(), String> {
         return Ok(());
     }
     // The OCR area under the cursor; failing that, the topmost area with a
-    // visible selection. A selection drag follows the nearest word outside the
+    // visible selection. A selection drag follows the nearest character outside the
     // area and its handles hang below it, so the release can leave the cursor
     // off the area while the band is still drawn (review of `#115`, round 9).
     let under = area_under_cursor(&app)?
@@ -2473,7 +2483,7 @@ pub fn overlay_ocr_copy_focused(app: AppHandle) -> Result<(), String> {
 }
 
 /// IPC surface and hook route for `Ctrl+A` in Placement (roadmap `1.41`):
-/// selects every word of the OCR area under the cursor.
+/// selects all the text of the OCR area under the cursor.
 #[tauri::command]
 pub fn overlay_ocr_select_all_focused(app: AppHandle) -> Result<(), String> {
     if !placement::is_placing() {
@@ -2652,11 +2662,12 @@ mod tests {
         assert_keys(
             "OcrWordPayload",
             &OcrWordPayload {
-                text: "Total:".to_string(),
+                text: "T".to_string(),
+                word: 0,
                 line: 0,
                 outline: [[0, 0], [10, 0], [10, 5], [0, 5]],
             },
-            &["text", "line", "outline"],
+            &["text", "word", "line", "outline"],
         );
         assert_keys(
             "OcrSelectionPayload",

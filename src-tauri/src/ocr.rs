@@ -118,7 +118,7 @@ use uptake_assets::{onnxruntime, ppocr};
 use uptake_core::area::AreaId;
 use uptake_core::geometry::{Point, Rect};
 
-use crate::ocr_words::{self, PlacedWord};
+use crate::ocr_words::{self, PlacedChar};
 use uptake_ocr::paddle::{PaddleConfig, PaddleEngine, PaddleOptions};
 use uptake_ocr::{Outcome, RequestId, Service, StopReason};
 
@@ -207,16 +207,25 @@ struct Ocr {
     ///
     /// See [`Request`] for why this is one slot rather than a set.
     latest: Option<Request>,
-    /// Each OCR area's words from its latest reading (roadmap `1.41`).
+    /// Each OCR area's CHARACTERS from its latest reading, each carrying the
+    /// word it belongs to (roadmap `1.41`; characters since `1.44`, the name
+    /// kept).
     ///
     /// Held here because the selection is made by the **hook**, in Rust: a
     /// press in Placement is hit-tested against these, and `Ctrl+C` copies
     /// from them. The page gets its own copy in the `overlay://ocr` payload to
     /// draw with. Replaced by every reading and dropped by [`forget`].
-    words: BTreeMap<u64, Vec<PlacedWord>>,
-    /// Each area's selection, as the indices of the word the drag started on
-    /// and the word it is on now, in either order.
+    words: BTreeMap<u64, Vec<PlacedChar>>,
+    /// Each area's selection, as the indices of the character the drag
+    /// started on and the character it is on now, in either order (indices
+    /// into `words`, which holds characters since roadmap `1.44`).
     selection: BTreeMap<u64, (usize, usize)>,
+    /// A press inside an area that has not become a selection yet: the
+    /// character nearest the press and the press itself, frame-local
+    /// (roadmap `1.44`). It becomes a selection once the pointer reaches
+    /// another character or moves [`DRAG_SLOP`] from the press, so a plain
+    /// click selects nothing.
+    pending: BTreeMap<u64, (usize, Point)>,
     /// How many readings each area has asked for, so a capture that finishes
     /// after a NEWER reading of the same area was asked for is not submitted.
     ///
@@ -279,6 +288,7 @@ impl Ocr {
             latest: None,
             words: BTreeMap::new(),
             selection: BTreeMap::new(),
+            pending: BTreeMap::new(),
             generation: BTreeMap::new(),
             submitted: BTreeMap::new(),
         }
@@ -670,6 +680,7 @@ fn recognise(app: &AppHandle, id: AreaId, bounds: Rect, copies: bool) {
         let mut guard = lock();
         guard.words.remove(&id.get());
         guard.selection.remove(&id.get());
+        guard.pending.remove(&id.get());
         let next = guard
             .generation
             .get(&id.get())
@@ -780,7 +791,7 @@ pub(crate) fn pump(app: &AppHandle) {
     // arbitrary listener bookkeeping inside Tauri, and holding this lock across
     // it would put an unrelated subsystem inside OCR's critical section for no
     // reason.
-    let mut announcements: Vec<(u64, Status, Option<String>, Vec<PlacedWord>)> = Vec::new();
+    let mut announcements: Vec<(u64, Status, Option<String>, Vec<PlacedChar>)> = Vec::new();
     // The one text result, if any, that `1.13` puts on the clipboard. Decided
     // under the lock and acted on outside it, for the same reason the
     // announcements are: publishing touches a global system resource that every
@@ -815,6 +826,7 @@ pub(crate) fn pump(app: &AppHandle) {
                         Ok(recognition) if recognition.is_empty() => {
                             guard.words.remove(&id.get());
                             guard.selection.remove(&id.get());
+                            guard.pending.remove(&id.get());
                             announcements.push((id.get(), Status::Empty, None, Vec::new()));
                         }
                         Ok(recognition) => {
@@ -826,11 +838,13 @@ pub(crate) fn pump(app: &AppHandle) {
                             let words = ocr_words::from_recognition(&recognition);
                             guard.words.insert(id.get(), words.clone());
                             guard.selection.remove(&id.get());
+                            guard.pending.remove(&id.get());
                             announcements.push((id.get(), Status::Text, Some(text), words));
                         }
                         Err(error) => {
                             guard.words.remove(&id.get());
                             guard.selection.remove(&id.get());
+                            guard.pending.remove(&id.get());
                             announcements.push((
                                 id.get(),
                                 Status::Failed,
@@ -977,6 +991,7 @@ pub(crate) fn forget(id: AreaId) {
     guard.waiting.remove(&id.get());
     guard.words.remove(&id.get());
     guard.selection.remove(&id.get());
+    guard.pending.remove(&id.get());
     guard.generation.remove(&id.get());
     guard.submitted.remove(&id.get());
     // The dismissed area also gives up the clipboard's promise. `pump` would
@@ -988,15 +1003,6 @@ pub(crate) fn forget(id: AreaId) {
     let _ = claims_clipboard(&mut guard.latest, id.get());
 }
 
-/// The word of `id`'s latest reading under `local`, a frame-local point.
-///
-/// `None` when the area has no words, which is the answer for every area that
-/// is not an OCR area that has read something.
-pub(crate) fn word_at(id: AreaId, local: Point) -> Option<usize> {
-    let guard = lock();
-    ocr_words::word_at(guard.words.get(&id.get())?, local)
-}
-
 /// Drops `id`'s words and selection, for an area converted away from OCR.
 ///
 /// Unlike [`forget`] it leaves any outstanding request alone: the area still
@@ -1006,14 +1012,43 @@ pub(crate) fn forget_words(id: AreaId) {
     let mut guard = lock();
     guard.words.remove(&id.get());
     guard.selection.remove(&id.get());
+    guard.pending.remove(&id.get());
 }
 
-/// Starts a selection of `id` from word `anchor` to word `focus` (roadmap
-/// `1.41`): a press on a word passes the same index twice, and a press on one
-/// of the selection's handles passes the OTHER end as the anchor, so the drag
-/// moves the end that was grabbed.
+/// How far, in physical pixels on either axis, the pointer must move from a
+/// press inside an in-place OCR area before the press selects (roadmap `1.44`).
+///
+/// Reaching another character starts the selection at once; this is what lets
+/// a drag select the ONE character it started on, while a click, which moves
+/// a pixel or two at most, still selects nothing.
+pub(crate) const DRAG_SLOP: i32 = 3;
+
+/// A press at `local` inside `id`, frame-local (roadmap `1.44`): it clears the
+/// selection and remembers the nearest character, so the drag that may follow
+/// selects from there and a plain click selects nothing.
+///
+/// Nothing is remembered when the area has no characters, so a drag over an
+/// area that has not read yet selects nothing either.
+pub(crate) fn press_selection(id: AreaId, local: Point) {
+    let mut guard = lock();
+    guard.selection.remove(&id.get());
+    guard.pending.remove(&id.get());
+    let anchor = guard
+        .words
+        .get(&id.get())
+        .and_then(|chars| ocr_words::nearest(chars, local));
+    if let Some(anchor) = anchor {
+        guard.pending.insert(id.get(), (anchor, local));
+    }
+}
+
+/// Starts a selection of `id` from character `anchor` to `focus`: a press on
+/// one of the selection's handles passes the OTHER end as the anchor, so the
+/// drag moves the end that was grabbed.
 pub(crate) fn begin_selection(id: AreaId, anchor: usize, focus: usize) -> (usize, usize) {
-    lock().selection.insert(id.get(), (anchor, focus));
+    let mut guard = lock();
+    guard.pending.remove(&id.get());
+    guard.selection.insert(id.get(), (anchor, focus));
     ordered((anchor, focus))
 }
 
@@ -1021,8 +1056,9 @@ pub(crate) fn begin_selection(id: AreaId, anchor: usize, focus: usize) -> (usize
 /// selection's OTHER end, which becomes the anchor of a drag from the handle.
 ///
 /// `radius` is the handle's reach in physical pixels, from the corner it hangs
-/// off: the start handle below the first selected word's bottom-left, the end
-/// handle below the last one's bottom-right (the founder's approved mock).
+/// off: the start handle below the first selected character's bottom-left,
+/// the end handle below the last one's bottom-right (the founder's approved
+/// mock).
 pub(crate) fn handle_at(id: AreaId, local: Point, radius: i32) -> Option<usize> {
     let guard = lock();
     let words = guard.words.get(&id.get())?;
@@ -1030,24 +1066,34 @@ pub(crate) fn handle_at(id: AreaId, local: Point, radius: i32) -> Option<usize> 
     ocr_words::handle_at(words, first, last, local, radius)
 }
 
-/// The centre of word `index` of `id`, frame-local: the mean of its outline.
-pub(crate) fn word_centre(id: AreaId, index: usize) -> Option<Point> {
+/// The centre of character `index` of `id`, frame-local: the mean of its
+/// outline.
+pub(crate) fn char_centre(id: AreaId, index: usize) -> Option<Point> {
     let guard = lock();
-    let word = guard.words.get(&id.get())?.get(index)?;
-    let (x, y) = word
+    let unit = guard.words.get(&id.get())?.get(index)?;
+    let (x, y) = unit
         .outline
         .iter()
         .fold((0, 0), |(x, y), corner| (x + corner.x, y + corner.y));
     Some(Point::new(x / 4, y / 4))
 }
 
-/// Moves the end of `id`'s selection to the word nearest `local`.
+/// Moves the end of `id`'s selection to the character nearest `local`, or
+/// turns a pending press into a selection once the pointer has left it.
 ///
 /// Returns the selection as `(first, last)` when it CHANGED, so the caller
 /// emits only on a change rather than on every poll tick of a drag.
 pub(crate) fn extend_selection(id: AreaId, local: Point) -> Option<(usize, usize)> {
     let mut guard = lock();
     let nearest = ocr_words::nearest(guard.words.get(&id.get())?, local)?;
+    if let Some(&(anchor, pressed)) = guard.pending.get(&id.get()) {
+        if !left_the_press(anchor, pressed, nearest, local) {
+            return None;
+        }
+        guard.pending.remove(&id.get());
+        guard.selection.insert(id.get(), (anchor, nearest));
+        return Some(ordered((anchor, nearest)));
+    }
     let entry = guard.selection.get_mut(&id.get())?;
     if entry.1 == nearest {
         return None;
@@ -1061,11 +1107,21 @@ pub(crate) fn selection_of(id: AreaId) -> Option<(usize, usize)> {
     lock().selection.get(&id.get()).copied().map(ordered)
 }
 
-/// Selects every word of `id`. `None` when the area has no words.
+/// Whether a pointer at `local`, nearest character `nearest`, has left a press
+/// at `pressed` on character `anchor`: by reaching another character, or by
+/// moving [`DRAG_SLOP`] on either axis.
+fn left_the_press(anchor: usize, pressed: Point, nearest: usize, local: Point) -> bool {
+    nearest != anchor
+        || (local.x - pressed.x).abs() >= DRAG_SLOP
+        || (local.y - pressed.y).abs() >= DRAG_SLOP
+}
+
+/// Selects every character of `id`. `None` when the area has none.
 pub(crate) fn select_all(id: AreaId) -> Option<(usize, usize)> {
     let mut guard = lock();
     let count = guard.words.get(&id.get())?.len();
     let last = count.checked_sub(1)?;
+    guard.pending.remove(&id.get());
     guard.selection.insert(id.get(), (0, last));
     Some((0, last))
 }
@@ -1101,6 +1157,33 @@ const fn ordered((a, b): (usize, usize)) -> (usize, usize) {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_click_selects_nothing_and_a_drag_selects_once_it_leaves_the_press() {
+        // Roadmap 1.44: a press inside an in-place OCR area remembers the
+        // nearest character; the selection starts only when the pointer
+        // reaches another character or moves DRAG_SLOP, so a click (which may
+        // wobble a pixel) selects nothing and a short drag inside one
+        // character still selects it.
+        let press = Point::new(100, 50);
+        assert!(!left_the_press(4, press, 4, press), "a click");
+        assert!(
+            !left_the_press(4, press, 4, Point::new(102, 48)),
+            "a wobble"
+        );
+        assert!(
+            left_the_press(4, press, 4, Point::new(103, 50)),
+            "slop in x"
+        );
+        assert!(
+            left_the_press(4, press, 4, Point::new(100, 47)),
+            "slop in y"
+        );
+        assert!(
+            left_the_press(4, press, 5, Point::new(101, 50)),
+            "next character"
+        );
+    }
 
     #[test]
     fn only_an_answer_to_the_latest_reading_is_used() {
