@@ -226,8 +226,10 @@ export interface OcrPayload {
    */
   detail: string | null;
   /**
-   * The words, in reading order, when `status` is `text`; empty otherwise
-   * (roadmap 1.41). An OCR area that reads in place draws from these.
+   * The CHARACTERS, in reading order, when `status` is `text`; empty otherwise.
+   * Each carries the word it belongs to (roadmap 1.44; the name `words` is kept
+   * from 1.41, when each entry was a word). An OCR area that reads in place
+   * draws from these: one mark per word, a band over the selected characters.
    */
   words: OcrWordPayload[];
 }

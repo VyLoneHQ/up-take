@@ -159,9 +159,9 @@ let flashes = $state(new SvelteMap<number, number>());
 // A failure and a page of recognised text want different treatment, and both
 // are `detail`.
 let recognitions = $state(new SvelteMap<number, OcrPayload>());
-// Roadmap 1.41 (ADR-0046): how an OCR area shows what it read, and which words
-// of each area are selected. The selection is made by the hook in Rust, word by
-// word, and announced here only so the band can be drawn.
+// Roadmap 1.41 (ADR-0046): how an OCR area shows what it read, and which
+// characters of each area are selected (1.44). The selection is made by the
+// hook in Rust and announced here only so the band can be drawn.
 let ocrBehaviour = $state<OcrBehaviour>('in_place');
 let ocrSelections = $state(new SvelteMap<number, [number, number]>());
 // The area's border width, which an absolutely positioned child is measured

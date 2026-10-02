@@ -207,7 +207,9 @@ struct Ocr {
     ///
     /// See [`Request`] for why this is one slot rather than a set.
     latest: Option<Request>,
-    /// Each OCR area's words from its latest reading (roadmap `1.41`).
+    /// Each OCR area's CHARACTERS from its latest reading, each carrying the
+    /// word it belongs to (roadmap `1.41`; characters since `1.44`, the name
+    /// kept).
     ///
     /// Held here because the selection is made by the **hook**, in Rust: a
     /// press in Placement is hit-tested against these, and `Ctrl+C` copies

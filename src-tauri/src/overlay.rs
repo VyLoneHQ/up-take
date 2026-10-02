@@ -1994,12 +1994,14 @@ struct OcrPayload {
     /// nullable fields would let a payload carry both or neither, which is two
     /// states nothing can draw.
     detail: Option<String>,
-    /// The words, in reading order, when `status` is `text`; empty otherwise.
+    /// The CHARACTERS, in reading order, when `status` is `text`; empty
+    /// otherwise. Each carries the word it belongs to (roadmap `1.44`; the name
+    /// `words` is kept from `1.41`, when each entry was a word).
     ///
-    /// Roadmap `1.41`: an area that reads **in place** (`ADR-0046`) draws a mark
-    /// under each word and a selection band over some of them, so it needs to
-    /// know where each word is. Frame-local, which for an OCR area is
-    /// area-local: `(0, 0)` is the area's top-left when it was read.
+    /// An area that reads **in place** (`ADR-0046`) draws a mark under each
+    /// word, by grouping these on their word, and a selection band over some of
+    /// them, so it needs to know where each sits. Frame-local, which for an OCR
+    /// area is area-local: `(0, 0)` is the area's top-left when it was read.
     words: Vec<OcrWordPayload>,
 }
 
