@@ -347,6 +347,7 @@ mod tests {
                             Point::new(10, 80),
                         ],
                         bounds: Rect::new(10, 60, 20, 20),
+                        characters: Vec::new(),
                     },
                     Word {
                         text: "b".to_owned(),
@@ -357,6 +358,7 @@ mod tests {
                             Point::new(30, 80),
                         ],
                         bounds: Rect::new(30, 60, 20, 20),
+                        characters: Vec::new(),
                     },
                 ],
             }],
