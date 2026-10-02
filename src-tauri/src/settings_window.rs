@@ -271,6 +271,16 @@ pub fn settings_write(app: AppHandle, settings: Settings) -> Result<(), String> 
         fail(error);
     }
 
+    // Only on the switch TO in place. A Rendered area is not re-read when it
+    // moves, so its words describe where it was; switching to In place would
+    // draw and select them over whatever it covers now (review of `#115`,
+    // round 7). Every OCR area reads again instead.
+    if settings.ocr_behaviour != previous.ocr_behaviour
+        && settings.ocr_behaviour == crate::settings::OcrBehaviour::InPlace
+    {
+        crate::placement::reread_every_in_place_ocr(&app);
+    }
+
     // Only when it changed. Writing the Run key on every save would mean a
     // user who never touches that switch still has their registry written
     // every time they move a slider.
