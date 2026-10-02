@@ -104,7 +104,7 @@
 //! [`ADR-0032`]: ../../../Projects/UP-TAKE/DECISIONS/ADR-0032-onnx-runtime-is-loaded-not-downloaded.md
 //! [`ADR-0035`]: ../../../Projects/UP-TAKE/DECISIONS/ADR-0035-assets-ship-in-the-installer.md
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
@@ -113,7 +113,9 @@ use tauri::AppHandle;
 use uptake_assets::install::{AssetState, Installer};
 use uptake_assets::{onnxruntime, ppocr};
 use uptake_core::area::AreaId;
-use uptake_core::geometry::Rect;
+use uptake_core::geometry::{Point, Rect};
+
+use crate::ocr_words::{self, PlacedWord};
 use uptake_ocr::paddle::{PaddleConfig, PaddleEngine, PaddleOptions};
 use uptake_ocr::{Outcome, RequestId, Service, StopReason};
 
@@ -202,6 +204,37 @@ struct Ocr {
     ///
     /// See [`Request`] for why this is one slot rather than a set.
     latest: Option<Request>,
+    /// Each OCR area's words from its latest reading (roadmap `1.41`).
+    ///
+    /// Held here because the selection is made by the **hook**, in Rust: a
+    /// press in Placement is hit-tested against these, and `Ctrl+C` copies
+    /// from them. The page gets its own copy in the `overlay://ocr` payload to
+    /// draw with. Replaced by every reading and dropped by [`forget`].
+    words: BTreeMap<u64, Vec<PlacedWord>>,
+    /// Each area's selection, as the indices of the word the drag started on
+    /// and the word it is on now, in either order.
+    selection: BTreeMap<u64, (usize, usize)>,
+    /// How many readings each area has asked for, so a capture that finishes
+    /// after a NEWER reading of the same area was asked for is not submitted.
+    ///
+    /// Roadmap `1.41` made a second reading of one area ordinary (an in-place
+    /// area reads again after every move), and each reading captures on its
+    /// own thread, so an older capture can reach the worker after a newer one
+    /// and its words would replace the newer words (review of `#115`, round 1).
+    /// The worker answers in submission order, so refusing a stale submission
+    /// is enough for the last answer to be the newest reading.
+    generation: BTreeMap<u64, u64>,
+    /// Which reading each unanswered submission of an area was, oldest first.
+    ///
+    /// The worker answers one area's submissions in order, so the front of the
+    /// queue is the reading an answer belongs to. An answer is used only when
+    /// that reading is still the LATEST one asked for (`generation`): an older
+    /// answer arriving while a newer reading is still being captured, or after
+    /// it was submitted, is superseded; and an answer for a dismissed area,
+    /// whose generation [`forget`] removed, is discarded before it stores
+    /// anything (reviews of `#115`, rounds 2 and 3). `waiting` cannot say
+    /// this, being a set.
+    submitted: BTreeMap<u64, VecDeque<u64>>,
 }
 
 /// The most recent conversion the user asked for, and when they asked.
@@ -241,6 +274,10 @@ impl Ocr {
             unavailable: None,
             waiting: BTreeSet::new(),
             latest: None,
+            words: BTreeMap::new(),
+            selection: BTreeMap::new(),
+            generation: BTreeMap::new(),
+            submitted: BTreeMap::new(),
         }
     }
 }
@@ -304,7 +341,78 @@ fn claims_clipboard(latest: &mut Option<Request>, id: u64) -> Option<Instant> {
     None
 }
 
+/// Takes the reading an answer for `id` belongs to off the front of its queue,
+/// and says whether that reading is still the latest one asked for.
+///
+/// `false` for a superseded reading (a newer one was asked for, whether or not
+/// it has reached the worker yet), and for an area with no queue or no
+/// generation, which is one that was dismissed: its answer must store nothing.
+fn answer_is_current(
+    submitted: &mut BTreeMap<u64, VecDeque<u64>>,
+    generation: &BTreeMap<u64, u64>,
+    id: u64,
+) -> bool {
+    let Some(queue) = submitted.get_mut(&id) else {
+        return false;
+    };
+    let answered = queue.pop_front();
+    if queue.is_empty() {
+        submitted.remove(&id);
+    }
+    answered.is_some() && answered == generation.get(&id).copied()
+}
+
+/// Whether reading `asked` of `id` is still the latest one asked for, before it
+/// has reached the worker.
+///
+/// **Every announcement a reading makes after its capture asks this first**:
+/// failure and unavailability as well as submission. A superseded reading that
+/// failed to capture used to emit `Failed` anyway, and if the newer reading had
+/// already answered, that replaced its words with an error for an area that
+/// was fine (review of `#115`, round 4). `false` too for a dismissed area,
+/// whose generation `forget` removed.
+fn reading_is_current(generation: &BTreeMap<u64, u64>, id: u64, asked: u64) -> bool {
+    generation.get(&id) == Some(&asked)
+}
+
 static OCR: Mutex<Ocr> = Mutex::new(Ocr::new());
+
+/// Serialises building the OCR service, and nothing else.
+///
+/// Building hashes the model files and the runtime, about 47 MB of disk, and
+/// used to happen while holding [`OCR`]. The mouse hook takes [`OCR`] too (a
+/// new reading's generation, a selection hit test), so the first reading of a
+/// session could stall the hook on disk work, and a hook that stalls past
+/// `LowLevelHooksTimeout` is removed by Windows (review of `#115`, the GPT-6
+/// Astra round). Building now holds this instead, and [`OCR`] only long enough
+/// to install the result.
+static BUILDING: Mutex<()> = Mutex::new(());
+
+/// Builds the OCR service if there is none and none has failed, without
+/// holding [`OCR`] while the files are verified.
+fn ensure_service() {
+    let needed = |ocr: &Ocr| ocr.service.is_none() && ocr.unavailable.is_none();
+    if !needed(&lock()) {
+        return;
+    }
+    let _building = BUILDING.lock().unwrap_or_else(PoisonError::into_inner);
+    // Another reading may have built it while this one waited.
+    if !needed(&lock()) {
+        return;
+    }
+    // Built once and kept. `service` is `None` only before the first OCR area
+    // of the session or after the worker has stopped, and `unavailable` is what
+    // stops a second area re-hashing the models to rediscover the same absence.
+    let built = resolve_config().and_then(|config| {
+        Service::spawn(move || PaddleEngine::load(&config, PaddleOptions::default()))
+            .map_err(|error| error.to_string())
+    });
+    let mut guard = lock();
+    match built {
+        Ok(service) => guard.service = Some(service),
+        Err(reason) => guard.unavailable = Some(reason),
+    }
+}
 
 /// The lock, poison-tolerant.
 ///
@@ -467,12 +575,55 @@ fn resolve_config() -> Result<PaddleConfig, String> {
 /// something the instant it is drawn rather than sitting blank for the several
 /// hundred milliseconds a cold load takes.
 pub(crate) fn recognise_into_area(app: &AppHandle, id: AreaId, bounds: Rect) {
+    recognise(app, id, bounds, true);
+}
+
+/// Reads `id` again because it MOVED, not because the user asked for text
+/// (roadmap `1.41`: an in-place area's marks must describe what it covers now).
+///
+/// **It never copies.** OCR's automatic copy is a promise to a conversion the
+/// user asked for; a move is not one, and a move that replaced the clipboard
+/// would destroy whatever the user had copied last (review of `#115`, round
+/// 2). It also withdraws the promise an earlier reading of this area still
+/// holds, because that reading is now of pixels the area no longer covers.
+pub(crate) fn reread_area(app: &AppHandle, id: AreaId, bounds: Rect) {
+    recognise(app, id, bounds, false);
+}
+
+/// The one reading path. `copies` says whether this reading may take the
+/// clipboard's promise.
+fn recognise(app: &AppHandle, id: AreaId, bounds: Rect, copies: bool) {
     // The clock for `quality-bars.md` §1's *selection release → OCR text on
     // clipboard* row starts here, on the caller's thread, before the frame is
     // captured and before the engine is built. Anything later would exclude
     // work the bar includes.
     let started = Instant::now();
-    crate::overlay::emit_ocr(app, id, Status::Working, None);
+    // A new reading replaces the words, so the old ones and any selection over
+    // them stop meaning anything now rather than when the answer arrives.
+    let asked = {
+        let mut guard = lock();
+        guard.words.remove(&id.get());
+        guard.selection.remove(&id.get());
+        let next = guard
+            .generation
+            .get(&id.get())
+            .map_or(1, |n| n.wrapping_add(1));
+        guard.generation.insert(id.get(), next);
+        if !copies
+            && guard
+                .latest
+                .as_ref()
+                .is_some_and(|held| held.id == id.get())
+        {
+            guard.latest = None;
+        }
+        // Announced under the lock, like every error below: a reading checks
+        // that it is current and speaks in one step, so an older reading's error
+        // cannot land between this reading's check and its words (review of
+        // `#115`, round 6). `emit_ocr` never takes this lock.
+        crate::overlay::emit_ocr(app, id, Status::Working, None, &[]);
+        next
+    };
     let app = app.clone();
     std::thread::spawn(move || {
         let frame = match crate::output::frame_for_ocr(&app, bounds) {
@@ -482,30 +633,32 @@ pub(crate) fn recognise_into_area(app: &AppHandle, id: AreaId, bounds: Rect) {
                     "ocr: could not capture the area",
                     &format_args!("{id:?}: {error}"),
                 );
-                crate::overlay::emit_ocr(&app, id, Status::Failed, Some(error));
+                // Only the latest reading speaks for the area. A newer one may
+                // already have put its words there.
+                let guard = lock();
+                if reading_is_current(&guard.generation, id.get(), asked) {
+                    crate::overlay::emit_ocr(&app, id, Status::Failed, Some(error), &[]);
+                }
+                drop(guard);
                 return;
             }
         };
 
+        // A newer reading of this area was asked for while this frame was being
+        // captured: it answers for the area, and this one would only replace
+        // its words with older ones, or with an error, if it spoke second.
+        if !reading_is_current(&lock().generation, id.get(), asked) {
+            return;
+        }
+        ensure_service();
         let mut guard = lock();
-        // Built once and kept. `service` is `None` only before the first OCR
-        // area of the session or after the worker has stopped, and `unavailable`
-        // is what stops a second area re-hashing the models to rediscover the
-        // same absence.
-        if guard.service.is_none() && guard.unavailable.is_none() {
-            match resolve_config() {
-                Ok(config) => match Service::spawn(move || {
-                    PaddleEngine::load(&config, PaddleOptions::default())
-                }) {
-                    Ok(service) => guard.service = Some(service),
-                    Err(error) => guard.unavailable = Some(error.to_string()),
-                },
-                Err(reason) => guard.unavailable = Some(reason),
-            }
+        // Asked again: the service may have taken a while to build.
+        if !reading_is_current(&guard.generation, id.get(), asked) {
+            return;
         }
         if let Some(reason) = guard.unavailable.clone() {
+            crate::overlay::emit_ocr(&app, id, Status::Unavailable, Some(reason), &[]);
             drop(guard);
-            crate::overlay::emit_ocr(&app, id, Status::Unavailable, Some(reason));
             return;
         }
         let Some(service) = guard.service.as_ref() else {
@@ -515,6 +668,14 @@ pub(crate) fn recognise_into_area(app: &AppHandle, id: AreaId, bounds: Rect) {
         match service.submit(RequestId::new(id.get()), frame) {
             Ok(()) => {
                 guard.waiting.insert(id.get());
+                guard
+                    .submitted
+                    .entry(id.get())
+                    .or_default()
+                    .push_back(asked);
+                if !copies {
+                    return;
+                }
                 // Promised on submission rather than on the gesture: a
                 // conversion that never reached the worker has no result
                 // coming, and letting it take the slot would mean a later
@@ -536,8 +697,8 @@ pub(crate) fn recognise_into_area(app: &AppHandle, id: AreaId, bounds: Rect) {
                 guard.service = None;
                 let reason = error.to_string();
                 guard.unavailable = Some(reason.clone());
+                crate::overlay::emit_ocr(&app, id, Status::Failed, Some(reason), &[]);
                 drop(guard);
-                crate::overlay::emit_ocr(&app, id, Status::Failed, Some(reason));
             }
         }
     });
@@ -553,13 +714,20 @@ pub(crate) fn pump(app: &AppHandle) {
     // arbitrary listener bookkeeping inside Tauri, and holding this lock across
     // it would put an unrelated subsystem inside OCR's critical section for no
     // reason.
-    let mut announcements: Vec<(u64, Status, Option<String>)> = Vec::new();
+    let mut announcements: Vec<(u64, Status, Option<String>, Vec<PlacedWord>)> = Vec::new();
     // The one text result, if any, that `1.13` puts on the clipboard. Decided
     // under the lock and acted on outside it, for the same reason the
     // announcements are: publishing touches a global system resource that every
     // other process blocks on, and that does not belong inside OCR's critical
     // section.
     let mut clipboard: Option<(u64, String, Instant)> = None;
+    // The generation the clipboard's text was accepted under; see `stamps`.
+    let mut clipboard_stamp: Option<u64> = None;
+    // The generation each announcement was accepted under, taken before the
+    // lock is released and checked again when it is published: a reading
+    // started in between (a move) must not have an older result drawn over its
+    // Working (review of `#115`, round 9).
+    let stamps: Vec<Option<u64>>;
     {
         let mut guard = lock();
         let Some(service) = guard.service.as_ref() else {
@@ -573,24 +741,45 @@ pub(crate) fn pump(app: &AppHandle) {
             match outcome {
                 Outcome::Done { id, result } => {
                     guard.waiting.remove(&id.get());
+                    let ocr = &mut *guard;
+                    if !answer_is_current(&mut ocr.submitted, &ocr.generation, id.get()) {
+                        continue;
+                    }
                     match result {
                         Ok(recognition) if recognition.is_empty() => {
-                            announcements.push((id.get(), Status::Empty, None));
+                            guard.words.remove(&id.get());
+                            guard.selection.remove(&id.get());
+                            announcements.push((id.get(), Status::Empty, None, Vec::new()));
                         }
                         Ok(recognition) => {
                             let text = recognition.text();
                             if let Some(started) = claims_clipboard(&mut guard.latest, id.get()) {
                                 clipboard = Some((id.get(), text.clone(), started));
+                                clipboard_stamp = guard.generation.get(&id.get()).copied();
                             }
-                            announcements.push((id.get(), Status::Text, Some(text)));
+                            let words = ocr_words::from_recognition(&recognition);
+                            guard.words.insert(id.get(), words.clone());
+                            guard.selection.remove(&id.get());
+                            announcements.push((id.get(), Status::Text, Some(text), words));
                         }
                         Err(error) => {
-                            announcements.push((id.get(), Status::Failed, Some(error.to_string())));
+                            guard.words.remove(&id.get());
+                            guard.selection.remove(&id.get());
+                            announcements.push((
+                                id.get(),
+                                Status::Failed,
+                                Some(error.to_string()),
+                                Vec::new(),
+                            ));
                         }
                     }
                 }
                 Outcome::Abandoned { id } => {
                     guard.waiting.remove(&id.get());
+                    let ocr = &mut *guard;
+                    if !answer_is_current(&mut ocr.submitted, &ocr.generation, id.get()) {
+                        continue;
+                    }
                     // Its answer is never coming, so it must not keep holding
                     // the clipboard's promise: an area converted after it would
                     // otherwise land its text on screen and decline to copy it.
@@ -600,6 +789,7 @@ pub(crate) fn pump(app: &AppHandle) {
                         id.get(),
                         Status::Failed,
                         Some("the OCR worker stopped before reaching this area".to_string()),
+                        Vec::new(),
                     ));
                 }
                 Outcome::Stopped(reason) => {
@@ -616,6 +806,7 @@ pub(crate) fn pump(app: &AppHandle) {
                     // guarantees is delivered first. This clears the residue of
                     // ids whose areas were dismissed in the meantime.
                     guard.waiting.clear();
+                    guard.submitted.clear();
                     // And the promise with them: the worker is gone, so no
                     // outstanding conversion can still deliver text.
                     guard.latest = None;
@@ -632,15 +823,24 @@ pub(crate) fn pump(app: &AppHandle) {
                 ),
             }
         }
+        stamps = announcements
+            .iter()
+            .map(|(raw, ..)| guard.generation.get(raw).copied())
+            .collect();
     }
-    for (raw, status, detail) in announcements {
+    for ((raw, status, detail, words), stamp) in announcements.into_iter().zip(stamps) {
         // Asked area by area rather than emitted blind: an area dismissed while
         // its frame was in the worker has nothing to draw on, and announcing a
         // result for it is the shape `captures::still_holds` exists to refuse
         // for a pin (`I-61`). A missing area here is the ordinary case, not an
         // error.
         if let Some(id) = crate::overlay::live_area_id(app, raw) {
-            crate::overlay::emit_ocr(app, id, status, detail);
+            // Checked and published in one step, as `recognise` does.
+            let guard = lock();
+            if guard.generation.get(&raw).copied() == stamp {
+                crate::overlay::emit_ocr(app, id, status, detail, &words);
+            }
+            drop(guard);
         }
     }
     // After the announcements, not before them: the copy fires the same flash
@@ -663,12 +863,24 @@ pub(crate) fn pump(app: &AppHandle) {
     // arm), and this path was the exception until the independent review of
     // `PR #83` raised it. Non-binding there and taken anyway: the cost is one
     // thread per conversion and the risk was a met bar.
+    // Checked against the generation, as the announcement is: a move between
+    // accepting this result and publishing it withdrew the promise, and the
+    // area still being alive does not say its text is still current (review
+    // of `#115`, the second GPT-6 Astra round).
     if let Some((raw, text, started)) = clipboard
         && let Some(id) = crate::overlay::live_area_id(app, raw)
+        && lock().generation.get(&raw).copied() == clipboard_stamp
     {
         let app = app.clone();
         std::thread::spawn(move || {
-            crate::output::copy_text_to_clipboard(&app, id, &text, started);
+            // Asked again on the publishing thread, right before the write: the
+            // thread can start late, and a move in that gap withdrew the copy
+            // (review of `#115`, third GPT-6 Astra round). The lock is not held
+            // across the write, because the clipboard can be held by another
+            // process; the gap left is between this check and the write.
+            if lock().generation.get(&raw).copied() == clipboard_stamp {
+                crate::output::copy_text_to_clipboard(&app, id, &text, started);
+            }
         });
     }
 }
@@ -697,6 +909,10 @@ fn describe_stop(reason: &StopReason) -> String {
 pub(crate) fn forget(id: AreaId) {
     let mut guard = lock();
     guard.waiting.remove(&id.get());
+    guard.words.remove(&id.get());
+    guard.selection.remove(&id.get());
+    guard.generation.remove(&id.get());
+    guard.submitted.remove(&id.get());
     // The dismissed area also gives up the clipboard's promise. `pump` would
     // decline to copy it anyway -- `live_area_id` answers `None` for an area
     // that is gone -- but leaving the slot filled would make the *next*
@@ -704,6 +920,111 @@ pub(crate) fn forget(id: AreaId) {
     // would not copy either. One dismissal must not cost two copies.
     // The instant is discarded: there is no copy to time.
     let _ = claims_clipboard(&mut guard.latest, id.get());
+}
+
+/// The word of `id`'s latest reading under `local`, a frame-local point.
+///
+/// `None` when the area has no words, which is the answer for every area that
+/// is not an OCR area that has read something.
+pub(crate) fn word_at(id: AreaId, local: Point) -> Option<usize> {
+    let guard = lock();
+    ocr_words::word_at(guard.words.get(&id.get())?, local)
+}
+
+/// Drops `id`'s words and selection, for an area converted away from OCR.
+///
+/// Unlike [`forget`] it leaves any outstanding request alone: the area still
+/// exists, and a reading already in the worker answers into `pump`, which
+/// replaces the words; the page shows them only while the area is OCR.
+pub(crate) fn forget_words(id: AreaId) {
+    let mut guard = lock();
+    guard.words.remove(&id.get());
+    guard.selection.remove(&id.get());
+}
+
+/// Starts a selection of `id` from word `anchor` to word `focus` (roadmap
+/// `1.41`): a press on a word passes the same index twice, and a press on one
+/// of the selection's handles passes the OTHER end as the anchor, so the drag
+/// moves the end that was grabbed.
+pub(crate) fn begin_selection(id: AreaId, anchor: usize, focus: usize) -> (usize, usize) {
+    lock().selection.insert(id.get(), (anchor, focus));
+    ordered((anchor, focus))
+}
+
+/// The selection handle of `id` under `local`, if one is: the index of the
+/// selection's OTHER end, which becomes the anchor of a drag from the handle.
+///
+/// `radius` is the handle's reach in physical pixels, from the corner it hangs
+/// off: the start handle below the first selected word's bottom-left, the end
+/// handle below the last one's bottom-right (the founder's approved mock).
+pub(crate) fn handle_at(id: AreaId, local: Point, radius: i32) -> Option<usize> {
+    let guard = lock();
+    let words = guard.words.get(&id.get())?;
+    let (first, last) = ordered(*guard.selection.get(&id.get())?);
+    ocr_words::handle_at(words, first, last, local, radius)
+}
+
+/// The centre of word `index` of `id`, frame-local: the mean of its outline.
+pub(crate) fn word_centre(id: AreaId, index: usize) -> Option<Point> {
+    let guard = lock();
+    let word = guard.words.get(&id.get())?.get(index)?;
+    let (x, y) = word
+        .outline
+        .iter()
+        .fold((0, 0), |(x, y), corner| (x + corner.x, y + corner.y));
+    Some(Point::new(x / 4, y / 4))
+}
+
+/// Moves the end of `id`'s selection to the word nearest `local`.
+///
+/// Returns the selection as `(first, last)` when it CHANGED, so the caller
+/// emits only on a change rather than on every poll tick of a drag.
+pub(crate) fn extend_selection(id: AreaId, local: Point) -> Option<(usize, usize)> {
+    let mut guard = lock();
+    let nearest = ocr_words::nearest(guard.words.get(&id.get())?, local)?;
+    let entry = guard.selection.get_mut(&id.get())?;
+    if entry.1 == nearest {
+        return None;
+    }
+    entry.1 = nearest;
+    Some(ordered(*entry))
+}
+
+/// `id`'s selection as `(first, last)` in reading order, if it has one.
+pub(crate) fn selection_of(id: AreaId) -> Option<(usize, usize)> {
+    lock().selection.get(&id.get()).copied().map(ordered)
+}
+
+/// Selects every word of `id`. `None` when the area has no words.
+pub(crate) fn select_all(id: AreaId) -> Option<(usize, usize)> {
+    let mut guard = lock();
+    let count = guard.words.get(&id.get())?.len();
+    let last = count.checked_sub(1)?;
+    guard.selection.insert(id.get(), (0, last));
+    Some((0, last))
+}
+
+/// The text `Ctrl+C` copies from `id`: the selection when `selection` says it
+/// is drawn and there is one, otherwise everything read. `None` when the area
+/// has no words.
+pub(crate) fn copy_text(id: AreaId, selection: bool) -> Option<String> {
+    let guard = lock();
+    let words = guard.words.get(&id.get())?;
+    let selected = if selection {
+        guard.selection.get(&id.get()).copied()
+    } else {
+        None
+    };
+    let (first, last) = match selected {
+        Some(range) => ordered(range),
+        None => (0, words.len().checked_sub(1)?),
+    };
+    Some(ocr_words::text_between(words, first, last))
+}
+
+/// A selection's two ends in reading order.
+const fn ordered((a, b): (usize, usize)) -> (usize, usize) {
+    if a <= b { (a, b) } else { (b, a) }
 }
 
 #[cfg(test)]
@@ -714,6 +1035,45 @@ pub(crate) fn forget(id: AreaId) {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_answer_to_the_latest_reading_is_used() {
+        let mut submitted: BTreeMap<u64, VecDeque<u64>> = BTreeMap::new();
+        let mut generation: BTreeMap<u64, u64> = BTreeMap::new();
+
+        // Two readings of area 7 both in the worker: the older answer is
+        // superseded, the newer is used, and the queue is gone after it.
+        submitted.insert(7, VecDeque::from([1, 2]));
+        generation.insert(7, 2);
+        assert!(!answer_is_current(&mut submitted, &generation, 7));
+        assert!(answer_is_current(&mut submitted, &generation, 7));
+        assert!(!submitted.contains_key(&7));
+
+        // Round 3's first case: reading 3 was ASKED FOR (the area moved) but is
+        // still being captured, so only reading 2 is in the worker. Its answer
+        // is already superseded.
+        submitted.insert(7, VecDeque::from([2]));
+        generation.insert(7, 3);
+        assert!(!answer_is_current(&mut submitted, &generation, 7));
+
+        // Round 3's second case: the area was dismissed, so `forget` removed
+        // its generation and queue. A late answer stores nothing.
+        submitted.insert(8, VecDeque::from([1]));
+        assert!(!answer_is_current(&mut submitted, &generation, 8));
+        assert!(!answer_is_current(&mut submitted, &generation, 9));
+    }
+
+    #[test]
+    fn only_the_latest_reading_may_announce_before_the_worker() {
+        // Round 4: a superseded reading whose capture failed must not emit
+        // `Failed` over the newer reading's words.
+        let mut generation: BTreeMap<u64, u64> = BTreeMap::new();
+        generation.insert(7, 2);
+        assert!(reading_is_current(&generation, 7, 2));
+        assert!(!reading_is_current(&generation, 7, 1), "superseded");
+        // Dismissed: `forget` removed the generation.
+        assert!(!reading_is_current(&generation, 8, 1), "dismissed");
+    }
 
     #[test]
     fn every_status_has_a_distinct_wire_name() {

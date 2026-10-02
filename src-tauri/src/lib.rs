@@ -13,6 +13,7 @@ mod first_run;
 mod freeze;
 mod hotkey;
 mod ocr;
+mod ocr_words;
 mod output;
 mod overlay;
 mod overlay_state;
@@ -167,6 +168,8 @@ pub fn run() -> tauri::Result<()> {
                     overlay::overlay_report_freeze_latency,
                     overlay::overlay_report_scale,
                     overlay::overlay_dismiss_focused,
+                    overlay::overlay_ocr_copy_focused,
+                    overlay::overlay_ocr_select_all_focused,
                     overlay::overlay_request_state,
                     overlay::overlay_active_monitor,
                     first_run::overlay_report_coach,
@@ -190,6 +193,8 @@ pub fn run() -> tauri::Result<()> {
                     overlay::overlay_freeze_hidden,
                     overlay::overlay_report_latency,
                     overlay::overlay_dismiss_focused,
+                    overlay::overlay_ocr_copy_focused,
+                    overlay::overlay_ocr_select_all_focused,
                     overlay::overlay_request_state,
                     // BOTH lists, and that is the whole of the care this needs:
                     // a command registered only in the debug list is a feature
@@ -284,7 +289,7 @@ pub fn run() -> tauri::Result<()> {
             // starting the sessions and `freeze` consulting them would leak
             // four held sessions. Still an environment variable: 1.9f's warm
             // path is settings-gated in the roadmap and is NOT one of the
-            // fourteen rows `UI-UX.md` section 4 inventories, so giving it a
+            // fifteen rows `UI-UX.md` section 4 inventories, so giving it a
             // control here would be inventing a row that window's own rule
             // forbids. Recorded rather than decided in passing.
             freeze::init_warm_capture();

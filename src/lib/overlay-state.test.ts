@@ -10,13 +10,19 @@ import {
   formatZoom,
   frameKey,
   frozenFrameKeys,
+  isCopyKey,
   isFreezeKey,
   isRemoveKey,
+  isSelectAllKey,
   type MenuView,
   menuFrameCss,
   monitorFramesCss,
   type OcrPayload,
+  type OcrWordPayload,
   ocrLine,
+  ocrSelectionBands,
+  ocrSelectionHandles,
+  ocrWordBoxes,
   type PhysRect,
   physRectsToCss,
   physRectToCss,
@@ -531,6 +537,7 @@ describe('ocrLine', () => {
     id: 1,
     status: 'text',
     detail: null,
+    words: [],
     ...over,
   });
 
@@ -774,5 +781,91 @@ describe('formatZoom', () => {
     // stringified the number directly would print `2.4999999403953552×`.
     expect(formatZoom(2.4999999403953552)).toBe('2.5×');
     expect(formatZoom(0.9999999)).toBe('1×');
+  });
+});
+
+describe('in-place OCR (roadmap 1.41)', () => {
+  /** An upright word from `x` to `x + width` on the line at `y`, 20 px tall. */
+  const word = (
+    text: string,
+    line: number,
+    x: number,
+    width: number,
+    y: number,
+  ): OcrWordPayload => ({
+    text,
+    line,
+    outline: [
+      [x, y],
+      [x + width, y],
+      [x + width, y + 20],
+      [x, y + 20],
+    ],
+  });
+  const words = [
+    word('Die', 0, 10, 30, 0),
+    word('Texte', 0, 40, 50, 0),
+    word('für', 1, 10, 30, 30),
+    word('Anfänger', 1, 40, 80, 30),
+  ];
+
+  it('places each word inside its area, scaled and shifted by the border', () => {
+    expect(ocrWordBoxes(words, 2, 1.5)[1]).toEqual({
+      x: 40 / 2 - 1.5,
+      y: -1.5,
+      width: 25,
+      height: 10,
+    });
+  });
+
+  it('draws one connected band per line, the gap between words included', () => {
+    // Texte (line 0) to für (line 1): one band on each line, and the line-0
+    // band runs from Texte only, not from the line's start.
+    const bands = ocrSelectionBands(words, [1, 2], 1, 0);
+    expect(bands).toEqual([
+      { x: 40, y: 0, width: 50, height: 20 },
+      { x: 10, y: 30, width: 30, height: 20 },
+    ]);
+    // A whole line is ONE band spanning both words and the space between.
+    expect(ocrSelectionBands(words, [2, 3], 1, 0)).toEqual([
+      { x: 10, y: 30, width: 110, height: 20 },
+    ]);
+  });
+
+  it('accepts a selection dragged backwards and clamps a stale range', () => {
+    expect(ocrSelectionBands(words, [2, 1], 1, 0)).toEqual(
+      ocrSelectionBands(words, [1, 2], 1, 0),
+    );
+    expect(ocrSelectionBands(words, [3, 99], 1, 0)).toEqual([
+      { x: 40, y: 30, width: 80, height: 20 },
+    ]);
+    expect(ocrSelectionBands(words, null, 1, 0)).toEqual([]);
+    expect(ocrSelectionBands([], [0, 0], 1, 0)).toEqual([]);
+  });
+
+  it('hangs the handles off the corners the hook grabs them by', () => {
+    // Selection Texte (1) to für (2): start below Texte's bottom-left (40, 20),
+    // end below für's bottom-right (40, 50), both 14 physical px at 2x scale.
+    expect(ocrSelectionHandles(words, [2, 1], 2, 0, 14)).toEqual([
+      { end: 'start', x: 20 - 7, y: 10, size: 7 },
+      { end: 'end', x: 20, y: 25, size: 7 },
+    ]);
+    expect(ocrSelectionHandles(words, null, 1, 0, 14)).toEqual([]);
+  });
+
+  it('takes Ctrl+C and Ctrl+A only as plain Ctrl chords', () => {
+    const key = (k: string, ctrl = true, alt = false, meta = false) => ({
+      key: k,
+      ctrlKey: ctrl,
+      altKey: alt,
+      metaKey: meta,
+    });
+    expect(isCopyKey(key('c'))).toBe(true);
+    expect(isCopyKey(key('C'))).toBe(true);
+    expect(isCopyKey(key('c', false))).toBe(false);
+    expect(isCopyKey(key('c', true, true))).toBe(false);
+    expect(isSelectAllKey(key('a'))).toBe(true);
+    expect(isSelectAllKey(key('a', true, false, true))).toBe(false);
+    expect(isSelectAllKey(key('c'))).toBe(false);
   });
 });
