@@ -233,14 +233,19 @@ export interface OcrPayload {
 }
 
 /**
- * One recognised word: Rust's `OcrWordPayload`.
+ * One recognised CHARACTER: Rust's `OcrWordPayload` (roadmap 1.44; before it,
+ * one word, and the name was kept so the contract changed by one field).
  *
- * `outline` is the word's four corners, clockwise from the top-left, as
- * `[x, y]` pairs in **area-local physical pixels**: `(0, 0)` is the area's
- * top-left when it was read.
+ * `word` says which word it belongs to, from `0` across the reading: the marks
+ * are drawn one per word by grouping on it, and a selection is made of these
+ * characters. A word or block the engine could not split further is one entry
+ * holding its whole text. `outline` is the character's four corners, clockwise
+ * from the top-left, as `[x, y]` pairs in **area-local physical pixels**:
+ * `(0, 0)` is the area's top-left when it was read.
  */
 export interface OcrWordPayload {
   text: string;
+  word: number;
   line: number;
   outline: [number, number][];
 }
@@ -267,7 +272,13 @@ export function ocrWordBoxes(
   dpr: number,
   inset: number,
 ): CssRect[] {
-  return words.map((word) => boxOf([word], dpr, inset));
+  const byWord = new Map<number, OcrWordPayload[]>();
+  for (const unit of words) {
+    const group = byWord.get(unit.word);
+    if (group) group.push(unit);
+    else byWord.set(unit.word, [unit]);
+  }
+  return [...byWord.values()].map((group) => boxOf(group, dpr, inset));
 }
 
 /**

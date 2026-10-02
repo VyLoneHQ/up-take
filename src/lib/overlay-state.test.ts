@@ -784,16 +784,22 @@ describe('formatZoom', () => {
   });
 });
 
-describe('in-place OCR (roadmap 1.41)', () => {
-  /** An upright word from `x` to `x + width` on the line at `y`, 20 px tall. */
+describe('in-place OCR (roadmap 1.41, 1.44)', () => {
+  /**
+   * An upright unit from `x` to `x + width` on the line at `y`, 20 px tall, in
+   * word `w`. The fixtures below make each unit a whole word, which is what a
+   * word the engine gave no characters arrives as.
+   */
   const word = (
     text: string,
     line: number,
     x: number,
     width: number,
     y: number,
+    w: number,
   ): OcrWordPayload => ({
     text,
+    word: w,
     line,
     outline: [
       [x, y],
@@ -803,10 +809,10 @@ describe('in-place OCR (roadmap 1.41)', () => {
     ],
   });
   const words = [
-    word('Die', 0, 10, 30, 0),
-    word('Texte', 0, 40, 50, 0),
-    word('für', 1, 10, 30, 30),
-    word('Anfänger', 1, 40, 80, 30),
+    word('Die', 0, 10, 30, 0, 0),
+    word('Texte', 0, 40, 50, 0, 1),
+    word('für', 1, 10, 30, 30, 2),
+    word('Anfänger', 1, 40, 80, 30, 3),
   ];
 
   it('places each word inside its area, scaled and shifted by the border', () => {
@@ -816,6 +822,33 @@ describe('in-place OCR (roadmap 1.41)', () => {
       width: 25,
       height: 10,
     });
+  });
+
+  it('draws ONE mark per word, whatever number of characters it arrives as', () => {
+    // "Die" as three characters and "Texte" as one unit: two marks, and the
+    // first spans all three characters (1.44 sends characters, and the marks
+    // must look as they did when it sent words).
+    const chars = [
+      word('D', 0, 10, 10, 0, 0),
+      word('i', 0, 20, 10, 0, 0),
+      word('e', 0, 30, 10, 0, 0),
+      word('Texte', 0, 40, 50, 0, 1),
+    ];
+    expect(ocrWordBoxes(chars, 1, 0)).toEqual([
+      { x: 10, y: 0, width: 30, height: 20 },
+      { x: 40, y: 0, width: 50, height: 20 },
+    ]);
+  });
+
+  it('draws a band from a character inside a word, not from the word', () => {
+    const chars = [
+      word('D', 0, 10, 10, 0, 0),
+      word('i', 0, 20, 10, 0, 0),
+      word('e', 0, 30, 10, 0, 0),
+    ];
+    expect(ocrSelectionBands(chars, [1, 2], 1, 0)).toEqual([
+      { x: 20, y: 0, width: 20, height: 20 },
+    ]);
   });
 
   it('draws one connected band per line, the gap between words included', () => {

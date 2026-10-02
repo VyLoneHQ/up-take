@@ -2003,11 +2003,17 @@ struct OcrPayload {
     words: Vec<OcrWordPayload>,
 }
 
-/// One recognised word, as the page draws it.
+/// One recognised CHARACTER, as the page draws it (roadmap `1.44`: before
+/// it, one word; the event and type keep the word name so the page's contract
+/// changed by one field rather than by a rename).
 #[derive(Serialize, Clone)]
 struct OcrWordPayload {
-    /// The word.
+    /// The character, or the whole text of a word or block the engine could
+    /// not split further.
     text: String,
+    /// Which word it belongs to, from `0` across the area's reading. The page
+    /// draws one mark per word, so it groups by this.
+    word: u32,
     /// The visual line it sits on, from `0` at the top. The page draws one
     /// selection band per line, so it groups by this.
     line: u32,
@@ -2055,14 +2061,15 @@ pub(crate) fn emit_ocr(
     id: AreaId,
     status: crate::ocr::Status,
     detail: Option<String>,
-    words: &[crate::ocr_words::PlacedWord],
+    words: &[crate::ocr_words::PlacedChar],
 ) {
     let words = words
         .iter()
-        .map(|word| OcrWordPayload {
-            text: word.text.clone(),
-            line: word.line,
-            outline: word.outline.map(|corner| [corner.x, corner.y]),
+        .map(|unit| OcrWordPayload {
+            text: unit.text.clone(),
+            line: unit.line,
+            word: unit.word,
+            outline: unit.outline.map(|corner| [corner.x, corner.y]),
         })
         .collect();
     if let Err(error) = app.emit(
@@ -2652,11 +2659,12 @@ mod tests {
         assert_keys(
             "OcrWordPayload",
             &OcrWordPayload {
-                text: "Total:".to_string(),
+                text: "T".to_string(),
+                word: 0,
                 line: 0,
                 outline: [[0, 0], [10, 0], [10, 5], [0, 5]],
             },
-            &["text", "line", "outline"],
+            &["text", "word", "line", "outline"],
         );
         assert_keys(
             "OcrSelectionPayload",
