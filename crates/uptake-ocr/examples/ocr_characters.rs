@@ -28,14 +28,18 @@
 //! ```text
 //! line  <file>  <index>  <timesteps>  <x0 y0 x1 y1 x2 y2 x3 y3>
 //! char  <file>  <index>  <code points, hex, '+'-joined>  <first>  <last>
-//! glyph <file>  <block>  <code points, hex, '+'-joined>  <left x>  <right x>
+//! glyph <file>  <block>  <code points, hex, '+'-joined>  <left x>  <right x>  <x0 y0 x1 y1 x2 y2 x3 y3>
+//! word  <file>  <block>  <x0 y0 x1 y1 x2 y2 x3 y3>
 //! ```
 //!
 //! Quad corners run clockwise from the top-left. A character's `first` and
 //! `last` are inclusive timestep indices. `line` and `char` are the raw decode,
 //! for trying other rules; `glyph` is what `Engine::recognise` itself returns,
 //! a character outline's top edge in whole pixels, so the rule the engine ships
-//! is scored on the engine's own output.
+//! is scored on the engine's own output. Its last field and the `word` records
+//! are the whole outlines, for `scripts/draw-ocr-characters.py`, which draws
+//! them onto a real screenshot: a screen has no ground truth to score against,
+//! so the rig half of `1.44`'s measurement is a picture judged by eye.
 
 #![allow(
     clippy::print_stderr,
@@ -48,7 +52,7 @@ use std::process::ExitCode;
 
 use uptake_assets::ppocr;
 use uptake_core::bitmap::RgbaBitmap;
-use uptake_core::geometry::Size;
+use uptake_core::geometry::{Point, Size};
 use uptake_ocr::Engine;
 use uptake_ocr::paddle::{PaddleConfig, PaddleEngine, PaddleOptions};
 
@@ -168,6 +172,7 @@ fn main() -> ExitCode {
         };
         for (index, block) in recognition.blocks().enumerate() {
             for word in &block.words {
+                println!("word\t{name}\t{index}\t{}", outline_fields(&word.outline));
                 for character in &word.characters {
                     let code_points: Vec<String> = character
                         .text
@@ -175,16 +180,27 @@ fn main() -> ExitCode {
                         .map(|c| format!("{:x}", u32::from(c)))
                         .collect();
                     println!(
-                        "glyph\t{name}\t{index}\t{}\t{}\t{}",
+                        "glyph\t{name}\t{index}\t{}\t{}\t{}\t{}",
                         code_points.join("+"),
                         character.outline[0].x,
-                        character.outline[1].x
+                        character.outline[1].x,
+                        outline_fields(&character.outline)
                     );
                 }
             }
         }
     }
     ExitCode::SUCCESS
+}
+
+/// An outline's four corners as `x0 y0 x1 y1 x2 y2 x3 y3`.
+fn outline_fields(outline: &[Point; 4]) -> String {
+    outline
+        .iter()
+        .flat_map(|corner| [corner.x, corner.y])
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn load_frame(path: &Path) -> Result<RgbaBitmap, String> {
