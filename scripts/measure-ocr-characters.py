@@ -229,7 +229,7 @@ def parity(truth: dict[str, dict], lines: dict[str, list[dict]]) -> bool:
     for name, expected in sorted(truth.items()):
         found = lines.get(name, [])
         placed = GLYPHS.get(name, [])
-        if len(found) != 1 or not placed or {glyph["block"] for glyph in placed} != {0}:
+        if len(found) != 1:
             continue
         if "".join(char["text"] for char in found[0]["chars"]) != expected["text"]:
             continue
@@ -238,10 +238,13 @@ def parity(truth: dict[str, dict], lines: dict[str, list[dict]]) -> bool:
             for cell, char in zip(cells(found[0], SHIPPED_SHIFT), found[0]["chars"])
             if char["text"] and not char["text"].isspace()
         ]
-        if len(mirrored) != len(placed):
+        if len(mirrored) != len(placed) or {glyph["block"] for glyph in placed} != {0}:
             # Every cell of the longer side is unmatched, and is charged as
             # such: counting a whole line as one difference let it pass under
-            # the tolerance (review of `#119`, round 3).
+            # the tolerance (review of `#119`, round 3). A line the decode read
+            # exactly but the engine placed NOTHING for, or placed across more
+            # than one block, is the same failure and was skipped instead
+            # (round 7).
             unmatched = max(len(mirrored), len(placed))
             compared += unmatched
             differ += unmatched

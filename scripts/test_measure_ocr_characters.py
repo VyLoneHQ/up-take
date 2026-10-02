@@ -164,6 +164,23 @@ def test_parity_charges_every_glyph_of_a_mismatched_line(module) -> None:
     assert module.parity(truth, lines) is False
 
 
+def test_parity_charges_a_line_the_engine_placed_nothing_for(module) -> None:
+    # Round 7: a line with no glyph records at all was skipped, so it was
+    # neither compared nor charged. Charged as its 4 cells, 4 of 800 fails.
+    truth, lines = one_line_corpus(module, drop=4)
+    assert module.GLYPHS["line0.rgba"] == []
+    assert module.parity(truth, lines) is False
+    truth, lines = one_line_corpus(module, drop=0)
+    del module.GLYPHS["line0.rgba"]
+    assert module.parity(truth, lines) is False
+
+
+def test_parity_charges_a_line_split_across_blocks(module) -> None:
+    truth, lines = one_line_corpus(module, drop=0)
+    module.GLYPHS["line0.rgba"][-1]["block"] = 1
+    assert module.parity(truth, lines) is False
+
+
 def main() -> int:
     module = load_module()
     tests = [
