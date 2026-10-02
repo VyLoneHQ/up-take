@@ -1407,7 +1407,7 @@ mod tests {
     /// the engine got.
     ///
     /// ```text
-    /// set UPTAKE_MODELS_DIR=C:\_CORE\up-take\dist\models
+    /// set UPTAKE_MODELS_DIR=C:\_CORE\up-take\src-tauri\assets\models
     /// set ORT_DYLIB_PATH=C:\Windows\System32\onnxruntime.dll
     /// cargo test -p up-take --lib -- --ignored --nocapture the_real_models
     /// ```
