@@ -14,6 +14,9 @@ with no model and no runtime:
 3. **The parity check can fail.** Round 2 found it only printed. Its verdict
    is tested for a pass, for too many differing cells, and for nothing
    compared at all.
+4. **Fonts are laid out without shaping.** Round 4 found that a ligature makes
+   one character's ink cover two, and Pillow shapes wherever RAQM is present.
+   `load_font` must ask for the BASIC layout engine.
 
 Pillow is stubbed unconditionally, as in `test_render_ocr_cards.py`: nothing
 under test renders, and a skip when Pillow is absent would skip in CI.
@@ -97,6 +100,15 @@ def test_the_scripts_shift_is_the_engines(module) -> None:
     )
     assert len(found) == 1, f"expected one CHARACTER_CUT_SHIFT in recognise.rs, found {found}"
     assert float(found[0]) == module.SHIPPED_SHIFT, (found[0], module.SHIPPED_SHIFT)
+
+
+def test_fonts_are_laid_out_without_shaping(module) -> None:
+    calls = []
+    font = sys.modules["PIL.ImageFont"]
+    font.Layout = types.SimpleNamespace(BASIC="basic", RAQM="raqm")
+    font.truetype = lambda *args, **kwargs: calls.append(kwargs) or object()
+    module.load_font("arial.ttf", 12)
+    assert calls == [{"layout_engine": "basic"}], calls
 
 
 def test_parity_passes_on_rounding_noise(module) -> None:

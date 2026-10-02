@@ -71,7 +71,18 @@ TEXTS = {
 
 
 def load_font(file_name: str, size: int) -> ImageFont.FreeTypeFont:
-    return ImageFont.truetype(str(FONT_DIRECTORY / file_name), size)
+    """The font, laid out with Pillow's BASIC engine on every machine.
+
+    `glyph_ink` takes a character's ink as the difference between two prefixes
+    rendered separately, which is only that character's ink if adding it never
+    changes an earlier glyph. RAQM shaping breaks that: "fi" in "fill" becomes a
+    ligature and the difference covers both letters. Pillow uses RAQM wherever
+    it was built with it, so without this pin the ground truth would depend on
+    the machine (review of `#119`, round 4).
+    """
+    return ImageFont.truetype(
+        str(FONT_DIRECTORY / file_name), size, layout_engine=ImageFont.Layout.BASIC
+    )
 
 
 def render(text: str, font: ImageFont.FreeTypeFont, foreground, background, size) -> Image.Image:
