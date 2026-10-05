@@ -107,7 +107,7 @@ Add a comment to your first pull request saying:
 > I have read the UP-TAKE Contributor License Agreement and I accept it.
 
 That comment is the record. It covers your later contributions to this repository as well, until this
-Agreement changes (section 7). Signing once is enough.
+Agreement changes (section 7). Until then, signing once is enough.
 
 <!-- CORRECTED 2026-08-02. This section previously said signing happened "automatically" via a
      CLA-assistant bot. No such bot is installed: the repository has one workflow file, no CLA action,
