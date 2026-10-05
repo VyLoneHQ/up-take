@@ -1,10 +1,12 @@
 # Contributor License Agreement
 
-Version 2, 2026-10-05. Nobody signed version 1, so no contribution was ever made under it.
+Version 2, 2026-10-05. Nobody signed version 1, and no one outside the project has contributed yet.
 <!-- source: ADR-0052 (UP-TAKE may be sold in stores, accepted 2026-10-05), which made version 1's
-     "there is no paid version and no plan for one" untrue. "Nobody signed version 1" was checked on
-     2026-10-05: no comment in VyLoneHQ/up-take carries the signing sentence, and every pull request so
-     far is by the maintainer, his agent account or Dependabot. -->
+     "there is no paid version and no plan for one" untrue. Checked on 2026-10-05: no comment in
+     VyLoneHQ/up-take carries the signing sentence, and every commit and pull request so far is by the
+     maintainer, his agent account or Dependabot. This line said "so no contribution was ever made
+     under it" until the final review of PR #125, which found that version 1 counted submitting a
+     contribution as agreeing, so an absence of signatures could not establish it. -->
 
 Thank you for your interest in contributing to UP-TAKE. VyLone is the name under which David Supanz, an
 individual in Austria, publishes and maintains UP-TAKE ("VyLone", "we", "us"). Section 6 covers
