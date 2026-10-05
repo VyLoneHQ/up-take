@@ -2,9 +2,10 @@
 
 Version 2, 2026-10-05. Nobody signed version 1, and no one outside the project has contributed yet.
 <!-- source: ADR-0052 (UP-TAKE may be sold in stores, accepted 2026-10-05), which made version 1's
-     "there is no paid version and no plan for one" untrue. Checked on 2026-10-05: no comment in
-     VyLoneHQ/up-take carries the signing sentence, and every commit and pull request so far is by the
-     maintainer, his agent account or Dependabot. This line said "so no contribution was ever made
+     "there is no paid version and no plan for one" untrue. Checked on 2026-10-05 through the GitHub
+     API: every comment, issue and pull request ever made in VyLoneHQ/up-take, and every commit, is by
+     the maintainer (VyLoneReaz), his agent account (vylone-agent) or Dependabot. Signing is a comment,
+     so no one else can have signed, in any wording. This line said "so no contribution was ever made
      under it" until the final review of PR #125, which found that version 1 counted submitting a
      contribution as agreeing, so an absence of signatures could not establish it. -->
 
