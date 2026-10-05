@@ -13,8 +13,10 @@ UP-TAKE is running.
      informs. It is true: areas persist until dismissed or the app exits (ADR-0009). -->
 The window you keep alt-tabbing back to can just sit there instead.
 
-It is free and open source under GPL-3.0, so it stays that way.
-<!-- source: MASTER-PLAN.md section 1 (free, GPL-3.0); ADR-0003 (the licence) -->
+It is free and open source under GPL-3.0-or-later, so it stays that way.
+<!-- source: MASTER-PLAN.md section 1 (free, GPL-3.0); ADR-0003 (the licence, GPL-3.0-or-later; this
+     line said only "GPL-3.0" until 2026-10-05, which named a narrower licence than the one in
+     LICENSE and Cargo.toml) -->
 
 **Nothing is installable yet.** There is no release, no installer and no download. What follows is
 what actually runs today if you build it yourself.
@@ -322,8 +324,19 @@ that lands, and the review above is what carries that weight instead.
 
 GPL-3.0-or-later. See [LICENSE](LICENSE).
 
+UP-TAKE may also be sold in stores such as Steam one day. A store copy will be the same build under
+the same licence, and buying one will be a way to support the work. Everything in this repository
+stays free, including a ready-made download once releases exist.
+<!-- source: ADR-0052 decisions 1, 2, 4 and 5 (accepted 2026-10-05: the same complete build may be
+     sold in stores, under the GPL as its only terms, and the repository keeps the source and a free
+     download). "One day" because nothing is in a store: roadmap 3.9 is Not started. -->
+
 The GPL covers the code. It does not cover the **UP-TAKE** or **VyLone** names and branding, which
-stay all rights reserved. Fork and modify the code freely under the GPL, but a fork cannot call
+stay all rights reserved. Fork and modify the code freely under the GPL, but a fork may not call
 itself UP-TAKE. Firefox and Chromium use the same arrangement for the same reason.
+<!-- source: GPL-3.0 section 7(e), which lets a licensor decline trademark rights. This said "a fork
+     cannot call itself UP-TAKE" until 2026-10-05. Neither name is a registered trademark (ADR-0020
+     decision 6, kept by the founder that day), so the sentence says what is not permitted, not what
+     is impossible. -->
 
 Copyright (C) 2026 VyLone.

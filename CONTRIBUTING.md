@@ -27,19 +27,22 @@ are designed and not written, so there is no code there to improve.
 ## Contributor License Agreement
 
 **External contributions need a signed [CLA](CLA.md).** You keep your copyright. You grant VyLone
-the right to also use the contribution under other licence terms, including commercial ones. The CLA
-explains it in plain language and is short.
+the right to also use the contribution under other licence terms, including commercial ones, and a
+patent licence for it. The CLA explains it in plain language and is short.
 
-The reason is stated in the open rather than buried. UP-TAKE is free and complete, and there is no
-paid tier and no plan for one. The CLA exists so that the project can change its licence terms later
-if it ever has to, for instance if the way it is funded has to be reopened, without tracking down
-every past contributor for permission: one unreachable person would otherwise freeze that
-permanently. It protects a fallback, not a product.
-<!-- source: ADR-0010 (free and complete, no Pro tier, 2026-07-21); ADR-0017 (software may be sold;
-     selling GPL-licensed software needs no CLA, which is the GPL's own term rather than that
-     record's claim); LEGAL-AND-COMMERCE.md section 2, "still required after ADR-0010, for a
-     different reason". This paragraph said "a paid tier built on the same codebase is planned for a
-     later phase" until 2026-09-08, seven weeks after ADR-0010 removed it. -->
+The reason is stated openly. UP-TAKE is free and complete, and it stays that way here. VyLone may also
+sell the same build in stores such as Steam, under the same licence, and the GPL allows that on its
+own. The CLA exists so that the project can change its licence terms later if it ever has to, for
+instance if the way it is funded has to be reopened, without tracking down every past contributor for
+permission: one unreachable person would otherwise freeze that permanently. It protects a fallback,
+not a product.
+<!-- source: ADR-0052 (UP-TAKE may be sold in stores as the same complete build, and the repository
+     stays free, 2026-10-05); ADR-0010 (free and complete, no Pro tier, 2026-07-21); ADR-0017 (software
+     may be sold; selling GPL-licensed software needs no CLA, which is the GPL's own term rather than
+     that record's claim); LEGAL-AND-COMMERCE.md section 2, "still required after ADR-0010, for a
+     different reason". This paragraph said "there is no paid tier and no plan for one" until
+     2026-10-05, and "a paid tier built on the same codebase is planned for a later phase" until
+     2026-09-08, seven weeks after ADR-0010 removed it. -->
 
 **To sign, comment on your first pull request** saying you have read the CLA and accept it. There is
 no bot. That comment is the record and it covers everything you send afterwards.
