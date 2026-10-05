@@ -45,7 +45,10 @@ not a product.
      2026-09-08, seven weeks after ADR-0010 removed it. -->
 
 **To sign, comment on your first pull request** saying you have read the CLA and accept it. There is
-no bot. That comment is the record and it covers everything you send afterwards.
+no bot. That comment is the record and it covers everything you send afterwards, until the CLA
+changes. After a change you accept the new version once, before your next contribution is merged.
+<!-- source: CLA.md section 7 (version 2, 2026-10-05). This said only "it covers everything you send
+     afterwards" until the independent review of PR #125 found it contradicting that section. -->
 <!-- CORRECTED 2026-08-02: this file, CLA.md and the pull request template all said a CLA-assistant
      bot would prompt automatically. None is installed, checked against the repository's workflows,
      configuration and webhooks. -->
