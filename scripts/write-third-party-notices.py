@@ -20,10 +20,15 @@ fact about the releases, not about this code, so it is not recorded here.
     out by `about.hbs`.
   * **JavaScript**: the packages the front end's BUILD actually contains, read
     from a sourcemap build rather than from `package.json`. Measured on
-    2026-10-06: eight packages are compiled in, and only one of them,
-    `@tauri-apps/api`, is a runtime dependency in `package.json`; Svelte's and
-    SvelteKit's runtimes arrive as dev dependencies and ship all the same. A
-    list taken from the manifest would have missed seven of eight.
+    2026-10-06: eight packages are compiled in, nine versions of them (devalue
+    twice), and only one, `@tauri-apps/api`, is a runtime dependency in
+    `package.json`; Svelte's and SvelteKit's runtimes arrive as dev
+    dependencies and ship all the same. A list taken from the manifest would
+    have missed seven of eight.
+    **The limit of this source:** a sourcemap names the modules the bundler
+    included, so a package whose code reached the bundle with no module of its
+    own would be missed; the refusals catch an empty inventory, not one omitted
+    package (review of #130, round 4, raised as non-binding unease).
 * `LICENSE.txt`, the repository's own `LICENSE`, so the GPL's text ships with
   the program it covers.
 
@@ -177,7 +182,7 @@ def notice_files(directory: Path) -> list[Path]:
 
     Apache-2.0 section 4(d) requires a NOTICE file's attribution to travel with
     the work, and it is a separate file from the licence. None of the 283 crates
-    or nine packages compiled in today ships one (measured 2026-10-06), so this
+    or the nine package versions compiled in ships one (measured 2026-10-06), so this
     is for the dependency that adds one later: without it, that NOTICE would be
     dropped with every check green (review of #130, round 3).
     """
