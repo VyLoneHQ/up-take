@@ -31,6 +31,11 @@ fact about the releases, not about this code, so it is not recorded here.
 the list stale: CI runs this before `tauri build`, and `verify-bundle.py` checks
 both files reached the installer.
 
+**NOTICE files travel too**, for crates and packages alike: Apache-2.0
+section 4(d) requires a NOTICE file's attribution with the work, and
+cargo-about reports licence texts only, so a crate's NOTICE is read from its
+published source (review of #130, round 3).
+
 **It refuses rather than writes a partial file**: a JavaScript package with no
 licence file, or one whose licence is not on the accepted list, stops the build.
 `cargo about` refuses the same way for a crate, through `about.toml`'s list.
@@ -167,6 +172,81 @@ def licence_files(package: Path) -> list[Path]:
     )
 
 
+def notice_files(directory: Path) -> list[Path]:
+    """Every NOTICE file a package or crate ships at its root, in any case.
+
+    Apache-2.0 section 4(d) requires a NOTICE file's attribution to travel with
+    the work, and it is a separate file from the licence. None of the 283 crates
+    or nine packages compiled in today ships one (measured 2026-10-06), so this
+    is for the dependency that adds one later: without it, that NOTICE would be
+    dropped with every check green (review of #130, round 3).
+    """
+    return sorted(
+        entry
+        for entry in directory.iterdir()
+        if entry.is_file() and entry.name.lower().startswith("notice")
+    )
+
+
+def read_text(path: Path) -> str:
+    """A text file's contents with its line endings normalised: licence files
+    arrive with CRLF on Windows, and one file should not mix the two."""
+    return path.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n").strip()
+
+
+def crate_directories(root: Path) -> dict[tuple[str, str], Path]:
+    """Each Windows-graph crate's source folder, from `cargo metadata`."""
+    result = subprocess.run(
+        [
+            "cargo",
+            "metadata",
+            "--format-version",
+            "1",
+            "--locked",
+            "--filter-platform",
+            "x86_64-pc-windows-msvc",
+        ],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if result.returncode != 0:
+        sys.stderr.write(result.stderr)
+        raise SystemExit("cargo metadata failed (exit " + str(result.returncode) + ")")
+    return {
+        (package["name"], package["version"]): Path(package["manifest_path"]).parent
+        for package in json.loads(result.stdout)["packages"]
+    }
+
+
+def crate_notices(crates: set[tuple[str, str]], directories: dict[tuple[str, str], Path]) -> str:
+    """The NOTICE files of the listed crates, as a block for PART 1.
+
+    cargo-about reports licence texts only, so a crate's NOTICE is read from its
+    published source here. A listed crate whose source cannot be found is a
+    refusal, because then its NOTICE, if it has one, cannot be checked.
+    """
+    blocks = []
+    for crate in sorted(crates):
+        directory = directories.get(crate)
+        if directory is None:
+            raise SystemExit(
+                crate[0] + " " + crate[1] + " is listed by cargo about and has no source"
+                " folder in cargo metadata, so its NOTICE file cannot be checked."
+            )
+        for path in notice_files(directory):
+            blocks.append(
+                SEPARATOR + "\nNOTICE of " + crate[0] + " " + crate[1] + " (" + path.name + ")\n\n"
+                + read_text(path)
+            )
+    if not blocks:
+        return "None of these crates ships a NOTICE file.\n"
+    return "NOTICE files shipped by these crates\n\n" + "\n\n".join(blocks) + "\n"
+
+
 def licence_accepted(expression: object) -> bool:
     """Whether a package's SPDX licence expression is acceptable.
 
@@ -208,10 +288,8 @@ def npm_notice(package: Path) -> tuple[str, str]:
             " licence requires its notice with every copy, so the build stops here"
             " rather than ship without it."
         )
-    text = "\n\n".join(
-        path.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n").strip()
-        for path in found
-    )
+    # Its NOTICE files travel with its licence files (Apache-2.0 section 4(d)).
+    text = "\n\n".join(read_text(path) for path in found + notice_files(package))
     return name + " " + version + " (" + licence + ")", text
 
 
@@ -255,7 +333,10 @@ def rust_part(root: Path) -> str:
         + str(len(crates))
         + " crates)\n\n"
         + text
+        + "\n\n"
+        + SEPARATOR
         + "\n"
+        + crate_notices(crates, crate_directories(root))
     )
 
 

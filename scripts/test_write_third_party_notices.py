@@ -144,6 +144,34 @@ def test_a_package_without_a_licence_file_or_with_another_licence_stops_the_buil
         shutil.rmtree(scratch, ignore_errors=True)
 
 
+def test_a_notice_file_travels_with_a_package_and_with_a_crate(module) -> None:
+    """Apache-2.0 section 4(d): a NOTICE file is separate from the licence and
+    must travel too. Round 3 of #130's review: the first version kept only the
+    licence files, so a dependency that added a NOTICE would lose it silently."""
+    scratch = Path(tempfile.mkdtemp(prefix="notices-test-"))
+    try:
+        package = make_package(
+            scratch, "apache", "Apache-2.0", {"LICENSE": "APACHE TEXT", "NOTICE": "ATTRIBUTION TEXT"}
+        )
+        assert "ATTRIBUTION TEXT" in module.npm_notice(package)[1]
+
+        with_notice = scratch / "with-notice-1.0.0"
+        with_notice.mkdir()
+        (with_notice / "NOTICE.txt").write_text("CRATE ATTRIBUTION", encoding="utf-8")
+        without = scratch / "plain-2.0.0"
+        without.mkdir()
+        (without / "LICENSE-MIT").write_text("MIT", encoding="utf-8")
+        directories = {("with-notice", "1.0.0"): with_notice, ("plain", "2.0.0"): without}
+        block = module.crate_notices({("with-notice", "1.0.0"), ("plain", "2.0.0")}, directories)
+        assert "NOTICE of with-notice 1.0.0" in block and "CRATE ATTRIBUTION" in block
+        assert "plain" not in block, "a crate with no NOTICE adds nothing"
+        assert module.crate_notices({("plain", "2.0.0")}, directories).startswith("None of these")
+        # A listed crate with no source folder cannot be checked, so it refuses.
+        assert refused(lambda: module.crate_notices({("ghost", "0.1.0")}, directories))
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
 def test_the_crate_count_reads_every_used_by_block_once(module) -> None:
     text = "\n".join(
         [

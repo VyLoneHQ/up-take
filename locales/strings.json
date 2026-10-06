@@ -721,9 +721,9 @@
       "de_from": "71381fc5"
     },
     "settings.licence.own.about": {
-      "en": "UP-TAKE is free software under the GNU General Public License, version 3: you may use it, study it, share it and change it. Its source code is on GitHub.",
-      "de": "UP-TAKE ist freie Software unter der GNU General Public License, Version 3: Du darfst es nutzen, untersuchen, weitergeben und verändern. Der Quellcode liegt auf GitHub.",
-      "de_from": "d2b66c21"
+      "en": "UP-TAKE is free software under the GNU General Public License, version 3: you may use it, study it, share it and change it.",
+      "de": "UP-TAKE ist freie Software unter der GNU General Public License, Version 3: Du darfst es nutzen, untersuchen, weitergeben und verändern.",
+      "de_from": "3f4ab55f"
     },
     "settings.licence.notices.name": {
       "en": "Software by others",
