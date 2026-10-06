@@ -234,6 +234,51 @@ pub fn settings_open_save_folder(app: AppHandle) -> Result<(), String> {
         .map_err(|error| format!("could not open {}: {error}", folder.display()))
 }
 
+/// The licence file `which` names, as the installer places it beside the
+/// executable (`I-443`): `"licence"` is UP-TAKE's own GPL text and `"notices"`
+/// the third-party notices. `None` for anything else, so the page cannot open an
+/// arbitrary path through this command.
+fn licence_file_name(which: &str) -> Option<&'static str> {
+    match which {
+        "licence" => Some("LICENSE.txt"),
+        "notices" => Some("THIRD-PARTY-NOTICES.txt"),
+        _ => None,
+    }
+}
+
+/// Opens one of the licence files the installer carries, from the Help pane's
+/// Licence section (`I-443`, `LEGAL-AND-COMMERCE.md` section 3).
+///
+/// Found beside the executable, where the installer puts every resource and
+/// where `ocr.rs` looks for the runtime. **A development build has neither
+/// file**, because `scripts/write-third-party-notices.py` writes them for the
+/// release bundle only, so this answers an error the page shows in words
+/// instead of opening nothing.
+///
+/// # Errors
+///
+/// When `which` names no licence file, when the file is not beside the
+/// executable, or when the opener refuses it.
+#[tauri::command]
+pub fn settings_open_licence(app: AppHandle, which: &str) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+
+    let name =
+        licence_file_name(which).ok_or_else(|| format!("no licence file is called {which}"))?;
+    let executable =
+        std::env::current_exe().map_err(|error| format!("could not locate UP-TAKE: {error}"))?;
+    let path = executable
+        .parent()
+        .ok_or_else(|| "UP-TAKE's executable has no folder".to_owned())?
+        .join(name);
+    if !path.is_file() {
+        return Err(format!("{name} is not in this build"));
+    }
+    app.opener()
+        .open_path(path.to_string_lossy(), None::<&str>)
+        .map_err(|error| format!("could not open {}: {error}", path.display()))
+}
+
 /// Stores `settings`, persists them, and applies the ones a running app can
 /// change without a restart.
 ///
@@ -384,6 +429,33 @@ pub fn settings_close(app: AppHandle) {
 mod tests {
     use super::{Facts, MINIMUM_SIZE, SIZE, WINDOW_LABEL};
     use crate::payload_keys::{assert_keys, assert_payload_coverage};
+
+    /// `I-443`: the Help pane opens exactly the two files the installer
+    /// carries, under the names it carries them, and nothing else.
+    #[test]
+    #[allow(clippy::expect_used, reason = "a failed expect is a failed test")]
+    fn the_help_pane_opens_the_licence_files_the_installer_carries() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.release.conf.json"))
+                .expect("tauri.release.conf.json must be valid JSON");
+        let destinations: Vec<&str> = conf["bundle"]["resources"]
+            .as_object()
+            .expect("the release config names its resources")
+            .values()
+            .filter_map(serde_json::Value::as_str)
+            .collect();
+        for which in ["licence", "notices"] {
+            let name = super::licence_file_name(which).expect("a known licence file");
+            assert!(
+                destinations.contains(&name),
+                "{name} is opened by the Help pane and not packaged, so an installed UP-TAKE has no {which}"
+            );
+        }
+        // Anything else is refused, so the page cannot open an arbitrary path.
+        for other in ["", "LICENSE.txt", "../secret", "notice"] {
+            assert_eq!(super::licence_file_name(other), None, "{other:?}");
+        }
+    }
 
     #[test]
     fn the_window_is_not_the_overlay() {

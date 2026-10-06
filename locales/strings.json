@@ -710,6 +710,41 @@
       "de": "Erledigt. Alles steht wieder auf den Standardwerten.",
       "de_from": "f2bce93d"
     },
+    "settings.section.licence": {
+      "en": "Licence",
+      "de": "Lizenz",
+      "de_from": "58c031d4"
+    },
+    "settings.licence.own.name": {
+      "en": "UP-TAKE's licence",
+      "de": "Die Lizenz von UP-TAKE",
+      "de_from": "71381fc5"
+    },
+    "settings.licence.own.about": {
+      "en": "UP-TAKE is free software under the GNU General Public License, version 3: you may use it, study it, share it and change it. Its source code is on GitHub.",
+      "de": "UP-TAKE ist freie Software unter der GNU General Public License, Version 3: Du darfst es nutzen, untersuchen, weitergeben und verändern. Der Quellcode liegt auf GitHub.",
+      "de_from": "d2b66c21"
+    },
+    "settings.licence.notices.name": {
+      "en": "Software by others",
+      "de": "Software von anderen",
+      "de_from": "9762ffa0"
+    },
+    "settings.licence.notices.about": {
+      "en": "UP-TAKE is built with open-source software written by others, each under its own licence. This lists every piece with its licence text.",
+      "de": "UP-TAKE ist mit Open-Source-Software anderer gebaut, jede unter ihrer eigenen Lizenz. Diese Liste nennt jede davon mit ihrem Lizenztext.",
+      "de_from": "eb7a2436"
+    },
+    "settings.licence.open": {
+      "en": "Open",
+      "de": "Öffnen",
+      "de_from": "538b10e9"
+    },
+    "settings.licence.missing": {
+      "en": "Not in this build",
+      "de": "Nicht in diesem Build",
+      "de_from": "8882ef8f"
+    },
     "settings.section.reset": {
       "en": "Starting over",
       "de": "Von vorn beginnen",

@@ -39,6 +39,8 @@
 *.rs text eol=lf
 *.lock text eol=lf
 *.sh text eol=lf
+# cargo-about's template (I-443): its line endings reach THIRD-PARTY-NOTICES.txt.
+*.hbs text eol=lf
 *.py text eol=lf
 
 # Binary files - no line ending conversion

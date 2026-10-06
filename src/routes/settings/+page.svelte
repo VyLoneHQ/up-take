@@ -26,6 +26,9 @@ let pane = $state<PaneId>('general');
 let problem = $state('');
 let tourArmed = $state(false);
 let wasReset = $state(false);
+// The licence files a development build does not have (I-443): the button says
+// so in words, once asked, instead of failing silently.
+let missingLicence = $state<string[]>([]);
 
 const view = $derived(
   settings && facts ? panes(language, settings, facts) : [],
@@ -90,6 +93,23 @@ async function chooseFolder(row: Extract<Row, { shape: 'folder' }>) {
 async function replayTour() {
   await invoke('settings_replay_tour');
   tourArmed = true;
+}
+
+/** Opens UP-TAKE's licence or the third-party notices, from Help (I-443). */
+async function openLicence(action: 'open-licence' | 'open-notices') {
+  try {
+    await invoke('settings_open_licence', {
+      which: action === 'open-licence' ? 'licence' : 'notices',
+    });
+  } catch (error) {
+    // Rust answers this in words when the file is not beside the executable,
+    // which is every development build. Anything else is a real problem.
+    if (String(error).includes('not in this build')) {
+      missingLicence = [...missingLicence, action];
+    } else {
+      problem = String(error);
+    }
+  }
 }
 
 async function openSaveFolder() {
@@ -262,6 +282,17 @@ onMount(() => {
                       onclick={replayTour}
                       >{tourArmed
                         ? text(language, 'settings.help.replay.armed')
+                        : row.label}</button
+                    >
+                  {:else if row.shape === 'action' && (row.action === 'open-licence' || row.action === 'open-notices')}
+                    {@const action = row.action}
+                    <button
+                      type="button"
+                      class="quiet"
+                      disabled={missingLicence.includes(action)}
+                      onclick={() => openLicence(action)}
+                      >{missingLicence.includes(action)
+                        ? text(language, 'settings.licence.missing')
                         : row.label}</button
                     >
                   {:else if row.shape === 'action'}

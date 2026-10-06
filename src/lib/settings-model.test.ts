@@ -131,7 +131,15 @@ describe('the inventory', () => {
     const shapes = help?.sections.flatMap((section) =>
       section.rows.map((each) => each.shape),
     );
-    expect(shapes).toEqual(['keys', 'keys', 'types', 'action', 'action']);
+    expect(shapes).toEqual([
+      'keys',
+      'keys',
+      'types',
+      'action',
+      'action',
+      'action',
+      'action',
+    ]);
   });
 
   it('drops the arming row from Help, because the legend replaced it', () => {

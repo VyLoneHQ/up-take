@@ -159,6 +159,12 @@ jobs:
       - name: Test the model licence notice
         run: python3 scripts/test_write_model_notice.py
 
+      # I-443: the third-party notices' own tests. Which JavaScript packages a
+      # build is found to contain, which licences are accepted, and which files
+      # are a package's licence. No cargo-about and no node_modules needed.
+      - name: Test the third-party notices
+        run: python3 scripts/test_write_third_party_notices.py
+
       # The card corpus's own tests (roadmap 1.33). Constants only -- no Pillow,
       # no rendering, no cards on disk -- because what they defend is the
       # 192-card default denominator every recorded accuracy figure is over, and
@@ -342,6 +348,20 @@ jobs:
       # because it walks the crate graph and sees no .onnx.
       - name: Write the model licence notice
         run: python scripts/write-model-notice.py --out src-tauri/assets/models
+
+      # I-443. Every crate compiled into up-take.exe and every package compiled
+      # into the interface carries a licence that requires its notice with each
+      # copy, binaries included, and the GPL's own text must ship too. Generated
+      # here from Cargo.lock and the front end's build, never by hand, so a
+      # Dependabot bump cannot leave the list stale; verify-bundle.py checks
+      # both files reached the installer. cargo-about is the same project family
+      # as cargo-deny, installed the same way.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+
+      - name: Write the third-party notices and the licence
+        run: python scripts/write-third-party-notices.py --out src-tauri/assets
 
       # The RECOGNISER, downloaded rather than converted (ADR-0037). Its
       # dictionary is EXTRACTED from the model's own inference.yml, because
