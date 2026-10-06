@@ -751,9 +751,9 @@
       "de_from": "3856d9b4"
     },
     "settings.ocr_behaviour.about": {
-      "en": "How an OCR area shows what it read. In place keeps the screen visible and marks each word, and while placing you can drag across words to select them. Rendered covers the area and shows the text in UP-TAKE's own style.",
-      "de": "Wie ein OCR-Bereich zeigt, was er gelesen hat. Direkt lässt den Bildschirm sichtbar und markiert jedes Wort, und beim Platzieren kannst du Wörter mit der Maus auswählen. Als Text deckt den Bereich ab und zeigt den Text in der Darstellung von UP-TAKE.",
-      "de_from": "a486940a"
+      "en": "How a new OCR area shows what it read. In place keeps the screen visible and marks each word, and you can drag across the text to select it. Rendered covers the area and shows the text in UP-TAKE's own style. Each area can change its own from its right-click menu.",
+      "de": "Wie ein neuer OCR-Bereich zeigt, was er gelesen hat. Direkt lässt den Bildschirm sichtbar und markiert jedes Wort, und du kannst den Text mit der Maus auswählen. Als Text deckt den Bereich ab und zeigt den Text in der Darstellung von UP-TAKE. Jeder Bereich kann das über sein Rechtsklickmenü selbst ändern.",
+      "de_from": "4eec2085"
     },
     "settings.ocr_behaviour.in_place": {
       "en": "In place",

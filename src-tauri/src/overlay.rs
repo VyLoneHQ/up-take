@@ -15,7 +15,9 @@ use std::sync::{Mutex, MutexGuard, PoisonError, RwLock};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
-use uptake_core::area::{AfterCreate, Area, AreaId, AreaStore, AreaType, Input, Layer};
+use uptake_core::area::{
+    AfterCreate, Area, AreaId, AreaStore, AreaType, Input, Layer, OcrBehaviour,
+};
 use uptake_core::geometry::{Monitor, Point, Rect, Size, virtual_desktop_bounds};
 use uptake_core::interaction;
 
@@ -985,6 +987,11 @@ struct AreaPayload {
     /// this field would have been inert: [`type_name`] existed only to name the
     /// *armed* type in the placement badge, never a placed one.
     kind: &'static str,
+    /// How the area shows what it read, `"in_place"` or `"rendered"` (roadmap
+    /// `1.45`). Every area carries one; the page reads it only for an OCR area.
+    /// Before `1.45` the page took it from the settings, for every OCR area at
+    /// once.
+    ocr_behaviour: OcrBehaviour,
     /// The area's magnification (§3.4), `1.0` at natural size.
     ///
     /// **The frontend does not scale anything with this.** The magnified
@@ -1063,6 +1070,7 @@ pub(crate) fn emit_areas(app: &AppHandle) -> Result<(), String> {
             close: as_tuple(interaction::close_control(area.bounds, &monitors)),
             layer: layer_name(area.layer),
             kind: type_name(area.kind),
+            ocr_behaviour: area.ocr_behaviour,
             zoom: area.zoom.factor(),
             bar: interaction::grab_bar(area.bounds, &monitors).map(as_tuple),
             handles: interaction::outside_resize_handles(area.bounds)
@@ -1085,6 +1093,9 @@ pub(crate) struct AreaSummary {
     /// What the area is — the area menu shows Copy/Save only for `Default`
     /// areas (task 1.9's scope; a typed capture area is 1.9b's).
     pub kind: AreaType,
+    /// How it shows what it read, for an OCR area's Behaviour rows (roadmap
+    /// `1.45`).
+    pub ocr_behaviour: OcrBehaviour,
 }
 
 impl AreaSummary {
@@ -1094,6 +1105,7 @@ impl AreaSummary {
             layer: area.layer,
             input: area.input,
             kind: area.kind,
+            ocr_behaviour: area.ocr_behaviour,
         }
     }
 }
@@ -1132,9 +1144,9 @@ pub(crate) fn interactive_area_at(app: &AppHandle, point: Point) -> Option<AreaS
         .map(AreaSummary::of)
 }
 
-/// What Living needs to know, beyond each area's own [`Input`], to decide
-/// whether a press on an area's **body** is the area's (`ADR-0047`): whether
-/// OCR areas read in place, and which of them hold text.
+/// What Living needs to know, beyond each area's own fields, to decide whether
+/// a press on an area's **body** is the area's (`ADR-0047`): which OCR areas
+/// hold text. Whether an area reads in place is its own since roadmap `1.45`.
 ///
 /// **Taken before the area store is locked**, and that is why it is a value
 /// rather than a closure that asks `ocr` as it goes: asking under the store
@@ -1148,26 +1160,22 @@ pub(crate) fn interactive_area_at(app: &AppHandle, point: Point) -> Option<AreaS
 /// press, the menu, the chord and the hover cannot come to disagree about which
 /// bodies are the user's apps'.
 pub(crate) struct LivingBodies {
-    /// OCR areas read in place (`ADR-0046`), the setting.
-    in_place: bool,
     /// The areas whose latest reading found characters.
     with_text: BTreeSet<u64>,
 }
 
 impl LivingBodies {
-    /// The current setting and the OCR engine's current answers.
+    /// The OCR engine's current answers.
     pub(crate) fn now() -> Self {
         Self {
-            in_place: crate::settings::current().ocr_behaviour
-                == crate::settings::OcrBehaviour::InPlace,
             with_text: crate::ocr::areas_with_text(),
         }
     }
 
     /// Whether `area`'s body takes a press in Living: [`Area::body_takes_input`]
-    /// with this snapshot's two facts.
+    /// with this snapshot's answer for it.
     pub(crate) fn take_input(&self, area: &Area) -> bool {
-        area.body_takes_input(self.in_place, self.with_text.contains(&area.id.get()))
+        area.body_takes_input(self.with_text.contains(&area.id.get()))
     }
 }
 
@@ -1283,6 +1291,45 @@ pub(crate) fn set_area_input(app: &AppHandle, id: AreaId, input: Input) -> bool 
     lock(&store).set_input(id, input)
 }
 
+/// Sets how one OCR area shows what it read, from its own menu (roadmap `1.45`,
+/// `ADR-0046` decision 9). Returns whether it changed, the caller's cue to
+/// re-emit.
+///
+/// **A switch to In place reads the area again.** A Rendered area is not re-read
+/// when it moves, so its characters describe wherever it was last read, and
+/// drawing or selecting them in place would mark pixels it no longer covers
+/// (review of `#115`, round 7, when this was the settings window's job for every
+/// area at once). **A switch to Rendered drops the selection**, because a
+/// Rendered area draws no band, and a selection nobody can see would still take
+/// `Ctrl+C` in Living.
+pub(crate) fn set_area_ocr_behaviour(app: &AppHandle, id: AreaId, behaviour: OcrBehaviour) -> bool {
+    let changed = {
+        let store = app.state::<Mutex<AreaStore>>();
+        lock(&store).set_ocr_behaviour(id, behaviour)
+    };
+    if !changed {
+        return false;
+    }
+    match behaviour {
+        OcrBehaviour::InPlace => placement::reread_in_place_ocr(app, id),
+        OcrBehaviour::Rendered => {
+            if crate::ocr::clear_selection(id) {
+                emit_ocr_selection(app, id, None);
+            }
+        }
+    }
+    true
+}
+
+/// Whether `id` is an OCR area that reads in place (`Area::reads_in_place`).
+/// `false` for an area that is gone.
+pub(crate) fn area_reads_in_place(app: &AppHandle, id: AreaId) -> bool {
+    let store = app.state::<Mutex<AreaStore>>();
+    lock(&store)
+        .get(id)
+        .is_some_and(|area| area.reads_in_place())
+}
+
 /// Converts an area to another type from its own menu (roadmap task 1.27),
 /// dropping any pinned pixels the new type cannot mean.
 ///
@@ -1309,10 +1356,17 @@ pub(crate) fn set_area_input(app: &AppHandle, id: AreaId, input: Input) -> bool 
 pub(crate) fn convert_area(app: &AppHandle, id: AreaId, kind: AreaType) -> bool {
     // Scoped so the store lock is released before the capture calls below, which
     // take `MAGNIFY` and then the capture store.
+    // Read before the store lock, so the two locks are never held together.
+    let default_behaviour = crate::settings::current().ocr_behaviour;
     let outcome = {
         let store = app.state::<Mutex<AreaStore>>();
         let mut guard = lock(&store);
         let conversion = guard.set_kind(id, kind);
+        // An area converted to OCR is a new OCR area, so it starts with the
+        // user's default (roadmap 1.45), before the reading below begins.
+        if kind == AreaType::Ocr && conversion.is_some_and(|conversion| conversion.changed) {
+            guard.set_ocr_behaviour(id, default_behaviour);
+        }
         let bounds = guard.get(id).map(|area| area.bounds);
         conversion.zip(bounds)
     };
@@ -1714,12 +1768,6 @@ pub(crate) fn area_bounds(app: &AppHandle, id: AreaId) -> Option<Rect> {
     lock(&store).get(id).map(|area| area.bounds)
 }
 
-/// The type of `id`, if it is still live.
-pub(crate) fn area_kind(app: &AppHandle, id: AreaId) -> Option<AreaType> {
-    let store = app.state::<Mutex<AreaStore>>();
-    lock(&store).get(id).map(|area| area.kind)
-}
-
 /// Whether `id`'s body takes a press in Living, by `bodies`' rule. `false` for
 /// an area that is gone.
 pub(crate) fn area_takes_input(app: &AppHandle, id: AreaId, bodies: &LivingBodies) -> bool {
@@ -1932,8 +1980,16 @@ pub(crate) fn create_area(
     if !interaction::is_placeable(bounds) {
         return None;
     }
+    // A new OCR area starts with the user's default (roadmap 1.45). Set on
+    // every new area, since the field is every area's and only OCR reads it.
+    let default_behaviour = crate::settings::current().ocr_behaviour;
     let store = app.state::<Mutex<AreaStore>>();
-    let id = lock(&store).create(kind, bounds)?;
+    let id = {
+        let mut guard = lock(&store);
+        let id = guard.create(kind, bounds)?;
+        guard.set_ocr_behaviour(id, default_behaviour);
+        id
+    };
     // The bounds travel back with the id because the capture that follows a
     // Screenshot create needs the *stored* rectangle, not the one the caller
     // asked for. They are equal today; returning the store's answer means a
@@ -2764,6 +2820,7 @@ mod tests {
             close: (0, 0, 18, 18),
             layer: "auto",
             kind: "default",
+            ocr_behaviour: OcrBehaviour::InPlace,
             zoom: 1.0,
             bar: Some((0, -18, 10, 18)),
             handles: vec![(0, 0, 18, 18)],
@@ -2772,7 +2829,15 @@ mod tests {
             "AreaPayload",
             &area,
             &[
-                "id", "rect", "close", "layer", "kind", "zoom", "bar", "handles",
+                "id",
+                "rect",
+                "close",
+                "layer",
+                "kind",
+                "ocr_behaviour",
+                "zoom",
+                "bar",
+                "handles",
             ],
         );
         assert_keys(
