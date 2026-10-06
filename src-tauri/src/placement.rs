@@ -2969,17 +2969,18 @@ fn handle_mouse(wparam: WPARAM, lparam: LPARAM) -> bool {
             // underneath never receives the right-click it gets today, which is
             // strictly worse than not claiming at all.
             Mode::Living => {
-                // A right press away from a selection clears it, as a left one
-                // does (`clear_selections_away_from`). A right press inside the
-                // selection's own area keeps it, so its menu can act on it.
+                // A right press clears every selection but the one of the area it
+                // opens the menu over, as a left press does
+                // (`clear_selections_except`), so that menu can still act on it.
+                let target = APP
+                    .get()
+                    .and_then(|app| pointer_target(app, point).map(|area| area.id));
                 if let Some(app) = APP.get() {
-                    clear_selections_away_from(app, point);
+                    clear_selections_except(app, target);
                 }
                 let claimed = lock(&MENU).is_some()
                     || crate::first_run::hit(point).is_some()
-                    || APP
-                        .get()
-                        .is_some_and(|app| pointer_target(app, point).is_some());
+                    || target.is_some();
                 if claimed {
                     RIGHT_PENDING.store(true, Ordering::SeqCst);
                 }
@@ -3212,13 +3213,14 @@ fn living_lbutton_down(point: Point) -> bool {
     // answers through the body rule. Before 1.46 the body press here was
     // always a move, so dragging over text in Living carried the area away.
     //
-    // A press away from a selection clears it (`ADR-0047`'s session default),
-    // and that is also what gives `Ctrl+C` back to the user's app. It runs
-    // here, after the menu and the coach have taken their presses: a press on
-    // the area menu's Copy row must still find the selection it copies.
-    clear_selections_away_from(app, point);
+    // A press that this area does not take clears its selection
+    // (`clear_selections_except`), and that is also what gives `Ctrl+C` back to
+    // the user's app. It runs here, after the menu and the coach have taken
+    // their presses: a press on the area menu's Copy row must still find the
+    // selection it copies.
     if let Some(gesture) = selection_handle_press(app, point, true) {
         if let Gesture::Select { id, .. } = gesture {
+            clear_selections_except(app, Some(id));
             raise_and_emit(app, id);
         }
         START_X.store(point.x, Ordering::SeqCst);
@@ -3242,6 +3244,7 @@ fn living_lbutton_down(point: Point) -> bool {
             true,
         ),
     };
+    clear_selections_except(app, grabbed.map(|(id, _, _)| id));
     let Some((id, bounds, handle)) = grabbed else {
         return false;
     };
@@ -3306,26 +3309,28 @@ fn raise_and_emit(app: &AppHandle, id: AreaId) {
     }
 }
 
-/// Clears every OCR selection the press at `point` is away from: outside its
-/// area and off its handles (`ADR-0047`, the session default the founder was
-/// shown: *a selection is cleared by a press anywhere outside its area*).
+/// Clears every OCR selection except `owner`'s: a Living press keeps a
+/// selection only when the area holding it is the one that takes the press.
 ///
-/// Living only. Nothing here claims the press; it goes on to whatever owns it,
-/// the user's app included. **The first question is the cheap one** (does any
-/// selection exist?), because this runs on every press on the machine while
-/// the overlay is visible.
-fn clear_selections_away_from(app: &AppHandle, point: Point) {
+/// `ADR-0047`'s session default, the one the founder was shown, reads *"a
+/// selection is cleared by a press anywhere outside its area"*. **This is that
+/// rule stated by who takes the press rather than by where it lands**, and the
+/// difference is exactly the case the first version got wrong (review of
+/// `#126`, round 1): it kept a selection for any press inside the area's bounds
+/// or on its handle, so on an OCR area set to pass clicks through, a press on
+/// the handle went to the app underneath and the selection stayed, and with it
+/// the hook's claim on `Ctrl+C`. Every press that reaches the user's app now
+/// clears every selection, because it has no owner here.
+///
+/// Living only. Nothing here claims the press. **The first question is the
+/// cheap one** (does any selection exist?), because this runs on every press on
+/// the machine while the overlay is visible.
+fn clear_selections_except(app: &AppHandle, owner: Option<AreaId>) {
     if !crate::ocr::any_selection() {
         return;
     }
-    for (id, bounds) in overlay::areas_top_down(app) {
-        let local = Point::new(point.x - bounds.origin.x, point.y - bounds.origin.y);
-        if bounds.contains(point)
-            || crate::ocr::handle_at(id, local, SELECTION_HANDLE_REACH).is_some()
-        {
-            continue;
-        }
-        if crate::ocr::clear_selection(id) {
+    for (id, _) in overlay::areas_top_down(app) {
+        if Some(id) != owner && crate::ocr::clear_selection(id) {
             overlay::emit_ocr_selection(app, id, None);
         }
     }
