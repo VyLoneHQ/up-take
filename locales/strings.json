@@ -740,6 +740,11 @@
       "de": "Öffnen",
       "de_from": "538b10e9"
     },
+    "settings.licence.failed": {
+      "en": "Could not open it",
+      "de": "Konnte nicht geöffnet werden",
+      "de_from": "c0fed596"
+    },
     "settings.licence.missing": {
       "en": "Not in this build",
       "de": "Nicht in diesem Build",

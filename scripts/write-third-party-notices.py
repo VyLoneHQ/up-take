@@ -6,10 +6,11 @@
 MIT, Apache-2.0, BSD and the other permissive licences UP-TAKE's dependencies
 use require their copyright and permission notices to travel with every copy,
 binaries included. Until this, the installer carried the notices for ONNX
-Runtime and the OCR models only, nothing for the 283 crates compiled into
-`up-take.exe` or the JavaScript compiled into its interface, and not the GPL's
-own text either. No binary had been published, so nothing was breached, and the
-first public one, free or paid, would have been.
+Runtime and the OCR models only, nothing for the crates compiled into
+`up-take.exe` (283 when this was written) or the JavaScript compiled into its
+interface, and not the GPL's own text either: an installer built before this
+lacked notices its licences require. Whether one was ever distributed is a
+fact about the releases, not about this code, so it is not recorded here.
 
 # What it writes, and from what
 
