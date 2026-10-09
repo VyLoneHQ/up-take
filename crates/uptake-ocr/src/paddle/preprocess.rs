@@ -50,56 +50,22 @@ pub const DEFAULT_LIMIT_SIDE_LEN: u32 = 960;
 /// one of them tested and dead, the other used and untested -- found by the
 /// independent review of `PR #76` and removed rather than documented.
 ///
-/// The one rule now lives in [`scale_to_source`], which the engine calls and
-/// these tests cover.
+/// The one rule now lives in [`DetectorInput::scale_to_source`], which the
+/// engine calls and these tests cover. It is a method since `I-440`, because it
+/// needs the content rectangle this value carries.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DetectorInput {
     /// Normalised pixel data, NCHW with N = 1 and C = 3.
     pub tensor: Vec<f32>,
-    /// Width the frame was resized to. A multiple of [`SIDE_MULTIPLE`].
+    /// The tensor's width. A multiple of [`SIDE_MULTIPLE`].
     pub width: u32,
-    /// Height the frame was resized to. A multiple of [`SIDE_MULTIPLE`].
+    /// The tensor's height. A multiple of [`SIDE_MULTIPLE`].
     pub height: u32,
-}
-
-/// The factors that map a coordinate in the detector's output map back to the
-/// source frame.
-///
-/// **Two factors, not one, and that is the whole reason this function exists.**
-/// The resize snaps each side to a multiple of [`SIDE_MULTIPLE`] independently,
-/// so aspect ratio is not preserved and the x and y ratios genuinely differ: a
-/// 100x40 frame becomes 96x32, giving 100/96 and 40/32. Assuming one ratio puts
-/// every box progressively further from its text down the frame, and
-/// `geometry.rs` calls coordinate maths this project's number one bug source.
-///
-/// Takes the **map's** dimensions rather than the resized tensor's, because the
-/// caller reads them off the model's actual output shape. For PP-OCRv4's
-/// detector the two agree, and so do they for PP-OCRv6_small's (a 320x480
-/// input gives a 320x480 map, measured 2026-09-15), but nothing enforces that
-/// and a model with a
-/// different stride would silently place every box wrong.
-///
-/// A zero map dimension yields a factor of `0.0` rather than an infinity, so a
-/// degenerate output collapses boxes to a point the size filter drops instead of
-/// poisoning them with `NaN`.
-#[must_use]
-pub fn scale_to_source(
-    source_width: u32,
-    source_height: u32,
-    map_width: usize,
-    map_height: usize,
-) -> (f32, f32) {
-    let factor = |source: u32, map: usize| -> f32 {
-        if map == 0 {
-            0.0
-        } else {
-            source as f32 / map as f32
-        }
-    };
-    (
-        factor(source_width, map_width),
-        factor(source_height, map_height),
-    )
+    /// How much of the tensor's width, from the left, holds the frame. The
+    /// rest is padding ([`fit`]).
+    pub content_width: u32,
+    /// How much of the tensor's height, from the top, holds the frame.
+    pub content_height: u32,
 }
 
 impl DetectorInput {
@@ -108,50 +74,131 @@ impl DetectorInput {
     pub fn shape(&self) -> [usize; 4] {
         [1, 3, self.height as usize, self.width as usize]
     }
+
+    /// The factors that map a coordinate in the detector's output map back to
+    /// the source frame.
+    ///
+    /// **Two factors, not one.** The frame is resized by one ratio, but each side
+    /// is rounded to whole pixels on its own, so the two ratios can differ by a
+    /// fraction of a pixel per side; assuming one would let boxes drift from
+    /// their text down a tall frame, and `geometry.rs` calls coordinate maths
+    /// this project's number one bug source. Until `I-440` they differed by up
+    /// to a third, because each side was stretched to a multiple of 32.
+    ///
+    /// **The map covers the whole tensor and the frame only its content
+    /// rectangle** (`I-440`), so a map pixel is `padded / map` tensor pixels and
+    /// a tensor pixel is `source / content` frame pixels. A box the detector
+    /// finds in the padding maps past the frame's edge, where the caller clamps
+    /// it.
+    ///
+    /// Takes the **map's** dimensions rather than assuming the tensor's,
+    /// because the caller reads them off the model's actual output shape. For
+    /// PP-OCRv4's detector the two agree, and so do they for PP-OCRv6_small's (a
+    /// 320x480 input gives a 320x480 map, measured 2026-09-15), but nothing
+    /// enforces that and a model with a different stride would silently place
+    /// every box wrong.
+    ///
+    /// A zero map dimension yields a factor of `0.0` rather than an infinity, so
+    /// a degenerate output collapses boxes to a point the size filter drops
+    /// instead of poisoning them with `NaN`.
+    #[must_use]
+    pub fn scale_to_source(
+        &self,
+        source_width: u32,
+        source_height: u32,
+        map_width: usize,
+        map_height: usize,
+    ) -> (f32, f32) {
+        let factor = |source: u32, content: u32, padded: u32, map: usize| -> f32 {
+            if map == 0 || content == 0 {
+                0.0
+            } else {
+                (source as f32 * padded as f32) / (map as f32 * content as f32)
+            }
+        };
+        (
+            factor(source_width, self.content_width, self.width, map_width),
+            factor(source_height, self.content_height, self.height, map_height),
+        )
+    }
 }
 
-/// Chooses the resized dimensions for a frame.
-///
-/// Two rules, in this order, and the order is what makes the result predictable:
+/// Where a frame goes in the detector's tensor: the rectangle it is resized to,
+/// and the tensor around it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fit {
+    /// The frame's width once resized.
+    pub content_width: u32,
+    /// The frame's height once resized.
+    pub content_height: u32,
+    /// The tensor's width: the content's, rounded UP to a multiple of
+    /// [`SIDE_MULTIPLE`].
+    pub width: u32,
+    /// The tensor's height, rounded up the same way.
+    pub height: u32,
+}
+
+/// Chooses where a frame goes in the detector's tensor.
 ///
 /// 1. If the longer side exceeds `limit_side_len`, scale **both** sides by one
-///    ratio so it fits. Aspect ratio is preserved at this step.
-/// 2. Round each side **independently** to the nearest multiple of
-///    [`SIDE_MULTIPLE`], with a floor of one multiple so a thin strip does not
-///    round to zero.
+///    ratio so it fits. Otherwise the frame keeps its size.
+/// 2. Pad each side **up** to the next multiple of [`SIDE_MULTIPLE`]. The frame
+///    sits at the top left and is never stretched.
 ///
-/// Step 2 is why aspect ratio is *not* preserved overall, and why
-/// [`DetectorInput`] carries two scale factors rather than one. A 100x40 frame
-/// becomes 96x32: the x ratio is 100/96, the y ratio is 40/32, and they are not
-/// equal. Assuming one ratio here is a coordinate bug that shows up as boxes
-/// drifting further from the text the further down the frame they sit --
-/// `geometry.rs` calls coordinate maths this project's number one bug source.
+/// # Why padding, and what it replaced (`I-440`)
+///
+/// Step 2 used to round each side to the NEAREST multiple and stretch the frame
+/// to fill it, as PaddleOCR's own preprocessing does. That changes the aspect
+/// ratio by up to a third on a short side, and on a wide, short frame it is a
+/// cliff: a 110 px tall strip scaled to a 960 px long side is 44 px tall, which
+/// rounded to 32, squeezing 13 px text to about 4 px, and the detector read
+/// nothing. Measured on the founder's 2385 x 110 editor strip: every width up to
+/// 2200 px read about 130 words and every width from 2201 read none, exactly
+/// where `110 x 960 / width` falls below 48. Padding keeps the text at the size
+/// the ratio gives it, whatever the frame's shape.
+///
+/// ⚠️ **What padding does not fix is the ratio itself.** Step 1 still shrinks a
+/// frame's longer side to `limit_side_len`, so on a wide frame the text shrinks
+/// with it: his 2385 px strip puts 13 px text at about 5 px, and measured after
+/// this change it reads 6 words, where its left 2200 px read about 130 before
+/// it. Capping the pixel count instead of the longer side read 138 words there,
+/// and costs more time on every large frame; that trade is recorded in
+/// `I-440`'s follow-up and not made here.
 #[must_use]
-pub fn resized_dimensions(width: u32, height: u32, limit_side_len: u32) -> (u32, u32) {
+pub fn fit(width: u32, height: u32, limit_side_len: u32) -> Fit {
     let longer = width.max(height);
-    let (mut target_width, mut target_height) = (f64::from(width), f64::from(height));
-    if longer > limit_side_len && longer > 0 {
+    let (content_width, content_height) = if longer > limit_side_len {
         let ratio = f64::from(limit_side_len) / f64::from(longer);
-        target_width *= ratio;
-        target_height *= ratio;
+        (scaled(width, ratio), scaled(height, ratio))
+    } else {
+        (width.max(1), height.max(1))
+    };
+    Fit {
+        content_width,
+        content_height,
+        width: round_up_to_multiple(content_width),
+        height: round_up_to_multiple(content_height),
     }
-    (
-        round_to_multiple(target_width),
-        round_to_multiple(target_height),
-    )
 }
 
-/// Rounds a dimension to the nearest multiple of [`SIDE_MULTIPLE`], never zero.
-fn round_to_multiple(value: f64) -> u32 {
-    let multiple = f64::from(SIDE_MULTIPLE);
-    let rounded = (value / multiple).round() * multiple;
-    if rounded < multiple {
-        SIDE_MULTIPLE
-    } else {
-        // The cap keeps the cast total: a frame wider than u32::MAX/32 cannot
-        // reach here because the caller's width is already a u32.
-        rounded.min(f64::from(u32::MAX)) as u32
-    }
+/// `side` scaled by `ratio`, to the nearest whole pixel and never zero.
+fn scaled(side: u32, ratio: f64) -> u32 {
+    let value = (f64::from(side) * ratio).round().max(1.0);
+    // `ratio` is below 1 whenever this is called, so the value fits in a u32.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamped to at least 1 and scaled down from a u32, so it is a positive u32"
+    )]
+    let value = value as u32;
+    value
+}
+
+/// Rounds a side up to the next multiple of [`SIDE_MULTIPLE`], never zero.
+const fn round_up_to_multiple(side: u32) -> u32 {
+    let multiples = side.div_ceil(SIDE_MULTIPLE);
+    let multiples = if multiples == 0 { 1 } else { multiples };
+    multiples.saturating_mul(SIDE_MULTIPLE)
 }
 
 /// Samples one channel of `bitmap` at a subpixel position, bilinearly.
@@ -212,15 +259,25 @@ pub fn detector_input(bitmap: &RgbaBitmap, limit_side_len: u32) -> Option<Detect
     if source_width == 0 || source_height == 0 {
         return None;
     }
-    let (width, height) = resized_dimensions(source_width, source_height, limit_side_len);
+    let Fit {
+        content_width,
+        content_height,
+        width,
+        height,
+    } = fit(source_width, source_height, limit_side_len);
 
-    let (scale_x, scale_y) =
-        scale_to_source(source_width, source_height, width as usize, height as usize);
+    // Frame pixels per content pixel. One ratio scaled both sides, so these
+    // differ only by each side's rounding to whole pixels.
+    let scale_x = source_width as f32 / content_width as f32;
+    let scale_y = source_height as f32 / content_height as f32;
 
     let plane = width as usize * height as usize;
+    // The padding is left at 0.0, which after normalisation is the ImageNet
+    // mean colour: the value that carries the least signal into a network
+    // trained on mean-subtracted input (`I-440`).
     let mut tensor = vec![0.0_f32; plane * 3];
-    for y in 0..height {
-        for x in 0..width {
+    for y in 0..content_height {
+        for x in 0..content_width {
             // Sample at the centre of the destination pixel, mapped back into
             // source space. The half-pixel offsets matter: without them the
             // resize is biased half a pixel up and left, which on 8px text is a
@@ -239,6 +296,8 @@ pub fn detector_input(bitmap: &RgbaBitmap, limit_side_len: u32) -> Option<Detect
         tensor,
         width,
         height,
+        content_width,
+        content_height,
     })
 }
 
@@ -259,57 +318,130 @@ mod tests {
         RgbaBitmap::from_pixels(Size::new(width, height), pixels).unwrap()
     }
 
-    #[test]
-    fn a_small_frame_is_rounded_up_to_one_multiple_rather_than_to_zero() {
-        assert_eq!(resized_dimensions(10, 4, 960), (32, 32));
-    }
-
-    #[test]
-    fn sides_within_the_limit_are_only_snapped_to_the_multiple() {
-        // 100 -> 96 (nearest multiple of 32), 40 -> 32.
-        assert_eq!(resized_dimensions(100, 40, 960), (96, 32));
-    }
-
-    #[test]
-    fn a_frame_over_the_limit_is_scaled_down_first() {
-        // 1920x1080, limit 960: ratio 0.5 gives 960x540, then snapped to 960x544.
-        assert_eq!(resized_dimensions(1920, 1080, 960), (960, 544));
-    }
-
-    #[test]
-    fn both_sides_are_always_multiples_of_the_quantum() {
-        for (width, height) in [(1, 1), (33, 65), (1920, 1080), (3840, 2160), (7, 4000)] {
-            let (resized_width, resized_height) = resized_dimensions(width, height, 960);
-            assert_eq!(resized_width % SIDE_MULTIPLE, 0, "width {resized_width}");
-            assert_eq!(resized_height % SIDE_MULTIPLE, 0, "height {resized_height}");
-            assert!(resized_width >= SIDE_MULTIPLE && resized_height >= SIDE_MULTIPLE);
+    /// A fit of `content` inside a tensor of `padded`, both `(width, height)`.
+    fn fitted(content: (u32, u32), padded: (u32, u32)) -> Fit {
+        Fit {
+            content_width: content.0,
+            content_height: content.1,
+            width: padded.0,
+            height: padded.1,
         }
     }
 
     #[test]
-    fn the_two_scale_factors_differ_when_the_rounding_is_uneven() {
-        // The property that makes scale_to_source return a PAIR. A 100x40 frame
-        // resizes to 96x32, so the x and y ratios are NOT equal, and a caller
-        // assuming one ratio would place every box progressively wrong down the
-        // frame.
-        let input = detector_input(&solid(100, 40, [0, 0, 0, 255]), 960).unwrap();
-        assert_eq!((input.width, input.height), (96, 32));
+    fn a_small_frame_keeps_its_size_and_is_padded_to_one_multiple() {
+        assert_eq!(fit(10, 4, 960), fitted((10, 4), (32, 32)));
+    }
 
-        let (scale_x, scale_y) = scale_to_source(100, 40, 96, 32);
-        assert!(
-            (scale_x - scale_y).abs() > 0.1,
-            "expected genuinely different factors, got {scale_x} and {scale_y}"
-        );
-        assert!((scale_x - 100.0 / 96.0).abs() < 1e-5);
-        assert!((scale_y - 40.0 / 32.0).abs() < 1e-5);
+    #[test]
+    fn sides_within_the_limit_keep_their_size_and_are_padded_up() {
+        // 100 x 40 is not stretched to 96 x 32 any more (I-440): it stays
+        // 100 x 40 inside a 128 x 64 tensor.
+        assert_eq!(fit(100, 40, 960), fitted((100, 40), (128, 64)));
+        // A side already on the multiple gains no padding.
+        assert_eq!(fit(64, 96, 960), fitted((64, 96), (64, 96)));
+    }
+
+    #[test]
+    fn a_frame_over_the_limit_is_scaled_down_by_one_ratio() {
+        // 1920 x 1080, limit 960: ratio 0.5 gives 960 x 540, padded to 544.
+        assert_eq!(fit(1920, 1080, 960), fitted((960, 540), (960, 544)));
+    }
+
+    #[test]
+    fn a_wide_short_strip_keeps_its_text_height() {
+        // I-440's own frame, the founder's 2385 x 110 editor strip. Ratio
+        // 960 / 2385 makes it 44.28 px tall; the old rule rounded that to 32
+        // and squeezed the text by a quarter, so the detector read nothing.
+        assert_eq!(fit(2385, 110, 960), fitted((960, 44), (960, 64)));
+        // Either side of the measured cliff now fits the same way.
+        assert_eq!(fit(2200, 110, 960).content_height, 48);
+        assert_eq!(fit(2201, 110, 960).content_height, 48);
+    }
+
+    #[test]
+    fn the_content_keeps_the_frames_aspect_ratio_and_the_tensor_holds_it() {
+        for (width, height) in [
+            (1, 1),
+            (33, 65),
+            (1920, 1080),
+            (3840, 2160),
+            (7, 4000),
+            (2385, 110),
+            (4000, 7),
+        ] {
+            let fit = fit(width, height, 960);
+            assert_eq!(fit.width % SIDE_MULTIPLE, 0, "{width}x{height}");
+            assert_eq!(fit.height % SIDE_MULTIPLE, 0, "{width}x{height}");
+            assert!(fit.width >= fit.content_width && fit.height >= fit.content_height);
+            // Less than one multiple of padding on each side.
+            assert!(fit.width - fit.content_width < SIDE_MULTIPLE);
+            assert!(fit.height - fit.content_height < SIDE_MULTIPLE);
+            // One ratio for both sides: each content side is the frame's side
+            // times that ratio, to within the half pixel of its own rounding
+            // (or the one-pixel floor).
+            let ratio =
+                f64::from(fit.content_width.max(fit.content_height)) / f64::from(width.max(height));
+            for (side, content) in [(width, fit.content_width), (height, fit.content_height)] {
+                let exact = f64::from(side) * ratio;
+                assert!(
+                    (f64::from(content) - exact).abs() <= 0.5 || content == 1,
+                    "{width}x{height}: {content} against {exact}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_frame_is_sampled_unstretched_and_the_padding_is_the_mean() {
+        // A frame within the limit lands pixel for pixel: column x of the
+        // tensor is column x of the frame. Before I-440 a 100 px wide frame was
+        // stretched onto 96 columns, so this would read a different column.
+        let (width, height) = (100_u32, 40_u32);
+        let pixels = (0..height)
+            .flat_map(|_| (0..width).flat_map(|x| [x as u8 * 2, 0, 0, 255]))
+            .collect();
+        let frame = RgbaBitmap::from_pixels(Size::new(width, height), pixels).unwrap();
+        let input = detector_input(&frame, 960).unwrap();
+        assert_eq!((input.width, input.height), (128, 64));
+        assert_eq!((input.content_width, input.content_height), (100, 40));
+        let red = |x: usize, y: usize| input.tensor[y * input.width as usize + x];
+        for x in [0_usize, 1, 50, 99] {
+            let expected = (f32::from(x as u8 * 2) / 255.0 - MEAN[0]) / STD[0];
+            assert!((red(x, 0) - expected).abs() < 1e-4, "column {x}");
+            assert!((red(x, 39) - expected).abs() < 1e-4, "column {x}, last row");
+        }
+        // Right of the content and below it: the mean, in every channel.
+        let plane = input.width as usize * input.height as usize;
+        for (x, y) in [(100_usize, 0_usize), (127, 39), (0, 40), (127, 63)] {
+            for channel in 0..3 {
+                let value = input.tensor[channel * plane + y * input.width as usize + x];
+                assert!(value.abs() < f32::EPSILON, "({x}, {y}) channel {channel}");
+            }
+        }
+    }
+
+    #[test]
+    fn scale_to_source_maps_the_content_edge_to_the_frame_edge() {
+        // The strip from I-440, through a map the size of the tensor: the
+        // content's far corner is the frame's far corner, and the padding maps
+        // past it, where the caller clamps.
+        let input = detector_input(&solid(2385, 110, [0, 0, 0, 255]), 960).unwrap();
+        assert_eq!((input.width, input.height), (960, 64));
+        let (scale_x, scale_y) = input.scale_to_source(2385, 110, 960, 64);
+        assert!((960.0 * scale_x - 2385.0).abs() < 1e-3, "x {scale_x}");
+        assert!((44.0 * scale_y - 110.0).abs() < 1e-3, "y {scale_y}");
+        assert!(64.0 * scale_y > 110.0, "the padding maps past the frame");
     }
 
     #[test]
     fn scale_to_source_maps_a_map_coordinate_home() {
-        // A 40x40 map of an 80x60 frame: x doubles, y is 1.5x.
-        let (scale_x, scale_y) = scale_to_source(80, 60, 40, 40);
+        // An 80 x 60 frame is 80 x 60 content in a 96 x 64 tensor; a 48 x 32
+        // map is half the tensor, so a map pixel is two tensor pixels.
+        let input = detector_input(&solid(80, 60, [0, 0, 0, 255]), 960).unwrap();
+        let (scale_x, scale_y) = input.scale_to_source(80, 60, 48, 32);
         assert!((scale_x - 2.0).abs() < 1e-6, "scale_x was {scale_x}");
-        assert!((scale_y - 1.5).abs() < 1e-6, "scale_y was {scale_y}");
+        assert!((scale_y - 2.0).abs() < 1e-6, "scale_y was {scale_y}");
     }
 
     #[test]
@@ -317,7 +449,8 @@ mod tests {
         // A model that returned a zero dimension must not poison every box with
         // an infinity or a NaN -- the size filter's comparisons would then be
         // silently false rather than rejecting.
-        let (scale_x, scale_y) = scale_to_source(80, 60, 0, 0);
+        let input = detector_input(&solid(80, 60, [0, 0, 0, 255]), 960).unwrap();
+        let (scale_x, scale_y) = input.scale_to_source(80, 60, 0, 0);
         assert!(scale_x.is_finite() && scale_y.is_finite());
         assert!((scale_x - 0.0).abs() < f32::EPSILON);
         assert!((scale_y - 0.0).abs() < f32::EPSILON);
@@ -325,12 +458,13 @@ mod tests {
 
     #[test]
     fn scale_to_source_reads_the_map_and_not_the_resize() {
-        // The regression this pair of functions exists to prevent: if the model
-        // emits a map at HALF the input resolution, the factors must double.
-        // Computing from the resized tensor instead would return 1.0 and place
-        // every box at half its true distance from the origin.
-        let (from_half_map, _) = scale_to_source(960, 960, 480, 480);
-        let (from_full_map, _) = scale_to_source(960, 960, 960, 960);
+        // The regression this function exists to prevent: if the model emits a
+        // map at HALF the input resolution, the factors must double. Computing
+        // from the tensor instead would return 1.0 and place every box at half
+        // its true distance from the origin.
+        let input = detector_input(&solid(960, 960, [0, 0, 0, 255]), 960).unwrap();
+        let (from_half_map, _) = input.scale_to_source(960, 960, 480, 480);
+        let (from_full_map, _) = input.scale_to_source(960, 960, 960, 960);
         assert!((from_half_map - 2.0).abs() < 1e-6, "was {from_half_map}");
         assert!((from_full_map - 1.0).abs() < 1e-6, "was {from_full_map}");
     }
