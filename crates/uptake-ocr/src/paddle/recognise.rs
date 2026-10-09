@@ -437,10 +437,18 @@ fn is_space(character: &DecodedCharacter) -> bool {
 /// those. So [`DecodedText::words`] places words along the whole quad exactly
 /// as it does for one piece.
 ///
-/// The confidence is the mean of the pieces' confidences weighted by how many
-/// characters each piece kept. A piece's confidence is the mean over ALL the
-/// characters it read, its share of the overlap included, so this is close to
-/// and not exactly the mean over the kept characters.
+/// # What the confidence is
+///
+/// The mean of the pieces' confidences, each weighted by **how much of the
+/// line it answers for**: the columns of its keep range. A piece that read
+/// nothing has a confidence of `0.0` ([`ctc_decode`]), so it pulls the line's
+/// confidence down in proportion to the stretch it failed to read, and a line
+/// half of which read nothing falls under `drop_score` and is dropped rather
+/// than returned with half its text missing. Weighting by characters kept, as
+/// this first did, gave such a piece no weight at all, and the truncated line
+/// kept the confidence of the half that read (review of `#133`, round 2).
+/// That follows the rule `drop_score` already states: an incomplete line
+/// pasted as though it were the text is worse than none.
 #[must_use]
 pub fn stitch(decoded: Vec<(Piece, DecodedText)>, line_width: u32) -> DecodedText {
     if let [(piece, _)] = decoded.as_slice()
@@ -530,9 +538,8 @@ pub fn stitch(decoded: Vec<(Piece, DecodedText)>, line_width: u32) -> DecodedTex
     let mut text = String::new();
     let mut characters = Vec::new();
     let mut weighted = 0.0_f32;
-    let mut kept_total = 0_usize;
+    let mut answered = 0.0_f32;
     for (index, (piece, decoded)) in read.iter().enumerate() {
-        let mut kept = 0_usize;
         for character in &decoded.characters {
             let at = centre(piece, decoded, character);
             if at < keep_from[index] || at >= keep_to[index] {
@@ -544,15 +551,18 @@ pub fn stitch(decoded: Vec<(Piece, DecodedText)>, line_width: u32) -> DecodedTex
                 first: to_line_step(piece, decoded, character.first),
                 last: to_line_step(piece, decoded, character.last),
             });
-            kept += 1;
         }
-        weighted += decoded.confidence * kept as f32;
-        kept_total += kept;
+        // The columns this piece answers for: its keep range, within itself.
+        let from = keep_from[index].max(piece.start as f32);
+        let to = keep_to[index].min(piece.end as f32);
+        let span = (to - from).max(0.0);
+        weighted += decoded.confidence * span;
+        answered += span;
     }
-    let confidence = if kept_total == 0 {
-        0.0
+    let confidence = if answered > 0.0 {
+        weighted / answered
     } else {
-        weighted / kept_total as f32
+        0.0
     };
     DecodedText {
         text,
@@ -1356,6 +1366,68 @@ b
     }
 
     #[test]
+    fn a_piece_that_read_nothing_pulls_the_line_under_the_drop_score() {
+        // Review of #133, round 2: a blank piece kept no characters, so it had
+        // no weight, and the line kept the confidence of the part that read.
+        // Leading, middle and trailing: the blank stretch now counts.
+        let blank = |timesteps: usize| piece_read(&[], timesteps, 0.0);
+        let read = |at: &[(&'static str, usize)]| piece_read(at, 60, 0.95);
+        let words: Vec<(&str, usize)> = (0..60).step_by(4).map(|at| ("x", at)).collect();
+        let pieces = [
+            Piece { start: 0, end: 480 },
+            Piece {
+                start: 320,
+                end: 800,
+            },
+            Piece {
+                start: 640,
+                end: 1120,
+            },
+        ];
+        for missing in 0..3 {
+            let decoded: Vec<(Piece, DecodedText)> = pieces
+                .iter()
+                .enumerate()
+                .map(|(index, piece)| {
+                    (
+                        *piece,
+                        if index == missing {
+                            blank(60)
+                        } else {
+                            read(&words)
+                        },
+                    )
+                })
+                .collect();
+            let joined = stitch(decoded, 1120);
+            assert!(
+                joined.confidence < 0.95 * 0.75,
+                "piece {missing} blank: confidence {}",
+                joined.confidence
+            );
+        }
+        // Two halves, one blank: under the shipped drop_score of 0.5.
+        let joined = stitch(
+            vec![
+                (Piece { start: 0, end: 480 }, read(&words)),
+                (
+                    Piece {
+                        start: 320,
+                        end: 800,
+                    },
+                    blank(60),
+                ),
+            ],
+            800,
+        );
+        assert!(joined.confidence < 0.5, "{}", joined.confidence);
+        assert!(
+            !joined.text.is_empty(),
+            "the part that read is still decoded"
+        );
+    }
+
+    #[test]
     fn a_shared_stretch_with_no_space_is_cut_between_two_characters() {
         // One long word across the join, read alike by both pieces.
         let line: Vec<(&str, usize)> = (0..19)
@@ -1386,10 +1458,11 @@ b
     }
 
     #[test]
-    fn the_joined_confidence_weighs_each_piece_by_what_it_kept() {
-        // Left keeps "abcd efgh" (9), right keeps " ijk l" (6).
+    fn the_joined_confidence_weighs_each_piece_by_the_stretch_it_answers_for() {
+        // The join is the space at timestep 50, column 404: the left piece
+        // answers for columns 0..404 and the right one for 404..800.
         let joined = stitch(two_pieces(0), 800);
-        let expected = (0.9 * 9.0 + 0.7 * 6.0) / 15.0;
+        let expected = (0.9 * 404.0 + 0.7 * 396.0) / 800.0;
         assert!(
             (joined.confidence - expected).abs() < 1e-5,
             "{}",
