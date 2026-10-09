@@ -77,7 +77,7 @@ pub struct DetectorInput {
     pub width: u32,
     /// The tensor's height. A multiple of [`SIDE_MULTIPLE`].
     pub height: u32,
-    /// How much of the tensor's width, from the left, holds the frame. The
+    /// How much of the tensor's width, from the left, holds the tile. The
     /// rest is padding ([`fit`]).
     pub content_width: u32,
     /// How much of the tensor's height, from the top, holds the tile.
