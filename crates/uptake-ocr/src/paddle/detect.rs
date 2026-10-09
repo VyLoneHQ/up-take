@@ -164,11 +164,70 @@ pub struct DetectedBox {
 #[derive(Debug, Clone, Copy)]
 pub struct ProbabilityMap<'a> {
     /// The probabilities, row-major, `width * height` of them.
-    pub data: &'a [f32],
+    pub data: Probabilities<'a>,
     /// Map width in pixels.
     pub width: usize,
     /// Map height in pixels.
     pub height: usize,
+}
+
+/// A map's probabilities: the model's own floats, or one byte a pixel.
+///
+/// **Bytes are for the joined map of a whole frame** (`I-440`, review of
+/// `#133`, round 7): it holds one value per frame pixel, so at 32 bits it was
+/// 133 MB on a 7680 x 4320 area, whose process peak measured 571 MB against
+/// `quality-bars.md` section 1's 500 MB *Active RAM* target. As bytes it is
+/// 33 MB and the peak 516 MB, of which the frame itself is 133 MB: what still
+/// grows with the area is the frame and this one byte a pixel. A byte stores a
+/// probability in steps of 1/255, about 0.004, against thresholds of 0.2 and
+/// 0.4 that need nothing finer ([`quantise`]).
+#[derive(Debug, Clone, Copy)]
+pub enum Probabilities<'a> {
+    /// One `f32` a pixel, as the model emits it.
+    Float(&'a [f32]),
+    /// One byte a pixel, `0` for 0.0 and `255` for 1.0.
+    Byte(&'a [u8]),
+}
+
+impl Probabilities<'_> {
+    /// How many values it holds.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        match self {
+            Self::Float(values) => values.len(),
+            Self::Byte(values) => values.len(),
+        }
+    }
+
+    /// Whether it holds none.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The probability at `index`, or `0.0` past the end.
+    #[must_use]
+    pub fn get(&self, index: usize) -> f32 {
+        match self {
+            Self::Float(values) => values.get(index).copied().unwrap_or(0.0),
+            Self::Byte(values) => values
+                .get(index)
+                .map_or(0.0, |&value| f32::from(value) / 255.0),
+        }
+    }
+}
+
+/// A probability as one byte, to the nearest 1/255, clamped into `0.0..=1.0`.
+#[must_use]
+pub fn quantise(probability: f32) -> u8 {
+    let scaled = (probability.clamp(0.0, 1.0) * 255.0).round();
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamped into 0..=255 above"
+    )]
+    let byte = scaled as u8;
+    byte
 }
 
 impl ProbabilityMap<'_> {
@@ -178,7 +237,7 @@ impl ProbabilityMap<'_> {
         if x >= self.width || y >= self.height {
             return 0.0;
         }
-        self.data.get(y * self.width + x).copied().unwrap_or(0.0)
+        self.data.get(y * self.width + x)
     }
 
     /// Whether the map's declared dimensions match the data it carries.
@@ -374,7 +433,8 @@ fn mean_probability(map: &ProbabilityMap<'_>, quad: &Quad) -> f32 {
 }
 
 /// Copies one tile's probabilities into its keep rectangle of the frame-sized
-/// map `joined`, which is `stride` pixels wide (`I-440`).
+/// map `joined`, which is `stride` pixels wide and holds one byte a pixel
+/// ([`quantise`], `I-440`).
 ///
 /// `scale_x` and `scale_y` map a coordinate in `map` to the tile's own pixels,
 /// as [`super::preprocess::DetectorInput::scale_to_source`] gives them; for
@@ -387,7 +447,7 @@ fn mean_probability(map: &ProbabilityMap<'_>, quad: &Quad) -> f32 {
 /// line cross a tile's edge without being cut: [`boxes_from_map`] sees one
 /// connected region, as it would have for the frame read whole.
 pub fn join_tile(
-    joined: &mut [f32],
+    joined: &mut [u8],
     stride: usize,
     tile: Tile,
     map: &ProbabilityMap<'_>,
@@ -420,7 +480,7 @@ pub fn join_tile(
         for x in columns.keep_from..columns.keep_to {
             let map_x = map_index(x - columns.start, scale_x, map.width);
             if let Some(cell) = joined.get_mut(row + x as usize) {
-                *cell = map.at(map_x, map_y);
+                *cell = quantise(map.at(map_x, map_y));
             }
         }
     }
@@ -450,7 +510,7 @@ mod tests {
 
     fn detect(data: &[f32], width: usize, height: usize) -> Vec<DetectedBox> {
         let map = ProbabilityMap {
-            data,
+            data: Probabilities::Float(data),
             width,
             height,
         };
@@ -555,7 +615,7 @@ mod tests {
         // The map is half the size of the source frame in each direction.
         let data = map_with(40, 40, &[(10, 12, 20, 8, 0.95)]);
         let map = ProbabilityMap {
-            data: &data,
+            data: Probabilities::Float(&data),
             width: 40,
             height: 40,
         };
@@ -587,7 +647,7 @@ mod tests {
     fn an_inconsistent_map_returns_nothing_rather_than_reading_past_the_buffer() {
         let data = vec![0.9_f32; 10];
         let map = ProbabilityMap {
-            data: &data,
+            data: Probabilities::Float(&data),
             width: 40,
             height: 40,
         };
@@ -604,6 +664,33 @@ mod tests {
         assert_eq!(found.len(), 1, "found {}", found.len());
     }
 
+    #[test]
+    fn a_byte_holds_a_probability_to_within_half_a_step() {
+        // Review of #133, round 7: the joined map is one byte a pixel. Every
+        // probability comes back to within half of 1/255, the ends exactly,
+        // and out-of-range values are clamped rather than wrapped.
+        for step in 0..=1000 {
+            let probability = step as f32 / 1000.0;
+            let bytes = [quantise(probability)];
+            let back = Probabilities::Byte(&bytes).get(0);
+            assert!(
+                (back - probability).abs() <= 0.5 / 255.0 + f32::EPSILON,
+                "{probability} came back {back}"
+            );
+        }
+        assert_eq!(quantise(0.0), 0);
+        assert_eq!(quantise(1.0), 255);
+        assert_eq!(quantise(-0.5), 0);
+        assert_eq!(quantise(1.5), 255);
+        // The shipped thresholds survive the trip on the right side.
+        let options = DetectorOptions::default();
+        for threshold in [options.threshold, options.box_threshold] {
+            let at = |value: f32| Probabilities::Byte(&[quantise(value)]).get(0);
+            assert!(at(threshold + 0.01) >= threshold);
+            assert!(at(threshold - 0.01) < threshold);
+        }
+    }
+
     /// A map of `width` x `height` in which every pixel holds `value`.
     fn flat(width: usize, height: usize, value: f32) -> Vec<f32> {
         vec![value; width * height]
@@ -616,15 +703,15 @@ mod tests {
         // tile every pixel came from.
         let (width, height) = (300_u32, 200_u32);
         let grid = tiles(width, height, 128, 32);
-        let mut joined = vec![-1.0_f32; (width * height) as usize];
+        let mut joined = vec![255_u8; (width * height) as usize];
         for (index, tile) in grid.iter().enumerate() {
             let data = flat(
                 tile.columns.len as usize,
                 tile.rows.len as usize,
-                index as f32,
+                index as f32 / 255.0,
             );
             let map = ProbabilityMap {
-                data: &data,
+                data: Probabilities::Float(&data),
                 width: tile.columns.len as usize,
                 height: tile.rows.len as usize,
             };
@@ -640,10 +727,7 @@ mod tests {
                     })
                     .unwrap();
                 let got = joined[(y * width + x) as usize];
-                assert!(
-                    (got - owner as f32).abs() < f32::EPSILON,
-                    "({x}, {y}) got {got}"
-                );
+                assert_eq!(usize::from(got), owner, "({x}, {y})");
             }
         }
     }
@@ -652,7 +736,8 @@ mod tests {
     fn a_tile_map_is_read_where_each_frame_pixel_falls() {
         use super::super::preprocess::{Span, Tile};
         // A tile at (10, 20), 8 x 4, whose map is HALF its size: map pixel
-        // (mx, my) holds mx + 10 * my, and covers two frame pixels each way.
+        // (mx, my) holds (mx + 4 * my) / 10, and covers two frame pixels each
+        // way.
         let span = |start: u32, len: u32| Span {
             start,
             len,
@@ -664,33 +749,30 @@ mod tests {
             rows: span(20, 4),
         };
         let data: Vec<f32> = (0..2)
-            .flat_map(|my| (0..4).map(move |mx| (mx + 10 * my) as f32))
+            .flat_map(|my| (0..4).map(move |mx| (mx + 4 * my) as f32 / 10.0))
             .collect();
         let map = ProbabilityMap {
-            data: &data,
+            data: Probabilities::Float(&data),
             width: 4,
             height: 2,
         };
         let stride = 40;
-        let mut joined = vec![-1.0_f32; stride * 30];
+        // 255 is a value no map pixel here holds, so it marks "not written".
+        let mut joined = vec![255_u8; stride * 30];
         join_tile(&mut joined, stride, tile, &map, 2.0, 2.0);
         let at = |x: usize, y: usize| joined[y * stride + x];
-        assert!((at(10, 20) - 0.0).abs() < f32::EPSILON);
-        assert!((at(11, 21) - 0.0).abs() < f32::EPSILON);
-        assert!((at(12, 20) - 1.0).abs() < f32::EPSILON);
-        assert!((at(17, 23) - 13.0).abs() < f32::EPSILON);
+        assert_eq!(at(10, 20), quantise(0.0));
+        assert_eq!(at(11, 21), quantise(0.0));
+        assert_eq!(at(12, 20), quantise(0.1));
+        assert_eq!(at(17, 23), quantise(0.7));
         // Outside the keep rectangle nothing is written.
-        assert!((at(9, 20) + 1.0).abs() < f32::EPSILON);
-        assert!((at(18, 20) + 1.0).abs() < f32::EPSILON);
-        assert!((at(10, 24) + 1.0).abs() < f32::EPSILON);
+        assert_eq!(at(9, 20), 255);
+        assert_eq!(at(18, 20), 255);
+        assert_eq!(at(10, 24), 255);
         // A degenerate factor writes nothing rather than indexing wildly.
-        let mut untouched = vec![-1.0_f32; stride * 30];
+        let mut untouched = vec![255_u8; stride * 30];
         join_tile(&mut untouched, stride, tile, &map, 0.0, 2.0);
-        assert!(
-            untouched
-                .iter()
-                .all(|&value| (value + 1.0).abs() < f32::EPSILON)
-        );
+        assert!(untouched.iter().all(|&value| value == 255));
     }
 
     #[test]
@@ -701,7 +783,7 @@ mod tests {
         // joined map gives ONE box that spans the line.
         let (width, height) = (300_u32, 40_u32);
         let inside = |x: u32, y: u32| (50..250).contains(&x) && (14..26).contains(&y);
-        let mut joined = vec![0.0_f32; (width * height) as usize];
+        let mut joined = vec![0_u8; (width * height) as usize];
         let grid = tiles(width, height, 128, 32);
         assert!(grid.len() > 1);
         for tile in &grid {
@@ -717,14 +799,14 @@ mod tests {
                 })
                 .collect();
             let map = ProbabilityMap {
-                data: &data,
+                data: Probabilities::Float(&data),
                 width: tile.columns.len as usize,
                 height: tile.rows.len as usize,
             };
             join_tile(&mut joined, width as usize, *tile, &map, 1.0, 1.0);
         }
         let map = ProbabilityMap {
-            data: &joined,
+            data: Probabilities::Byte(&joined),
             width: width as usize,
             height: height as usize,
         };

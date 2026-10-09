@@ -36,7 +36,7 @@ use uptake_core::bitmap::RgbaBitmap;
 use uptake_core::geometry::{Point, Rect};
 
 use crate::engine::{Character, Engine, EngineError, Recognition, TextBlock, Word};
-use detect::{DetectorOptions, ProbabilityMap};
+use detect::{DetectorOptions, Probabilities, ProbabilityMap};
 use reading_order::Placed;
 use recognise::{CharacterDictionary, DecodedText};
 
@@ -228,7 +228,10 @@ impl PaddleEngine {
         if width == 0 || height == 0 {
             return Ok(Vec::new());
         }
-        let mut joined = vec![0.0_f32; width * height];
+        // One byte a pixel ([`detect::Probabilities::Byte`]): this map is the
+        // one allocation that grows with the area, and at 32 bits it took a
+        // 7680 x 4320 area past the 500 MB target (review of `#133`, round 7).
+        let mut joined = vec![0_u8; width * height];
         for tile in preprocess::tiles(
             frame.width(),
             frame.height(),
@@ -238,7 +241,7 @@ impl PaddleEngine {
             self.detect_tile(frame, tile, &mut joined, width)?;
         }
         let map = ProbabilityMap {
-            data: &joined,
+            data: Probabilities::Byte(&joined),
             width,
             height,
         };
@@ -258,7 +261,7 @@ impl PaddleEngine {
         &mut self,
         frame: &RgbaBitmap,
         tile: preprocess::Tile,
-        joined: &mut [f32],
+        joined: &mut [u8],
         stride: usize,
     ) -> Result<(), EngineError> {
         let Some(input) = preprocess::detector_input(frame, tile) else {
@@ -291,7 +294,7 @@ impl PaddleEngine {
             }
         };
         let map = ProbabilityMap {
-            data,
+            data: Probabilities::Float(data),
             width: map_width,
             height: map_height,
         };
