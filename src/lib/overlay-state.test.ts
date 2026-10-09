@@ -149,6 +149,7 @@ describe('areaFramesCss', () => {
       close: [282, 100, 18, 18],
       layer: 'auto',
       kind: 'default',
+      ocr_behaviour: 'in_place',
       zoom: 1,
       // 200x150, so it is above `CHROME_INSIDE_SPAN` on both axes: bands
       // inside, and therefore no outside handles. Rust decides this; the
@@ -162,11 +163,23 @@ describe('areaFramesCss', () => {
       close: [-718, -200, 18, 18],
       layer: 'front',
       kind: 'filter',
+      ocr_behaviour: 'rendered',
       zoom: 1,
       bar: [-1000, -218, 300, 18],
       handles: [],
     },
   ];
+
+  it("carries each area's own OCR behaviour through to the frame", () => {
+    // Roadmap 1.45: the page draws marks or a panel by THIS field, per area.
+    // Dropping it would draw every OCR area one way, which is the global
+    // setting the change removed, with no error anywhere.
+    const frames = areaFramesCss(areas, [-1080, -1080], 2, null);
+    expect(frames?.map((frame) => frame.ocrBehaviour)).toEqual([
+      'in_place',
+      'rendered',
+    ]);
+  });
 
   it('carries each area type through to the frame', () => {
     // The frame is what the template styles on, so a dropped `kind` renders

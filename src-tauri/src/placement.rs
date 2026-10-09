@@ -122,7 +122,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
-use uptake_core::area::{AreaId, AreaType, Input, Layer};
+use uptake_core::area::{AreaId, AreaType, Input, Layer, OcrBehaviour};
 use uptake_core::geometry::{Point, Rect};
 use uptake_core::interaction::{self, Handle, Resize};
 
@@ -509,6 +509,10 @@ enum MenuAction {
     /// current type is drawn ticked. Clicking that one is harmless: the store
     /// reports nothing changed and no capture is discarded.
     SetType(AreaType),
+    /// Set how an OCR area shows what it read (roadmap `1.45`, `ADR-0046`
+    /// decision 9). Radio rows like [`MenuAction::SetType`], so the action
+    /// carries the behaviour the row names.
+    SetOcrBehaviour(OcrBehaviour),
     /// Remove the area.
     Dismiss,
     /// Capture the area and publish it to the clipboard alone (task 1.9,
@@ -2141,12 +2145,18 @@ const fn living_key(
     }
 }
 
-/// Whether an OCR selection is showing: some area has one and OCR areas read
-/// in place, the one behaviour that draws it. Asked by the keyboard hook only
+/// Whether an OCR selection is showing: some area that reads in place, the one
+/// behaviour that draws a selection, has one. Asked by the keyboard hook only
 /// for `Ctrl+C` in Living, so its cost is paid per copy, not per keystroke.
+/// Per area since roadmap `1.45`, so a selection left on an area since switched
+/// to Rendered does not take the key; the switch drops it anyway.
 fn selection_showing() -> bool {
     crate::ocr::any_selection()
-        && crate::settings::current().ocr_behaviour == crate::settings::OcrBehaviour::InPlace
+        && APP.get().is_some_and(|app| {
+            overlay::areas_top_down(app)
+                .into_iter()
+                .any(|(id, _)| reads_in_place(app, id) && crate::ocr::selection_of(id).is_some())
+        })
 }
 
 /// Which Placement key this is, if any, by the page's own rules. Pure.
@@ -3478,25 +3488,16 @@ fn shadowed_by_another_window(point: Point) -> bool {
 /// Takes the store lock, which is safe here and would not be on every mouse
 /// *move*: a press happens once per gesture, so this runs at click rate rather
 /// than at the mouse's report rate. See [`pump`] for the moves.
-/// Reads a moved or resized OCR area again, if OCR areas read in place.
+/// Reads a moved or resized OCR area again, if it reads in place.
 ///
 /// Only in place: a *Rendered* area shows text rather than marks over the
 /// screen, and it has never re-read on a move, which this change leaves alone.
-fn reread_in_place_ocr(app: &AppHandle, id: AreaId) {
+pub(crate) fn reread_in_place_ocr(app: &AppHandle, id: AreaId) {
     if !reads_in_place(app, id) {
         return;
     }
     if let Some(bounds) = overlay::area_bounds(app, id) {
         crate::ocr::reread_area(app, id, bounds);
-    }
-}
-
-/// Reads every OCR area again, if OCR areas read in place: called when the
-/// behaviour switches to In place, because a Rendered area kept the words of
-/// wherever it was last read.
-pub(crate) fn reread_every_in_place_ocr(app: &AppHandle) {
-    for (id, _) in overlay::areas_top_down(app) {
-        reread_in_place_ocr(app, id);
     }
 }
 
@@ -3506,14 +3507,14 @@ pub(crate) fn reread_every_in_place_ocr(app: &AppHandle) {
 /// to hit with a mouse.
 const SELECTION_HANDLE_REACH: i32 = 14;
 
-/// Whether `id` is an OCR area and OCR areas read in place: the two conditions
-/// every word gesture needs. The type is asked of the store rather than
-/// inferred from the words `ocr.rs` holds, so an area converted away from OCR
-/// can never be selected even if its words outlived the conversion (review of
-/// `#115`, round 1).
+/// Whether `id` is an OCR area that reads in place: the condition every
+/// character gesture needs. Asked of the store rather than inferred from the
+/// characters `ocr.rs` holds, so an area converted away from OCR can never be
+/// selected even if its characters outlived the conversion (review of `#115`,
+/// round 1). **The area's own behaviour since roadmap `1.45`**; it was the
+/// setting, for every OCR area at once.
 pub(crate) fn reads_in_place(app: &AppHandle, id: AreaId) -> bool {
-    crate::settings::current().ocr_behaviour == crate::settings::OcrBehaviour::InPlace
-        && overlay::area_kind(app, id) == Some(AreaType::Ocr)
+    overlay::area_reads_in_place(app, id)
 }
 
 /// The selection handle of `id` under `point`, as `(anchor, focus)`: the
@@ -4474,6 +4475,31 @@ fn menu_rows(area: &overlay::AreaSummary) -> Vec<MenuRow> {
         checked: false,
         children: types,
     });
+    // Roadmap 1.45, ADR-0046 decision 9: an OCR area chooses In place or
+    // Rendered for itself, here, without the settings window (*"The user should
+    // not need to open the dedicated full settings window for it"*). A child
+    // list for the reason Depth is one: two rows of one axis, which flat would
+    // read as two toggles. Below the type, because it is how this type shows
+    // itself, and only on an OCR area, the one type it means anything for.
+    if area.kind == AreaType::Ocr {
+        rows.push(MenuRow {
+            action: MenuAction::OpenSubmenu,
+            label: text(Text::MenuOcrBehaviour),
+            checked: false,
+            children: vec![
+                leaf(
+                    MenuAction::SetOcrBehaviour(OcrBehaviour::InPlace),
+                    text(Text::MenuOcrInPlace),
+                    area.ocr_behaviour == OcrBehaviour::InPlace,
+                ),
+                leaf(
+                    MenuAction::SetOcrBehaviour(OcrBehaviour::Rendered),
+                    text(Text::MenuOcrRendered),
+                    area.ocr_behaviour == OcrBehaviour::Rendered,
+                ),
+            ],
+        });
+    }
     // The three Layer rows live in a child list of their own, the same shape
     // roadmap 1.28 gave the type rows. Founder's call at the 2026-08-25 rig
     // sitting: they are one axis with one answer, and three flat siblings of the
@@ -4620,6 +4646,9 @@ fn activate_menu_item(app: &AppHandle, hit: MenuHit, release: Point) {
         MenuAction::SetLayer(layer) => overlay::set_area_layer(app, area, layer),
         MenuAction::SetInput(input) => overlay::set_area_input(app, area, input),
         MenuAction::SetType(kind) => overlay::convert_area(app, area, kind),
+        MenuAction::SetOcrBehaviour(behaviour) => {
+            overlay::set_area_ocr_behaviour(app, area, behaviour)
+        }
         MenuAction::Dismiss => overlay::dismiss_area(app, area),
         // Returned above, before the menu was closed.
         MenuAction::OpenSubmenu => false,
@@ -5036,6 +5065,7 @@ mod tests {
             layer,
             input,
             kind,
+            ocr_behaviour: uptake_core::area::OcrBehaviour::InPlace,
         }
     }
 
@@ -6310,7 +6340,10 @@ mod tests {
             let rows = menu_rows(&summary(kind, Layer::Auto, Input::Interactive));
             let parents: Vec<&super::MenuRow> =
                 rows.iter().filter(|row| !row.children.is_empty()).collect();
-            assert_eq!(parents.len(), 2, "{kind:?}");
+            // Type and Depth for every area, and Behaviour for an OCR area
+            // (roadmap 1.45).
+            let expected = if kind == AreaType::Ocr { 3 } else { 2 };
+            assert_eq!(parents.len(), expected, "{kind:?}");
             for parent in parents {
                 for child in &parent.children {
                     assert!(
@@ -6340,6 +6373,56 @@ mod tests {
                 // convert *to*, and none of those is what this area is.
                 None => assert!(ticked.is_empty(), "{kind:?}"),
             }
+        }
+    }
+
+    /// Roadmap 1.45, ADR-0046 decision 9: an OCR area chooses In place or
+    /// Rendered from its own menu, no other type is offered the choice, and the
+    /// tick is the area's own behaviour, not the setting's.
+    #[test]
+    fn only_an_ocr_area_offers_its_behaviour_and_ticks_its_own() {
+        use crate::strings::{Text, text};
+        use uptake_core::area::OcrBehaviour;
+        let behaviour_list = |rows: &[super::MenuRow]| {
+            rows.iter()
+                .find(|row| row.label == text(Text::MenuOcrBehaviour))
+                .cloned()
+        };
+        for kind in AreaType::ALL {
+            let rows = menu_rows(&summary(kind, Layer::Auto, Input::Interactive));
+            assert_eq!(
+                behaviour_list(&rows).is_some(),
+                kind == AreaType::Ocr,
+                "{kind:?}"
+            );
+        }
+        for own in [OcrBehaviour::InPlace, OcrBehaviour::Rendered] {
+            let mut area = summary(AreaType::Ocr, Layer::Auto, Input::Interactive);
+            area.ocr_behaviour = own;
+            let Some(list) = behaviour_list(&menu_rows(&area)) else {
+                panic!("an OCR area's menu has a Behaviour list")
+            };
+            assert_eq!(list.action, MenuAction::OpenSubmenu);
+            assert!(!list.checked, "the parent row is never ticked");
+            let rows: Vec<(MenuAction, bool)> = list
+                .children
+                .iter()
+                .map(|row| (row.action, row.checked))
+                .collect();
+            assert_eq!(
+                rows,
+                vec![
+                    (
+                        MenuAction::SetOcrBehaviour(OcrBehaviour::InPlace),
+                        own == OcrBehaviour::InPlace
+                    ),
+                    (
+                        MenuAction::SetOcrBehaviour(OcrBehaviour::Rendered),
+                        own == OcrBehaviour::Rendered
+                    ),
+                ],
+                "{own:?}"
+            );
         }
     }
 
