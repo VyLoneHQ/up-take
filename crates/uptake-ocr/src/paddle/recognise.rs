@@ -3,10 +3,12 @@
 //! Two pure stages sit either side of the recognition model, and both are here
 //! because both are testable without it:
 //!
-//! - [`rectify`] lifts a rotated quad out of the frame into an upright,
-//!   fixed-height strip -- the only shape the recogniser accepts.
+//! - [`rectify_piece`] lifts a rotated quad, or one [`Piece`] of a long one,
+//!   out of the frame into an upright, fixed-height strip -- the only shape
+//!   the recogniser accepts.
 //! - [`ctc_decode`] turns the model's per-timestep class scores back into
-//!   characters.
+//!   characters, and [`stitch`] joins the pieces of a long line into one
+//!   decode.
 //!
 //! **Nothing here loads a model.** `ctc_decode` takes a slice of logits, so its
 //! tests write the logits by hand.
@@ -23,33 +25,35 @@ use super::quad::{PointF, Quad};
 /// produces a feature map of the wrong rank and the session refuses it.
 pub const REC_HEIGHT: u32 = 48;
 
-/// Widest crop the recogniser is given, in pixels.
+/// Widest piece of a line the recogniser is given at once, in pixels.
 ///
-/// **Past this width the crop is squeezed, not shrunk**: the height is fixed at
-/// [`REC_HEIGHT`], so a clamp narrows the characters and leaves them just as
-/// tall. The model reads squeezed text as noise, the line's confidence falls
-/// under `drop_score`, and the whole line vanishes from the result.
+/// **A line wider than this is read in overlapping pieces and joined**
+/// ([`pieces`], [`stitch`], `I-440`). Until then it was a cap,
+/// `REC_MAX_WIDTH`, and a crop past it was SQUEEZED rather than shrunk: the
+/// height is fixed at [`REC_HEIGHT`], so the clamp narrowed the characters and
+/// left them just as tall, the model read them as noise, and the whole line
+/// vanished. That is why a 2560 x 1440 screen of 13 px text read nothing even
+/// once the detector found every line: each was about 100:1, past the cap's
+/// 66:1.
 ///
-/// It was `640` until 2026-09-25, which allowed a 13:1 box. That is a 16 px
-/// line about 550 px wide, and ordinary paragraphs are wider: `BACKLOG.md`
-/// `I-428` is the founder losing the two widest lines of a German paragraph
-/// (about 830 px) on the rig. It was not German. Rendered English and German
-/// lines both read exactly up to about 520 px and came back empty from about
-/// 590 px, at 13 and 16 px, on a grey or a white background. The old value
-/// arrived with the first port (`1.11`) and was never measured.
+/// History of the value, kept because it is a measurement: it was `640` until
+/// 2026-09-25, which allowed a 13:1 box, and `BACKLOG.md` `I-428` is the
+/// founder losing the two widest lines of a German paragraph to it. `3200` was
+/// measured then with `ocr_smoke`: every rendered line from 200 to 2855 px wide
+/// at 12, 13, 14 and 16 px read exactly, and recognising a monitor-wide line
+/// took 60 to 100 ms. The 192 cards of `ocr_accuracy` read the same except
+/// one: `invoice_mono_28px` reads `Tota1` for `Total` at its true width. So
+/// `3200` stays the widest a piece gets, which is the width already measured to
+/// read well, and a line within it is read in one piece exactly as before.
+pub const REC_PIECE_WIDTH: u32 = 3200;
+
+/// How many pixels two neighbouring pieces of a line share.
 ///
-/// `3200` is a 66:1 box. Measured 2026-09-25 with `ocr_smoke`: every rendered
-/// line from 200 to 2855 px wide at 12, 13, 14 and 16 px read exactly (the
-/// old value read none past 590 px), and recognising a monitor-wide line went
-/// from about 45 ms to 60 to 100 ms. The 192 cards of `ocr_accuracy` read the
-/// same except one: `invoice_mono_28px` now reads `Tota1` for `Total`. Its box
-/// is 17.5:1, so the old clamp squeezed it to 76 % and happened to read the
-/// Consolas `l` correctly; at its true width the model takes it for a `1`.
-///
-/// A line wider than this still gets squeezed, which is gentler than losing it
-/// only while the squeeze is mild. Splitting such a line into overlapping
-/// pieces would remove the limit; nothing measured so far needs that.
-pub const REC_MAX_WIDTH: u32 = 3200;
+/// About eight characters at the recogniser's 48 px height, so the join can
+/// fall on a space in the middle of the shared stretch, where both pieces see
+/// whole glyphs ([`stitch`]). A multiple of 32, so a piece starts on a whole
+/// timestep of the model's output.
+pub const REC_PIECE_OVERLAP: u32 = 384;
 
 /// One recognised line and how sure the model was.
 #[derive(Debug, Clone, PartialEq)]
@@ -262,7 +266,71 @@ impl RecogniserInput {
     }
 }
 
-/// Lifts a quad out of the frame into an upright strip of [`REC_HEIGHT`] pixels.
+/// A stretch of a line's crop, in the columns of the whole crop at its true
+/// width ([`line_width`]). `start` inclusive, `end` exclusive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Piece {
+    /// The first column.
+    pub start: u32,
+    /// One past the last column.
+    pub end: u32,
+}
+
+impl Piece {
+    /// The piece's width in pixels.
+    #[must_use]
+    pub const fn width(&self) -> u32 {
+        self.end - self.start
+    }
+}
+
+/// How wide a quad's crop is at the recogniser's height and its own aspect
+/// ratio: the width that neither squeezes nor stretches its text.
+///
+/// `None` for a degenerate quad, which has no crop.
+#[must_use]
+pub fn line_width(quad: &Quad) -> Option<u32> {
+    let (long_side, short_side) = quad.side_lengths();
+    if !long_side.is_finite() || !short_side.is_finite() || short_side <= 0.0 {
+        return None;
+    }
+    let width = (REC_HEIGHT as f32 * long_side / short_side)
+        .round()
+        .max(1.0);
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "finite, at least 1, and a saturating float-to-int cast past u32::MAX"
+    )]
+    let width = width as u32;
+    Some(width)
+}
+
+/// Splits a line `line_width` pixels wide into pieces no wider than
+/// `piece_width`, each sharing `overlap` pixels with the next (`I-440`).
+///
+/// A line that fits is one piece, the whole of it, so it is read exactly as it
+/// was before pieces existed. Otherwise a piece starts every
+/// `piece_width - overlap` pixels and the last one ends on the line's end.
+/// `overlap` is clamped below `piece_width`, so the pieces always advance.
+#[must_use]
+pub fn pieces(line_width: u32, piece_width: u32, overlap: u32) -> Vec<Piece> {
+    let piece_width = piece_width.max(1);
+    let step = piece_width - overlap.min(piece_width - 1);
+    let mut result = Vec::new();
+    let mut start: u32 = 0;
+    loop {
+        let end = start.saturating_add(piece_width).min(line_width);
+        result.push(Piece { start, end });
+        if end >= line_width {
+            return result;
+        }
+        start += step;
+    }
+}
+
+/// Lifts one piece of a quad out of the frame into an upright strip of
+/// [`REC_HEIGHT`] pixels.
 ///
 /// # Why a perspective sample and not a crop-then-rotate
 ///
@@ -273,26 +341,27 @@ impl RecogniserInput {
 /// reads those as characters. Sampling along the quad's own edges takes exactly
 /// the pixels the box claims and nothing else.
 ///
-/// The output width preserves the box's aspect ratio, capped at
-/// [`REC_MAX_WIDTH`] and floored at 1 so a degenerate box still produces a
-/// tensor the session will accept rather than a zero-width one it rejects.
+/// Column `x` of the piece is column `piece.start + x` of the whole line's crop
+/// at `line_width`, so the pieces of one line sample exactly the pixels the
+/// unbroken crop would, and a piece that is the whole line IS that crop.
 ///
 /// Normalisation is PP-OCR's recogniser convention, `(pixel/255 - 0.5) / 0.5`,
 /// which is **not** the ImageNet normalisation the detector uses. Two models,
 /// two conventions; using one for both is a silent accuracy loss rather than an
 /// error, which is why the constants live next to the stage that needs them.
+///
+/// `None` for an empty frame or an empty piece.
 #[must_use]
-pub fn rectify(bitmap: &RgbaBitmap, quad: &Quad) -> Option<RecogniserInput> {
-    if bitmap.width() == 0 || bitmap.height() == 0 {
+pub fn rectify_piece(
+    bitmap: &RgbaBitmap,
+    quad: &Quad,
+    line_width: u32,
+    piece: Piece,
+) -> Option<RecogniserInput> {
+    if bitmap.width() == 0 || bitmap.height() == 0 || line_width == 0 || piece.end <= piece.start {
         return None;
     }
-    let (long_side, short_side) = quad.side_lengths();
-    if !long_side.is_finite() || !short_side.is_finite() || short_side <= 0.0 {
-        return None;
-    }
-
-    let aspect = long_side / short_side;
-    let width = ((REC_HEIGHT as f32 * aspect).round().max(1.0) as u32).min(REC_MAX_WIDTH);
+    let width = piece.width();
 
     // The quad's corners, clockwise from top-left. Interpolating along the top
     // and bottom edges and then between them is a bilinear map of the unit
@@ -305,7 +374,7 @@ pub fn rectify(bitmap: &RgbaBitmap, quad: &Quad) -> Option<RecogniserInput> {
     for y in 0..REC_HEIGHT {
         let v = (y as f32 + 0.5) / REC_HEIGHT as f32;
         for x in 0..width {
-            let u = (x as f32 + 0.5) / width as f32;
+            let u = ((piece.start + x) as f32 + 0.5) / line_width as f32;
             let top = PointF::new(
                 top_left.x.mul_add(1.0 - u, top_right.x * u),
                 top_left.y.mul_add(1.0 - u, top_right.y * u),
@@ -326,6 +395,230 @@ pub fn rectify(bitmap: &RgbaBitmap, quad: &Quad) -> Option<RecogniserInput> {
     }
 
     Some(RecogniserInput { tensor, width })
+}
+
+/// Whether a decoded character is whitespace, the place a line can be joined.
+fn is_space(character: &DecodedCharacter) -> bool {
+    !character.text.is_empty() && character.text.chars().all(char::is_whitespace)
+}
+
+/// Joins the decodes of a line's pieces into the decode of the whole line
+/// (`I-440`).
+///
+/// One piece that is the whole line is returned unchanged, so a line that fits
+/// in [`REC_PIECE_WIDTH`] decodes exactly as it did before pieces existed.
+///
+/// # Where two pieces are joined
+///
+/// Each character is placed in the whole line's columns by the centre of its
+/// run. Two neighbouring pieces both read the characters in their shared
+/// stretch, so the join decides which piece speaks for each of them: the left
+/// piece for everything before the join, the right one for everything from it.
+///
+/// **The join is a SPACE near the middle of the shared stretch**, found in each
+/// piece separately: the left piece keeps what lies before its space and the
+/// right piece what lies from its own copy of that space on, so the space is
+/// kept once, from the right. Matching the space rather than a column is what
+/// makes the join robust: the two pieces may place one glyph a timestep apart,
+/// and a cut through a word could then keep a character twice or lose it, but a
+/// space is a word away from the next one. The middle is where both pieces see
+/// whole glyphs, far from the edges where each piece's view is cut.
+///
+/// With no space in the shared stretch (one long word, a URL, a hash, or a
+/// script written without spaces) the join is the GAP between two characters
+/// nearest the middle, found the same way: the left piece's gap, and the right
+/// piece's own copy of it, the nearest of its gaps with the same two characters
+/// either side. With no character there at all, the middle itself.
+///
+/// # What the result's timesteps are
+///
+/// The whole line's: a piece's timestep is `piece.width() / timesteps` pixels
+/// wide, a character's run is moved by its piece's start and re-expressed in
+/// timesteps of the FIRST piece's size, and `timesteps` is the line's width in
+/// those. So [`DecodedText::words`] places words along the whole quad exactly
+/// as it does for one piece.
+///
+/// # What the confidence is
+///
+/// The mean of the pieces' confidences, each weighted by **how much of the
+/// line it answers for**: the columns of its keep range. A piece that read
+/// nothing has a confidence of `0.0` ([`ctc_decode`]), so it pulls the line's
+/// confidence down in proportion to the stretch it failed to read, and a line
+/// half of which read nothing falls under `drop_score` and is dropped rather
+/// than returned with half its text missing. Weighting by characters kept, as
+/// this first did, gave such a piece no weight at all, and the truncated line
+/// kept the confidence of the half that read (review of `#133`, round 2).
+/// That follows the rule `drop_score` already states: an incomplete line
+/// pasted as though it were the text is worse than none.
+#[must_use]
+pub fn stitch(decoded: Vec<(Piece, DecodedText)>, line_width: u32) -> DecodedText {
+    if let [(piece, _)] = decoded.as_slice()
+        && piece.start == 0
+        && piece.end >= line_width
+    {
+        return decoded
+            .into_iter()
+            .next()
+            .map_or_else(empty_decode, |(_, text)| text);
+    }
+    let read: Vec<(Piece, DecodedText)> = decoded
+        .into_iter()
+        .filter(|(piece, text)| text.timesteps > 0 && piece.width() > 0)
+        .collect();
+    let Some((first_piece, first_text)) = read.first() else {
+        return empty_decode();
+    };
+    let step_width = first_piece.width() as f32 / first_text.timesteps as f32;
+    let column = |piece: &Piece, text: &DecodedText, timestep: f32| -> f32 {
+        let width = piece.width() as f32 / text.timesteps as f32;
+        (timestep + 0.5).mul_add(width, piece.start as f32)
+    };
+    let centre = |piece: &Piece, text: &DecodedText, character: &DecodedCharacter| -> f32 {
+        column(piece, text, (character.first + character.last) as f32 / 2.0)
+    };
+
+    // The keep range of each piece, in the line's columns.
+    let mut keep_from = vec![f32::NEG_INFINITY; read.len()];
+    let mut keep_to = vec![f32::INFINITY; read.len()];
+    for index in 0..read.len().saturating_sub(1) {
+        let (left_piece, left) = &read[index];
+        let (right_piece, right) = &read[index + 1];
+        let shared_from = right_piece.start as f32;
+        let shared_to = left_piece.end as f32;
+        let middle = f32::midpoint(shared_from, shared_to);
+        let in_shared = |at: f32| at >= shared_from && at < shared_to;
+        // A piece's space in the shared stretch nearest `to`. Only the shared
+        // stretch: a space outside it is not a copy of one inside it, and
+        // joining at one would drop what lies between (review of `#133`,
+        // round 5).
+        let nearest_space = |piece: &Piece, text: &DecodedText, to: f32| -> Option<f32> {
+            text.characters
+                .iter()
+                .filter(|character| is_space(character))
+                .map(|character| centre(piece, text, character))
+                .filter(|&at| in_shared(at))
+                .min_by(|a, b| (a - to).abs().total_cmp(&(b - to).abs()))
+        };
+        // The right piece's copy of the left piece's space is the right
+        // piece's space nearest it, if that is close enough to be the same
+        // one: a quarter of the shared stretch is several timesteps of
+        // disagreement and still less than one word.
+        let tolerance = (shared_to - shared_from) / 4.0;
+        if let Some(left_space) = nearest_space(left_piece, left, middle) {
+            keep_to[index] = left_space;
+            keep_from[index + 1] = nearest_space(right_piece, right, left_space)
+                .filter(|at| (at - left_space).abs() <= tolerance)
+                .unwrap_or(left_space);
+        } else {
+            // Each gap between two consecutive characters of a piece: the
+            // index of the first one and the column between their centres.
+            let gaps = |piece: &Piece, text: &DecodedText| -> Vec<(usize, f32)> {
+                text.characters
+                    .windows(2)
+                    .enumerate()
+                    .map(|(at, pair)| {
+                        let middle_of_pair = f32::midpoint(
+                            centre(piece, text, &pair[0]),
+                            centre(piece, text, &pair[1]),
+                        );
+                        (at, middle_of_pair)
+                    })
+                    .collect()
+            };
+            let left_gap = gaps(left_piece, left)
+                .into_iter()
+                .filter(|&(_, at)| in_shared(at))
+                .min_by(|a, b| (a.1 - middle).abs().total_cmp(&(b.1 - middle).abs()));
+            if let Some((before, cut)) = left_gap {
+                keep_to[index] = cut;
+                // The right piece's copy of that gap: among its own gaps near
+                // the cut, nearest first, the first with the same character on
+                // each side. Cutting each piece at its own gap is what keeps a
+                // boundary character once when the pieces place it a timestep
+                // or two apart (review of `#133`, round 3); the text check
+                // tells two neighbouring gaps apart when the shift is half a
+                // character.
+                let pair = (
+                    &left.characters[before].text,
+                    &left.characters[before + 1].text,
+                );
+                let mut near: Vec<(usize, f32)> = gaps(right_piece, right)
+                    .into_iter()
+                    .filter(|&(_, at)| in_shared(at) && (at - cut).abs() <= tolerance)
+                    .collect();
+                near.sort_by(|a, b| (a.1 - cut).abs().total_cmp(&(b.1 - cut).abs()));
+                keep_from[index + 1] = near
+                    .iter()
+                    .find(|&&(at, _)| {
+                        (&right.characters[at].text, &right.characters[at + 1].text) == pair
+                    })
+                    .or_else(|| near.first())
+                    .map_or(cut, |&(_, at)| at);
+            } else {
+                keep_to[index] = middle;
+                keep_from[index + 1] = middle;
+            }
+        }
+    }
+
+    let timesteps = ((line_width as f32 / step_width).ceil().max(1.0)) as usize;
+    let to_line_step = |piece: &Piece, text: &DecodedText, timestep: usize| -> usize {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a non-negative column over a positive width, floored, then clamped"
+        )]
+        let step = (column(piece, text, timestep as f32) / step_width)
+            .floor()
+            .max(0.0) as usize;
+        step.min(timesteps - 1)
+    };
+
+    let mut text = String::new();
+    let mut characters = Vec::new();
+    let mut weighted = 0.0_f32;
+    let mut answered = 0.0_f32;
+    for (index, (piece, decoded)) in read.iter().enumerate() {
+        for character in &decoded.characters {
+            let at = centre(piece, decoded, character);
+            if at < keep_from[index] || at >= keep_to[index] {
+                continue;
+            }
+            text.push_str(&character.text);
+            characters.push(DecodedCharacter {
+                text: character.text.clone(),
+                first: to_line_step(piece, decoded, character.first),
+                last: to_line_step(piece, decoded, character.last),
+            });
+        }
+        // The columns this piece answers for: its keep range, within itself.
+        let from = keep_from[index].max(piece.start as f32);
+        let to = keep_to[index].min(piece.end as f32);
+        let span = (to - from).max(0.0);
+        weighted += decoded.confidence * span;
+        answered += span;
+    }
+    let confidence = if answered > 0.0 {
+        weighted / answered
+    } else {
+        0.0
+    };
+    DecodedText {
+        text,
+        confidence,
+        characters,
+        timesteps,
+    }
+}
+
+/// The decode of a line that said nothing.
+const fn empty_decode() -> DecodedText {
+    DecodedText {
+        text: String::new(),
+        confidence: 0.0,
+        characters: Vec::new(),
+        timesteps: 0,
+    }
 }
 
 /// Nearest-neighbour sample of one channel, clamped at the edges.
@@ -882,6 +1175,20 @@ b
         ])
     }
 
+    /// The whole line's crop, one piece wide, as a line that fits is read.
+    fn rectify(bitmap: &RgbaBitmap, quad: &Quad) -> Option<RecogniserInput> {
+        let width = line_width(quad)?;
+        rectify_piece(
+            bitmap,
+            quad,
+            width,
+            Piece {
+                start: 0,
+                end: width,
+            },
+        )
+    }
+
     #[test]
     fn a_crop_is_always_the_recognisers_fixed_height() {
         let bitmap = frame(200, 100, [128, 128, 128, 255]);
@@ -914,10 +1221,395 @@ b
     }
 
     #[test]
-    fn a_very_long_line_is_capped_rather_than_truncated() {
-        let bitmap = frame(4000, 100, [128, 128, 128, 255]);
-        let input = rectify(&bitmap, &axis_aligned(0.0, 0.0, 3900.0, 10.0)).unwrap();
-        assert_eq!(input.width, REC_MAX_WIDTH);
+    fn a_very_long_line_keeps_its_width_and_is_read_in_pieces() {
+        // I-440: this 390:1 box was squeezed to 3200 px, about an eighth of
+        // its width, and read as noise. It now keeps all 18720 px.
+        let quad = axis_aligned(0.0, 0.0, 3900.0, 10.0);
+        let width = line_width(&quad).unwrap();
+        assert_eq!(width, REC_HEIGHT * 390);
+        let split = pieces(width, REC_PIECE_WIDTH, REC_PIECE_OVERLAP);
+        assert!(split.len() > 1);
+        assert!(split.iter().all(|piece| piece.width() <= REC_PIECE_WIDTH));
+    }
+
+    #[test]
+    fn a_line_that_fits_is_one_piece_the_whole_of_it() {
+        for width in [1, 192, REC_PIECE_WIDTH] {
+            assert_eq!(
+                pieces(width, REC_PIECE_WIDTH, REC_PIECE_OVERLAP),
+                vec![Piece {
+                    start: 0,
+                    end: width
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn pieces_cover_the_line_and_each_neighbour_shares_the_overlap() {
+        for width in [3201, 4829, 6400, 18720, 100_000] {
+            for (piece_width, overlap) in
+                [(REC_PIECE_WIDTH, REC_PIECE_OVERLAP), (100, 40), (10, 50)]
+            {
+                let split = pieces(width, piece_width, overlap);
+                let label = format!("{width} in {piece_width}/{overlap}");
+                assert_eq!(split[0].start, 0, "{label}");
+                assert_eq!(split.last().unwrap().end, width, "{label}");
+                for piece in &split {
+                    assert!(piece.width() > 0 && piece.width() <= piece_width, "{label}");
+                }
+                for pair in split.windows(2) {
+                    assert!(pair[1].start > pair[0].start, "{label}");
+                    assert!(pair[1].start < pair[0].end, "{label}: a gap");
+                    if overlap < piece_width {
+                        assert_eq!(pair[0].end - pair[1].start, overlap, "{label}");
+                    }
+                }
+            }
+        }
+        // The shipped overlap starts every piece on a whole 32 px, so on a timestep.
+        for piece in pieces(18720, REC_PIECE_WIDTH, REC_PIECE_OVERLAP) {
+            assert_eq!(piece.start % 32, 0);
+        }
+    }
+
+    #[test]
+    fn a_piece_samples_exactly_the_columns_of_the_unbroken_crop() {
+        // A horizontal ramp, so every column of the crop is different.
+        let (width, height) = (400_u32, 20_u32);
+        let pixels = (0..height)
+            .flat_map(|_| (0..width).flat_map(|x| [(x % 256) as u8, (x / 2) as u8, 0, 255]))
+            .collect();
+        let bitmap = RgbaBitmap::from_pixels(Size::new(width, height), pixels).unwrap();
+        let quad = axis_aligned(0.0, 0.0, 400.0, 10.0);
+        let line = line_width(&quad).unwrap();
+        let whole = rectify(&bitmap, &quad).unwrap();
+        for piece in pieces(line, 700, 128) {
+            let part = rectify_piece(&bitmap, &quad, line, piece).unwrap();
+            let plane = part.width as usize * REC_HEIGHT as usize;
+            let whole_plane = whole.width as usize * REC_HEIGHT as usize;
+            for channel in 0..3 {
+                for y in [0_usize, 23, 47] {
+                    for x in 0..part.width as usize {
+                        let ours = part.tensor[channel * plane + y * part.width as usize + x];
+                        let theirs = whole.tensor[channel * whole_plane
+                            + y * whole.width as usize
+                            + piece.start as usize
+                            + x];
+                        assert!(
+                            (ours - theirs).abs() < f32::EPSILON,
+                            "piece {piece:?} column {x} row {y} channel {channel}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The decode of one piece, from `(character, timestep)` pairs, each
+    /// character a run of one timestep.
+    fn piece_read(characters: &[(&str, usize)], timesteps: usize, confidence: f32) -> DecodedText {
+        DecodedText {
+            text: characters.iter().map(|(text, _)| *text).collect(),
+            confidence,
+            characters: characters
+                .iter()
+                .map(|&(text, at)| DecodedCharacter {
+                    text: text.to_owned(),
+                    first: at,
+                    last: at,
+                })
+                .collect(),
+            timesteps,
+        }
+    }
+
+    #[test]
+    fn one_piece_that_is_the_whole_line_is_returned_unchanged() {
+        let decoded = piece_read(&[("a", 1), ("b", 3)], 10, 0.9);
+        let joined = stitch(vec![(Piece { start: 0, end: 80 }, decoded.clone())], 80);
+        assert_eq!(joined, decoded);
+    }
+
+    /// A line of 800 px read as two pieces of 480 sharing 160, at 8 px a
+    /// timestep: "abcd efgh ijk l". The right piece places every glyph
+    /// `right_shift` timesteps from where the left one does, and drops what
+    /// that pushes before its own start.
+    fn two_pieces(right_shift: isize) -> Vec<(Piece, DecodedText)> {
+        // In the line's timesteps, one character every 5, spaces at 25, 50 and
+        // 70. The shared stretch is columns 320..480, timesteps 40..60, and
+        // its only space is at 50, its middle.
+        let text = "abcd efgh ijk l";
+        let line: Vec<(&str, usize)> = (0..text.len())
+            .map(|index| (&text[index..=index], 5 + 5 * index))
+            .collect();
+        let left: Vec<(&str, usize)> = line.iter().copied().filter(|&(_, at)| at < 60).collect();
+        let right: Vec<(&str, usize)> = line
+            .iter()
+            .copied()
+            .filter(|&(_, at)| at >= 40)
+            .filter_map(|(text, at)| {
+                usize::try_from(at as isize - 40 + right_shift)
+                    .ok()
+                    .map(|at| (text, at))
+            })
+            .collect();
+        vec![
+            (Piece { start: 0, end: 480 }, piece_read(&left, 60, 0.9)),
+            (
+                Piece {
+                    start: 320,
+                    end: 800,
+                },
+                piece_read(&right, 60, 0.7),
+            ),
+        ]
+    }
+
+    #[test]
+    fn two_pieces_join_at_a_space_and_keep_every_character_once() {
+        let joined = stitch(two_pieces(0), 800);
+        assert_eq!(joined.text, "abcd efgh ijk l");
+        assert_eq!(joined.timesteps, 100);
+        // Every character at its own place in the whole line.
+        let at: Vec<usize> = joined
+            .characters
+            .iter()
+            .map(|character| character.first)
+            .collect();
+        assert_eq!(at, (1..=15).map(|index| 5 * index).collect::<Vec<_>>());
+        // The words fall where they are on the line: "ijk" starts in the
+        // middle of the space at timestep 50.
+        let words = joined.words();
+        assert_eq!(words.len(), 4);
+        assert!(
+            (words[2].start - 0.50).abs() < 0.02,
+            "ijk starts at {}",
+            words[2].start
+        );
+    }
+
+    #[test]
+    fn a_right_piece_that_places_glyphs_a_timestep_off_still_joins_cleanly() {
+        // The two pieces disagree by a timestep or two, either way: the join
+        // matches the same space in both, so nothing is doubled or lost. At -1
+        // the right piece puts the space BEFORE the left piece's join column,
+        // and a join by column alone would drop it.
+        for shift in [-2, -1, 1, 2] {
+            assert_eq!(
+                stitch(two_pieces(shift), 800).text,
+                "abcd efgh ijk l",
+                "shift {shift}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_piece_that_read_nothing_pulls_the_line_under_the_drop_score() {
+        // Review of #133, round 2: a blank piece kept no characters, so it had
+        // no weight, and the line kept the confidence of the part that read.
+        // Leading, middle and trailing: the blank stretch now counts.
+        let blank = |timesteps: usize| piece_read(&[], timesteps, 0.0);
+        let read = |at: &[(&'static str, usize)]| piece_read(at, 60, 0.95);
+        let words: Vec<(&str, usize)> = (0..60).step_by(4).map(|at| ("x", at)).collect();
+        let pieces = [
+            Piece { start: 0, end: 480 },
+            Piece {
+                start: 320,
+                end: 800,
+            },
+            Piece {
+                start: 640,
+                end: 1120,
+            },
+        ];
+        for missing in 0..3 {
+            let decoded: Vec<(Piece, DecodedText)> = pieces
+                .iter()
+                .enumerate()
+                .map(|(index, piece)| {
+                    (
+                        *piece,
+                        if index == missing {
+                            blank(60)
+                        } else {
+                            read(&words)
+                        },
+                    )
+                })
+                .collect();
+            let joined = stitch(decoded, 1120);
+            assert!(
+                joined.confidence < 0.95 * 0.75,
+                "piece {missing} blank: confidence {}",
+                joined.confidence
+            );
+        }
+        // Two halves, one blank: under the shipped drop_score of 0.5.
+        let joined = stitch(
+            vec![
+                (Piece { start: 0, end: 480 }, read(&words)),
+                (
+                    Piece {
+                        start: 320,
+                        end: 800,
+                    },
+                    blank(60),
+                ),
+            ],
+            800,
+        );
+        assert!(joined.confidence < 0.5, "{}", joined.confidence);
+        assert!(
+            !joined.text.is_empty(),
+            "the part that read is still decoded"
+        );
+    }
+
+    #[test]
+    fn a_right_piece_that_missed_the_join_space_does_not_join_at_one_outside() {
+        // Review of #133, round 5. The left piece joins at its space at
+        // timestep 58, near the shared stretch's end (columns 320..480). The
+        // right piece misread that space, and has another at 62, just past
+        // the stretch and within the tolerance; joining there dropped the
+        // letter at 60. Now the right piece joins at the left one's column.
+        let letters = "abcdefghijklmnopqrstuvwxyzabcdefghijklm";
+        let line: Vec<(&str, usize)> = (0..letters.len())
+            .map(|index| {
+                let at = 2 + 2 * index;
+                let text = if at == 30 || at == 58 || at == 62 {
+                    " "
+                } else {
+                    &letters[index..=index]
+                };
+                (text, at)
+            })
+            .collect();
+        let left: Vec<(&str, usize)> = line.iter().copied().filter(|&(_, at)| at < 60).collect();
+        let right: Vec<(&str, usize)> = line
+            .iter()
+            .copied()
+            .filter(|&(_, at)| at >= 40 && at != 58)
+            .map(|(text, at)| (text, at - 40))
+            .collect();
+        let joined = stitch(
+            vec![
+                (Piece { start: 0, end: 480 }, piece_read(&left, 60, 0.9)),
+                (
+                    Piece {
+                        start: 320,
+                        end: 800,
+                    },
+                    piece_read(&right, 60, 0.9),
+                ),
+            ],
+            800,
+        );
+        // Everything but the space the right piece never read.
+        let expected: String = line
+            .iter()
+            .filter(|&&(_, at)| at != 58)
+            .map(|(text, _)| *text)
+            .collect();
+        assert_eq!(joined.text, expected);
+    }
+
+    #[test]
+    fn a_gap_join_is_matched_only_inside_the_shared_stretch() {
+        // Review of #133, round 5, the no-space half. The left piece's only
+        // gap in the shared stretch (columns 320..480) is between its
+        // characters at 57 and 59, column 468. The right piece misread the one
+        // at 57, so its nearest gap is between 59 and 63, column 492: past the
+        // stretch, within the tolerance, and joining there dropped the 59.
+        let line: Vec<(&str, usize)> = vec![
+            ("a", 4),
+            ("b", 8),
+            ("c", 12),
+            ("d", 16),
+            ("e", 20),
+            ("f", 57),
+            ("g", 59),
+            ("h", 63),
+            ("i", 65),
+            ("j", 69),
+        ];
+        let left: Vec<(&str, usize)> = line.iter().copied().filter(|&(_, at)| at < 60).collect();
+        let right: Vec<(&str, usize)> = line
+            .iter()
+            .copied()
+            .filter(|&(_, at)| at >= 40 && at != 57)
+            .map(|(text, at)| (text, at - 40))
+            .collect();
+        let joined = stitch(
+            vec![
+                (Piece { start: 0, end: 480 }, piece_read(&left, 60, 0.9)),
+                (
+                    Piece {
+                        start: 320,
+                        end: 800,
+                    },
+                    piece_read(&right, 60, 0.9),
+                ),
+            ],
+            800,
+        );
+        assert_eq!(joined.text, "abcdefghij");
+    }
+
+    #[test]
+    fn a_shared_stretch_with_no_space_joins_each_character_once() {
+        // One long word across the join, a character every 4 timesteps. The
+        // right piece places every glyph `shift` timesteps from where the left
+        // one does (review of #133, round 3): a cut at one column for both
+        // kept a boundary character twice or lost it. Two words: distinct
+        // letters, and two letters repeating, where only the text check tells
+        // neighbouring gaps apart.
+        for word in ["abcdefghijklmnopqrs", "xyxyxyxyxyxyxyxyxyx"] {
+            let line: Vec<(&str, usize)> = (0..word.len())
+                .map(|index| (&word[index..=index], 5 + index * 4))
+                .collect();
+            for shift in [-2_isize, -1, 0, 1, 2] {
+                let left: Vec<(&str, usize)> =
+                    line.iter().copied().filter(|&(_, at)| at < 60).collect();
+                let right: Vec<(&str, usize)> = line
+                    .iter()
+                    .copied()
+                    .filter(|&(_, at)| at >= 40)
+                    .filter_map(|(text, at)| {
+                        usize::try_from(at as isize - 40 + shift)
+                            .ok()
+                            .map(|at| (text, at))
+                    })
+                    .collect();
+                let joined = stitch(
+                    vec![
+                        (Piece { start: 0, end: 480 }, piece_read(&left, 60, 0.9)),
+                        (
+                            Piece {
+                                start: 320,
+                                end: 800,
+                            },
+                            piece_read(&right, 60, 0.9),
+                        ),
+                    ],
+                    800,
+                );
+                assert_eq!(joined.text, word, "{word} shifted {shift}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_joined_confidence_weighs_each_piece_by_the_stretch_it_answers_for() {
+        // The join is the space at timestep 50, column 404: the left piece
+        // answers for columns 0..404 and the right one for 404..800.
+        let joined = stitch(two_pieces(0), 800);
+        let expected = (0.9 * 404.0 + 0.7 * 396.0) / 800.0;
+        assert!(
+            (joined.confidence - expected).abs() < 1e-5,
+            "{}",
+            joined.confidence
+        );
     }
 
     #[test]

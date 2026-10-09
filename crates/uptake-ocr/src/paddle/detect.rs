@@ -27,6 +27,7 @@
 //! carries the measurement and the reasoning. The other four are unchanged and
 //! unmeasured.
 
+use super::preprocess::Tile;
 use super::quad::{PointF, Quad, min_area_rect};
 
 /// The knobs DB's post-processing exposes.
@@ -56,7 +57,8 @@ use super::quad::{PointF, Quad, min_area_rect};
 ///
 /// `box_threshold` is the load-bearing one. On a width sweep holding the text
 /// pixel-identical and varying only the surrounding canvas, cards read out of
-/// 12, at the shipping `limit_side_len`:
+/// 12, at the then-shipping `limit_side_len` of 960 (`I-440` has since
+/// replaced it with true-size tiles):
 ///
 /// | | `box` 0.6 | `box` 0.4 |
 /// | --- | --- | --- |
@@ -154,19 +156,81 @@ pub struct DetectedBox {
     pub score: f32,
 }
 
-/// A probability map: one `f32` per pixel, row-major.
+/// A probability map: one probability per pixel, row-major, borrowed.
 ///
-/// Borrowed rather than owned because it comes straight out of an `ort` tensor
-/// and copying a 960x544 map per frame is 2 MB of pointless memcpy on the
-/// latency path.
+/// Two maps reach [`boxes_from_map`] through this type, and [`Probabilities`]
+/// says which: a tile's own map, [`Probabilities::Float`], borrowed straight out
+/// of the `ort` tensor so no copy sits on the latency path; and the joined map
+/// of a whole frame ([`join_tile`], `I-440`), [`Probabilities::Byte`], which the
+/// engine owns and lends here. Everything below reads it through [`Self::at`],
+/// so neither representation leaks past this type.
 #[derive(Debug, Clone, Copy)]
 pub struct ProbabilityMap<'a> {
     /// The probabilities, row-major, `width * height` of them.
-    pub data: &'a [f32],
+    pub data: Probabilities<'a>,
     /// Map width in pixels.
     pub width: usize,
     /// Map height in pixels.
     pub height: usize,
+}
+
+/// A map's probabilities: the model's own floats, or one byte a pixel.
+///
+/// **Bytes are for the joined map of a whole frame** (`I-440`, review of
+/// `#133`, round 7): it holds one value per frame pixel, so at 32 bits it was
+/// 133 MB on a 7680 x 4320 area, whose process peak measured 571 MB against
+/// `quality-bars.md` section 1's 500 MB *Active RAM* target. As bytes it is
+/// 33 MB and the peak 516 MB, of which the frame itself is 133 MB: what still
+/// grows with the area is the frame and this one byte a pixel. A byte stores a
+/// probability in steps of 1/255, about 0.004, against thresholds of 0.2 and
+/// 0.4 that need nothing finer ([`quantise`]).
+#[derive(Debug, Clone, Copy)]
+pub enum Probabilities<'a> {
+    /// One `f32` a pixel, as the model emits it.
+    Float(&'a [f32]),
+    /// One byte a pixel, `0` for 0.0 and `255` for 1.0.
+    Byte(&'a [u8]),
+}
+
+impl Probabilities<'_> {
+    /// How many values it holds.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        match self {
+            Self::Float(values) => values.len(),
+            Self::Byte(values) => values.len(),
+        }
+    }
+
+    /// Whether it holds none.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The probability at `index`, or `0.0` past the end.
+    #[must_use]
+    pub fn get(&self, index: usize) -> f32 {
+        match self {
+            Self::Float(values) => values.get(index).copied().unwrap_or(0.0),
+            Self::Byte(values) => values
+                .get(index)
+                .map_or(0.0, |&value| f32::from(value) / 255.0),
+        }
+    }
+}
+
+/// A probability as one byte, to the nearest 1/255, clamped into `0.0..=1.0`.
+#[must_use]
+pub fn quantise(probability: f32) -> u8 {
+    let scaled = (probability.clamp(0.0, 1.0) * 255.0).round();
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamped into 0..=255 above"
+    )]
+    let byte = scaled as u8;
+    byte
 }
 
 impl ProbabilityMap<'_> {
@@ -176,7 +240,7 @@ impl ProbabilityMap<'_> {
         if x >= self.width || y >= self.height {
             return 0.0;
         }
-        self.data.get(y * self.width + x).copied().unwrap_or(0.0)
+        self.data.get(y * self.width + x)
     }
 
     /// Whether the map's declared dimensions match the data it carries.
@@ -371,6 +435,60 @@ fn mean_probability(map: &ProbabilityMap<'_>, quad: &Quad) -> f32 {
     }
 }
 
+/// Copies one tile's probabilities into its keep rectangle of the frame-sized
+/// map `joined`, which is `stride` pixels wide and holds one byte a pixel
+/// ([`quantise`], `I-440`).
+///
+/// `scale_x` and `scale_y` map a coordinate in `map` to the tile's own pixels,
+/// as [`super::preprocess::DetectorInput::scale_to_source`] gives them; for
+/// PP-OCRv6_small both are `1.0` and this is a copy. Each frame pixel takes the
+/// map pixel its centre falls in. A non-positive factor or an inconsistent
+/// map writes nothing, which leaves that rectangle at `0.0`, no text, rather
+/// than indexing past the buffer.
+///
+/// Writing the tiles into one map and finding the boxes once is what lets a
+/// line cross a tile's edge without being cut: [`boxes_from_map`] sees one
+/// connected region, as it would have for the frame read whole.
+pub fn join_tile(
+    joined: &mut [u8],
+    stride: usize,
+    tile: Tile,
+    map: &ProbabilityMap<'_>,
+    scale_x: f32,
+    scale_y: f32,
+) {
+    if !map.is_consistent()
+        || map.width == 0
+        || map.height == 0
+        || scale_x <= 0.0
+        || scale_y <= 0.0
+        || !scale_x.is_finite()
+        || !scale_y.is_finite()
+    {
+        return;
+    }
+    let map_index = |offset: u32, scale: f32, limit: usize| -> usize {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a non-negative pixel centre over a positive scale, floored, then clamped"
+        )]
+        let index = ((offset as f32 + 0.5) / scale).floor().max(0.0) as usize;
+        index.min(limit - 1)
+    };
+    let (columns, rows) = (tile.columns, tile.rows);
+    for y in rows.keep_from..rows.keep_to {
+        let map_y = map_index(y - rows.start, scale_y, map.height);
+        let row = y as usize * stride;
+        for x in columns.keep_from..columns.keep_to {
+            let map_x = map_index(x - columns.start, scale_x, map.width);
+            if let Some(cell) = joined.get_mut(row + x as usize) {
+                *cell = quantise(map.at(map_x, map_y));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -395,7 +513,7 @@ mod tests {
 
     fn detect(data: &[f32], width: usize, height: usize) -> Vec<DetectedBox> {
         let map = ProbabilityMap {
-            data,
+            data: Probabilities::Float(data),
             width,
             height,
         };
@@ -500,7 +618,7 @@ mod tests {
         // The map is half the size of the source frame in each direction.
         let data = map_with(40, 40, &[(10, 12, 20, 8, 0.95)]);
         let map = ProbabilityMap {
-            data: &data,
+            data: Probabilities::Float(&data),
             width: 40,
             height: 40,
         };
@@ -532,7 +650,7 @@ mod tests {
     fn an_inconsistent_map_returns_nothing_rather_than_reading_past_the_buffer() {
         let data = vec![0.9_f32; 10];
         let map = ProbabilityMap {
-            data: &data,
+            data: Probabilities::Float(&data),
             width: 40,
             height: 40,
         };
@@ -547,5 +665,164 @@ mod tests {
         let data = vec![0.95_f32; 200 * 200];
         let found = detect(&data, 200, 200);
         assert_eq!(found.len(), 1, "found {}", found.len());
+    }
+
+    #[test]
+    fn a_byte_holds_a_probability_to_within_half_a_step() {
+        // Review of #133, round 7: the joined map is one byte a pixel. Every
+        // probability comes back to within half of 1/255, the ends exactly,
+        // and out-of-range values are clamped rather than wrapped.
+        for step in 0..=1000 {
+            let probability = step as f32 / 1000.0;
+            let bytes = [quantise(probability)];
+            let back = Probabilities::Byte(&bytes).get(0);
+            assert!(
+                (back - probability).abs() <= 0.5 / 255.0 + f32::EPSILON,
+                "{probability} came back {back}"
+            );
+        }
+        assert_eq!(quantise(0.0), 0);
+        assert_eq!(quantise(1.0), 255);
+        assert_eq!(quantise(-0.5), 0);
+        assert_eq!(quantise(1.5), 255);
+        // The shipped thresholds survive the trip on the right side.
+        let options = DetectorOptions::default();
+        for threshold in [options.threshold, options.box_threshold] {
+            let at = |value: f32| Probabilities::Byte(&[quantise(value)]).get(0);
+            assert!(at(threshold + 0.01) >= threshold);
+            assert!(at(threshold - 0.01) < threshold);
+        }
+    }
+
+    /// A map of `width` x `height` in which every pixel holds `value`.
+    fn flat(width: usize, height: usize, value: f32) -> Vec<f32> {
+        vec![value; width * height]
+    }
+
+    #[test]
+    fn tiles_fill_the_joined_map_each_from_its_own_keep_rectangle() {
+        use super::super::preprocess::tiles;
+        // Each tile's map holds its own index, so the joined map names which
+        // tile every pixel came from.
+        let (width, height) = (300_u32, 200_u32);
+        let grid = tiles(width, height, 128, 32);
+        let mut joined = vec![255_u8; (width * height) as usize];
+        for (index, tile) in grid.iter().enumerate() {
+            let data = flat(
+                tile.columns.len as usize,
+                tile.rows.len as usize,
+                index as f32 / 255.0,
+            );
+            let map = ProbabilityMap {
+                data: Probabilities::Float(&data),
+                width: tile.columns.len as usize,
+                height: tile.rows.len as usize,
+            };
+            join_tile(&mut joined, width as usize, *tile, &map, 1.0, 1.0);
+        }
+        for y in 0..height {
+            for x in 0..width {
+                let owner = grid
+                    .iter()
+                    .position(|tile| {
+                        (tile.columns.keep_from..tile.columns.keep_to).contains(&x)
+                            && (tile.rows.keep_from..tile.rows.keep_to).contains(&y)
+                    })
+                    .unwrap();
+                let got = joined[(y * width + x) as usize];
+                assert_eq!(usize::from(got), owner, "({x}, {y})");
+            }
+        }
+    }
+
+    #[test]
+    fn a_tile_map_is_read_where_each_frame_pixel_falls() {
+        use super::super::preprocess::{Span, Tile};
+        // A tile at (10, 20), 8 x 4, whose map is HALF its size: map pixel
+        // (mx, my) holds (mx + 4 * my) / 10, and covers two frame pixels each
+        // way.
+        let span = |start: u32, len: u32| Span {
+            start,
+            len,
+            keep_from: start,
+            keep_to: start + len,
+        };
+        let tile = Tile {
+            columns: span(10, 8),
+            rows: span(20, 4),
+        };
+        let data: Vec<f32> = (0..2)
+            .flat_map(|my| (0..4).map(move |mx| (mx + 4 * my) as f32 / 10.0))
+            .collect();
+        let map = ProbabilityMap {
+            data: Probabilities::Float(&data),
+            width: 4,
+            height: 2,
+        };
+        let stride = 40;
+        // 255 is a value no map pixel here holds, so it marks "not written".
+        let mut joined = vec![255_u8; stride * 30];
+        join_tile(&mut joined, stride, tile, &map, 2.0, 2.0);
+        let at = |x: usize, y: usize| joined[y * stride + x];
+        assert_eq!(at(10, 20), quantise(0.0));
+        assert_eq!(at(11, 21), quantise(0.0));
+        assert_eq!(at(12, 20), quantise(0.1));
+        assert_eq!(at(17, 23), quantise(0.7));
+        // Outside the keep rectangle nothing is written.
+        assert_eq!(at(9, 20), 255);
+        assert_eq!(at(18, 20), 255);
+        assert_eq!(at(10, 24), 255);
+        // A degenerate factor writes nothing rather than indexing wildly.
+        let mut untouched = vec![255_u8; stride * 30];
+        join_tile(&mut untouched, stride, tile, &map, 0.0, 2.0);
+        assert!(untouched.iter().all(|&value| value == 255));
+    }
+
+    #[test]
+    fn a_line_crossing_a_tile_edge_is_one_box_in_the_joined_map() {
+        use super::super::preprocess::tiles;
+        // One text line, 200 x 12, across a 300 px frame split into tiles of
+        // 128: each tile's map shows the part of the line inside it, and the
+        // joined map gives ONE box that spans the line.
+        let (width, height) = (300_u32, 40_u32);
+        let inside = |x: u32, y: u32| (50..250).contains(&x) && (14..26).contains(&y);
+        let mut joined = vec![0_u8; (width * height) as usize];
+        let grid = tiles(width, height, 128, 32);
+        assert!(grid.len() > 1);
+        for tile in &grid {
+            let data: Vec<f32> = (0..tile.rows.len)
+                .flat_map(|y| {
+                    (0..tile.columns.len).map(move |x| {
+                        if inside(tile.columns.start + x, tile.rows.start + y) {
+                            0.9
+                        } else {
+                            0.0
+                        }
+                    })
+                })
+                .collect();
+            let map = ProbabilityMap {
+                data: Probabilities::Float(&data),
+                width: tile.columns.len as usize,
+                height: tile.rows.len as usize,
+            };
+            join_tile(&mut joined, width as usize, *tile, &map, 1.0, 1.0);
+        }
+        let map = ProbabilityMap {
+            data: Probabilities::Byte(&joined),
+            width: width as usize,
+            height: height as usize,
+        };
+        let boxes = boxes_from_map(
+            &map,
+            DetectorOptions::default(),
+            1.0,
+            1.0,
+            width as f32,
+            height as f32,
+        );
+        assert_eq!(boxes.len(), 1, "{boxes:?}");
+        let (min_x, _, max_x, _) = boxes[0].quad.bounds();
+        assert!(min_x < 50.0 && max_x > 249.0, "{min_x}..{max_x}");
     }
 }

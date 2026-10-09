@@ -224,25 +224,23 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             },
-            // The detector's cap on the longer side. Repeatable like
-            // `--drop-score`, and here for the same reason that one is: the
-            // founder's rig pass on 2026-09-04 found that an area wider than
-            // roughly 700 logical pixels stops reading, and `limit_side_len`
-            // scaling the frame down before the detector ever sees it is the
-            // named suspect. A hypothesis about a knob is worth exactly as much
-            // as the sweep that tests it.
-            ("--limit-side-len", Some(text)) => match text.parse::<u32>() {
+            // The detector's tile side. Repeatable like `--drop-score`. It was
+            // `--limit-side-len`, the cap on the longer side that scaled every
+            // large frame down, until `I-440` made the detector read at true
+            // size; a tile side changes only how a large frame is split, so a
+            // sweep over it should read the cards the same at every value.
+            ("--tile-side", Some(text)) => match text.parse::<u32>() {
                 Ok(limit) if limit >= preprocess::SIDE_MULTIPLE => limits.push(limit),
                 Ok(limit) => {
                     eprintln!(
-                        "--limit-side-len {limit} is below one {} px multiple, which would \
-                         round every frame to nothing",
+                        "--tile-side {limit} is below one {} px multiple, which is \
+                         the smallest tile the detector takes",
                         preprocess::SIDE_MULTIPLE
                     );
                     return ExitCode::FAILURE;
                 }
                 Err(error) => {
-                    eprintln!("--limit-side-len {text}: {error}");
+                    eprintln!("--tile-side {text}: {error}");
                     return ExitCode::FAILURE;
                 }
             },
@@ -262,7 +260,7 @@ fn main() -> ExitCode {
             // spelling instead of their argument list. Same choice as
             // `ocr_smoke.rs`, for the reason its review recorded.
             (
-                flag @ ("--models" | "--cards" | "--runtime" | "--drop-score" | "--limit-side-len"
+                flag @ ("--models" | "--cards" | "--runtime" | "--drop-score" | "--tile-side"
                 | "--filter"),
                 None,
             ) => {
@@ -282,7 +280,7 @@ fn main() -> ExitCode {
         drop_scores.push(PaddleOptions::default().drop_score);
     }
     if limits.is_empty() {
-        limits.push(PaddleOptions::default().limit_side_len);
+        limits.push(PaddleOptions::default().tile_side);
     }
 
     let manifest = cards_dir.join("cards.tsv");
@@ -326,7 +324,7 @@ fn main() -> ExitCode {
     // The full cross product, so a sweep over one knob at several values of the
     // other is one invocation rather than several a reader has to line up by
     // hand.
-    for &limit_side_len in &limits {
+    for &tile_side in &limits {
         for &drop_score in &drop_scores {
             let mut detector = PaddleOptions::default().detector;
             if let Some(value) = box_threshold {
@@ -337,7 +335,7 @@ fn main() -> ExitCode {
             }
             let options = PaddleOptions {
                 drop_score,
-                limit_side_len,
+                tile_side,
                 detector,
             };
             // Reloaded per combination rather than mutated: both knobs live in
@@ -349,7 +347,7 @@ fn main() -> ExitCode {
                 Err(error) => {
                     eprintln!(
                         "load failed at drop_score {drop_score}, \
-                         limit_side_len {limit_side_len}: {error}"
+                         tile_side {tile_side}: {error}"
                     );
                     return ExitCode::FAILURE;
                 }
@@ -359,7 +357,7 @@ fn main() -> ExitCode {
                 &cards,
                 &cards_dir,
                 drop_score,
-                limit_side_len,
+                tile_side,
                 detector.threshold,
                 detector.box_threshold,
             ) {
@@ -374,7 +372,7 @@ fn main() -> ExitCode {
 fn usage() {
     eprintln!(
         "usage: --models <dir> --cards <dir> [--runtime <dll>] \
-         [--drop-score <0.0..1.0>]... [--limit-side-len <px>]... \n         [--filter <substring>]"
+         [--drop-score <0.0..1.0>]... [--tile-side <px>]... \n         [--filter <substring>]"
     );
 }
 
@@ -384,7 +382,7 @@ fn measure(
     cards: &[Card],
     directory: &Path,
     drop_score: f32,
-    limit_side_len: u32,
+    tile_side: u32,
     det_threshold: f32,
     box_threshold: f32,
 ) -> Result<(), String> {
@@ -436,7 +434,7 @@ fn measure(
 
     println!();
     println!(
-        "=== drop_score {drop_score}, limit_side_len {limit_side_len}, \n         det_thresh {det_threshold}, box_thresh {box_threshold} ==="
+        "=== drop_score {drop_score}, tile_side {tile_side}, \n         det_thresh {det_threshold}, box_thresh {box_threshold} ==="
     );
     println!(
         "{} cards in {:.1} s ({:.0} ms per card)",
