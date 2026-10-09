@@ -156,11 +156,14 @@ pub struct DetectedBox {
     pub score: f32,
 }
 
-/// A probability map: one `f32` per pixel, row-major.
+/// A probability map: one probability per pixel, row-major, borrowed.
 ///
-/// Borrowed rather than owned because it comes straight out of an `ort` tensor
-/// and copying a 960x544 map per frame is 2 MB of pointless memcpy on the
-/// latency path.
+/// Two maps reach [`boxes_from_map`] through this type, and [`Probabilities`]
+/// says which: a tile's own map, [`Probabilities::Float`], borrowed straight out
+/// of the `ort` tensor so no copy sits on the latency path; and the joined map
+/// of a whole frame ([`join_tile`], `I-440`), [`Probabilities::Byte`], which the
+/// engine owns and lends here. Everything below reads it through [`Self::at`],
+/// so neither representation leaks past this type.
 #[derive(Debug, Clone, Copy)]
 pub struct ProbabilityMap<'a> {
     /// The probabilities, row-major, `width * height` of them.
