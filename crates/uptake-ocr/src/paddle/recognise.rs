@@ -487,11 +487,16 @@ pub fn stitch(decoded: Vec<(Piece, DecodedText)>, line_width: u32) -> DecodedTex
         let shared_to = left_piece.end as f32;
         let middle = f32::midpoint(shared_from, shared_to);
         let in_shared = |at: f32| at >= shared_from && at < shared_to;
+        // A piece's space in the shared stretch nearest `to`. Only the shared
+        // stretch: a space outside it is not a copy of one inside it, and
+        // joining at one would drop what lies between (review of `#133`,
+        // round 5).
         let nearest_space = |piece: &Piece, text: &DecodedText, to: f32| -> Option<f32> {
             text.characters
                 .iter()
                 .filter(|character| is_space(character))
                 .map(|character| centre(piece, text, character))
+                .filter(|&at| in_shared(at))
                 .min_by(|a, b| (a - to).abs().total_cmp(&(b - to).abs()))
         };
         // The right piece's copy of the left piece's space is the right
@@ -499,9 +504,7 @@ pub fn stitch(decoded: Vec<(Piece, DecodedText)>, line_width: u32) -> DecodedTex
         // one: a quarter of the shared stretch is several timesteps of
         // disagreement and still less than one word.
         let tolerance = (shared_to - shared_from) / 4.0;
-        if let Some(left_space) =
-            nearest_space(left_piece, left, middle).filter(|&at| in_shared(at))
-        {
+        if let Some(left_space) = nearest_space(left_piece, left, middle) {
             keep_to[index] = left_space;
             keep_from[index + 1] = nearest_space(right_piece, right, left_space)
                 .filter(|at| (at - left_space).abs() <= tolerance)
@@ -541,7 +544,7 @@ pub fn stitch(decoded: Vec<(Piece, DecodedText)>, line_width: u32) -> DecodedTex
                 );
                 let mut near: Vec<(usize, f32)> = gaps(right_piece, right)
                     .into_iter()
-                    .filter(|&(_, at)| (at - cut).abs() <= tolerance)
+                    .filter(|&(_, at)| in_shared(at) && (at - cut).abs() <= tolerance)
                     .collect();
                 near.sort_by(|a, b| (a.1 - cut).abs().total_cmp(&(b.1 - cut).abs()));
                 keep_from[index + 1] = near
@@ -1461,6 +1464,54 @@ b
             !joined.text.is_empty(),
             "the part that read is still decoded"
         );
+    }
+
+    #[test]
+    fn a_right_piece_that_missed_the_join_space_does_not_join_at_one_outside() {
+        // Review of #133, round 5. The left piece joins at its space at
+        // timestep 58, near the shared stretch's end (columns 320..480). The
+        // right piece misread that space, and has another at 62, just past
+        // the stretch and within the tolerance; joining there dropped the
+        // letter at 60. Now the right piece joins at the left one's column.
+        let letters = "abcdefghijklmnopqrstuvwxyzabcdefghijklm";
+        let line: Vec<(&str, usize)> = (0..letters.len())
+            .map(|index| {
+                let at = 2 + 2 * index;
+                let text = if at == 30 || at == 58 || at == 62 {
+                    " "
+                } else {
+                    &letters[index..=index]
+                };
+                (text, at)
+            })
+            .collect();
+        let left: Vec<(&str, usize)> = line.iter().copied().filter(|&(_, at)| at < 60).collect();
+        let right: Vec<(&str, usize)> = line
+            .iter()
+            .copied()
+            .filter(|&(_, at)| at >= 40 && at != 58)
+            .map(|(text, at)| (text, at - 40))
+            .collect();
+        let joined = stitch(
+            vec![
+                (Piece { start: 0, end: 480 }, piece_read(&left, 60, 0.9)),
+                (
+                    Piece {
+                        start: 320,
+                        end: 800,
+                    },
+                    piece_read(&right, 60, 0.9),
+                ),
+            ],
+            800,
+        );
+        // Everything but the space the right piece never read.
+        let expected: String = line
+            .iter()
+            .filter(|&&(_, at)| at != 58)
+            .map(|(text, _)| *text)
+            .collect();
+        assert_eq!(joined.text, expected);
     }
 
     #[test]
