@@ -320,7 +320,9 @@ def write_manifest(cards: list[dict[str, object]], path: Path) -> None:
 
 #: The width-sweep set: one line of text, identical in every card, on canvases
 #: of increasing width. Chosen to straddle `limit_side_len` (960) so the
-#: downscaling boundary is inside the range rather than at its edge.
+#: downscaling boundary is inside the range rather than at its edge. `I-440`
+#: removed that downscaling; the range now straddles the detector's 768 px
+#: tile instead, so the sweep still crosses a boundary in the pipeline.
 SWEEP_WIDTHS = (608, 672, 736, 800, 864, 928, 992, 1056, 1120, 1184, 1248, 1312)
 
 #: The line the sweep uses. Six words at a comfortable size: the point is that

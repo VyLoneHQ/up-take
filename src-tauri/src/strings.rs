@@ -106,6 +106,13 @@ texts! {
     MenuTypeUpscale => "menu.type.upscale",
     /// Type list: convert to an OCR area.
     MenuTypeOcr => "menu.type.ocr",
+    /// Area menu: an OCR area's Behaviour list (roadmap `1.45`). The settings
+    /// pane's own label, so the menu and the pane name the choice alike.
+    MenuOcrBehaviour => "settings.ocr_behaviour.name",
+    /// Behaviour list: draw over the screen.
+    MenuOcrInPlace => "settings.ocr_behaviour.in_place",
+    /// Behaviour list: draw in the area's own panel.
+    MenuOcrRendered => "settings.ocr_behaviour.rendered",
     /// Area menu: the row that opens the depth list.
     MenuDepth => "menu.depth",
     /// Depth list: always above other areas.

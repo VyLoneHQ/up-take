@@ -36,7 +36,7 @@ use uptake_core::bitmap::RgbaBitmap;
 use uptake_core::geometry::{Point, Rect};
 
 use crate::engine::{Character, Engine, EngineError, Recognition, TextBlock, Word};
-use detect::{DetectorOptions, ProbabilityMap};
+use detect::{DetectorOptions, Probabilities, ProbabilityMap};
 use reading_order::Placed;
 use recognise::{CharacterDictionary, DecodedText};
 
@@ -72,8 +72,10 @@ pub struct PaddleConfig {
 pub struct PaddleOptions {
     /// DB post-processing thresholds.
     pub detector: DetectorOptions,
-    /// Cap on the detector's input side length.
-    pub limit_side_len: u32,
+    /// Side of one detector tile, in frame pixels: frames larger than this are
+    /// read in overlapping tiles (`I-440`). It bounds one tensor's memory, not
+    /// the text's size, which is always the size on screen.
+    pub tile_side: u32,
     /// Recognitions below this confidence are dropped.
     ///
     /// PP-OCR's `drop_score`. A low-confidence line is usually an artifact --
@@ -86,7 +88,7 @@ impl Default for PaddleOptions {
     fn default() -> Self {
         Self {
             detector: DetectorOptions::default(),
-            limit_side_len: preprocess::DEFAULT_LIMIT_SIDE_LEN,
+            tile_side: preprocess::DEFAULT_TILE_SIDE,
             drop_score: 0.5,
         }
     }
@@ -214,9 +216,56 @@ impl PaddleEngine {
     }
 
     /// Runs the detector and returns the boxes it found, in frame coordinates.
+    ///
+    /// The frame is read at its true size, one tile at a time
+    /// ([`preprocess::tiles`], `I-440`). Each tile's probability map fills its
+    /// own keep rectangle of ONE map the size of the frame, and the boxes are
+    /// found once, on that map. So a line that crosses a tile's edge is one
+    /// region and one box, exactly as if the frame had been read whole, and no
+    /// box has to be matched or merged across tiles.
     fn detect(&mut self, frame: &RgbaBitmap) -> Result<Vec<detect::DetectedBox>, EngineError> {
-        let Some(input) = preprocess::detector_input(frame, self.options.limit_side_len) else {
+        let (width, height) = (frame.width() as usize, frame.height() as usize);
+        if width == 0 || height == 0 {
             return Ok(Vec::new());
+        }
+        // One byte a pixel ([`detect::Probabilities::Byte`]): this map is the
+        // one allocation that grows with the area, and at 32 bits it took a
+        // 7680 x 4320 area past the 500 MB target (review of `#133`, round 7).
+        let mut joined = vec![0_u8; width * height];
+        for tile in preprocess::tiles(
+            frame.width(),
+            frame.height(),
+            self.options.tile_side,
+            preprocess::TILE_OVERLAP,
+        ) {
+            self.detect_tile(frame, tile, &mut joined, width)?;
+        }
+        let map = ProbabilityMap {
+            data: Probabilities::Byte(&joined),
+            width,
+            height,
+        };
+        Ok(detect::boxes_from_map(
+            &map,
+            self.options.detector,
+            1.0,
+            1.0,
+            width as f32,
+            height as f32,
+        ))
+    }
+
+    /// Runs the detector over one tile and writes its probabilities into the
+    /// tile's keep rectangle of `joined`, a frame-sized map `stride` wide.
+    fn detect_tile(
+        &mut self,
+        frame: &RgbaBitmap,
+        tile: preprocess::Tile,
+        joined: &mut [u8],
+        stride: usize,
+    ) -> Result<(), EngineError> {
+        let Some(input) = preprocess::detector_input(frame, tile) else {
+            return Ok(());
         };
         let shape: Vec<i64> = input.shape().iter().map(|&value| value as i64).collect();
         let tensor = TensorRef::from_array_view((shape, input.tensor.as_slice()))
@@ -244,27 +293,23 @@ impl PaddleEngine {
                 )));
             }
         };
-
         let map = ProbabilityMap {
-            data,
+            data: Probabilities::Float(data),
             width: map_width,
             height: map_height,
         };
         // The map may be a different size from the tensor we sent, so the ratio
-        // home is computed against the MAP, not against the resize. One rule,
-        // defined and tested in `preprocess`; this used to be a second copy of
-        // it, and the copy `DetectorInput` carried was the dead one.
-        let (scale_x, scale_y) =
-            preprocess::scale_to_source(frame.width(), frame.height(), map_width, map_height);
-
-        Ok(detect::boxes_from_map(
-            &map,
-            self.options.detector,
-            scale_x,
-            scale_y,
-            frame.width() as f32,
-            frame.height() as f32,
-        ))
+        // home is computed against the MAP, not against the input. One rule,
+        // defined and tested in `preprocess`. For PP-OCRv6_small both factors
+        // are 1.0 and joining the tile is a copy.
+        let (scale_x, scale_y) = input.scale_to_source(
+            input.content_width,
+            input.content_height,
+            map_width,
+            map_height,
+        );
+        detect::join_tile(joined, stride, tile, &map, scale_x, scale_y);
+        Ok(())
     }
 
     /// Runs the recogniser over one crop.
@@ -300,9 +345,30 @@ impl PaddleEngine {
         frame: &RgbaBitmap,
         quad: &quad::Quad,
     ) -> Result<Option<DecodedText>, EngineError> {
-        let Some(crop) = recognise::rectify(frame, quad) else {
+        // A line wider than one piece is read in overlapping pieces and joined
+        // (`I-440`); a line that fits is one piece and reads as it always did.
+        let Some(line_width) = recognise::line_width(quad) else {
             return Ok(None);
         };
+        let mut decoded = Vec::new();
+        for piece in recognise::pieces(
+            line_width,
+            recognise::REC_PIECE_WIDTH,
+            recognise::REC_PIECE_OVERLAP,
+        ) {
+            let Some(crop) = recognise::rectify_piece(frame, quad, line_width, piece) else {
+                return Ok(None);
+            };
+            decoded.push((piece, self.recognise_input(&crop)?));
+        }
+        Ok(Some(recognise::stitch(decoded, line_width)))
+    }
+
+    /// Runs the recogniser over one prepared crop and decodes what it said.
+    fn recognise_input(
+        &mut self,
+        crop: &recognise::RecogniserInput,
+    ) -> Result<DecodedText, EngineError> {
         let shape: Vec<i64> = crop.shape().iter().map(|&value| value as i64).collect();
         let tensor = TensorRef::from_array_view((shape, crop.tensor.as_slice()))
             .map_err(|error| EngineError::Inference(format!("crop rejected: {error}")))?;
@@ -333,11 +399,7 @@ impl PaddleEngine {
             )));
         }
 
-        Ok(Some(recognise::ctc_decode(
-            data,
-            class_count,
-            &self.dictionary,
-        )))
+        Ok(recognise::ctc_decode(data, class_count, &self.dictionary))
     }
 }
 
@@ -1269,7 +1331,7 @@ c",
         // these owes the same evidence the two above have.
         assert!((options.detector.unclip_ratio - 1.5).abs() < f32::EPSILON);
         assert!((options.drop_score - 0.5).abs() < f32::EPSILON);
-        assert_eq!(options.limit_side_len, preprocess::DEFAULT_LIMIT_SIDE_LEN);
+        assert_eq!(options.tile_side, preprocess::DEFAULT_TILE_SIDE);
     }
 
     /// The two thresholds are ordered, and the order is what makes the pipeline

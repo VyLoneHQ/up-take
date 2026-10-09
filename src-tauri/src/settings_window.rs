@@ -167,6 +167,12 @@ fn build(app: &AppHandle) -> Result<(), String> {
             state: None,
             radius: Some(6.0),
             color: None,
+            // New in tauri-utils 2.10 (Tauri 2.12): interactive Liquid Glass,
+            // which its own docs scope to macOS 27 and Liquid Glass effects
+            // only. It does nothing to Windows' acrylic, so `false` is today's
+            // behaviour, stated rather than left to a `Default` that does not
+            // exist for this struct (I-442).
+            interactive: false,
         })
         .is_ok();
     ACRYLIC.store(applied, Ordering::SeqCst);
@@ -316,15 +322,10 @@ pub fn settings_write(app: AppHandle, settings: Settings) -> Result<(), String> 
         fail(error);
     }
 
-    // Only on the switch TO in place. A Rendered area is not re-read when it
-    // moves, so its words describe where it was; switching to In place would
-    // draw and select them over whatever it covers now (review of `#115`,
-    // round 7). Every OCR area reads again instead.
-    if settings.ocr_behaviour != previous.ocr_behaviour
-        && settings.ocr_behaviour == crate::settings::OcrBehaviour::InPlace
-    {
-        crate::placement::reread_every_in_place_ocr(&app);
-    }
+    // The OCR behaviour is not applied to any area here. Since roadmap 1.45 it
+    // is the default a NEW OCR area takes, and an existing area changes only
+    // from its own menu (`overlay::set_area_ocr_behaviour`), which is where the
+    // re-read on a switch to In place now lives.
 
     // Only when it changed. Writing the Run key on every save would mean a
     // user who never touches that switch still has their registry written

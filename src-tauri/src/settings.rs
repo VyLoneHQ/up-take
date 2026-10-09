@@ -106,20 +106,12 @@ pub enum HeldPictureQuality {
     Exact,
 }
 
-/// How an OCR area shows what it read (`ADR-0046`, roadmap `1.41`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum OcrBehaviour {
-    /// The screen under the area stays visible: the area draws its border and
-    /// a faint mark under each word it read, and in Placement the words can be
-    /// selected. **The default, by the founder's decision of 2026-09-25**
-    /// (*"I also want the "in place" version to be the default one"*).
-    #[default]
-    InPlace,
-    /// The area covers the screen with its own panel and draws the text there,
-    /// which is how every OCR area looked before `ADR-0046`.
-    Rendered,
-}
+/// How an OCR area shows what it read (`ADR-0046`). **Since roadmap `1.45` the
+/// setting is only what a NEW OCR area starts with**: each area then has its
+/// own, chosen from its right-click menu (`ADR-0046` decision 9). The type is
+/// the area model's, re-exported here so the setting and the area cannot come
+/// to name one choice two ways, and its wire names are unchanged.
+pub use uptake_core::area::OcrBehaviour;
 
 /// Which language the interface is shown in (roadmap 1.38).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -195,7 +187,8 @@ pub struct Settings {
     pub language: Language,
 
     // ---- OCR -----------------------------------------------------------
-    /// How an OCR area shows what it read.
+    /// How a new OCR area shows what it read. Each area keeps its own after
+    /// that (roadmap `1.45`).
     pub ocr_behaviour: OcrBehaviour,
 }
 
@@ -453,10 +446,6 @@ mod tests {
                 ),
                 (
                     "Language",
-                    "a field of Settings, covered by its key table and its wire-name test",
-                ),
-                (
-                    "OcrBehaviour",
                     "a field of Settings, covered by its key table and its wire-name test",
                 ),
             ],

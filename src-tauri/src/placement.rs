@@ -18,9 +18,12 @@
 //!   cursor of its own (no `WM_SETCURSOR` ever reaches it).
 //! - **`Living`** leaves the pointer to the user's apps, and the hook takes only
 //!   what the area model assigns to areas: a press on the topmost *interactive*
-//!   area (`AreaStore::hit_test`; pass-through areas are invisible to input,
-//!   V-7) is swallowed and acted on (left raises the area per §3.2a recency,
-//!   right opens its menu); every other press is passed through untouched.
+//!   area (`AreaStore::hit_test_with`; pass-through bodies are invisible to
+//!   input, V-7, and so is the body of an in-place OCR area that holds no text,
+//!   `ADR-0047`) is swallowed and acted on (left raises the area per §3.2a
+//!   recency and moves, resizes or, over OCR text, selects; right opens its
+//!   menu); every other press is passed through untouched. The keyboard hook
+//!   takes one key here, `Ctrl+C`, and only while an OCR selection shows.
 //!   **A NARROW cursor override while the pointer is on an area** -- `OCR_NORMAL`,
 //!   `OCR_IBEAM` and `OCR_HAND`, see [`LIVING_CURSORS`]. This line read *"No
 //!   cursor override: the pointer belongs to whatever is underneath"* until
@@ -119,7 +122,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
-use uptake_core::area::{AreaId, AreaType, Input, Layer};
+use uptake_core::area::{AreaId, AreaType, Input, Layer, OcrBehaviour};
 use uptake_core::geometry::{Point, Rect};
 use uptake_core::interaction::{self, Handle, Resize};
 
@@ -255,7 +258,9 @@ enum Mode {
 static MODE: AtomicU8 = AtomicU8::new(Mode::Hidden as u8);
 
 /// Whether UP-TAKE is in Placement, for callers outside this module that act
-/// only there (roadmap `1.41`'s OCR selection and copy, per `ADR-0016`).
+/// only there: the page's `Ctrl+C` and `Ctrl+A` (roadmap `1.41`). Since roadmap
+/// `1.46` an OCR selection is made in Living too, and copied there by
+/// [`PlacementKey::CopySelection`] rather than through those two.
 pub(crate) fn is_placing() -> bool {
     mode() == Mode::Placement
 }
@@ -504,6 +509,10 @@ enum MenuAction {
     /// current type is drawn ticked. Clicking that one is harmless: the store
     /// reports nothing changed and no capture is discarded.
     SetType(AreaType),
+    /// Set how an OCR area shows what it read (roadmap `1.45`, `ADR-0046`
+    /// decision 9). Radio rows like [`MenuAction::SetType`], so the action
+    /// carries the behaviour the row names.
+    SetOcrBehaviour(OcrBehaviour),
     /// Remove the area.
     Dismiss,
     /// Capture the area and publish it to the clipboard alone (task 1.9,
@@ -556,7 +565,8 @@ enum CursorShape {
     Arrow,
     /// **The user's own text caret.** Restore-only until roadmap `1.41`, which
     /// also SHOWS it in Placement over the body of an in-place OCR area (since
-    /// `1.44`; over its words only, before) and while a selection is being
+    /// `1.44`; over its words only, before; in Living too since `1.46`, once the
+    /// area holds text) and while a selection is being
     /// dragged: the same caret the user sees over
     /// text everywhere else, because what is under the pointer is text.
     ///
@@ -1789,13 +1799,26 @@ fn pump_hover(app: &AppHandle, state: &mut PumpState) {
         // menu instead of moving anything. The cursor promised a grab the press
         // path would not perform, which is the one thing ADR-0025 says it must
         // never do.
+        //
+        // **Over the body of an in-place OCR area that holds text, the I-beam**
+        // (roadmap 1.46), as in Placement: a press there selects, and the
+        // cursor is the only thing that says so before the press. The body
+        // only reaches `grabbed` when it holds text (the body rule), so an
+        // empty one shows the user's own cursor, as any pass-through body does.
         set_living_cursor(match *lock(&GESTURE) {
             Some(gesture) => Some(gesture_cursor(gesture)),
             None => pointer.as_ref().and_then(|resolved| {
                 resolved
                     .grabbed
-                    .or(resolved.chord)
-                    .map(|(_, _, handle)| CursorShape::for_handle(handle))
+                    .map(|(id, _, handle)| match handle {
+                        Handle::Body if selects_at(app, id) => CursorShape::IBeam,
+                        _ => CursorShape::for_handle(handle),
+                    })
+                    .or_else(|| {
+                        resolved
+                            .chord
+                            .map(|(_, _, handle)| CursorShape::for_handle(handle))
+                    })
             }),
         });
         // Compared as one tuple rather than field by field: a hover that changes
@@ -2089,6 +2112,51 @@ enum PlacementKey {
     /// `Ctrl+A` without `Alt` or the Windows key: select all the text of the OCR
     /// area under the cursor. The page's `isSelectAllKey`.
     SelectAll,
+    /// `Ctrl+C` in **Living**, taken only while an OCR selection is showing
+    /// (roadmap `1.46`, `ADR-0047` decision 5): copy that selection and nothing
+    /// else. A variant of its own rather than [`Self::Copy`] because the two do
+    /// different things with the same chord: Placement's copies everything an
+    /// area read when nothing is selected, and in Living the key is only ours
+    /// because something is.
+    CopySelection,
+}
+
+/// The virtual key of `C`, which copy is matched on in either mode.
+const VK_C: u32 = 0x43;
+
+/// Which key Living takes, if any: `Ctrl+C` without `Alt` or the Windows key,
+/// and only while a selection is showing (`ADR-0047` decision 5). Pure.
+///
+/// **No other key, ever.** In Living the keyboard is the user's app's, and the
+/// hook watches every key typed anywhere on the machine; the selection is the
+/// only reason one chord is borrowed, so the moment it is cleared the chord is
+/// the app's again.
+const fn living_key(
+    vk: u32,
+    ctrl: bool,
+    alt: bool,
+    win: bool,
+    selection_showing: bool,
+) -> Option<PlacementKey> {
+    if vk == VK_C && ctrl && !alt && !win && selection_showing {
+        Some(PlacementKey::CopySelection)
+    } else {
+        None
+    }
+}
+
+/// Whether an OCR selection is showing: some area that reads in place, the one
+/// behaviour that draws a selection, has one. Asked by the keyboard hook only
+/// for `Ctrl+C` in Living, so its cost is paid per copy, not per keystroke.
+/// Per area since roadmap `1.45`, so a selection left on an area since switched
+/// to Rendered does not take the key; the switch drops it anyway.
+fn selection_showing() -> bool {
+    crate::ocr::any_selection()
+        && APP.get().is_some_and(|app| {
+            overlay::areas_top_down(app)
+                .into_iter()
+                .any(|(id, _)| reads_in_place(app, id) && crate::ocr::selection_of(id).is_some())
+        })
 }
 
 /// Which Placement key this is, if any, by the page's own rules. Pure.
@@ -2110,7 +2178,6 @@ fn placement_key(
     const VK_SPACE: u32 = 0x20;
     const VK_DELETE: u32 = 0x2E;
     const VK_A: u32 = 0x41;
-    const VK_C: u32 = 0x43;
     match vk {
         v if v == u32::from(VK_ESCAPE) => Some(PlacementKey::Escape),
         VK_DELETE => Some(PlacementKey::Remove),
@@ -2166,11 +2233,12 @@ enum KeyAction {
 
 /// The keyboard hook's whole rule. Pure, so it is tested without a desktop.
 ///
-/// A press is taken only in Placement, only for one of [`placement_key`]'s
-/// keys, and only when the foreground window is not UP-TAKE's own: there the
-/// page already receives the key, and taking it here too would act on one
-/// press twice. Once a press is taken, everything until its release belongs to
-/// it, whatever the mode is by then.
+/// A press is taken in Placement for one of [`placement_key`]'s keys, and in
+/// Living for [`living_key`]'s one (roadmap `1.46`); never in Hidden, and never
+/// a key that belongs to the other mode. Either way only when the foreground
+/// window is not UP-TAKE's own: there the page already receives the key, and
+/// taking it here too would act on one press twice. Once a press is taken,
+/// everything until its release belongs to it, whatever the mode is by then.
 fn key_action(
     mode: Mode,
     key: Option<PlacementKey>,
@@ -2181,10 +2249,13 @@ fn key_action(
     if taken {
         return KeyAction::Swallow;
     }
+    let in_mode = |key: PlacementKey| match mode {
+        Mode::Placement => key != PlacementKey::CopySelection,
+        Mode::Living => key == PlacementKey::CopySelection,
+        Mode::Hidden => false,
+    };
     match key {
-        Some(key) if mode == Mode::Placement && is_down && !foreground_is_ours => {
-            KeyAction::Act(key)
-        }
+        Some(key) if in_mode(key) && is_down && !foreground_is_ours => KeyAction::Act(key),
         _ => KeyAction::Pass,
     }
 }
@@ -2205,6 +2276,10 @@ fn act_on(app: &AppHandle, key: PlacementKey) {
         PlacementKey::Arm(kind) => overlay::overlay_arm_type(app.clone(), kind.to_string()),
         PlacementKey::Copy => overlay::overlay_ocr_copy_focused(app.clone()),
         PlacementKey::SelectAll => overlay::overlay_ocr_select_all_focused(app.clone()),
+        PlacementKey::CopySelection => {
+            overlay::ocr_copy_selection(app);
+            Ok(())
+        }
     };
     if let Err(error) = outcome {
         crate::diagnostics::trouble("placement: a key taken from another program failed", &error);
@@ -2265,15 +2340,30 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
                 was_taken = false;
             }
             last_seen.store(event.time, Ordering::SeqCst);
-            let key = if was_taken || mode() != Mode::Placement {
-                None
-            } else {
-                let ctrl = vk_is_down(i32::from(VK_CONTROL));
-                let alt = vk_is_down(i32::from(VK_MENU));
-                let win = vk_is_down(i32::from(VK_LWIN)) || vk_is_down(i32::from(VK_RWIN));
-                // Only a bare key can arm, so only a bare key needs the layout.
-                let typed = (!ctrl && !alt && !win).then(|| layout_char(vk)).flatten();
-                placement_key(vk, typed, ctrl, alt, win)
+            let modifiers = || {
+                (
+                    vk_is_down(i32::from(VK_CONTROL)),
+                    vk_is_down(i32::from(VK_MENU)),
+                    vk_is_down(i32::from(VK_LWIN)) || vk_is_down(i32::from(VK_RWIN)),
+                )
+            };
+            let key = match mode() {
+                _ if was_taken => None,
+                Mode::Placement => {
+                    let (ctrl, alt, win) = modifiers();
+                    // Only a bare key can arm, so only a bare key needs the layout.
+                    let typed = (!ctrl && !alt && !win).then(|| layout_char(vk)).flatten();
+                    placement_key(vk, typed, ctrl, alt, win)
+                }
+                // Living watches every key typed on the machine, so `C` is the
+                // only one that reads anything at all, and only `Ctrl+C` asks
+                // whether a selection shows (roadmap 1.46).
+                Mode::Living if vk == VK_C => {
+                    let (ctrl, alt, win) = modifiers();
+                    let showing = ctrl && !alt && !win && selection_showing();
+                    living_key(vk, ctrl, alt, win, showing)
+                }
+                Mode::Living | Mode::Hidden => None,
             };
             // The foreground is asked only about a key that could be taken.
             let ours = key.is_some() && foreground_is_ours();
@@ -2889,11 +2979,18 @@ fn handle_mouse(wparam: WPARAM, lparam: LPARAM) -> bool {
             // underneath never receives the right-click it gets today, which is
             // strictly worse than not claiming at all.
             Mode::Living => {
+                // A right press clears every selection but the one of the area it
+                // opens the menu over, as a left press does
+                // (`clear_selections_except`), so that menu can still act on it.
+                let target = APP
+                    .get()
+                    .and_then(|app| pointer_target(app, point).map(|area| area.id));
+                if let Some(app) = APP.get() {
+                    clear_selections_except(app, target);
+                }
                 let claimed = lock(&MENU).is_some()
                     || crate::first_run::hit(point).is_some()
-                    || APP
-                        .get()
-                        .is_some_and(|app| pointer_target(app, point).is_some());
+                    || target.is_some();
                 if claimed {
                     RIGHT_PENDING.store(true, Ordering::SeqCst);
                 }
@@ -3051,11 +3148,13 @@ fn start_precapture(gesture: Gesture, point: Point) {
 /// manager); otherwise the press belongs to the user's apps and passes
 /// through untouched. Returns whether the event is swallowed.
 ///
-/// Living never starts drags: moving and resizing are `Placement` gestures,
-/// so [`DRAGGING`] is set only for the menu-row press, where the existing
-/// release path ([`finish_gesture`] → [`activate_menu_item`]) implements the
-/// press-and-release-on-target contract. A raised area's press needs nothing
-/// on release beyond being swallowed, which [`LEFT_PENDING`] alone provides.
+/// ⚠️ This said *"Living never starts drags"* until roadmap `1.46`, and it had
+/// been false since task 1.17(a) gave Living its own move and resize (the code
+/// below says so). Since `1.46` a press on the body of an in-place OCR area
+/// that holds text starts a selection drag here too, and a press on one of a
+/// selection's handles moves that end, as in Placement (`ADR-0047`). Every
+/// gesture started here sets [`DRAGGING`] and [`LEFT_PENDING`], and the release
+/// path ([`finish_gesture`]) is the one Placement uses.
 fn living_lbutton_down(point: Point) -> bool {
     if menu_contains(point) {
         let gesture = match menu_item_at(point) {
@@ -3115,11 +3214,47 @@ fn living_lbutton_down(point: Point) -> bool {
     // pays nothing for a feature it is not using. This runs inside the
     // `WH_MOUSE_LL` callback, where time spent is time Windows counts against
     // `LowLevelHooksTimeout`.
-    let grabbed = overlay::interactive_area_handle_at(app, point).or_else(|| {
-        move_chord_held()
-            .then(|| overlay::chord_movable_area_at(app, point))
-            .flatten()
-    });
+    //
+    // **Roadmap 1.46 (`ADR-0047`): an in-place OCR area that holds text takes
+    // its body's presses as a selection**, exactly as in Placement (`1.44`):
+    // the inside never moves it, a drag selects, a plain click selects nothing,
+    // and only the grab bar and the border move or resize it. One that holds
+    // no text passes them through, which `interactive_area_handle_at` already
+    // answers through the body rule. Before 1.46 the body press here was
+    // always a move, so dragging over text in Living carried the area away.
+    //
+    // A press that this area does not take clears its selection
+    // (`clear_selections_except`), and that is also what gives `Ctrl+C` back to
+    // the user's app. It runs here, after the menu and the coach have taken
+    // their presses: a press on the area menu's Copy row must still find the
+    // selection it copies.
+    if let Some(gesture) = selection_handle_press(app, point, true) {
+        if let Gesture::Select { id, .. } = gesture {
+            clear_selections_except(app, Some(id));
+            raise_and_emit(app, id);
+        }
+        START_X.store(point.x, Ordering::SeqCst);
+        START_Y.store(point.y, Ordering::SeqCst);
+        CUR_X.store(point.x, Ordering::SeqCst);
+        CUR_Y.store(point.y, Ordering::SeqCst);
+        *lock(&GESTURE) = Some(gesture);
+        DRAGGING.store(true, Ordering::SeqCst);
+        LEFT_PENDING.store(true, Ordering::SeqCst);
+        return true;
+    }
+    // Which route grabbed the area matters for the body: the chord is a move by
+    // definition (ADR-0024 section 3), whatever the area would do with a plain
+    // press on the same pixels.
+    let (grabbed, chord) = match overlay::interactive_area_handle_at(app, point) {
+        Some(grabbed) => (Some(grabbed), false),
+        None => (
+            move_chord_held()
+                .then(|| overlay::chord_movable_area_at(app, point))
+                .flatten(),
+            true,
+        ),
+    };
+    clear_selections_except(app, grabbed.map(|(id, _, _)| id));
     let Some((id, bounds, handle)) = grabbed else {
         return false;
     };
@@ -3136,14 +3271,7 @@ fn living_lbutton_down(point: Point) -> bool {
     CUR_Y.store(point.y, Ordering::SeqCst);
     // Raise first, so the gesture acts on an area that is already topmost:
     // §3.2a's "the area you last touched is on top" (ADR-0016), unchanged.
-    if overlay::raise_area(app, id)
-        && let Err(error) = overlay::emit_areas(app)
-    {
-        crate::diagnostics::trouble(
-            "placement: raised an area but could not emit the new set",
-            &error,
-        );
-    }
+    raise_and_emit(app, id);
     *lock(&GESTURE) = Some(match handle {
         Handle::Close => Gesture::Close {
             id,
@@ -3165,11 +3293,57 @@ fn living_lbutton_down(point: Point) -> bool {
         // where the pointer is. The chord is resolved in `chord_movable_area_at`
         // precisely so that it can say `Body` and stop being a special case by
         // the time it gets here.
+        //
+        // **Roadmap 1.46 splits the first producer.** A plain press on the body
+        // of an in-place OCR area that holds text selects, through the same
+        // `select_or_move` Placement uses, so the two modes cannot come to
+        // differ about what the inside of an OCR area does. The chord still
+        // moves.
+        Handle::Body if !chord => select_or_move(app, id, bounds, point),
         Handle::Body | Handle::Bar => Gesture::Move { id, start: bounds },
     });
     DRAGGING.store(true, Ordering::SeqCst);
     LEFT_PENDING.store(true, Ordering::SeqCst);
     true
+}
+
+/// Raises `id` to the top of its tier and tells the page, logging a failed emit.
+fn raise_and_emit(app: &AppHandle, id: AreaId) {
+    if overlay::raise_area(app, id)
+        && let Err(error) = overlay::emit_areas(app)
+    {
+        crate::diagnostics::trouble(
+            "placement: raised an area but could not emit the new set",
+            &error,
+        );
+    }
+}
+
+/// Clears every OCR selection except `owner`'s: a Living press keeps a
+/// selection only when the area holding it is the one that takes the press.
+///
+/// `ADR-0047`'s session default, the one the founder was shown, reads *"a
+/// selection is cleared by a press anywhere outside its area"*. **This is that
+/// rule stated by who takes the press rather than by where it lands**, and the
+/// difference is exactly the case the first version got wrong (review of
+/// `#126`, round 1): it kept a selection for any press inside the area's bounds
+/// or on its handle, so on an OCR area set to pass clicks through, a press on
+/// the handle went to the app underneath and the selection stayed, and with it
+/// the hook's claim on `Ctrl+C`. Every press that reaches the user's app now
+/// clears every selection, because it has no owner here.
+///
+/// Living only. Nothing here claims the press. **The first question is the
+/// cheap one** (does any selection exist?), because this runs on every press on
+/// the machine while the overlay is visible.
+fn clear_selections_except(app: &AppHandle, owner: Option<AreaId>) {
+    if !crate::ocr::any_selection() {
+        return;
+    }
+    for (id, _) in overlay::areas_top_down(app) {
+        if Some(id) != owner && crate::ocr::clear_selection(id) {
+            overlay::emit_ocr_selection(app, id, None);
+        }
+    }
 }
 
 /// How far up the z-order [`shadowed_by_another_window`] will walk before giving
@@ -3314,25 +3488,16 @@ fn shadowed_by_another_window(point: Point) -> bool {
 /// Takes the store lock, which is safe here and would not be on every mouse
 /// *move*: a press happens once per gesture, so this runs at click rate rather
 /// than at the mouse's report rate. See [`pump`] for the moves.
-/// Reads a moved or resized OCR area again, if OCR areas read in place.
+/// Reads a moved or resized OCR area again, if it reads in place.
 ///
 /// Only in place: a *Rendered* area shows text rather than marks over the
 /// screen, and it has never re-read on a move, which this change leaves alone.
-fn reread_in_place_ocr(app: &AppHandle, id: AreaId) {
+pub(crate) fn reread_in_place_ocr(app: &AppHandle, id: AreaId) {
     if !reads_in_place(app, id) {
         return;
     }
     if let Some(bounds) = overlay::area_bounds(app, id) {
         crate::ocr::reread_area(app, id, bounds);
-    }
-}
-
-/// Reads every OCR area again, if OCR areas read in place: called when the
-/// behaviour switches to In place, because a Rendered area kept the words of
-/// wherever it was last read.
-pub(crate) fn reread_every_in_place_ocr(app: &AppHandle) {
-    for (id, _) in overlay::areas_top_down(app) {
-        reread_in_place_ocr(app, id);
     }
 }
 
@@ -3342,14 +3507,14 @@ pub(crate) fn reread_every_in_place_ocr(app: &AppHandle) {
 /// to hit with a mouse.
 const SELECTION_HANDLE_REACH: i32 = 14;
 
-/// Whether `id` is an OCR area and OCR areas read in place: the two conditions
-/// every word gesture needs. The type is asked of the store rather than
-/// inferred from the words `ocr.rs` holds, so an area converted away from OCR
-/// can never be selected even if its words outlived the conversion (review of
-/// `#115`, round 1).
+/// Whether `id` is an OCR area that reads in place: the condition every
+/// character gesture needs. Asked of the store rather than inferred from the
+/// characters `ocr.rs` holds, so an area converted away from OCR can never be
+/// selected even if its characters outlived the conversion (review of `#115`,
+/// round 1). **The area's own behaviour since roadmap `1.45`**; it was the
+/// setting, for every OCR area at once.
 pub(crate) fn reads_in_place(app: &AppHandle, id: AreaId) -> bool {
-    crate::settings::current().ocr_behaviour == crate::settings::OcrBehaviour::InPlace
-        && overlay::area_kind(app, id) == Some(AreaType::Ocr)
+    overlay::area_reads_in_place(app, id)
 }
 
 /// The selection handle of `id` under `point`, as `(anchor, focus)`: the
@@ -3413,10 +3578,28 @@ fn select_or_move(app: &AppHandle, id: AreaId, bounds: Rect, point: Point) -> Ge
 /// **Only areas at or above the topmost one covering `point`.** A handle of an
 /// area below it is hidden under that area, and grabbing it through the area on
 /// top would contradict what the user sees (review of `#115`, round 8).
-fn selection_handle_press(app: &AppHandle, point: Point) -> Option<Gesture> {
-    let covering = overlay::area_handle_at(app, point).map(|(id, _, _)| id);
+///
+/// **In Living, "covering" and "may be grabbed" follow Living's rule**
+/// (roadmap `1.46`): an area covers a point only where it would take the press
+/// (`overlay::interactive_area_handle_at`), so a pass-through Filter over a
+/// selection does not hide its handle; and only an area whose body takes input
+/// offers its handles at all, so an OCR area the user set to pass clicks
+/// through keeps them out of the way as it keeps its body (`ADR-0047`
+/// decision 4). A selection made on such an area in Placement still shows, and
+/// still copies.
+fn selection_handle_press(app: &AppHandle, point: Point, living: bool) -> Option<Gesture> {
+    let covering = if living {
+        overlay::interactive_area_handle_at(app, point)
+    } else {
+        overlay::area_handle_at(app, point)
+    }
+    .map(|(id, _, _)| id);
+    let bodies = living.then(overlay::LivingBodies::now);
     for (id, bounds) in overlay::areas_top_down(app) {
-        if reads_in_place(app, id) {
+        let offers = bodies
+            .as_ref()
+            .is_none_or(|bodies| overlay::area_takes_input(app, id, bodies));
+        if offers && reads_in_place(app, id) {
             let local = Point::new(point.x - bounds.origin.x, point.y - bounds.origin.y);
             if crate::ocr::handle_at(id, local, SELECTION_HANDLE_REACH).is_some() {
                 return Some(select_or_move(app, id, bounds, point));
@@ -3457,7 +3640,7 @@ fn classify_press(point: Point) -> Gesture {
         // the area, where the classification below would resize the area or
         // create a new one instead of extending the selection (review of
         // `#115`, round 5).
-        if let Some(gesture) = selection_handle_press(app, point) {
+        if let Some(gesture) = selection_handle_press(app, point, false) {
             return gesture;
         }
         if let Some((id, bounds, handle)) = overlay::area_handle_at(app, point) {
@@ -4292,6 +4475,31 @@ fn menu_rows(area: &overlay::AreaSummary) -> Vec<MenuRow> {
         checked: false,
         children: types,
     });
+    // Roadmap 1.45, ADR-0046 decision 9: an OCR area chooses In place or
+    // Rendered for itself, here, without the settings window (*"The user should
+    // not need to open the dedicated full settings window for it"*). A child
+    // list for the reason Depth is one: two rows of one axis, which flat would
+    // read as two toggles. Below the type, because it is how this type shows
+    // itself, and only on an OCR area, the one type it means anything for.
+    if area.kind == AreaType::Ocr {
+        rows.push(MenuRow {
+            action: MenuAction::OpenSubmenu,
+            label: text(Text::MenuOcrBehaviour),
+            checked: false,
+            children: vec![
+                leaf(
+                    MenuAction::SetOcrBehaviour(OcrBehaviour::InPlace),
+                    text(Text::MenuOcrInPlace),
+                    area.ocr_behaviour == OcrBehaviour::InPlace,
+                ),
+                leaf(
+                    MenuAction::SetOcrBehaviour(OcrBehaviour::Rendered),
+                    text(Text::MenuOcrRendered),
+                    area.ocr_behaviour == OcrBehaviour::Rendered,
+                ),
+            ],
+        });
+    }
     // The three Layer rows live in a child list of their own, the same shape
     // roadmap 1.28 gave the type rows. Founder's call at the 2026-08-25 rig
     // sitting: they are one axis with one answer, and three flat siblings of the
@@ -4438,6 +4646,9 @@ fn activate_menu_item(app: &AppHandle, hit: MenuHit, release: Point) {
         MenuAction::SetLayer(layer) => overlay::set_area_layer(app, area, layer),
         MenuAction::SetInput(input) => overlay::set_area_input(app, area, input),
         MenuAction::SetType(kind) => overlay::convert_area(app, area, kind),
+        MenuAction::SetOcrBehaviour(behaviour) => {
+            overlay::set_area_ocr_behaviour(app, area, behaviour)
+        }
         MenuAction::Dismiss => overlay::dismiss_area(app, area),
         // Returned above, before the menu was closed.
         MenuAction::OpenSubmenu => false,
@@ -4575,6 +4786,57 @@ mod tests {
         assert_eq!(
             key_action(Mode::Placement, None, true, false, false),
             KeyAction::Pass
+        );
+    }
+
+    /// Roadmap 1.46, `ADR-0047` decision 5: in Living the hook takes one key,
+    /// `Ctrl+C`, and only while a selection is showing. Each mode's keys stay
+    /// that mode's: Living never takes a Placement key, Placement never takes
+    /// Living's, and Hidden takes nothing.
+    #[test]
+    fn living_takes_ctrl_c_only_while_a_selection_shows() {
+        use super::{KeyAction, Mode, PlacementKey, VK_C, key_action, living_key};
+        let copy = Some(PlacementKey::CopySelection);
+        assert_eq!(living_key(VK_C, true, false, false, true), copy);
+        // No selection: the chord is the user's app's.
+        assert_eq!(living_key(VK_C, true, false, false, false), None);
+        // Only the plain Ctrl chord, as in Placement.
+        assert_eq!(living_key(VK_C, false, false, false, true), None);
+        assert_eq!(living_key(VK_C, true, true, false, true), None);
+        assert_eq!(living_key(VK_C, true, false, true, true), None);
+        // Nothing else, with or without a selection.
+        assert_eq!(living_key(u32::from(b'A'), true, false, false, true), None);
+        assert_eq!(
+            living_key(u32::from(super::VK_ESCAPE), false, false, false, true),
+            None
+        );
+
+        assert_eq!(
+            key_action(Mode::Living, copy, true, false, false),
+            KeyAction::Act(PlacementKey::CopySelection)
+        );
+        // UP-TAKE's own window has the keyboard: its own Ctrl+C is its own.
+        assert_eq!(
+            key_action(Mode::Living, copy, true, true, false),
+            KeyAction::Pass
+        );
+        assert_eq!(
+            key_action(Mode::Placement, copy, true, false, false),
+            KeyAction::Pass
+        );
+        assert_eq!(
+            key_action(Mode::Hidden, copy, true, false, false),
+            KeyAction::Pass
+        );
+        let placement_copy = Some(PlacementKey::Copy);
+        assert_eq!(
+            key_action(Mode::Living, placement_copy, true, false, false),
+            KeyAction::Pass
+        );
+        // The release of a taken press is swallowed, whatever the mode is by then.
+        assert_eq!(
+            key_action(Mode::Hidden, None, false, false, true),
+            KeyAction::Swallow
         );
     }
 
@@ -4803,6 +5065,7 @@ mod tests {
             layer,
             input,
             kind,
+            ocr_behaviour: uptake_core::area::OcrBehaviour::InPlace,
         }
     }
 
@@ -6077,7 +6340,10 @@ mod tests {
             let rows = menu_rows(&summary(kind, Layer::Auto, Input::Interactive));
             let parents: Vec<&super::MenuRow> =
                 rows.iter().filter(|row| !row.children.is_empty()).collect();
-            assert_eq!(parents.len(), 2, "{kind:?}");
+            // Type and Depth for every area, and Behaviour for an OCR area
+            // (roadmap 1.45).
+            let expected = if kind == AreaType::Ocr { 3 } else { 2 };
+            assert_eq!(parents.len(), expected, "{kind:?}");
             for parent in parents {
                 for child in &parent.children {
                     assert!(
@@ -6107,6 +6373,56 @@ mod tests {
                 // convert *to*, and none of those is what this area is.
                 None => assert!(ticked.is_empty(), "{kind:?}"),
             }
+        }
+    }
+
+    /// Roadmap 1.45, ADR-0046 decision 9: an OCR area chooses In place or
+    /// Rendered from its own menu, no other type is offered the choice, and the
+    /// tick is the area's own behaviour, not the setting's.
+    #[test]
+    fn only_an_ocr_area_offers_its_behaviour_and_ticks_its_own() {
+        use crate::strings::{Text, text};
+        use uptake_core::area::OcrBehaviour;
+        let behaviour_list = |rows: &[super::MenuRow]| {
+            rows.iter()
+                .find(|row| row.label == text(Text::MenuOcrBehaviour))
+                .cloned()
+        };
+        for kind in AreaType::ALL {
+            let rows = menu_rows(&summary(kind, Layer::Auto, Input::Interactive));
+            assert_eq!(
+                behaviour_list(&rows).is_some(),
+                kind == AreaType::Ocr,
+                "{kind:?}"
+            );
+        }
+        for own in [OcrBehaviour::InPlace, OcrBehaviour::Rendered] {
+            let mut area = summary(AreaType::Ocr, Layer::Auto, Input::Interactive);
+            area.ocr_behaviour = own;
+            let Some(list) = behaviour_list(&menu_rows(&area)) else {
+                panic!("an OCR area's menu has a Behaviour list")
+            };
+            assert_eq!(list.action, MenuAction::OpenSubmenu);
+            assert!(!list.checked, "the parent row is never ticked");
+            let rows: Vec<(MenuAction, bool)> = list
+                .children
+                .iter()
+                .map(|row| (row.action, row.checked))
+                .collect();
+            assert_eq!(
+                rows,
+                vec![
+                    (
+                        MenuAction::SetOcrBehaviour(OcrBehaviour::InPlace),
+                        own == OcrBehaviour::InPlace
+                    ),
+                    (
+                        MenuAction::SetOcrBehaviour(OcrBehaviour::Rendered),
+                        own == OcrBehaviour::Rendered
+                    ),
+                ],
+                "{own:?}"
+            );
         }
     }
 

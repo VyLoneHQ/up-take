@@ -398,6 +398,32 @@ pub enum Input {
     PassThrough,
 }
 
+/// How an OCR area shows what it read (ADR-0046), **per area** since roadmap
+/// `1.45`.
+///
+/// It lived in the settings until then and applied to every OCR area at once.
+/// ADR-0046 decision 9 gave each area its own, chosen from its right-click menu
+/// (*"The user should not need to open the dedicated full settings window for
+/// it"*), and the setting now chooses only what a new OCR area starts with.
+/// So it is the area's, like [`Input`] and [`Layer`], and the host sets it when
+/// an area is created or converted to OCR.
+///
+/// Meaningful only on an OCR area. Every area carries one so a conversion to
+/// OCR has a field to set rather than an optional to create.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OcrBehaviour {
+    /// The screen under the area stays visible: the area draws its border and
+    /// a faint mark under each character it read, and the text can be
+    /// selected. **The default, by the founder's decision of 2026-09-25**
+    /// (*"I also want the "in place" version to be the default one"*).
+    #[default]
+    InPlace,
+    /// The area covers the screen with its own panel and draws the text there,
+    /// which is how every OCR area looked before ADR-0046.
+    Rendered,
+}
+
 /// Whether creating an area of a given type leaves PLACEMENT (ADR-0018 §6).
 ///
 /// Deliberately a two-variant enum rather than a `bool`: `after_create(t) ==
@@ -648,6 +674,10 @@ pub struct Area {
     /// type that gains the gesture later gains it by answering the predicate,
     /// with no migration of the model.
     pub zoom: Zoom,
+    /// How the area shows what it read, if it is an OCR area (roadmap `1.45`).
+    /// [`OcrBehaviour::InPlace`] at creation; the host replaces it with the
+    /// user's default for new OCR areas.
+    pub ocr_behaviour: OcrBehaviour,
 }
 
 /// The capture an area's own contents are made of: which rectangle of screen to
@@ -676,6 +706,39 @@ impl Area {
     #[must_use]
     pub fn is_interactive(self) -> bool {
         self.input == Input::Interactive
+    }
+
+    /// True when this area's **body** takes a press in Living: the rule the host
+    /// gives [`AreaStore::hit_test_with`] and its siblings.
+    ///
+    /// [`is_interactive`](Self::is_interactive) plus one exception, ADR-0047
+    /// decision 2: **an OCR area that reads in place and holds no text passes
+    /// clicks through**, while it is reading and when the reading found nothing,
+    /// failed or could not run. It has nothing to select, and its body is a
+    /// window onto the screen it is reading. It takes input from the moment
+    /// words arrive.
+    ///
+    /// The area's own setting still wins (ADR-0047 decision 4): a pass-through
+    /// area's body passes clicks through whether or not it holds text, because
+    /// the exception only ever removes input and never adds it.
+    ///
+    /// Whether the area reads in place is its own (roadmap `1.45`); whether it
+    /// holds text comes from the host, because it is what the OCR engine last
+    /// answered for this area and not a fact of the area model. A *Rendered* OCR
+    /// area keeps the plain rule: it draws a text panel rather than marks over
+    /// the screen, and ADR-0047 leaves it as it was.
+    #[must_use]
+    pub fn body_takes_input(self, holds_text: bool) -> bool {
+        // Read as: interactive, and not an in-place OCR area still without text.
+        self.is_interactive() && (holds_text || !self.reads_in_place())
+    }
+
+    /// True for an OCR area that shows what it read over the screen, in place,
+    /// rather than in a panel of its own (ADR-0046). The one condition every
+    /// selection gesture and every in-place mark needs.
+    #[must_use]
+    pub fn reads_in_place(self) -> bool {
+        self.kind == AreaType::Ocr && self.ocr_behaviour == OcrBehaviour::InPlace
     }
 
     /// True when this area needs continuous capture.
@@ -874,6 +937,7 @@ impl AreaStore {
             // `set_kind`, so a type born magnified in future would silently
             // arrive natural through a conversion.
             zoom: kind.default_zoom(),
+            ocr_behaviour: OcrBehaviour::default(),
         };
         let index = self.top_of_tier(area.layer);
         self.areas.insert(index, area);
@@ -970,6 +1034,19 @@ impl AreaStore {
                 true
             }
             None => false,
+        }
+    }
+
+    /// Sets how an area shows what it read (roadmap `1.45`). Returns whether it
+    /// CHANGED, so the caller re-reads and redraws only on a change; `false` for
+    /// an unknown id as well.
+    pub fn set_ocr_behaviour(&mut self, id: AreaId, behaviour: OcrBehaviour) -> bool {
+        match self.area_mut(id) {
+            Some(area) if area.ocr_behaviour != behaviour => {
+                area.ocr_behaviour = behaviour;
+                true
+            }
+            _ => false,
         }
     }
 
@@ -1154,8 +1231,31 @@ impl AreaStore {
     /// be placed against a monitor.
     #[must_use]
     pub fn hit_test(&self, point: Point, monitors: &[Rect]) -> Option<&Area> {
+        self.hit_test_with(point, monitors, |area| area.is_interactive())
+    }
+
+    /// [`AreaStore::hit_test`] with the host's rule for **which bodies take
+    /// input** in place of [`Area::is_interactive`].
+    ///
+    /// The host passes [`Area::body_takes_input`] with the one thing this store
+    /// does not know: which OCR areas hold text (ADR-0047). Whether an area
+    /// reads in place is its own field since roadmap `1.45`, and it was a second
+    /// fact passed in before that. Every Living question takes the rule as a parameter
+    /// rather than reading it from a field, so there is no copy of "which OCR
+    /// areas hold text" here to fall out of step with the OCR engine's own.
+    ///
+    /// `body` may only narrow [`Area::is_interactive`]. A rule that returned
+    /// `true` for a pass-through area would let its body take clicks, against
+    /// ADR-0024 section 2; [`Area::body_takes_input`] cannot, by construction.
+    #[must_use]
+    pub fn hit_test_with(
+        &self,
+        point: Point,
+        monitors: &[Rect],
+        body: impl Fn(&Area) -> bool,
+    ) -> Option<&Area> {
         self.iter_top_down().find(|area| {
-            if area.is_interactive() {
+            if body(area) {
                 area.bounds.contains(point)
             } else {
                 interaction::is_chrome_at(area.bounds, point, monitors)
@@ -1180,10 +1280,21 @@ impl AreaStore {
         point: Point,
         monitors: &[Rect],
     ) -> Option<(&Area, interaction::Handle)> {
+        self.grab_test_with(point, monitors, |area| area.is_interactive())
+    }
+
+    /// [`AreaStore::grab_test`] with the host's body rule; see
+    /// [`AreaStore::hit_test_with`] for why it is a parameter.
+    #[must_use]
+    pub fn grab_test_with(
+        &self,
+        point: Point,
+        monitors: &[Rect],
+        body: impl Fn(&Area) -> bool,
+    ) -> Option<(&Area, interaction::Handle)> {
         self.iter_top_down().find_map(|area| {
             let handle = interaction::handle_at(area.bounds, point, monitors)?;
-            (area.is_interactive() || !matches!(handle, interaction::Handle::Body))
-                .then_some((area, handle))
+            (body(area) || !matches!(handle, interaction::Handle::Body)).then_some((area, handle))
         })
     }
 
@@ -1220,8 +1331,20 @@ impl AreaStore {
     /// disagree the first time chrome geometry changed.
     #[must_use]
     pub fn chord_move_test(&self, point: Point) -> Option<&Area> {
-        self.hit_test_any(point)
-            .filter(|area| !area.is_interactive())
+        self.chord_move_test_with(point, |area| area.is_interactive())
+    }
+
+    /// [`AreaStore::chord_move_test`] with the host's body rule; see
+    /// [`AreaStore::hit_test_with`]. An OCR area that holds no text passes its
+    /// body's clicks through (ADR-0047 decision 2), so the chord reaches it as
+    /// it reaches any other body that does.
+    #[must_use]
+    pub fn chord_move_test_with(
+        &self,
+        point: Point,
+        body: impl Fn(&Area) -> bool,
+    ) -> Option<&Area> {
+        self.hit_test_any(point).filter(|area| !body(area))
     }
 
     /// The topmost area containing `point`, **whatever its [`Input`]** — the
@@ -1306,9 +1429,21 @@ impl AreaStore {
     /// check, not the requirement.
     #[must_use]
     pub fn interactive_regions(&self, monitors: &[Rect]) -> Vec<Rect> {
+        self.interactive_regions_with(monitors, |area| area.is_interactive())
+    }
+
+    /// [`AreaStore::interactive_regions`] with the host's body rule. Kept so
+    /// the property test can hold [`AreaStore::hit_test_with`] to the same
+    /// agreement under any rule, not only the plain one.
+    #[must_use]
+    pub fn interactive_regions_with(
+        &self,
+        monitors: &[Rect],
+        body: impl Fn(&Area) -> bool,
+    ) -> Vec<Rect> {
         self.iter_top_down()
             .flat_map(|area| {
-                if area.is_interactive() {
+                if body(area) {
                     vec![area.bounds]
                 } else {
                     interaction::chrome_rects(area.bounds, monitors)
@@ -2199,6 +2334,7 @@ mod tests {
             input: AreaType::Upscale.default_input(),
             layer: Layer::Auto,
             zoom: AreaType::Upscale.default_zoom(),
+            ocr_behaviour: OcrBehaviour::InPlace,
         };
         assert_eq!(
             area.retake(),
@@ -2312,6 +2448,7 @@ mod tests {
             input: Input::Interactive,
             layer: Layer::Auto,
             zoom: Zoom::NATURAL.stepped(4),
+            ocr_behaviour: OcrBehaviour::InPlace,
         };
         // A hypothetical second zooming type inherits the factor, so both sides
         // answer with the same rectangle and the same treatment: equal, so
@@ -2378,6 +2515,106 @@ mod tests {
             right
         );
         assert!(store.hit_test(Point::new(20, 5), &screens()).is_none());
+    }
+
+    #[test]
+    fn an_ocr_area_reading_in_place_takes_input_on_its_body_only_with_text() {
+        // ADR-0047 decisions 1, 2 and 4 as a truth table. The exception only
+        // ever removes input: no combination makes a pass-through body take a
+        // press, and no other type is touched by the two OCR facts.
+        let (mut store, ids) = store_with(&[AreaType::Ocr, AreaType::Default]);
+        for (behaviour, text, expected) in [
+            (OcrBehaviour::InPlace, true, true),
+            (OcrBehaviour::InPlace, false, false),
+            (OcrBehaviour::Rendered, true, true),
+            (OcrBehaviour::Rendered, false, true),
+        ] {
+            store.set_ocr_behaviour(ids[0], behaviour);
+            store.set_ocr_behaviour(ids[1], behaviour);
+            let ocr = *store.get(ids[0]).unwrap();
+            let default = *store.get(ids[1]).unwrap();
+            assert_eq!(
+                ocr.body_takes_input(text),
+                expected,
+                "{behaviour:?}, text {text}"
+            );
+            assert_eq!(ocr.reads_in_place(), behaviour == OcrBehaviour::InPlace);
+            assert!(default.body_takes_input(text));
+            assert!(!default.reads_in_place(), "only an OCR area reads");
+        }
+        assert!(store.set_input(ids[0], Input::PassThrough));
+        for behaviour in [OcrBehaviour::InPlace, OcrBehaviour::Rendered] {
+            store.set_ocr_behaviour(ids[0], behaviour);
+            let quiet = *store.get(ids[0]).unwrap();
+            assert!(!quiet.body_takes_input(true) && !quiet.body_takes_input(false));
+        }
+    }
+
+    #[test]
+    fn each_area_has_its_own_ocr_behaviour_and_reports_only_a_change() {
+        // Roadmap 1.45, ADR-0046 decision 9: the behaviour belongs to the area,
+        // so changing one area's leaves another's alone.
+        let (mut store, ids) = store_with(&[AreaType::Ocr, AreaType::Ocr]);
+        assert_eq!(
+            store.get(ids[0]).unwrap().ocr_behaviour,
+            OcrBehaviour::InPlace
+        );
+        assert!(store.set_ocr_behaviour(ids[0], OcrBehaviour::Rendered));
+        assert!(
+            !store.set_ocr_behaviour(ids[0], OcrBehaviour::Rendered),
+            "no change"
+        );
+        assert_eq!(
+            store.get(ids[0]).unwrap().ocr_behaviour,
+            OcrBehaviour::Rendered
+        );
+        assert_eq!(
+            store.get(ids[1]).unwrap().ocr_behaviour,
+            OcrBehaviour::InPlace
+        );
+        let gone = ids[1];
+        assert!(store.remove(gone).is_some());
+        assert!(
+            !store.set_ocr_behaviour(gone, OcrBehaviour::Rendered),
+            "unknown id"
+        );
+    }
+
+    #[test]
+    fn an_empty_ocr_area_passes_a_body_press_to_what_is_beneath() {
+        // An in-place OCR area with no text over a Default area: the press on
+        // the overlap belongs to the Default area, exactly as it would under a
+        // Filter, and the OCR area's chrome still answers for itself. With text
+        // the OCR area takes the same press.
+        let mut store = AreaStore::new();
+        let below = store
+            .create(AreaType::Default, rect(0, 0, 400, 400))
+            .unwrap();
+        let ocr = store.create(AreaType::Ocr, rect(50, 50, 200, 200)).unwrap();
+        let inside = Point::new(150, 150);
+        let empty = |area: &Area| area.body_takes_input(false);
+        let read = |area: &Area| area.body_takes_input(true);
+        assert_eq!(
+            store.hit_test_with(inside, &screens(), empty).unwrap().id,
+            below
+        );
+        assert_eq!(
+            store.hit_test_with(inside, &screens(), read).unwrap().id,
+            ocr
+        );
+        let (grabbed, handle) = store.grab_test_with(inside, &screens(), empty).unwrap();
+        assert_eq!((grabbed.id, handle), (below, interaction::Handle::Body));
+        // The chord reaches the empty body, because it passes clicks through.
+        assert_eq!(store.chord_move_test_with(inside, empty).unwrap().id, ocr);
+        // Its resize band is chrome, and chrome never passes through.
+        let edge = Point::new(50, 150);
+        assert_eq!(
+            store.grab_test_with(edge, &screens(), empty).unwrap().0.id,
+            ocr
+        );
+        // And the plain rule is unchanged: with no OCR knowledge an OCR area is
+        // as interactive as its own setting says.
+        assert_eq!(store.hit_test(inside, &screens()).unwrap().id, ocr);
     }
 
     #[test]
@@ -2809,6 +3046,39 @@ mod tests {
             prop_assert_eq!(
                 crate::geometry::point_in_any(&regions, point),
                 store.hit_test(point, &screens()).is_some()
+            );
+        }
+
+        #[test]
+        fn hit_testing_and_the_region_list_agree_under_the_ocr_rule(
+            store in any_store(),
+            rendered in prop::collection::vec(any::<bool>(), 12),
+            text in prop::collection::vec(any::<bool>(), 12),
+            x in -250i32..250,
+            y in -250i32..250,
+        ) {
+            // The same agreement, with the body rule the host actually passes
+            // in Living (ADR-0047): which OCR areas read in place and which hold
+            // text are arbitrary here, so every combination is tried.
+            let mut store = store;
+            let ids: Vec<AreaId> = store.iter().map(|a| a.id).collect();
+            for (index, id) in ids.iter().enumerate() {
+                let behaviour = if rendered[index] {
+                    OcrBehaviour::Rendered
+                } else {
+                    OcrBehaviour::InPlace
+                };
+                store.set_ocr_behaviour(*id, behaviour);
+            }
+            let holds = |area: &Area| {
+                ids.iter().position(|id| *id == area.id).is_some_and(|i| text[i])
+            };
+            let body = |area: &Area| area.body_takes_input(holds(area));
+            let point = Point::new(x, y);
+            let regions = store.interactive_regions_with(&screens(), body);
+            prop_assert_eq!(
+                crate::geometry::point_in_any(&regions, point),
+                store.hit_test_with(point, &screens(), body).is_some()
             );
         }
 
