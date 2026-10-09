@@ -27,6 +27,7 @@
 //! carries the measurement and the reasoning. The other four are unchanged and
 //! unmeasured.
 
+use super::preprocess::Tile;
 use super::quad::{PointF, Quad, min_area_rect};
 
 /// The knobs DB's post-processing exposes.
@@ -56,7 +57,8 @@ use super::quad::{PointF, Quad, min_area_rect};
 ///
 /// `box_threshold` is the load-bearing one. On a width sweep holding the text
 /// pixel-identical and varying only the surrounding canvas, cards read out of
-/// 12, at the shipping `limit_side_len`:
+/// 12, at the then-shipping `limit_side_len` of 960 (`I-440` has since
+/// replaced it with true-size tiles):
 ///
 /// | | `box` 0.6 | `box` 0.4 |
 /// | --- | --- | --- |
@@ -371,6 +373,59 @@ fn mean_probability(map: &ProbabilityMap<'_>, quad: &Quad) -> f32 {
     }
 }
 
+/// Copies one tile's probabilities into its keep rectangle of the frame-sized
+/// map `joined`, which is `stride` pixels wide (`I-440`).
+///
+/// `scale_x` and `scale_y` map a coordinate in `map` to the tile's own pixels,
+/// as [`super::preprocess::DetectorInput::scale_to_source`] gives them; for
+/// PP-OCRv6_small both are `1.0` and this is a copy. Each frame pixel takes the
+/// map pixel its centre falls in. A non-positive factor or an inconsistent
+/// map writes nothing, which leaves that rectangle at `0.0`, no text, rather
+/// than indexing past the buffer.
+///
+/// Writing the tiles into one map and finding the boxes once is what lets a
+/// line cross a tile's edge without being cut: [`boxes_from_map`] sees one
+/// connected region, as it would have for the frame read whole.
+pub fn join_tile(
+    joined: &mut [f32],
+    stride: usize,
+    tile: Tile,
+    map: &ProbabilityMap<'_>,
+    scale_x: f32,
+    scale_y: f32,
+) {
+    if !map.is_consistent()
+        || map.width == 0
+        || map.height == 0
+        || scale_x <= 0.0
+        || scale_y <= 0.0
+        || !scale_x.is_finite()
+        || !scale_y.is_finite()
+    {
+        return;
+    }
+    let map_index = |offset: u32, scale: f32, limit: usize| -> usize {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a non-negative pixel centre over a positive scale, floored, then clamped"
+        )]
+        let index = ((offset as f32 + 0.5) / scale).floor().max(0.0) as usize;
+        index.min(limit - 1)
+    };
+    let (columns, rows) = (tile.columns, tile.rows);
+    for y in rows.keep_from..rows.keep_to {
+        let map_y = map_index(y - rows.start, scale_y, map.height);
+        let row = y as usize * stride;
+        for x in columns.keep_from..columns.keep_to {
+            let map_x = map_index(x - columns.start, scale_x, map.width);
+            if let Some(cell) = joined.get_mut(row + x as usize) {
+                *cell = map.at(map_x, map_y);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -547,5 +602,142 @@ mod tests {
         let data = vec![0.95_f32; 200 * 200];
         let found = detect(&data, 200, 200);
         assert_eq!(found.len(), 1, "found {}", found.len());
+    }
+
+    /// A map of `width` x `height` in which every pixel holds `value`.
+    fn flat(width: usize, height: usize, value: f32) -> Vec<f32> {
+        vec![value; width * height]
+    }
+
+    #[test]
+    fn tiles_fill_the_joined_map_each_from_its_own_keep_rectangle() {
+        use super::super::preprocess::tiles;
+        // Each tile's map holds its own index, so the joined map names which
+        // tile every pixel came from.
+        let (width, height) = (300_u32, 200_u32);
+        let grid = tiles(width, height, 128, 32);
+        let mut joined = vec![-1.0_f32; (width * height) as usize];
+        for (index, tile) in grid.iter().enumerate() {
+            let data = flat(
+                tile.columns.len as usize,
+                tile.rows.len as usize,
+                index as f32,
+            );
+            let map = ProbabilityMap {
+                data: &data,
+                width: tile.columns.len as usize,
+                height: tile.rows.len as usize,
+            };
+            join_tile(&mut joined, width as usize, *tile, &map, 1.0, 1.0);
+        }
+        for y in 0..height {
+            for x in 0..width {
+                let owner = grid
+                    .iter()
+                    .position(|tile| {
+                        (tile.columns.keep_from..tile.columns.keep_to).contains(&x)
+                            && (tile.rows.keep_from..tile.rows.keep_to).contains(&y)
+                    })
+                    .unwrap();
+                let got = joined[(y * width + x) as usize];
+                assert!(
+                    (got - owner as f32).abs() < f32::EPSILON,
+                    "({x}, {y}) got {got}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_tile_map_is_read_where_each_frame_pixel_falls() {
+        use super::super::preprocess::{Span, Tile};
+        // A tile at (10, 20), 8 x 4, whose map is HALF its size: map pixel
+        // (mx, my) holds mx + 10 * my, and covers two frame pixels each way.
+        let span = |start: u32, len: u32| Span {
+            start,
+            len,
+            keep_from: start,
+            keep_to: start + len,
+        };
+        let tile = Tile {
+            columns: span(10, 8),
+            rows: span(20, 4),
+        };
+        let data: Vec<f32> = (0..2)
+            .flat_map(|my| (0..4).map(move |mx| (mx + 10 * my) as f32))
+            .collect();
+        let map = ProbabilityMap {
+            data: &data,
+            width: 4,
+            height: 2,
+        };
+        let stride = 40;
+        let mut joined = vec![-1.0_f32; stride * 30];
+        join_tile(&mut joined, stride, tile, &map, 2.0, 2.0);
+        let at = |x: usize, y: usize| joined[y * stride + x];
+        assert!((at(10, 20) - 0.0).abs() < f32::EPSILON);
+        assert!((at(11, 21) - 0.0).abs() < f32::EPSILON);
+        assert!((at(12, 20) - 1.0).abs() < f32::EPSILON);
+        assert!((at(17, 23) - 13.0).abs() < f32::EPSILON);
+        // Outside the keep rectangle nothing is written.
+        assert!((at(9, 20) + 1.0).abs() < f32::EPSILON);
+        assert!((at(18, 20) + 1.0).abs() < f32::EPSILON);
+        assert!((at(10, 24) + 1.0).abs() < f32::EPSILON);
+        // A degenerate factor writes nothing rather than indexing wildly.
+        let mut untouched = vec![-1.0_f32; stride * 30];
+        join_tile(&mut untouched, stride, tile, &map, 0.0, 2.0);
+        assert!(
+            untouched
+                .iter()
+                .all(|&value| (value + 1.0).abs() < f32::EPSILON)
+        );
+    }
+
+    #[test]
+    fn a_line_crossing_a_tile_edge_is_one_box_in_the_joined_map() {
+        use super::super::preprocess::tiles;
+        // One text line, 200 x 12, across a 300 px frame split into tiles of
+        // 128: each tile's map shows the part of the line inside it, and the
+        // joined map gives ONE box that spans the line.
+        let (width, height) = (300_u32, 40_u32);
+        let inside = |x: u32, y: u32| (50..250).contains(&x) && (14..26).contains(&y);
+        let mut joined = vec![0.0_f32; (width * height) as usize];
+        let grid = tiles(width, height, 128, 32);
+        assert!(grid.len() > 1);
+        for tile in &grid {
+            let data: Vec<f32> = (0..tile.rows.len)
+                .flat_map(|y| {
+                    (0..tile.columns.len).map(move |x| {
+                        if inside(tile.columns.start + x, tile.rows.start + y) {
+                            0.9
+                        } else {
+                            0.0
+                        }
+                    })
+                })
+                .collect();
+            let map = ProbabilityMap {
+                data: &data,
+                width: tile.columns.len as usize,
+                height: tile.rows.len as usize,
+            };
+            join_tile(&mut joined, width as usize, *tile, &map, 1.0, 1.0);
+        }
+        let map = ProbabilityMap {
+            data: &joined,
+            width: width as usize,
+            height: height as usize,
+        };
+        let boxes = boxes_from_map(
+            &map,
+            DetectorOptions::default(),
+            1.0,
+            1.0,
+            width as f32,
+            height as f32,
+        );
+        assert_eq!(boxes.len(), 1, "{boxes:?}");
+        let (min_x, _, max_x, _) = boxes[0].quad.bounds();
+        assert!(min_x < 50.0 && max_x > 249.0, "{min_x}..{max_x}");
     }
 }
