@@ -7,6 +7,7 @@
  */
 
 import type { CssRect, Invoke } from './regions';
+import type { OcrBehaviour } from './settings-model';
 import { type Language, text } from './strings';
 
 /** Which of the three interaction states the overlay is in (ADR-0012). */
@@ -125,6 +126,13 @@ export interface AreaView {
   close: PhysRect;
   layer: LayerName;
   kind: AreaKind;
+  /**
+   * How the area shows what it read (roadmap 1.45, ADR-0046 decision 9):
+   * `in_place` or `rendered`. Every area carries one, and only an OCR area's
+   * means anything. Before 1.45 the page took it from the settings, for every
+   * OCR area at once; the setting is now only what a new OCR area starts with.
+   */
+  ocr_behaviour: OcrBehaviour;
   /**
    * Magnification (§3.4), `1` at natural size.
    *
@@ -564,6 +572,8 @@ export interface AreaFrame {
   close: CssRect;
   layer: LayerName;
   kind: AreaKind;
+  /** How an OCR area shows what it read. See {@link AreaView.ocr_behaviour}. */
+  ocrBehaviour: OcrBehaviour;
   /** Magnification (§3.4), `1` at natural size. See {@link AreaView.zoom}. */
   zoom: number;
   /** Draw this area as the one a press would grab: brighter, lit border. */
@@ -701,6 +711,7 @@ export function areaFramesCss(
     close: closes[index] as CssRect,
     layer: area.layer,
     kind: area.kind,
+    ocrBehaviour: area.ocr_behaviour,
     zoom: area.zoom,
     // A dragged area is not also "hovered": the hover chrome invites a gesture
     // that is already under way, and its close control would sit at the source

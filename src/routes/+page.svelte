@@ -66,7 +66,7 @@ import {
   toggleFreeze,
 } from '$lib/overlay-state';
 import { type CssRect, isDismissKey } from '$lib/regions';
-import type { OcrBehaviour, Settings } from '$lib/settings-model';
+import type { Settings } from '$lib/settings-model';
 import { isLanguage, type Language, text } from '$lib/strings';
 
 // The two appearance settings (roadmap 1.14). Held as percentages, exactly as
@@ -159,10 +159,10 @@ let flashes = $state(new SvelteMap<number, number>());
 // A failure and a page of recognised text want different treatment, and both
 // are `detail`.
 let recognitions = $state(new SvelteMap<number, OcrPayload>());
-// Roadmap 1.41 (ADR-0046): how an OCR area shows what it read, and which
-// characters of each area are selected (1.44). The selection is made by the
-// hook in Rust and announced here only so the band can be drawn.
-let ocrBehaviour = $state<OcrBehaviour>('in_place');
+// Roadmap 1.41 (ADR-0046): which characters of each OCR area are selected
+// (1.44). The selection is made by the hook in Rust and announced here only so
+// the band can be drawn. How each area shows what it read is the area's own
+// since roadmap 1.45 (`area.ocrBehaviour`), not a setting read here.
 let ocrSelections = $state(new SvelteMap<number, [number, number]>());
 // The area's border width, which an absolutely positioned child is measured
 // from inside of. Kept beside `.area`'s own `border` in the stylesheet.
@@ -482,7 +482,6 @@ onMount(() => {
     listen<Settings>('settings://changed', (event) => {
       areaOpacityPercent = event.payload.area_opacity_percent;
       filterStrengthPercent = event.payload.filter_strength_percent;
-      ocrBehaviour = event.payload.ocr_behaviour;
     }),
     // A freeze asking the page to take its drawing on the covered monitors out
     // of the shot (ADR-0019 decision 6, I-426). Rust waits for the answer and
@@ -544,7 +543,6 @@ onMount(() => {
       const stored = await invoke<Settings>('settings_read');
       areaOpacityPercent = stored.area_opacity_percent;
       filterStrengthPercent = stored.filter_strength_percent;
-      ocrBehaviour = stored.ocr_behaviour;
     } catch {
       // The shipped defaults stay. An unreadable setting is never a reason
       // not to draw, which is the same rule the language above follows.
@@ -722,7 +720,7 @@ onMount(() => {
                    2026-09-03 and could only report the first line of an error
                    (BACKLOG.md I-353). The fade does not make the rest
                    reachable; resizing the area does. It says there is a rest. -->
-              {#if ocrBehaviour === 'in_place'}
+              {#if area.ocrBehaviour === 'in_place'}
                 <!-- Roadmap 1.41, ADR-0046: the screen under the area stays
                      visible. Each word gets a faint mark where it sits, and a
                      selection is one connected band per line (Samsung's text
