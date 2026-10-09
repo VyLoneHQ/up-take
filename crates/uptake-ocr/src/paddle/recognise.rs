@@ -424,10 +424,11 @@ fn is_space(character: &DecodedCharacter) -> bool {
 /// space is a word away from the next one. The middle is where both pieces see
 /// whole glyphs, far from the edges where each piece's view is cut.
 ///
-/// With no space in the shared stretch (one long word, or a script written
-/// without spaces) the join is the gap between two of the left piece's
-/// characters nearest the middle, used as a column by both pieces; with no
-/// character there at all, the middle itself.
+/// With no space in the shared stretch (one long word, a URL, a hash, or a
+/// script written without spaces) the join is the GAP between two characters
+/// nearest the middle, found the same way: the left piece's gap, and the right
+/// piece's own copy of it, the nearest of its gaps with the same two characters
+/// either side. With no character there at all, the middle itself.
 ///
 /// # What the result's timesteps are
 ///
@@ -506,19 +507,54 @@ pub fn stitch(decoded: Vec<(Piece, DecodedText)>, line_width: u32) -> DecodedTex
                 .filter(|at| (at - left_space).abs() <= tolerance)
                 .unwrap_or(left_space);
         } else {
-            let centres: Vec<f32> = left
-                .characters
-                .iter()
-                .map(|character| centre(left_piece, left, character))
-                .collect();
-            let cut = centres
-                .windows(2)
-                .map(|pair| f32::midpoint(pair[0], pair[1]))
-                .filter(|&at| in_shared(at))
-                .min_by(|a, b| (a - middle).abs().total_cmp(&(b - middle).abs()))
-                .unwrap_or(middle);
-            keep_to[index] = cut;
-            keep_from[index + 1] = cut;
+            // Each gap between two consecutive characters of a piece: the
+            // index of the first one and the column between their centres.
+            let gaps = |piece: &Piece, text: &DecodedText| -> Vec<(usize, f32)> {
+                text.characters
+                    .windows(2)
+                    .enumerate()
+                    .map(|(at, pair)| {
+                        let middle_of_pair = f32::midpoint(
+                            centre(piece, text, &pair[0]),
+                            centre(piece, text, &pair[1]),
+                        );
+                        (at, middle_of_pair)
+                    })
+                    .collect()
+            };
+            let left_gap = gaps(left_piece, left)
+                .into_iter()
+                .filter(|&(_, at)| in_shared(at))
+                .min_by(|a, b| (a.1 - middle).abs().total_cmp(&(b.1 - middle).abs()));
+            if let Some((before, cut)) = left_gap {
+                keep_to[index] = cut;
+                // The right piece's copy of that gap: among its own gaps near
+                // the cut, nearest first, the first with the same character on
+                // each side. Cutting each piece at its own gap is what keeps a
+                // boundary character once when the pieces place it a timestep
+                // or two apart (review of `#133`, round 3); the text check
+                // tells two neighbouring gaps apart when the shift is half a
+                // character.
+                let pair = (
+                    &left.characters[before].text,
+                    &left.characters[before + 1].text,
+                );
+                let mut near: Vec<(usize, f32)> = gaps(right_piece, right)
+                    .into_iter()
+                    .filter(|&(_, at)| (at - cut).abs() <= tolerance)
+                    .collect();
+                near.sort_by(|a, b| (a.1 - cut).abs().total_cmp(&(b.1 - cut).abs()));
+                keep_from[index + 1] = near
+                    .iter()
+                    .find(|&&(at, _)| {
+                        (&right.characters[at].text, &right.characters[at + 1].text) == pair
+                    })
+                    .or_else(|| near.first())
+                    .map_or(cut, |&(_, at)| at);
+            } else {
+                keep_to[index] = middle;
+                keep_from[index + 1] = middle;
+            }
         }
     }
 
@@ -1428,33 +1464,46 @@ b
     }
 
     #[test]
-    fn a_shared_stretch_with_no_space_is_cut_between_two_characters() {
-        // One long word across the join, read alike by both pieces.
-        let line: Vec<(&str, usize)> = (0..19)
-            .map(|index| (["x", "y"][index % 2], 5 + index * 4))
-            .collect();
-        let left: Vec<(&str, usize)> = line.iter().copied().filter(|&(_, at)| at < 60).collect();
-        let right: Vec<(&str, usize)> = line
-            .iter()
-            .copied()
-            .filter(|&(_, at)| at >= 40)
-            .map(|(text, at)| (text, at - 40))
-            .collect();
-        let joined = stitch(
-            vec![
-                (Piece { start: 0, end: 480 }, piece_read(&left, 60, 0.9)),
-                (
-                    Piece {
-                        start: 320,
-                        end: 800,
-                    },
-                    piece_read(&right, 60, 0.9),
-                ),
-            ],
-            800,
-        );
-        let expected: String = line.iter().map(|(text, _)| *text).collect();
-        assert_eq!(joined.text, expected);
+    fn a_shared_stretch_with_no_space_joins_each_character_once() {
+        // One long word across the join, a character every 4 timesteps. The
+        // right piece places every glyph `shift` timesteps from where the left
+        // one does (review of #133, round 3): a cut at one column for both
+        // kept a boundary character twice or lost it. Two words: distinct
+        // letters, and two letters repeating, where only the text check tells
+        // neighbouring gaps apart.
+        for word in ["abcdefghijklmnopqrs", "xyxyxyxyxyxyxyxyxyx"] {
+            let line: Vec<(&str, usize)> = (0..word.len())
+                .map(|index| (&word[index..=index], 5 + index * 4))
+                .collect();
+            for shift in [-2_isize, -1, 0, 1, 2] {
+                let left: Vec<(&str, usize)> =
+                    line.iter().copied().filter(|&(_, at)| at < 60).collect();
+                let right: Vec<(&str, usize)> = line
+                    .iter()
+                    .copied()
+                    .filter(|&(_, at)| at >= 40)
+                    .filter_map(|(text, at)| {
+                        usize::try_from(at as isize - 40 + shift)
+                            .ok()
+                            .map(|at| (text, at))
+                    })
+                    .collect();
+                let joined = stitch(
+                    vec![
+                        (Piece { start: 0, end: 480 }, piece_read(&left, 60, 0.9)),
+                        (
+                            Piece {
+                                start: 320,
+                                end: 800,
+                            },
+                            piece_read(&right, 60, 0.9),
+                        ),
+                    ],
+                    800,
+                );
+                assert_eq!(joined.text, word, "{word} shifted {shift}");
+            }
+        }
     }
 
     #[test]
