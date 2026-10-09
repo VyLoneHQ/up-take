@@ -3,10 +3,12 @@
 //! Two pure stages sit either side of the recognition model, and both are here
 //! because both are testable without it:
 //!
-//! - [`rectify`] lifts a rotated quad out of the frame into an upright,
-//!   fixed-height strip -- the only shape the recogniser accepts.
+//! - [`rectify_piece`] lifts a rotated quad, or one [`Piece`] of a long one,
+//!   out of the frame into an upright, fixed-height strip -- the only shape
+//!   the recogniser accepts.
 //! - [`ctc_decode`] turns the model's per-timestep class scores back into
-//!   characters.
+//!   characters, and [`stitch`] joins the pieces of a long line into one
+//!   decode.
 //!
 //! **Nothing here loads a model.** `ctc_decode` takes a slice of logits, so its
 //! tests write the logits by hand.
