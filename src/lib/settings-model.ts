@@ -173,7 +173,11 @@ export type Row =
   | (Common & {
       shape: 'action';
       label: string;
-      action: 'replay-tour' | 'reset-defaults';
+      action:
+        | 'replay-tour'
+        | 'reset-defaults'
+        | 'open-licence'
+        | 'open-notices';
     })
   | (Common & { shape: 'keys'; heading: string; keys: readonly KeyRow[] })
   | (Common & {
@@ -548,6 +552,31 @@ export function panes(
               about: say('settings.help.replay.about'),
               label: say('settings.help.replay.action'),
               action: 'replay-tour',
+            },
+          ],
+        },
+        // I-443 (LEGAL-AND-COMMERCE.md section 3): UP-TAKE's own licence and
+        // everyone else's, each one click from Help. Both files ship in the
+        // installer beside the executable; a development build has neither,
+        // and the button says so rather than opening nothing.
+        {
+          label: say('settings.section.licence'),
+          rows: [
+            {
+              shape: 'action',
+              id: 'open-licence',
+              name: say('settings.licence.own.name'),
+              about: say('settings.licence.own.about'),
+              label: say('settings.licence.open'),
+              action: 'open-licence',
+            },
+            {
+              shape: 'action',
+              id: 'open-notices',
+              name: say('settings.licence.notices.name'),
+              about: say('settings.licence.notices.about'),
+              label: say('settings.licence.open'),
+              action: 'open-notices',
             },
           ],
         },

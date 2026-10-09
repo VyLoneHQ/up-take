@@ -1,7 +1,9 @@
 {
   "bundle": {
     "resources": {
+      "assets/LICENSE.txt": "LICENSE.txt",
       "assets/LICENSE-onnxruntime.txt": "LICENSE-onnxruntime.txt",
+      "assets/THIRD-PARTY-NOTICES.txt": "THIRD-PARTY-NOTICES.txt",
       "assets/ThirdPartyNotices-onnxruntime.txt": "ThirdPartyNotices-onnxruntime.txt",
       "assets/models/NOTICE-models.txt": "models/NOTICE-models.txt",
       "assets/models/PP-OCRv6_small_det.onnx": "models/PP-OCRv6_small_det.onnx",

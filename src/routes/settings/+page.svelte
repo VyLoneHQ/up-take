@@ -26,6 +26,12 @@ let pane = $state<PaneId>('general');
 let problem = $state('');
 let tourArmed = $state(false);
 let wasReset = $state(false);
+// The licence files a development build does not have (I-443), and the ones
+// Windows refused to open: each button says which in words. Not `problem`, which
+// is rendered as a settings save that failed, and opening a file saves nothing
+// (review of #130, round 1).
+let missingLicence = $state<string[]>([]);
+let failedLicence = $state<string[]>([]);
 
 const view = $derived(
   settings && facts ? panes(language, settings, facts) : [],
@@ -90,6 +96,25 @@ async function chooseFolder(row: Extract<Row, { shape: 'folder' }>) {
 async function replayTour() {
   await invoke('settings_replay_tour');
   tourArmed = true;
+}
+
+/** Opens UP-TAKE's licence or the third-party notices, from Help (I-443). */
+async function openLicence(action: 'open-licence' | 'open-notices') {
+  failedLicence = failedLicence.filter((each) => each !== action);
+  try {
+    await invoke('settings_open_licence', {
+      which: action === 'open-licence' ? 'licence' : 'notices',
+    });
+  } catch (error) {
+    // Rust answers this in words when the file is not beside the executable,
+    // which is every development build. Anything else is Windows refusing to
+    // open it, said on the button, which stays enabled for another try.
+    if (String(error).includes('not in this build')) {
+      missingLicence = [...missingLicence, action];
+    } else {
+      failedLicence = [...failedLicence, action];
+    }
+  }
 }
 
 async function openSaveFolder() {
@@ -263,6 +288,19 @@ onMount(() => {
                       >{tourArmed
                         ? text(language, 'settings.help.replay.armed')
                         : row.label}</button
+                    >
+                  {:else if row.shape === 'action' && (row.action === 'open-licence' || row.action === 'open-notices')}
+                    {@const action = row.action}
+                    <button
+                      type="button"
+                      class="quiet"
+                      disabled={missingLicence.includes(action)}
+                      onclick={() => openLicence(action)}
+                      >{missingLicence.includes(action)
+                        ? text(language, 'settings.licence.missing')
+                        : failedLicence.includes(action)
+                          ? text(language, 'settings.licence.failed')
+                          : row.label}</button
                     >
                   {:else if row.shape === 'action'}
                     <button
