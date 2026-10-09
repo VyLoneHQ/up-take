@@ -1107,6 +1107,46 @@ pub(crate) fn selection_of(id: AreaId) -> Option<(usize, usize)> {
     lock().selection.get(&id.get()).copied().map(ordered)
 }
 
+/// The areas whose latest reading found characters: the OCR half of Living's
+/// body rule (`ADR-0047` decision 2, `Area::body_takes_input`).
+///
+/// A copy, taken before the area store is locked, so the two locks are never
+/// held together on the hover and press paths. The characters are the one
+/// source: a reading in progress has already dropped them (`recognise`), and an
+/// empty, failed or unavailable reading never stores any, so every state the ADR
+/// names as "no text" is an id missing from this set.
+pub(crate) fn areas_with_text() -> BTreeSet<u64> {
+    lock()
+        .words
+        .iter()
+        .filter(|(_, chars)| !chars.is_empty())
+        .map(|(id, _)| *id)
+        .collect()
+}
+
+/// The text of `id`'s selection, or `None` when it has none: unlike
+/// [`copy_text`], never everything read.
+pub(crate) fn selected_text(id: AreaId) -> Option<String> {
+    let guard = lock();
+    let (first, last) = ordered(*guard.selection.get(&id.get())?);
+    let words = guard.words.get(&id.get())?;
+    Some(ocr_words::text_between(words, first, last))
+}
+
+/// Whether any area has a selection: the cheap first question on the Living
+/// press path, which is asked on every press while the overlay is visible.
+pub(crate) fn any_selection() -> bool {
+    !lock().selection.is_empty()
+}
+
+/// Drops `id`'s selection, and any press still waiting to become one. Returns
+/// whether there was a selection to drop, so the caller announces only a change.
+pub(crate) fn clear_selection(id: AreaId) -> bool {
+    let mut guard = lock();
+    guard.pending.remove(&id.get());
+    guard.selection.remove(&id.get()).is_some()
+}
+
 /// Whether a pointer at `local`, nearest character `nearest`, has left a press
 /// at `pressed` on character `anchor`: by reaching another character, or by
 /// moving [`DRAG_SLOP`] on either axis.
@@ -1157,6 +1197,51 @@ const fn ordered((a, b): (usize, usize)) -> (usize, usize) {
 )]
 mod tests {
     use super::*;
+
+    /// Roadmap 1.46: Living's body rule and its `Ctrl+C` read these three, so
+    /// each is driven at its own call site against the module's real state.
+    ///
+    /// ⚠️ **Global `OCR` state, like `dismissing_an_area_releases_the_clipboard_promise`.**
+    /// The id is taken from far up a store of its own, because every other test
+    /// here that touches the state uses a store's FIRST id, and the tests run in
+    /// parallel.
+    #[test]
+    fn an_area_holds_text_only_while_its_reading_has_characters() {
+        let mut store = AreaStore::new();
+        let id = (0..40).map(|_| area_id(&mut store)).last().unwrap();
+        let unit = |text: &str, word: u32| PlacedChar {
+            text: text.to_owned(),
+            line: 0,
+            word,
+            outline: [Point::new(0, 0); 4],
+        };
+        // A reading that found characters: the area holds text.
+        lock()
+            .words
+            .insert(id.get(), vec![unit("a", 0), unit("b", 0), unit("c", 1)]);
+        assert!(areas_with_text().contains(&id.get()));
+        // An empty list is no text: the rule must not mistake the key for words.
+        lock().words.insert(id.get(), Vec::new());
+        assert!(!areas_with_text().contains(&id.get()));
+        lock()
+            .words
+            .insert(id.get(), vec![unit("a", 0), unit("b", 0), unit("c", 1)]);
+
+        // Only the selection, never everything read: no selection, no text.
+        assert_eq!(selected_text(id), None);
+        lock().selection.insert(id.get(), (2, 1));
+        assert_eq!(selected_text(id).as_deref(), Some("b c"));
+        assert!(any_selection());
+
+        // Clearing reports a change exactly once.
+        assert!(clear_selection(id));
+        assert!(!clear_selection(id));
+        assert_eq!(selected_text(id), None);
+
+        // A dismissed area holds no text.
+        forget(id);
+        assert!(!areas_with_text().contains(&id.get()));
+    }
 
     #[test]
     fn a_click_selects_nothing_and_a_drag_selects_once_it_leaves_the_press() {

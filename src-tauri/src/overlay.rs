@@ -10,11 +10,12 @@
 //! Geometry decisions live in `uptake_core::geometry`; this module only maps
 //! Tauri's monitor reports into core types and talks to the OS.
 
+use std::collections::BTreeSet;
 use std::sync::{Mutex, MutexGuard, PoisonError, RwLock};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
-use uptake_core::area::{AfterCreate, AreaId, AreaStore, AreaType, Input, Layer};
+use uptake_core::area::{AfterCreate, Area, AreaId, AreaStore, AreaType, Input, Layer};
 use uptake_core::geometry::{Monitor, Point, Rect, Size, virtual_desktop_bounds};
 use uptake_core::interaction;
 
@@ -1123,9 +1124,51 @@ pub(crate) fn area_at(app: &AppHandle, point: Point) -> Option<AreaSummary> {
 /// motivated the split.
 pub(crate) fn interactive_area_at(app: &AppHandle, point: Point) -> Option<AreaSummary> {
     let monitors = monitor_rects();
+    let bodies = LivingBodies::now();
     let store = app.state::<Mutex<AreaStore>>();
     let guard = lock(&store);
-    guard.hit_test(point, &monitors).map(AreaSummary::of)
+    guard
+        .hit_test_with(point, &monitors, |area| bodies.take_input(area))
+        .map(AreaSummary::of)
+}
+
+/// What Living needs to know, beyond each area's own [`Input`], to decide
+/// whether a press on an area's **body** is the area's (`ADR-0047`): whether
+/// OCR areas read in place, and which of them hold text.
+///
+/// **Taken before the area store is locked**, and that is why it is a value
+/// rather than a closure that asks `ocr` as it goes: asking under the store
+/// lock would hold it and the OCR lock together. Nothing holds both today, and
+/// a lock order nobody has to reason about is the one worth keeping. The cost
+/// is that the answer can be one press old: words land from the poll thread,
+/// so a reading that finishes between this snapshot and the store lock is seen
+/// on the next press, not this one.
+///
+/// One constructor and one rule, shared by every Living question below, so the
+/// press, the menu, the chord and the hover cannot come to disagree about which
+/// bodies are the user's apps'.
+pub(crate) struct LivingBodies {
+    /// OCR areas read in place (`ADR-0046`), the setting.
+    in_place: bool,
+    /// The areas whose latest reading found characters.
+    with_text: BTreeSet<u64>,
+}
+
+impl LivingBodies {
+    /// The current setting and the OCR engine's current answers.
+    pub(crate) fn now() -> Self {
+        Self {
+            in_place: crate::settings::current().ocr_behaviour
+                == crate::settings::OcrBehaviour::InPlace,
+            with_text: crate::ocr::areas_with_text(),
+        }
+    }
+
+    /// Whether `area`'s body takes a press in Living: [`Area::body_takes_input`]
+    /// with this snapshot's two facts.
+    pub(crate) fn take_input(&self, area: &Area) -> bool {
+        area.body_takes_input(self.in_place, self.with_text.contains(&area.id.get()))
+    }
 }
 
 /// Applies `notches` of scroll to an area's magnification (§3.4) and starts
@@ -1422,10 +1465,11 @@ pub(crate) fn interactive_area_handle_at(
     point: Point,
 ) -> Option<(AreaId, Rect, interaction::Handle)> {
     let monitors = monitor_rects();
+    let bodies = LivingBodies::now();
     let store = app.state::<Mutex<AreaStore>>();
     let guard = lock(&store);
     guard
-        .grab_test(point, &monitors)
+        .grab_test_with(point, &monitors, |area| bodies.take_input(area))
         .map(|(area, handle)| (area.id, area.bounds, handle))
 }
 
@@ -1466,10 +1510,11 @@ pub(crate) fn chord_movable_area_at(
     app: &AppHandle,
     point: Point,
 ) -> Option<(AreaId, Rect, interaction::Handle)> {
+    let bodies = LivingBodies::now();
     let store = app.state::<Mutex<AreaStore>>();
     let guard = lock(&store);
     guard
-        .chord_move_test(point)
+        .chord_move_test_with(point, |area| bodies.take_input(area))
         .map(|area| (area.id, area.bounds, interaction::Handle::Body))
 }
 
@@ -1542,9 +1587,11 @@ pub(crate) struct LivingPointer {
 /// exactly when it could change the answer.
 pub(crate) fn living_pointer_at(app: &AppHandle, point: Point, chord_held: bool) -> LivingPointer {
     let monitors = monitor_rects();
+    let bodies = LivingBodies::now();
     let store = app.state::<Mutex<AreaStore>>();
     let guard = lock(&store);
-    if let Some((area, handle)) = guard.grab_test(point, &monitors) {
+    let body = |area: &Area| bodies.take_input(area);
+    if let Some((area, handle)) = guard.grab_test_with(point, &monitors, body) {
         return LivingPointer {
             grabbed: Some((area.id, area.bounds, handle)),
             hovered: Some(area.id),
@@ -1555,7 +1602,7 @@ pub(crate) fn living_pointer_at(app: &AppHandle, point: Point, chord_held: bool)
     // Same lock, same snapshot. `Handle::Body` because that is the grab the chord
     // grants and `living_lbutton_down` already turns it into a move.
     let chord = chord_held
-        .then(|| guard.chord_move_test(point))
+        .then(|| guard.chord_move_test_with(point, body))
         .flatten()
         .map(|area| (area.id, area.bounds, interaction::Handle::Body));
     LivingPointer {
@@ -1671,6 +1718,42 @@ pub(crate) fn area_bounds(app: &AppHandle, id: AreaId) -> Option<Rect> {
 pub(crate) fn area_kind(app: &AppHandle, id: AreaId) -> Option<AreaType> {
     let store = app.state::<Mutex<AreaStore>>();
     lock(&store).get(id).map(|area| area.kind)
+}
+
+/// Whether `id`'s body takes a press in Living, by `bodies`' rule. `false` for
+/// an area that is gone.
+pub(crate) fn area_takes_input(app: &AppHandle, id: AreaId, bodies: &LivingBodies) -> bool {
+    let store = app.state::<Mutex<AreaStore>>();
+    lock(&store)
+        .get(id)
+        .is_some_and(|area| bodies.take_input(area))
+}
+
+/// Hook route for `Ctrl+C` in Living (roadmap `1.46`, `ADR-0047` decision 5):
+/// copies the OCR selection that is showing, and nothing else.
+///
+/// **Never everything an area read**, which is what Placement's `Ctrl+C` does
+/// over an area with no selection (`overlay_ocr_copy_focused`). In Living the
+/// key is taken from the user's own app only because a selection is showing; if
+/// it has gone by the time this runs, the honest outcome is no copy, not a
+/// different one. The topmost area with a selection wins when several have one,
+/// which only a selection left over from Placement can produce: a press in
+/// Living clears every selection it is away from.
+pub(crate) fn ocr_copy_selection(app: &AppHandle) {
+    let found = areas_top_down(app).into_iter().find_map(|(id, _)| {
+        if !placement::reads_in_place(app, id) {
+            return None;
+        }
+        crate::ocr::selected_text(id).map(|text| (id, text))
+    });
+    let Some((id, text)) = found else {
+        return;
+    };
+    let started = std::time::Instant::now();
+    let app = app.clone();
+    std::thread::spawn(move || {
+        crate::output::copy_text_to_clipboard(&app, id, &text, started);
+    });
 }
 
 /// The monitor rectangles, cached.
@@ -2446,8 +2529,10 @@ fn area_under_cursor(app: &AppHandle) -> Result<Option<AreaSummary>, String> {
 /// clipboard is a global resource another process can hold.
 #[tauri::command]
 pub fn overlay_ocr_copy_focused(app: AppHandle) -> Result<(), String> {
-    // Placement only, like the selection it copies (`ADR-0016`; review of
-    // `#115`, round 1), and only from an area that is OCR now.
+    // Placement only (review of `#115`, round 1), and only from an area that is
+    // OCR now. A selection is made in Living too since roadmap `1.46`, and
+    // copied there by `ocr_copy_selection`, which never copies a whole area:
+    // in Living the key is the user's app's unless a selection shows.
     if !placement::is_placing() {
         return Ok(());
     }
@@ -2528,6 +2613,67 @@ pub fn overlay_request_state(app: AppHandle) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What roadmap `1.46` adds to each Living question, measured: building
+    /// the [`LivingBodies`] snapshot (a settings read and a copy of the OCR
+    /// ids that hold text), and asking the store with the body rule instead of
+    /// the plain one. Twelve areas, the size of the store the property tests
+    /// generate, half of them OCR.
+    ///
+    /// **What it leaves out, said rather than implied:** the Tauri state lookup
+    /// and the store lock each Living question already paid before `1.46`, and
+    /// the extra store reads of the selection-handle check, which run only on a
+    /// press. A real press on the rig is the measurement of those, and the hook
+    /// runs it inside `LowLevelHooksTimeout` (300 ms by default), against which
+    /// the z-order walk already measured 2.77 ms in the worst case.
+    ///
+    /// Run with:
+    /// `cargo test --release -p up-take --lib living_body_rule_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore = "a measurement, not a check: times the Living body rule"]
+    fn living_body_rule_cost() {
+        let mut store = AreaStore::new();
+        for index in 0..12_i32 {
+            let kind = if index % 2 == 0 {
+                AreaType::Ocr
+            } else {
+                AreaType::Default
+            };
+            assert!(
+                store
+                    .create(kind, Rect::new(index * 40, index * 30, 300, 200))
+                    .is_some()
+            );
+        }
+        let monitors = [Rect::new(-3000, -3000, 8000, 8000)];
+        let point = Point::new(250, 200);
+        const ROUNDS: u32 = 200_000;
+
+        let started = std::time::Instant::now();
+        for _ in 0..ROUNDS {
+            std::hint::black_box(LivingBodies::now());
+        }
+        let snapshot = started.elapsed() / ROUNDS;
+
+        let bodies = LivingBodies::now();
+        let started = std::time::Instant::now();
+        for _ in 0..ROUNDS {
+            std::hint::black_box(store.grab_test(std::hint::black_box(point), &monitors));
+        }
+        let plain = started.elapsed() / ROUNDS;
+        let started = std::time::Instant::now();
+        for _ in 0..ROUNDS {
+            std::hint::black_box(store.grab_test_with(
+                std::hint::black_box(point),
+                &monitors,
+                |area| bodies.take_input(area),
+            ));
+        }
+        let with_rule = started.elapsed() / ROUNDS;
+        println!(
+            "\nLivingBodies::now  {snapshot:?}\ngrab_test          {plain:?}\ngrab_test_with     {with_rule:?}\n"
+        );
+    }
 
     #[test]
     fn the_leave_placing_setting_is_screenshot_only() {
