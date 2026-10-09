@@ -415,6 +415,21 @@
       "de": "UP-TAKE Einstellungen",
       "de_from": "fcd525e1"
     },
+    "licence.title.own": {
+      "en": "UP-TAKE's licence",
+      "de": "Die Lizenz von UP-TAKE",
+      "de_from": "71381fc5"
+    },
+    "licence.title.notices": {
+      "en": "UP-TAKE: software by others",
+      "de": "UP-TAKE: Software von anderen",
+      "de_from": "c054b49f"
+    },
+    "licence.unreadable": {
+      "en": "This file could not be read.",
+      "de": "Diese Datei konnte nicht gelesen werden.",
+      "de_from": "779aa004"
+    },
     "settings.close": {
       "en": "Close",
       "de": "Schließen",
