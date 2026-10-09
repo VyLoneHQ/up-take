@@ -194,7 +194,7 @@ impl ProbabilityMap<'_> {
 /// Extracts text boxes from a probability map.
 ///
 /// `scale_x` and `scale_y` map a coordinate in **this map** to the source frame,
-/// and the caller gets them from [`super::preprocess::scale_to_source`] using the
+/// and the caller gets them from [`super::preprocess::DetectorInput::scale_to_source`] using the
 /// model's own output dimensions. Returns boxes in **source-frame** coordinates,
 /// clamped to `(source_width, source_height)`.
 ///

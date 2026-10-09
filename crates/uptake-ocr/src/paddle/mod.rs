@@ -253,9 +253,11 @@ impl PaddleEngine {
         // The map may be a different size from the tensor we sent, so the ratio
         // home is computed against the MAP, not against the resize. One rule,
         // defined and tested in `preprocess`; this used to be a second copy of
-        // it, and the copy `DetectorInput` carried was the dead one.
+        // it, and the copy `DetectorInput` carried was the dead one. Since
+        // `I-440` it also needs the content rectangle inside the padded
+        // tensor, which is why it is a method of the input.
         let (scale_x, scale_y) =
-            preprocess::scale_to_source(frame.width(), frame.height(), map_width, map_height);
+            input.scale_to_source(frame.width(), frame.height(), map_width, map_height);
 
         Ok(detect::boxes_from_map(
             &map,

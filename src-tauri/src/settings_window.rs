@@ -167,6 +167,12 @@ fn build(app: &AppHandle) -> Result<(), String> {
             state: None,
             radius: Some(6.0),
             color: None,
+            // New in tauri-utils 2.10 (Tauri 2.12): interactive Liquid Glass,
+            // which its own docs scope to macOS 27 and Liquid Glass effects
+            // only. It does nothing to Windows' acrylic, so `false` is today's
+            // behaviour, stated rather than left to a `Default` that does not
+            // exist for this struct (I-442).
+            interactive: false,
         })
         .is_ok();
     ACRYLIC.store(applied, Ordering::SeqCst);
