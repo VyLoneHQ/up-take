@@ -1515,6 +1515,48 @@ b
     }
 
     #[test]
+    fn a_gap_join_is_matched_only_inside_the_shared_stretch() {
+        // Review of #133, round 5, the no-space half. The left piece's only
+        // gap in the shared stretch (columns 320..480) is between its
+        // characters at 57 and 59, column 468. The right piece misread the one
+        // at 57, so its nearest gap is between 59 and 63, column 492: past the
+        // stretch, within the tolerance, and joining there dropped the 59.
+        let line: Vec<(&str, usize)> = vec![
+            ("a", 4),
+            ("b", 8),
+            ("c", 12),
+            ("d", 16),
+            ("e", 20),
+            ("f", 57),
+            ("g", 59),
+            ("h", 63),
+            ("i", 65),
+            ("j", 69),
+        ];
+        let left: Vec<(&str, usize)> = line.iter().copied().filter(|&(_, at)| at < 60).collect();
+        let right: Vec<(&str, usize)> = line
+            .iter()
+            .copied()
+            .filter(|&(_, at)| at >= 40 && at != 57)
+            .map(|(text, at)| (text, at - 40))
+            .collect();
+        let joined = stitch(
+            vec![
+                (Piece { start: 0, end: 480 }, piece_read(&left, 60, 0.9)),
+                (
+                    Piece {
+                        start: 320,
+                        end: 800,
+                    },
+                    piece_read(&right, 60, 0.9),
+                ),
+            ],
+            800,
+        );
+        assert_eq!(joined.text, "abcdefghij");
+    }
+
+    #[test]
     fn a_shared_stretch_with_no_space_joins_each_character_once() {
         // One long word across the join, a character every 4 timesteps. The
         // right piece places every glyph `shift` timesteps from where the left
