@@ -2275,6 +2275,16 @@ mod tests {
                 "prune_in(&LINKS, outlet.still_sticky);",
                 "links of areas that are gone are dropped",
             ),
+            (
+                "pub(crate) fn can_stick(bounds: Rect) -> bool {",
+                "window_under(bounds).is_some()",
+                "the menu greys its row out by asking for the window sticking would take",
+            ),
+            (
+                "fn link_under(id: AreaId, bounds: Rect) -> Option<Link> {",
+                "window_under(bounds)?;",
+                "and sticking takes that same window, so the two cannot disagree",
+            ),
         ] {
             assert!(body(&this, signature).contains(line), "{why}");
         }
