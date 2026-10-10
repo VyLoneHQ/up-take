@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 16e82dffc03141f6c58ad7eec37c3840759cb4dfd50965d369544b768ce2a14a # shrinks to area = Rect { origin: Point { x: 0, y: 11703 }, size: Size { width: 1, height: 4479 } }, window = Rect { origin: Point { x: 0, y: 10672 }, size: Size { width: 0, height: 4906 } }, width = 0, height = 745, dx = 0, dy = -9623
+cc a8e6357dec2b905597f42f01f9c32ebcc6d0920fc8a627717ee2638512b670a9 # shrinks to area = Rect { origin: Point { x: -7972, y: 0 }, size: Size { width: 2071, height: 1 } }, window = Rect { origin: Point { x: -8736, y: -2529 }, size: Size { width: 4418, height: 0 } }, width = 439, height = 0
