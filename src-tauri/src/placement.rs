@@ -3752,7 +3752,7 @@ fn finish_gesture(release: Point) {
                 // A sticky area the user moved by hand keeps the place they
                 // put it: its anchor on the window is taken again from
                 // where it is now (roadmap `1.47`).
-                crate::sticky::reanchor(app, id);
+                crate::sticky::reanchor(app, id, Rect::new(x, y, width, height));
             }
             moved
         }

@@ -54,8 +54,11 @@ tauri-plugin-single-instance = "2"
 #     (Win32_System_Memory), and GetLocalTime (Win32_System_SystemInformation)
 #     for the output pipeline (task 1.9).
 #   - sticky.rs: SetWinEventHook (Win32_UI_Accessibility) to hear a followed
-#     window move, and QueryFullProcessImageNameW (Win32_System_Threading)
-#     to recognise its program again (roadmap 1.47).
+#     window move, QueryFullProcessImageNameW (Win32_System_Threading) to
+#     recognise its program again, DwmFlush and DwmGetWindowAttribute
+#     (Win32_Graphics_Dwm) for the once-a-frame poll and the cloaked test,
+#     MonitorFromWindow (Win32_Graphics_Gdi) and GetDpiForWindow and its
+#     three companions (Win32_UI_HiDpi) for the window's scale (roadmap 1.47).
 #   - strings.rs: GetUserDefaultUILanguage (Win32_Globalization), the
 #     display language UP-TAKE's words follow (roadmap 1.38).
 # tao already pulls windows-sys transitively; this makes the usage explicit and
@@ -81,8 +84,10 @@ windows-sys = { workspace = true, features = [
   # window by (roadmap 1.47).
   "Win32_UI_Accessibility",
   # dev_harness.rs: SetThreadDpiHostingBehavior, for roadmap 1.35 gate 1's
-  # measurement (UPTAKE_DEV_DPI_HOSTING). Debug builds call it; release builds
-  # link the feature and call nothing.
+  # measurement (UPTAKE_DEV_DPI_HOSTING), in debug builds only.
+  # sticky.rs: the scale a followed window is drawn at, in every build
+  # (roadmap 1.47). Until then release builds linked this feature and called
+  # nothing from it.
   "Win32_UI_HiDpi",
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",

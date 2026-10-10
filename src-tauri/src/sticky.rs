@@ -91,6 +91,7 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 use uptake_core::area::{AreaId, AreaStore};
 use uptake_core::geometry::{Point, Rect};
+use uptake_core::interaction;
 use uptake_core::sticky::{Anchor, Sticky};
 
 use windows_sys::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT};
@@ -339,20 +340,41 @@ pub(crate) fn forget(id: AreaId) {
 }
 
 /// Takes a new anchor after the user moved or resized a sticky area by hand,
-/// so the place they put it is the place it keeps.
+/// so the place they put it is the place it keeps. `placed` is where the hand
+/// left it.
 ///
 /// Nothing happens if the area is not sticky, or if its window is not on
 /// screen (see the module's limits).
-pub(crate) fn reanchor(app: &AppHandle, id: AreaId) {
-    let Some(bounds) = overlay::area_bounds(app, id) else {
-        return;
-    };
-    let mut links = lock(&LINKS);
+pub(crate) fn reanchor(app: &AppHandle, id: AreaId, placed: Rect) {
+    let store = app.state::<Mutex<AreaStore>>();
+    reanchor_in(store.inner(), &LINKS, id, placed, see);
+}
+
+/// [`reanchor`] on given state. The links are held throughout, as in every
+/// step that touches both them and the store.
+///
+/// The area is put back at `placed` first. The follower may have written its
+/// own placement between the hand's write and this call, from a decision it
+/// made a moment earlier, and the hand is the later word.
+fn reanchor_in(
+    store: &Mutex<AreaStore>,
+    links: &Mutex<Vec<Link>>,
+    id: AreaId,
+    placed: Rect,
+    see: impl FnOnce(isize, u32) -> Seen,
+) {
+    let mut links = lock(links);
     let Some(link) = links.iter_mut().find(|link| link.area == id && !link.gone) else {
         return;
     };
+    {
+        let mut store = lock(store);
+        if store.get(id).is_some_and(|area| area.bounds != placed) {
+            store.set_bounds(id, placed);
+        }
+    }
     let seen = see(link.window, link.pid);
-    retake(link, bounds, seen);
+    retake(link, placed, seen);
 }
 
 /// Takes a link's anchor again from where the area and its window are now. A
@@ -994,6 +1016,7 @@ fn sync(window: isize) -> Option<Seen> {
 /// already knows it and a look would say otherwise. `None` looks.
 fn sync_as(window: isize, known: Option<Seen>) -> Option<Seen> {
     let mut changes: Vec<Change> = Vec::new();
+    let mut moved: Vec<AreaId> = Vec::new();
     let seen = {
         let mut links = lock(&LINKS);
         let pid = links
@@ -1023,19 +1046,23 @@ fn sync_as(window: isize, known: Option<Seen>) -> Option<Seen> {
             let (state, bounds) = plan(link.anchor, link.scale, seen);
             changes.push((link.area, state, bounds));
         }
+        // Written before the links are let go. A hand move takes the links to
+        // record its new anchor, so it comes wholly before this decision or
+        // wholly after it. Let go first, an older decision could be written
+        // over the place the user had just put the area.
+        if !changes.is_empty()
+            && let Some(outlet) = OUTLET.get()
+        {
+            moved = (outlet.place)(&changes);
+        }
         seen
     };
-    if !changes.is_empty()
-        && let Some(outlet) = OUTLET.get()
-    {
-        let moved = (outlet.place)(&changes);
-        if !moved.is_empty() {
-            UNSETTLED.with_borrow_mut(|unsettled| unsettled.extend(moved));
-            // SAFETY: as in `keep_ticking`. Passing the id of the timer that
-            // is already running restarts it, so the wait is counted from the
-            // last move and not from the first.
-            SETTLE.set(unsafe { SetTimer(std::ptr::null_mut(), SETTLE.get(), SETTLE_MS, None) });
-        }
+    if !moved.is_empty() {
+        UNSETTLED.with_borrow_mut(|unsettled| unsettled.extend(moved));
+        // SAFETY: as in `keep_ticking`. Passing the id of the timer that is
+        // already running restarts it, so the wait is counted from the last
+        // move and not from the first.
+        SETTLE.set(unsafe { SetTimer(std::ptr::null_mut(), SETTLE.get(), SETTLE_MS, None) });
     }
     Some(seen)
 }
@@ -1049,7 +1076,7 @@ fn app_place(changes: &[Change]) -> Vec<AreaId> {
     };
     let (changed, moved) = {
         let store = app.state::<Mutex<AreaStore>>();
-        write(&mut lock(&store), changes)
+        write(&mut lock(&store), changes, &overlay::monitor_rects())
     };
     if changed || !moved.is_empty() {
         tell_the_page(app);
@@ -1095,20 +1122,27 @@ fn tell_the_page(app: &AppHandle) {
 /// follower decides on its own thread, so a decision can arrive just after the
 /// user freed the area from its menu, and writing it would tick the menu row
 /// again on an area nothing follows.
-fn write(store: &mut AreaStore, changes: &[Change]) -> (bool, Vec<AreaId>) {
+fn write(store: &mut AreaStore, changes: &[Change], monitors: &[Rect]) -> (bool, Vec<AreaId>) {
     let mut moved: Vec<AreaId> = Vec::new();
     let mut changed = false;
     for &(id, state, bounds) in changes {
-        if !store.get(id).is_some_and(|area| area.sticky.is_sticky()) {
+        let Some(area) = store.get(id).copied() else {
+            continue;
+        };
+        if !area.sticky.is_sticky() {
             continue;
         }
         changed |= store.set_sticky(id, state);
-        let Some(bounds) = bounds else {
-            continue;
-        };
+        // A followed area goes where its window is, off the desktop too: the
+        // window brings it back. A paused area has no window to bring it
+        // back, and an area off the desktop cannot be reached to move, free or
+        // dismiss it (`interaction::contain` says why that is a correctness
+        // rule). So an area that pauses while it hangs off the desktop is
+        // pulled back onto it, and waits there.
+        let bounds = bounds.unwrap_or_else(|| interaction::contain(area.bounds, monitors));
         // Following a window does not raise the area: the user did not touch
         // it, so the stack stays as they left it.
-        if store.get(id).is_some_and(|area| area.bounds != bounds) && store.set_bounds(id, bounds) {
+        if area.bounds != bounds && store.set_bounds(id, bounds) {
             moved.push(id);
         }
     }
@@ -1276,6 +1310,7 @@ mod tests {
     use uptake_core::geometry::{Point, Rect};
     use uptake_core::sticky::{Anchor, Sticky};
 
+    use super::reanchor_in;
     use std::collections::HashSet;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1294,6 +1329,8 @@ mod tests {
 
     /// Every placement `sync` decided, for the real-window test to read.
     static PLACED: Mutex<Vec<Change>> = Mutex::new(Vec::new());
+    /// Every area the follower asked to settle, for the same test.
+    static SETTLED: Mutex<Vec<AreaId>> = Mutex::new(Vec::new());
     /// How many events about a followed window reached the callback.
     pub(super) static EVENTS_HEARD: AtomicUsize = AtomicUsize::new(0);
 
@@ -1421,11 +1458,17 @@ mod tests {
         // still sticky, and each decision is written down to be read below.
         let _ = OUTLET.set(Outlet {
             still_sticky: |linked| linked.iter().copied().collect(),
+            // Every area given a rectangle counts as moved, as it would be
+            // in the app, so the follower's settle timer is set and handled.
             place: |changes| {
                 lock(&PLACED).extend_from_slice(changes);
-                Vec::new()
+                changes
+                    .iter()
+                    .filter(|(_, _, bounds)| bounds.is_some())
+                    .map(|&(area, _, _)| area)
+                    .collect()
             },
-            settle: |_| {},
+            settle: |area| lock(&SETTLED).push(area),
         });
         wake();
         assert!(
@@ -1470,6 +1513,16 @@ mod tests {
         // this count says outright that the events arrived.
         let heard = EVENTS_HEARD.load(Ordering::Relaxed) - heard_before;
         assert!(heard >= 5, "{heard} events heard for 5 moves");
+
+        // The moves have stopped, so the area re-takes what it shows. This
+        // asks only that it happens: the follower's timer was set and was
+        // handled. That the five moves settle once and not five times is not
+        // asserted, because it turns on the moves landing inside one 150 ms
+        // wait, which a slow CI runner does not promise.
+        assert!(
+            wait_for(Duration::from_millis(1000), || lock(&SETTLED).contains(&id)),
+            "a moved area settles once its window is still"
+        );
 
         // A drag. Windows announces one with `EVENT_SYSTEM_MOVESIZESTART`, and
         // a program may raise that event for its own window, which is how this
@@ -1603,6 +1656,14 @@ mod tests {
                 .iter()
                 .any(|link| link.area == id && link.gone)),
             "a destroyed window is marked gone, so it can be re-attached"
+        );
+        // And the link wrote down what was open at that moment. This desktop
+        // has other windows, and none of them is this one coming back.
+        assert!(
+            lock(&LINKS)
+                .iter()
+                .any(|link| link.area == id && !link.open_at_close.is_empty()),
+            "what was open when the window closed is remembered"
         );
         forget(id);
     }
@@ -1831,7 +1892,7 @@ mod tests {
             (first, Sticky::Following, Some(moved_to)),
             (second, Sticky::Paused, None),
         ];
-        let (changed, moved) = write(&mut store, &changes);
+        let (changed, moved) = write(&mut store, &changes, &[]);
         assert!(changed, "the second area's state changed");
         assert_eq!(moved, vec![first]);
         let (Some(a), Some(b)) = (store.get(first).copied(), store.get(second).copied()) else {
@@ -1850,7 +1911,79 @@ mod tests {
         );
         // The same decisions again change nothing and move nothing, so the
         // page is not sent a set that says what it already shows.
-        assert_eq!(write(&mut store, &changes), (false, Vec::new()));
+        assert_eq!(write(&mut store, &changes, &[]), (false, Vec::new()));
+    }
+
+    #[test]
+    fn an_area_that_pauses_off_the_desktop_is_brought_back_onto_it() {
+        // The third review's first finding. The window was dragged so that
+        // the area hung off the right of the only monitor, and then closed.
+        // Paused out there, nothing could reach the area: every way to move,
+        // free or dismiss one needs the pointer on it.
+        let monitor = [Rect::new(0, 0, 1920, 1080)];
+        let (mut store, first, second) = store_with_two();
+        store.set_sticky(first, Sticky::Following);
+        store.set_sticky(second, Sticky::Following);
+        let off = Rect::new(2450, 300, 200, 80);
+        // Following: the area goes where its window is, off the desktop too.
+        let (_, moved) = write(
+            &mut store,
+            &[(first, Sticky::Following, Some(off))],
+            &monitor,
+        );
+        assert_eq!(moved, vec![first]);
+        assert_eq!(store.get(first).map(|area| area.bounds), Some(off));
+        // The window closes. The area pauses, and comes back onto the monitor
+        // by the same rule a hand move obeys.
+        let (changed, moved) = write(&mut store, &[(first, Sticky::Paused, None)], &monitor);
+        assert!(changed);
+        assert_eq!(moved, vec![first]);
+        let held = uptake_core::interaction::contain(off, &monitor);
+        assert_ne!(held, off);
+        assert_eq!(store.get(first).map(|area| area.bounds), Some(held));
+        // An area that pauses where it can be reached does not move at all.
+        let was = store.get(second).map(|area| area.bounds);
+        let (_, moved) = write(&mut store, &[(second, Sticky::Paused, None)], &monitor);
+        assert!(moved.is_empty());
+        assert_eq!(store.get(second).map(|area| area.bounds), was);
+    }
+
+    #[test]
+    fn a_hand_move_is_the_later_word_over_a_decision_made_just_before_it() {
+        // The third review's second finding. The follower decided where the
+        // area goes, the user dropped the area somewhere else, and the older
+        // decision was then written over the drop. The hand move now puts the
+        // area back where the hand left it and takes its anchor from there.
+        let (store, first, _) = store_with_two();
+        let store = Mutex::new(store);
+        let links: Mutex<Vec<Link>> = Mutex::new(Vec::new());
+        let was = Rect::new(140, 260, 200, 80);
+        stick_in(&store, &links, link_for(first, was));
+        let dropped = Rect::new(600, 500, 200, 80);
+        // The follower's write lands after the hand's own, with the old place.
+        lock(&store).set_bounds(first, Rect::new(440, 360, 200, 80));
+        reanchor_in(&store, &links, first, dropped, |_, _| Seen::At {
+            rect: WINDOW,
+            scale: 1.0,
+        });
+        assert_eq!(
+            lock(&store).get(first).map(|area| area.bounds),
+            Some(dropped)
+        );
+        let anchors: Vec<Anchor> = lock(&links).iter().map(|link| link.anchor).collect();
+        assert_eq!(anchors, vec![Anchor::of(dropped, WINDOW)]);
+        // And it holds the links while it writes the store, like every step
+        // that touches both.
+        let held = lock(&store);
+        std::thread::scope(|scope| {
+            let step = scope.spawn(|| {
+                reanchor_in(&store, &links, first, was, |_, _| Seen::Hidden);
+            });
+            let blocked = wait_for(Duration::from_secs(2), || links.try_lock().is_err());
+            drop(held);
+            let _ = step.join();
+            assert!(blocked, "the links are held across the store");
+        });
     }
 
     #[test]
@@ -1863,6 +1996,7 @@ mod tests {
         write(
             &mut store,
             &[(first, Sticky::Following, Some(Rect::new(0, 0, 200, 80)))],
+            &[],
         );
         assert_eq!(order(&store), before, "the user did not touch it");
     }
@@ -1875,7 +2009,7 @@ mod tests {
         let (mut store, first, _) = store_with_two();
         let was = Rect::new(140, 260, 200, 80);
         let late: Vec<Change> = vec![(first, Sticky::Following, Some(Rect::new(900, 40, 200, 80)))];
-        assert_eq!(write(&mut store, &late), (false, Vec::new()));
+        assert_eq!(write(&mut store, &late, &[]), (false, Vec::new()));
         let Some(area) = store.get(first).copied() else {
             panic!("the area")
         };
@@ -1883,7 +2017,7 @@ mod tests {
         assert_eq!(area.bounds, was, "a free area is not moved either");
         // An id that no longer exists is passed by the same way.
         assert!(store.remove(first).is_some());
-        assert_eq!(write(&mut store, &late), (false, Vec::new()));
+        assert_eq!(write(&mut store, &late, &[]), (false, Vec::new()));
     }
 
     #[test]
@@ -1966,9 +2100,14 @@ mod tests {
         assert_eq!(found.map(|open| open.window), Some(31));
     }
 
-    /// `source` with its test module cut off and its comment lines dropped, so
-    /// that a call which survives only in a comment or only in a test does not
-    /// count as made.
+    /// `source` with its test module cut off and its comments dropped, line
+    /// comments and block comments both, so that a call which survives only
+    /// in a comment or only in a test does not count as made.
+    ///
+    /// What it cannot see is code made dead another way: a call left inside
+    /// `if false { }` still reads as made. This guards against a line going
+    /// missing, which is how these calls were lost in two reviews' drills. It
+    /// is not a proof that the line runs.
     ///
     /// The test module is everything from the line `mod tests {` on. The first
     /// version looked for that line directly under `#[cfg(test)]`, found it in
@@ -1979,7 +2118,14 @@ mod tests {
         let code = source
             .split_once("\nmod tests {")
             .map_or(source, |(before, _)| before);
-        code.lines()
+        let mut kept = String::with_capacity(code.len());
+        let mut rest = code;
+        while let Some((before, after)) = rest.split_once("/*") {
+            kept.push_str(before);
+            rest = after.split_once("*/").map_or("", |(_, after)| after);
+        }
+        kept.push_str(rest);
+        kept.lines()
             .filter(|line| !line.trim_start().starts_with("//"))
             .collect::<Vec<_>>()
             .join("\n")
@@ -2010,6 +2156,11 @@ mod tests {
             let source = format!("fn setup() {{}}\n{header}\n    fn t() {{ {call} }}\n}}\n");
             assert!(!production(&source).contains(call), "{header}");
         }
+        // Inside a block comment, on one line or across several.
+        assert!(!production(&format!("fn setup() {{\n    /* {call} */\n}}\n")).contains(call));
+        assert!(
+            !production(&format!("fn setup() {{\n    /*\n    {call}\n    */\n}}\n")).contains(call)
+        );
         // Present in production code: found.
         assert!(production(&format!("fn setup() {{\n    {call}\n}}\n")).contains(call));
         // A body ends at its own closing brace, not at the next function's.
@@ -2038,7 +2189,7 @@ mod tests {
             "the menu row does something"
         );
         assert!(
-            placement.contains("crate::sticky::reanchor(app, id);"),
+            placement.contains("crate::sticky::reanchor(app, id, Rect::new(x, y, width, height));"),
             "a hand move takes a new anchor"
         );
         let overlay = production(include_str!("overlay.rs"));
@@ -2065,13 +2216,13 @@ mod tests {
                 "freeing an area drops its link",
             ),
             (
-                "pub(crate) fn reanchor(app: &AppHandle, id: AreaId) {",
-                "retake(link, bounds, seen);",
+                "pub(crate) fn reanchor(app: &AppHandle, id: AreaId, placed: Rect) {",
+                "reanchor_in(store.inner(), &LINKS, id, placed, see);",
                 "a hand move takes the new anchor, or the area snaps back",
             ),
             (
                 "fn app_place(changes: &[Change]) -> Vec<AreaId> {",
-                "write(&mut lock(&store), changes)",
+                "write(&mut lock(&store), changes, &overlay::monitor_rects())",
                 "the follower's decisions reach the store",
             ),
             (
