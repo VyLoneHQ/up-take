@@ -256,6 +256,18 @@ jobs:
       - name: cargo test (release)
         run: cargo test --release --all-features
 
+      # The one test of the Windows half of sticky areas (roadmap 1.47). It is
+      # marked `ignore` because it needs a desktop session: it creates a real
+      # window, far off every monitor, and listens to the events Windows sends
+      # about it. This runner has such a session, so it runs here.
+      #
+      # Added 2026-10-10 on the first independent review of the feature, which
+      # found that the step above never runs it: with the follower thread, the
+      # hooks or the per-frame poll broken, every other test stays green,
+      # because none of them has a window to follow.
+      - name: cargo test (a sticky area follows a real window)
+        run: cargo test --all-features -p up-take --lib a_real_window_is_followed -- --ignored
+
   # ---------------------------------------------------------------------------
   # Supply chain: licence policy and security advisories.
   #

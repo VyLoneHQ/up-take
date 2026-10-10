@@ -1057,8 +1057,42 @@ pub(crate) const fn as_tuple(rect: Rect) -> (i32, i32, u32, u32) {
     )
 }
 
+/// What the page is told about one area.
+///
+/// A function of its own so that a test can ask what an area is sent as. The
+/// first review of sticky areas (roadmap `1.47`) sent every area as `free`
+/// from inside [`emit_areas`] and no test noticed.
+fn payload_of(area: &Area, monitors: &[Rect]) -> AreaPayload {
+    AreaPayload {
+        id: area.id.get(),
+        rect: as_tuple(area.bounds),
+        close: as_tuple(interaction::close_control(area.bounds, monitors)),
+        layer: layer_name(area.layer),
+        kind: type_name(area.kind),
+        ocr_behaviour: area.ocr_behaviour,
+        sticky: area.sticky,
+        zoom: area.zoom.factor(),
+        bar: interaction::grab_bar(area.bounds, monitors).map(as_tuple),
+        handles: interaction::outside_resize_handles(area.bounds)
+            .into_iter()
+            .map(as_tuple)
+            .collect(),
+    }
+}
+
+/// Held from reading the store to handing the set to the page, so two threads
+/// cannot send their sets in the opposite order to the one they read them in.
+static EMITTING_AREAS: Mutex<()> = Mutex::new(());
+
 /// Emits the current area set. Called on entering a visible state, on the
-/// frontend's mount request, and by the placement hook after every change.
+/// frontend's mount request, by the placement hook after every change, and,
+/// since roadmap `1.47`, by the thread that follows windows each time a
+/// sticky area moves or pauses.
+///
+/// That last caller is why the read and the send are one step under
+/// [`EMITTING_AREAS`]. With two threads sending, the one that read first could
+/// send last, and the page would end on the older set until something else
+/// changed.
 pub(crate) fn emit_areas(app: &AppHandle) -> Result<(), String> {
     // Fetched once, before the store lock: the close control's position depends
     // on the monitors, because on a small area it sits *outside* the area and
@@ -1066,25 +1100,14 @@ pub(crate) fn emit_areas(app: &AppHandle) -> Result<(), String> {
     // same dependence for the same reason (it picks above or below), while the
     // outside handles deliberately do not (see `outside_resize_handles`).
     let monitors = monitor_rects();
-    let store = app.state::<Mutex<AreaStore>>();
-    let areas = lock(&store)
-        .iter()
-        .map(|area| AreaPayload {
-            id: area.id.get(),
-            rect: as_tuple(area.bounds),
-            close: as_tuple(interaction::close_control(area.bounds, &monitors)),
-            layer: layer_name(area.layer),
-            kind: type_name(area.kind),
-            ocr_behaviour: area.ocr_behaviour,
-            sticky: area.sticky,
-            zoom: area.zoom.factor(),
-            bar: interaction::grab_bar(area.bounds, &monitors).map(as_tuple),
-            handles: interaction::outside_resize_handles(area.bounds)
-                .into_iter()
-                .map(as_tuple)
-                .collect(),
-        })
-        .collect();
+    let _one_at_a_time = lock(&EMITTING_AREAS);
+    let areas = {
+        let store = app.state::<Mutex<AreaStore>>();
+        lock(&store)
+            .iter()
+            .map(|area| payload_of(area, &monitors))
+            .collect()
+    };
     app.emit(AREAS_EVENT, AreasPayload { areas })
         .map_err(|e| format!("Could not emit overlay areas: {e}"))
 }
@@ -1771,9 +1794,11 @@ pub(crate) fn set_area_layer(app: &AppHandle, id: AreaId, layer: Layer) -> bool 
 /// Read fresh at the moment Copy/Save is activated rather than carried from
 /// the menu's own opening: the menu can stay open across pump ticks, and a
 /// capture should target where the area is *now*, not where it was when the
-/// menu was drawn (it cannot move while a menu is open today, but this is the
-/// same "read state at the point of action" discipline [`overlay_dismiss_focused`]
-/// already follows).
+/// menu was drawn. Since roadmap `1.47` that is a real case and not only
+/// discipline: a sticky area moves with its window while its menu is open.
+/// (This said "it cannot move while a menu is open today" until then.) It is
+/// the same "read state at the point of action" rule [`overlay_dismiss_focused`]
+/// already follows.
 pub(crate) fn area_bounds(app: &AppHandle, id: AreaId) -> Option<Rect> {
     let store = app.state::<Mutex<AreaStore>>();
     lock(&store).get(id).map(|area| area.bounds)
@@ -2809,6 +2834,27 @@ mod tests {
         "stills",
         "freeze_probe",
     ];
+
+    #[test]
+    fn an_area_is_sent_with_the_sticky_state_it_has() {
+        // Roadmap 1.47. The page marks a sticky area and says "Paused" from
+        // this field alone, so an area sent as `free` whatever it is leaves
+        // the menu row ticked and the screen saying nothing.
+        let mut store = AreaStore::new();
+        let Some(id) = store.create(AreaType::Default, Rect::new(10, 20, 300, 200)) else {
+            panic!("an area")
+        };
+        for state in [Sticky::Free, Sticky::Following, Sticky::Paused] {
+            store.set_sticky(id, state);
+            let Some(area) = store.get(id) else {
+                panic!("the area")
+            };
+            let payload = payload_of(area, &[Rect::new(0, 0, 1920, 1080)]);
+            assert_eq!(payload.sticky, state);
+            assert_eq!(payload.id, id.get());
+            assert_eq!(payload.rect, (10, 20, 300, 200));
+        }
+    }
 
     #[test]
     fn every_payload_this_module_emits_keeps_the_keys_the_frontend_reads() {

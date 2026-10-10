@@ -809,7 +809,7 @@ onMount(() => {
                that will move with its window can be told from one that will
                not. Paused is said in words: the area has stopped following,
                and a mark alone would not say why it sits where it does. -->
-          {#if area.sticky !== 'free'}
+          {#if area.sticky === 'following' || area.sticky === 'paused'}
             <span
               class="sticky-badge"
               class:beside-layer={area.layer !== 'auto'}

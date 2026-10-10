@@ -22,7 +22,8 @@
 //! progress:
 //!
 //! - Outside a drag, [`on_event`] hears the move and the area is placed at
-//!   once. Nothing runs while no window moves.
+//!   once. No window is polled while none is being dragged. What does run is a
+//!   check once a second, for as long as any area is sticky (see below).
 //! - Between `EVENT_SYSTEM_MOVESIZESTART` and `EVENT_SYSTEM_MOVESIZEEND`,
 //!   [`follow_drag`] reads the window's rectangle once per composed frame
 //!   (`DwmFlush`). That bounds the lag at a monitor crossing by one frame,
@@ -39,7 +40,15 @@
 //! was, shown as paused, and follows again when the window is back. A closed
 //! window pauses it too, and once a second [`reattach`] looks for a window of
 //! the same program with the same title and joins the area to that one (the
-//! founder's decision of 2026-10-09).
+//! founder's decision of 2026-10-09). His word was that such a window
+//! "appears", so a window that was already open when the followed one closed
+//! is not taken: two windows of one program can share a title, and the area
+//! was on one of them, not on the other.
+//!
+//! The once-a-second check does three things while any area is sticky: it
+//! drops the links of areas that no longer exist, it looks at every followed
+//! window in case an event never came, and it runs [`reattach`]. With no
+//! sticky area the timer is stopped and the thread never wakes.
 //!
 //! # What is never logged
 //!
@@ -57,11 +66,15 @@
 //! - An area moved by hand while its window is minimised or closed keeps its
 //!   old anchor, and goes back to it when the window returns. There is no
 //!   window rectangle to take a new anchor from.
+//! - "The same program" is the same full path. A program that updates itself
+//!   into a folder named for its version is another program by this test, and
+//!   its area stays paused.
 //! - Content that scrolls inside the window is not followed. That is roadmap
 //!   `1.43`.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -146,7 +159,7 @@ const WAKE: u32 = WM_APP + 0x47;
 
 /// Posted by the follower thread to itself when a drag starts, so its wait for
 /// a message ends and the per-frame poll begins. It carries nothing: the drag
-/// is in [`DRAG`].
+/// is in [`DRAGGED`].
 const DRAG_STARTED: u32 = WM_APP + 0x48;
 
 /// How often the follower checks every followed window when no event says to,
@@ -184,6 +197,10 @@ struct Link {
     seen: Option<Seen>,
     /// The window closed. The link waits for [`reattach`].
     gone: bool,
+    /// Every top-level window that was open when this one closed. None of
+    /// them is the window "appearing" again, so [`reattach`] passes them by.
+    /// Empty while the window is alive.
+    open_at_close: HashSet<isize>,
 }
 
 /// What can be seen of a window right now.
@@ -246,24 +263,48 @@ fn stick(app: &AppHandle, id: AreaId) -> bool {
         crate::diagnostics::trouble_for_area("sticky: no window under the area to follow", id);
         return false;
     };
-    {
-        let mut links = lock(&LINKS);
-        links.retain(|existing| existing.area != id);
-        links.push(link);
-    }
-    let changed = {
-        let store = app.state::<Mutex<AreaStore>>();
-        lock(&store).set_sticky(id, Sticky::Following)
-    };
+    let store = app.state::<Mutex<AreaStore>>();
+    let changed = stick_in(store.inner(), &LINKS, link);
     wake();
+    changed
+}
+
+/// Records that an area follows a window: the store is told first, and the
+/// link is added second.
+///
+/// The order is the point. The follower drops any link whose area the store
+/// does not call sticky. With the link first, a once-a-second check landing
+/// between the two steps dropped the new link, and the store then said
+/// "following" about an area nothing would ever move.
+fn stick_in(store: &Mutex<AreaStore>, links: &Mutex<Vec<Link>>, link: Link) -> bool {
+    let id = link.area;
+    let changed = {
+        let mut store = lock(store);
+        if store.get(id).is_none() {
+            return false;
+        }
+        store.set_sticky(id, Sticky::Following)
+    };
+    let mut links = lock(links);
+    links.retain(|existing| existing.area != id);
+    links.push(link);
     changed
 }
 
 /// Frees an area: it is anchored to the screen again, where it is now.
 fn release(app: &AppHandle, id: AreaId) -> bool {
-    forget(id);
     let store = app.state::<Mutex<AreaStore>>();
-    lock(&store).set_sticky(id, Sticky::Free)
+    let changed = release_in(store.inner(), &LINKS, id);
+    wake();
+    changed
+}
+
+/// Drops the link, then tells the store the area is free. A decision the
+/// follower made a moment before cannot undo this: [`write`] leaves an area
+/// alone once the store calls it free.
+fn release_in(store: &Mutex<AreaStore>, links: &Mutex<Vec<Link>>, id: AreaId) -> bool {
+    lock(links).retain(|link| link.area != id);
+    lock(store).set_sticky(id, Sticky::Free)
 }
 
 /// Drops an area's link, because the area is gone or was freed.
@@ -292,10 +333,18 @@ pub(crate) fn reanchor(app: &AppHandle, id: AreaId) {
     let Some(link) = links.iter_mut().find(|link| link.area == id && !link.gone) else {
         return;
     };
-    if let Seen::At { rect, scale } = see(link.window, link.pid) {
+    let seen = see(link.window, link.pid);
+    retake(link, bounds, seen);
+}
+
+/// Takes a link's anchor again from where the area and its window are now. A
+/// window that is not on screen has no rectangle to measure from, so the old
+/// anchor stays.
+fn retake(link: &mut Link, bounds: Rect, seen: Seen) {
+    if let Seen::At { rect, scale } = seen {
         link.anchor = Anchor::of(bounds, rect);
         link.scale = scale;
-        link.seen = Some(Seen::At { rect, scale });
+        link.seen = Some(seen);
     }
 }
 
@@ -320,6 +369,7 @@ fn link_under(id: AreaId, bounds: Rect) -> Option<Link> {
         scale,
         seen: Some(Seen::At { rect, scale }),
         gone: false,
+        open_at_close: HashSet::new(),
     })
 }
 
@@ -572,11 +622,25 @@ fn wake() {
     }
 }
 
+/// The window being dragged or resized right now, if it is a followed one. 0
+/// is "none", which no window handle is. Written only by the follower thread.
+/// It is a static and not a thread-local so a test can see a drag end.
+static DRAGGED: AtomicIsize = AtomicIsize::new(0);
+
+fn dragged() -> Option<isize> {
+    match DRAGGED.load(Ordering::Relaxed) {
+        0 => None,
+        window => Some(window),
+    }
+}
+
+fn set_dragged(window: Option<isize>) {
+    DRAGGED.store(window.unwrap_or(0), Ordering::Relaxed);
+}
+
 thread_local! {
     /// The event hooks this thread holds, by the process they listen to.
     static HOOKS: RefCell<HashMap<u32, Vec<isize>>> = RefCell::new(HashMap::new());
-    /// The window being dragged or resized right now, if it is a followed one.
-    static DRAG: Cell<Option<isize>> = const { Cell::new(None) };
     /// The areas that moved and have not yet re-taken what they show.
     static UNSETTLED: RefCell<HashSet<AreaId>> = RefCell::new(HashSet::new());
     /// The once-a-second timer, while any area is sticky. 0 is "not running".
@@ -616,7 +680,7 @@ fn run() {
             break;
         }
         handle(&message);
-        while let Some(window) = DRAG.get() {
+        while let Some(window) = dragged() {
             follow_drag(window);
         }
     }
@@ -793,7 +857,7 @@ unsafe extern "system" fn on_event(
     tests::EVENTS_HEARD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     match event {
         EVENT_SYSTEM_MOVESIZESTART => {
-            DRAG.set(Some(window));
+            set_dragged(Some(window));
             // This callback runs inside the thread's wait for a message, and
             // the wait does not end because a callback ran. Without a message
             // of its own the per-frame poll would start at the next timer
@@ -805,18 +869,25 @@ unsafe extern "system" fn on_event(
             }
         }
         EVENT_SYSTEM_MOVESIZEEND => {
-            if DRAG.get() == Some(window) {
-                DRAG.set(None);
+            if dragged() == Some(window) {
+                set_dragged(None);
             }
             sync(window);
         }
         // During a drag the per-frame poll places the area. Answering each of
         // the 190 events a second as well would only repeat it.
-        EVENT_OBJECT_LOCATIONCHANGE if DRAG.get() == Some(window) => {}
+        EVENT_OBJECT_LOCATIONCHANGE if dragged() == Some(window) => {}
         EVENT_OBJECT_NAMECHANGE => retitle(window),
+        // Windows says the window is destroyed, so it is gone, whatever a look
+        // at it says. Measured: when this event arrives the handle still
+        // answers as a live, hidden window, and it went on doing so until the
+        // once-a-second check, about 790 ms later.
+        EVENT_OBJECT_DESTROY => {
+            sync_as(window, Some(Seen::Gone));
+        }
         // A move outside a drag, and every way a window stops or starts being
-        // on screen: minimised, restored, hidden, shown, cloaked, destroyed.
-        // `sync` looks at the window itself, so they are all one case.
+        // on screen: minimised, restored, hidden, shown, cloaked. `sync` looks
+        // at the window itself, so they are all one case.
         _ => {
             sync(window);
         }
@@ -843,7 +914,7 @@ fn retitle(window: isize) {
 fn follow_drag(window: isize) {
     let mut last_change = Instant::now();
     let mut last_seen = None;
-    while DRAG.get() == Some(window) {
+    while dragged() == Some(window) {
         // SAFETY: takes nothing. Blocks until the compositor has presented a
         // frame, which is the "once a frame" of the design.
         if unsafe { DwmFlush() } != 0 {
@@ -857,7 +928,7 @@ fn follow_drag(window: isize) {
         }
         let over = matches!(seen, None | Some(Seen::Gone)) || last_change.elapsed() > DRAG_IDLE;
         if over {
-            DRAG.set(None);
+            set_dragged(None);
         }
         // SAFETY: as in `run`. Each call writes one `MSG`.
         let mut message: MSG = unsafe { std::mem::zeroed() };
@@ -875,6 +946,12 @@ fn follow_drag(window: isize) {
 /// Returns what was seen, or `None` if no live link follows this window. A
 /// window that looks exactly as it did last time costs one look and no more.
 fn sync(window: isize) -> Option<Seen> {
+    sync_as(window, None)
+}
+
+/// [`sync`], with what is known of the window passed in when something
+/// already knows it and a look would say otherwise. `None` looks.
+fn sync_as(window: isize, known: Option<Seen>) -> Option<Seen> {
     let mut changes: Vec<Change> = Vec::new();
     let seen = {
         let mut links = lock(&LINKS);
@@ -882,7 +959,14 @@ fn sync(window: isize) -> Option<Seen> {
             .iter()
             .find(|link| link.window == window && !link.gone)?
             .pid;
-        let seen = see(window, pid);
+        let seen = known.unwrap_or_else(|| see(window, pid));
+        // Read once, and only when a window closed: what else is open now is
+        // what must not be mistaken for it coming back.
+        let open_now: HashSet<isize> = if seen == Seen::Gone {
+            top_level_windows().into_iter().collect()
+        } else {
+            HashSet::new()
+        };
         for link in links
             .iter_mut()
             .filter(|link| link.window == window && !link.gone)
@@ -892,6 +976,9 @@ fn sync(window: isize) -> Option<Seen> {
             }
             link.seen = Some(seen);
             link.gone = seen == Seen::Gone;
+            if link.gone {
+                link.open_at_close.clone_from(&open_now);
+            }
             let (state, bounds) = plan(link.anchor, link.scale, seen);
             changes.push((link.area, state, bounds));
         }
@@ -919,25 +1006,10 @@ fn app_place(changes: &[Change]) -> Vec<AreaId> {
     let Some(app) = APP.get() else {
         return Vec::new();
     };
-    let mut moved: Vec<AreaId> = Vec::new();
-    let mut changed = false;
-    {
+    let (changed, moved) = {
         let store = app.state::<Mutex<AreaStore>>();
-        let mut store = lock(&store);
-        for &(id, state, bounds) in changes {
-            changed |= store.set_sticky(id, state);
-            let Some(bounds) = bounds else {
-                continue;
-            };
-            // Following a window does not raise the area: the user did not
-            // touch it, so the stack stays as they left it.
-            if store.get(id).is_some_and(|area| area.bounds != bounds)
-                && store.set_bounds(id, bounds)
-            {
-                moved.push(id);
-            }
-        }
-    }
+        write(&mut lock(&store), changes)
+    };
     if (changed || !moved.is_empty())
         && let Err(error) = overlay::emit_areas(app)
     {
@@ -947,6 +1019,33 @@ fn app_place(changes: &[Change]) -> Vec<AreaId> {
         );
     }
     moved
+}
+
+/// Writes the follower's decisions to the store. Returns whether any state
+/// changed, and the areas that moved.
+///
+/// An area the store calls free is left alone, state and rectangle both. The
+/// follower decides on its own thread, so a decision can arrive just after the
+/// user freed the area from its menu, and writing it would tick the menu row
+/// again on an area nothing follows.
+fn write(store: &mut AreaStore, changes: &[Change]) -> (bool, Vec<AreaId>) {
+    let mut moved: Vec<AreaId> = Vec::new();
+    let mut changed = false;
+    for &(id, state, bounds) in changes {
+        if !store.get(id).is_some_and(|area| area.sticky.is_sticky()) {
+            continue;
+        }
+        changed |= store.set_sticky(id, state);
+        let Some(bounds) = bounds else {
+            continue;
+        };
+        // Following a window does not raise the area: the user did not touch
+        // it, so the stack stays as they left it.
+        if store.get(id).is_some_and(|area| area.bounds != bounds) && store.set_bounds(id, bounds) {
+            moved.push(id);
+        }
+    }
+    (changed, moved)
 }
 
 /// [`Outlet::settle`] for the app: the area re-takes what it shows, exactly as
@@ -976,46 +1075,88 @@ fn settle() {
     }
 }
 
+/// One open top-level window, as far as re-attaching cares.
+struct Open {
+    window: isize,
+    pid: u32,
+    title: String,
+}
+
+/// The window a waiting link should join, if one of `open` is its window come
+/// back: the same title, not one of the windows that were already open when
+/// it closed, and passing `same_program`.
+///
+/// `same_program` is asked last and only about windows that fit otherwise,
+/// because answering it means opening the window's process.
+fn window_again<'a>(
+    title: &str,
+    open_at_close: &HashSet<isize>,
+    open: &'a [Open],
+    mut same_program: impl FnMut(&Open) -> bool,
+) -> Option<&'a Open> {
+    open.iter().find(|candidate| {
+        candidate.title == title
+            && !open_at_close.contains(&candidate.window)
+            && same_program(candidate)
+    })
+}
+
 /// Looks for the windows of links whose window closed, and joins each area to
-/// a window of the same program with the same title, if one is on screen.
+/// a window of the same program with the same title, if one has appeared.
 fn reattach() {
-    let waiting: Vec<(AreaId, String, String)> = lock(&LINKS)
+    let waiting: Vec<(AreaId, String, String, HashSet<isize>)> = lock(&LINKS)
         .iter()
         .filter(|link| link.gone)
-        .filter_map(|link| Some((link.area, link.program.clone()?, link.title.clone())))
+        .filter_map(|link| {
+            Some((
+                link.area,
+                link.program.clone()?,
+                link.title.clone(),
+                link.open_at_close.clone(),
+            ))
+        })
         .collect();
     if waiting.is_empty() {
         return;
     }
     let own = std::process::id();
-    // The title is read first because it is cheap and almost never matches.
-    // The program's path means opening the process, so it is read only for a
-    // window whose title already fits.
-    let titled: Vec<(isize, String)> = top_level_windows()
+    // UP-TAKE's own windows are passed by before their title is read. Reading
+    // the title of a window in this process sends that window a message and
+    // waits for its thread to answer, which this thread must never do.
+    let open: Vec<Open> = top_level_windows()
         .into_iter()
-        .map(|window| (window, title_of(window)))
-        .filter(|(_, title)| waiting.iter().any(|(_, _, wanted)| wanted == title))
+        .filter_map(|window| {
+            let pid = owner_of(window);
+            (pid != own).then(|| Open {
+                window,
+                pid,
+                title: title_of(window),
+            })
+        })
+        .filter(|open| {
+            waiting
+                .iter()
+                .any(|(_, _, wanted, _)| *wanted == open.title)
+        })
         .collect();
     let mut joined = false;
-    for (area, program, title) in waiting {
-        let found = titled.iter().find_map(|(window, candidate)| {
-            if *candidate != title || !describe(*window).can_be_followed(own) {
-                return None;
-            }
-            let pid = owner_of(*window);
-            (program_of(pid).as_deref() == Some(program.as_str())).then_some((*window, pid))
+    for (area, program, title, open_at_close) in waiting {
+        let found = window_again(&title, &open_at_close, &open, |candidate| {
+            describe(candidate.window).can_be_followed(own)
+                && program_of(candidate.pid).as_deref() == Some(program.as_str())
         });
-        let Some((window, pid)) = found else {
+        let Some(found) = found else {
             continue;
         };
         if let Some(link) = lock(&LINKS)
             .iter_mut()
             .find(|link| link.area == area && link.gone)
         {
-            link.window = window;
-            link.pid = pid;
+            link.window = found.window;
+            link.pid = found.pid;
             link.gone = false;
             link.seen = None;
+            link.open_at_close.clear();
             joined = true;
         }
     }
@@ -1029,6 +1170,7 @@ mod tests {
     use uptake_core::geometry::{Point, Rect};
     use uptake_core::sticky::{Anchor, Sticky};
 
+    use std::collections::HashSet;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
@@ -1036,8 +1178,9 @@ mod tests {
     use uptake_core::area::{AreaId, AreaStore, AreaType};
 
     use super::{
-        Candidate, Change, EVENT_RANGES, FOLLOWER, Follower, LINKS, Link, OUTLET, Outlet, Seen,
-        centre_of, forget, lock, plan, see, text_of, title_of, wake,
+        Candidate, Change, EVENT_RANGES, FOLLOWER, Follower, LINKS, Link, OUTLET, Open, Outlet,
+        Seen, centre_of, dragged, forget, lock, plan, release_in, retake, see, stick_in, text_of,
+        title_of, wake, window_again, write,
     };
 
     const WINDOW: Rect = Rect::new(100, 200, 900, 600);
@@ -1048,15 +1191,34 @@ mod tests {
     /// How many events about a followed window reached the callback.
     pub(super) static EVENTS_HEARD: AtomicUsize = AtomicUsize::new(0);
 
+    /// Waits for `done`, answering this thread's own window messages while it
+    /// waits. The real-window test owns its window, and reading the title of
+    /// a window in the same process asks the window's thread, which is this
+    /// one. Asleep and not answering, it would hold the follower thread for
+    /// good. UP-TAKE never follows its own windows, so only the test needs
+    /// this.
     fn wait_for(limit: Duration, mut done: impl FnMut() -> bool) -> bool {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            DispatchMessageW, MSG, PM_REMOVE, PeekMessageW,
+        };
         let start = Instant::now();
-        while start.elapsed() < limit {
+        loop {
+            // SAFETY: `MSG` is plain integers and pointers, valid as zeroes,
+            // and each call writes one through the pointer.
+            unsafe {
+                let mut message: MSG = std::mem::zeroed();
+                while PeekMessageW(&raw mut message, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+                    DispatchMessageW(&raw const message);
+                }
+            }
             if done() {
                 return true;
             }
-            std::thread::sleep(Duration::from_millis(5));
+            if start.elapsed() >= limit {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(2));
         }
-        done()
     }
 
     fn placed(id: AreaId, state: Sticky, bounds: Option<Rect>) -> bool {
@@ -1069,24 +1231,41 @@ mod tests {
     ///
     /// The window is created far off every monitor and never activated, so
     /// running this draws nothing on anyone's screen and takes no keystroke.
-    /// What it cannot cover is a drag by hand (the per-frame poll) and the
-    /// re-attach, which refuses windows of its own process. Those are rig
-    /// steps.
+    /// It covers the per-frame poll by announcing a drag the way Windows does.
+    /// What it cannot cover is the re-attach, which refuses windows of its own
+    /// process, and a drag by a hand on a mouse. CI runs this test on the
+    /// Windows runner, and `quality-bars.md` section 3 carries the two rig
+    /// scenarios.
     #[test]
     #[ignore = "needs a desktop session: it creates a real window, off every monitor, and listens to its events"]
     fn a_real_window_is_followed_by_its_events_and_paused_when_it_closes() {
         use windows_sys::Win32::UI::Accessibility::NotifyWinEvent;
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            CreateWindowExW, DestroyWindow, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE,
-            SWP_NOZORDER, SetWindowPos, ShowWindow, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+            CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW, SW_SHOWNOACTIVATE,
+            SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos, SetWindowTextW, ShowWindow,
+            WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
         };
         use windows_sys::Win32::UI::WindowsAndMessaging::{
             EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART, OBJID_WINDOW,
         };
-        let class: Vec<u16> = "Static\0".encode_utf16().collect();
+        // A class of the test's own with Windows' default procedure: an
+        // ordinary top-level window, as a followed program's would be. With
+        // the system `Static` class, which is a control, the new title below
+        // never reached the follower as a name change of the window. That was
+        // observed in five runs of this test and not looked into further.
+        let class: Vec<u16> = "UptakeStickyTest\0".encode_utf16().collect();
         let title: Vec<u16> = "uptake sticky test\0".encode_utf16().collect();
+        // SAFETY: `WNDCLASSW` is plain integers and pointers, valid as zeroes.
+        // The class name outlives the registration's use in this test, and a
+        // second registration of the same name fails harmlessly.
+        unsafe {
+            let mut definition: WNDCLASSW = std::mem::zeroed();
+            definition.lpfnWndProc = Some(DefWindowProcW);
+            definition.lpszClassName = class.as_ptr();
+            RegisterClassW(&raw const definition);
+        }
         // SAFETY: both strings are null-terminated and outlive the call. Every
-        // handle argument may be null for a top-level window of a system class.
+        // handle argument may be null for a top-level window.
         let handle = unsafe {
             CreateWindowExW(
                 WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
@@ -1127,7 +1306,11 @@ mod tests {
             scale,
             seen: Some(Seen::At { rect, scale }),
             gone: false,
+            open_at_close: HashSet::new(),
         });
+        // A handle whose owner is another process is another window that was
+        // given the same number, and must never be followed as this one.
+        assert_eq!(see(window, pid.wrapping_add(1)), Seen::Gone);
         // An outlet of the test's own, in place of the app: every area is
         // still sticky, and each decision is written down to be read below.
         let _ = OUTLET.set(Outlet {
@@ -1219,6 +1402,12 @@ mod tests {
         unsafe {
             NotifyWinEvent(EVENT_SYSTEM_MOVESIZEEND, handle, OBJID_WINDOW, 0);
         }
+        // The end event ends the drag. Left set, the per-frame poll would go
+        // on waking this thread every frame until five idle seconds had passed.
+        assert!(
+            wait_for(Duration::from_millis(250), || dragged().is_none()),
+            "the end event clears the drag"
+        );
         // After the end event a plain move is followed by its event again.
         let (x, y) = (rect.origin.x + 200, rect.origin.y + 100);
         // SAFETY: as above.
@@ -1242,6 +1431,20 @@ mod tests {
             "a move after the drag ended was not followed within 250 ms"
         );
 
+        // A new title is remembered, so that when the window closes the title
+        // looked for is the one it closed with.
+        let renamed: Vec<u16> = "uptake sticky test, renamed\0".encode_utf16().collect();
+        // SAFETY: the string is null-terminated and outlives the call.
+        unsafe {
+            SetWindowTextW(handle, renamed.as_ptr());
+        }
+        assert!(
+            wait_for(Duration::from_millis(250), || lock(&LINKS).iter().any(
+                |link| link.area == id && link.title == "uptake sticky test, renamed"
+            )),
+            "a changed title is remembered"
+        );
+
         // SAFETY: destroys the window created above, on the thread that made it.
         unsafe {
             DestroyWindow(handle);
@@ -1256,11 +1459,12 @@ mod tests {
         );
         // Paused because it is GONE, not merely hidden. Only a link marked
         // gone is looked for again, so a closed window read as hidden would
-        // leave its area waiting for a handle that never comes back. Waited
-        // for, because Windows reports the window hidden first and destroyed
-        // a moment later.
+        // leave its area waiting for a handle that never comes back. Windows
+        // reports the window hidden first and destroyed a moment later, and
+        // 250 ms is well inside the once-a-second check: only the destroyed
+        // event itself can mark the link this soon.
         assert!(
-            wait_for(Duration::from_millis(2500), || lock(&LINKS)
+            wait_for(Duration::from_millis(250), || lock(&LINKS)
                 .iter()
                 .any(|link| link.area == id && link.gone)),
             "a destroyed window is marked gone, so it can be re-attached"
@@ -1383,5 +1587,293 @@ mod tests {
             assert!(first <= last);
             assert!(last - first <= 2, "{first:#x} to {last:#x}");
         }
+    }
+
+    fn link_for(area: AreaId, bounds: Rect) -> Link {
+        Link {
+            area,
+            window: 0x51,
+            pid: 7,
+            program: Some("C:\\Program Files\\Editor\\editor.exe".to_owned()),
+            title: "notes.txt".to_owned(),
+            anchor: Anchor::of(bounds, WINDOW),
+            scale: 1.0,
+            seen: None,
+            gone: false,
+            open_at_close: HashSet::new(),
+        }
+    }
+
+    fn store_with_two() -> (AreaStore, AreaId, AreaId) {
+        let mut store = AreaStore::new();
+        let (Some(first), Some(second)) = (
+            store.create(AreaType::Default, Rect::new(140, 260, 200, 80)),
+            store.create(AreaType::Ocr, Rect::new(600, 500, 100, 50)),
+        ) else {
+            panic!("two areas")
+        };
+        (store, first, second)
+    }
+
+    #[test]
+    fn sticking_tells_the_store_and_then_adds_the_link() {
+        let (store, first, second) = store_with_two();
+        let store = Mutex::new(store);
+        let links: Mutex<Vec<Link>> = Mutex::new(Vec::new());
+        assert!(stick_in(
+            &store,
+            &links,
+            link_for(first, Rect::new(140, 260, 200, 80))
+        ));
+        let Some(area) = lock(&store).get(first).copied() else {
+            panic!("the area is still there")
+        };
+        assert_eq!(area.sticky, Sticky::Following, "the store was told");
+        assert_eq!(lock(&links).len(), 1, "the link was added");
+        // Sticking the same area again replaces its link, never adds a second.
+        assert!(!stick_in(
+            &store,
+            &links,
+            link_for(first, Rect::new(140, 260, 200, 80))
+        ));
+        assert_eq!(lock(&links).len(), 1);
+        // The other area is untouched.
+        let Some(other) = lock(&store).get(second).copied() else {
+            panic!("the other area")
+        };
+        assert_eq!(other.sticky, Sticky::Free);
+    }
+
+    #[test]
+    fn an_area_that_is_gone_gets_no_link() {
+        let (mut store, first, _) = store_with_two();
+        assert!(store.remove(first).is_some());
+        let store = Mutex::new(store);
+        let links: Mutex<Vec<Link>> = Mutex::new(Vec::new());
+        assert!(!stick_in(
+            &store,
+            &links,
+            link_for(first, Rect::new(140, 260, 200, 80))
+        ));
+        assert!(
+            lock(&links).is_empty(),
+            "a link to no area would never be dropped by its area"
+        );
+    }
+
+    #[test]
+    fn releasing_drops_the_link_and_frees_the_area() {
+        let (store, first, second) = store_with_two();
+        let store = Mutex::new(store);
+        let links: Mutex<Vec<Link>> = Mutex::new(Vec::new());
+        stick_in(
+            &store,
+            &links,
+            link_for(first, Rect::new(140, 260, 200, 80)),
+        );
+        stick_in(
+            &store,
+            &links,
+            link_for(second, Rect::new(600, 500, 100, 50)),
+        );
+        assert!(release_in(&store, &links, first));
+        let Some(area) = lock(&store).get(first).copied() else {
+            panic!("the area is still there")
+        };
+        assert_eq!(area.sticky, Sticky::Free, "the store was told");
+        let left: Vec<AreaId> = lock(&links).iter().map(|link| link.area).collect();
+        assert_eq!(left, vec![second], "only the released area's link is gone");
+        assert!(!release_in(&store, &links, first), "nothing left to change");
+    }
+
+    #[test]
+    fn the_followers_decisions_reach_the_store() {
+        let (mut store, first, second) = store_with_two();
+        store.set_sticky(first, Sticky::Following);
+        store.set_sticky(second, Sticky::Following);
+        let moved_to = Rect::new(900, 40, 200, 80);
+        let changes: Vec<Change> = vec![
+            (first, Sticky::Following, Some(moved_to)),
+            (second, Sticky::Paused, None),
+        ];
+        let (changed, moved) = write(&mut store, &changes);
+        assert!(changed, "the second area's state changed");
+        assert_eq!(moved, vec![first]);
+        let (Some(a), Some(b)) = (store.get(first).copied(), store.get(second).copied()) else {
+            panic!("both areas")
+        };
+        assert_eq!(a.bounds, moved_to);
+        assert_eq!(
+            b.sticky,
+            Sticky::Paused,
+            "paused is written, not only decided"
+        );
+        assert_eq!(
+            b.bounds,
+            Rect::new(600, 500, 100, 50),
+            "a paused area waits where it was"
+        );
+        // The same decisions again change nothing and move nothing, so the
+        // page is not sent a set that says what it already shows.
+        assert_eq!(write(&mut store, &changes), (false, Vec::new()));
+    }
+
+    #[test]
+    fn following_a_window_does_not_raise_the_area() {
+        let (mut store, first, second) = store_with_two();
+        store.set_sticky(first, Sticky::Following);
+        let order = |store: &AreaStore| store.iter().map(|area| area.id).collect::<Vec<_>>();
+        let before = order(&store);
+        assert_eq!(before, vec![first, second]);
+        write(
+            &mut store,
+            &[(first, Sticky::Following, Some(Rect::new(0, 0, 200, 80)))],
+        );
+        assert_eq!(order(&store), before, "the user did not touch it");
+    }
+
+    #[test]
+    fn a_decision_that_arrives_after_the_area_was_freed_is_dropped() {
+        // The second ordering the first review found: the follower decided,
+        // the user freed the area from its menu, and the decision was then
+        // written, ticking the row again on an area nothing follows.
+        let (mut store, first, _) = store_with_two();
+        let was = Rect::new(140, 260, 200, 80);
+        let late: Vec<Change> = vec![(first, Sticky::Following, Some(Rect::new(900, 40, 200, 80)))];
+        assert_eq!(write(&mut store, &late), (false, Vec::new()));
+        let Some(area) = store.get(first).copied() else {
+            panic!("the area")
+        };
+        assert_eq!(area.sticky, Sticky::Free);
+        assert_eq!(area.bounds, was, "a free area is not moved either");
+        // An id that no longer exists is passed by the same way.
+        assert!(store.remove(first).is_some());
+        assert_eq!(write(&mut store, &late), (false, Vec::new()));
+    }
+
+    #[test]
+    fn a_hand_move_takes_a_new_anchor_only_from_a_window_on_screen() {
+        let was = Rect::new(140, 260, 200, 80);
+        let Some(id) = AreaStore::new().create(AreaType::Default, was) else {
+            panic!("an area id")
+        };
+        let mut link = link_for(id, was);
+        // Dragged by hand to the window's bottom right corner.
+        let now = Rect::new(100 + 900 - 20 - 200, 200 + 600 - 30 - 80, 200, 80);
+        retake(
+            &mut link,
+            now,
+            Seen::At {
+                rect: WINDOW,
+                scale: 1.25,
+            },
+        );
+        assert_eq!(
+            link.anchor,
+            Anchor::of(now, WINDOW),
+            "the place they put it"
+        );
+        assert!((link.scale - 1.25).abs() < f64::EPSILON);
+        assert_eq!(
+            link.seen,
+            Some(Seen::At {
+                rect: WINDOW,
+                scale: 1.25
+            })
+        );
+        // Minimised or closed: there is no rectangle to measure from.
+        let kept = link.anchor;
+        retake(&mut link, was, Seen::Hidden);
+        retake(&mut link, was, Seen::Gone);
+        assert_eq!(link.anchor, kept);
+    }
+
+    fn open(window: isize, title: &str) -> Open {
+        Open {
+            window,
+            pid: 7,
+            title: title.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_closed_window_is_found_again_by_title_and_program() {
+        let windows = [
+            open(10, "other.txt"),
+            open(11, "notes.txt"),
+            open(12, "notes.txt"),
+        ];
+        let none = HashSet::new();
+        let found = window_again("notes.txt", &none, &windows, |_| true);
+        assert_eq!(found.map(|open| open.window), Some(11), "the topmost match");
+        // Another program with the same title is not the window coming back.
+        assert!(window_again("notes.txt", &none, &windows, |_| false).is_none());
+        // The program is asked only about windows whose title already fits.
+        let mut asked = Vec::new();
+        window_again("notes.txt", &none, &windows, |open| {
+            asked.push(open.window);
+            false
+        });
+        assert_eq!(asked, vec![11, 12]);
+        assert!(window_again("gone.txt", &none, &windows, |_| true).is_none());
+    }
+
+    #[test]
+    fn a_window_that_was_already_open_is_not_the_one_coming_back() {
+        // Two windows of one program with one title. The area was on the one
+        // that closed. The other was open all along and is passed by, and a
+        // third that appears afterwards is taken.
+        let already: HashSet<isize> = [11].into_iter().collect();
+        let sibling_only = [open(11, "notes.txt")];
+        assert!(window_again("notes.txt", &already, &sibling_only, |_| true).is_none());
+        let reopened = [open(11, "notes.txt"), open(31, "notes.txt")];
+        let found = window_again("notes.txt", &already, &reopened, |_| true);
+        assert_eq!(found.map(|open| open.window), Some(31));
+    }
+
+    /// `source` up to its test module, with comment lines dropped, so a call
+    /// that survives only in a comment or in a test does not count.
+    fn production(source: &str) -> String {
+        let Some((production, _)) = source.split_once("#[cfg(test)]\nmod tests") else {
+            return source.to_owned();
+        };
+        production
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The four places the rest of the app calls into this module. Each is one
+    /// line, and with any of them gone the feature is dead in the app while
+    /// every test of this module's own logic stays green: the first review
+    /// removed each in turn and the suite passed.
+    #[test]
+    fn the_app_calls_into_this_module_at_the_four_places_it_must() {
+        let lib = production(include_str!("lib.rs"));
+        assert!(
+            lib.contains("sticky::init(app.handle());"),
+            "startup hands this module the app, or nothing the follower decides is written"
+        );
+        let placement = production(include_str!("placement.rs"));
+        assert!(
+            placement.contains(
+                "MenuAction::SetSticky(sticky) => crate::sticky::set(app, area, sticky),"
+            ),
+            "the menu row does something"
+        );
+        assert!(
+            placement.contains("crate::sticky::reanchor(app, id);"),
+            "a hand move takes a new anchor"
+        );
+        let overlay = production(include_str!("overlay.rs"));
+        assert!(
+            overlay.contains("crate::sticky::forget(id);"),
+            "a dismissed area drops its link"
+        );
+        // And the helper can fail: a call that exists only in a comment or in
+        // a test module is not found.
+        let decoy = "// sticky::init(app.handle());\n#[cfg(test)]\nmod tests { sticky::init(app.handle()); }";
+        assert!(!production(decoy).contains("sticky::init(app.handle());"));
     }
 }

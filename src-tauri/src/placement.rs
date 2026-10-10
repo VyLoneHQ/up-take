@@ -3823,9 +3823,11 @@ fn capture_on_create(app: &AppHandle, kind: AreaType, id: AreaId, bounds: Rect) 
     // (roadmap 1.24). `AreaStore::create` gives the area `kind.default_zoom()`,
     // so an `Upscale` area exists at 2x the instant the drag ends -- and would
     // sit there showing the live screen at natural size until the user happened
-    // to move it, because `refresh_magnification` is only called from move and
-    // resize. That is the magnifying type not magnifying, which is the same
-    // defect a converted `Screenshot` holding no pin was.
+    // to move it, because `refresh_magnification` is otherwise called only
+    // when an area moves or is resized: by the user's hand, or since roadmap
+    // 1.47 by a sticky area following its window (`sticky::app_settle`). That
+    // is the magnifying type not magnifying, which is the same defect a
+    // converted `Screenshot` holding no pin was.
     //
     // Asked through `refresh_magnification`, which reads the area's OWN zoom
     // and no-ops at natural size, rather than through a second `AreaType`

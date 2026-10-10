@@ -275,8 +275,9 @@ fn saturate(value: i64) -> i32 {
     i32::try_from(value).unwrap_or(if value < 0 { i32::MIN } else { i32::MAX })
 }
 
+/// A length as a `u32`. The caller has already made it at least 1.
 fn extent(value: i64) -> u32 {
-    u32::try_from(value.max(1)).unwrap_or(u32::MAX)
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 #[cfg(test)]
@@ -316,6 +317,65 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_thirds_change_exactly_at_a_third_and_two_thirds() {
+        // A 900 px wide window has its thirds at 300 and 600. An area whose
+        // centre is ON a boundary is in the middle third; half a pixel outside
+        // it is in the side third. Every area here sits in the top third, so
+        // the "very middle" rule never comes into it.
+        let across = |x: i32, width: u32| {
+            Anchor::of(Rect::new(100 + x, 210, width, 20), WINDOW)
+                .sides()
+                .0
+        };
+        assert_eq!(across(299, 1), Side::Near, "centre at 299.5");
+        assert_eq!(across(299, 2), Side::Centre, "centre at 300");
+        assert_eq!(across(599, 2), Side::Centre, "centre at 600");
+        assert_eq!(across(600, 1), Side::Far, "centre at 600.5");
+        // And down: a 600 px tall window has its thirds at 200 and 400.
+        let down = |y: i32, height: u32| {
+            Anchor::of(Rect::new(110, 200 + y, 20, height), WINDOW)
+                .sides()
+                .1
+        };
+        assert_eq!(down(199, 1), Side::Near, "centre at 199.5");
+        assert_eq!(down(199, 2), Side::Centre, "centre at 200");
+        assert_eq!(down(399, 2), Side::Centre, "centre at 400");
+        assert_eq!(down(400, 1), Side::Far, "centre at 400.5");
+    }
+
+    #[test]
+    fn a_tie_in_the_very_middle_goes_to_the_top_or_bottom() {
+        // 100 px from all four edges of the window, so no edge is closer.
+        let area = Rect::new(200, 300, 700, 400);
+        assert_eq!(Anchor::of(area, WINDOW).sides(), (Side::Centre, Side::Near));
+        // One pixel closer to the left edge than to the top, and the left
+        // wins: the tie rule decides ties and nothing else.
+        let nearer_left = Rect::new(199, 300, 702, 400);
+        assert_eq!(
+            Anchor::of(nearer_left, WINDOW).sides(),
+            (Side::Near, Side::Centre)
+        );
+    }
+
+    #[test]
+    fn a_centred_area_rounds_the_same_way_left_of_the_primary_monitor() {
+        // Centred on the top edge of a window whose width then becomes odd,
+        // so the centre falls on a half pixel. The area goes to the pixel on
+        // the left of it, on a monitor at negative coordinates exactly as on
+        // one at positive coordinates. Rounding toward zero would put it one
+        // pixel further right on the negative side only.
+        let odd = |x: i32| {
+            let window = Rect::new(x, 0, 900, 600);
+            let area = Rect::new(x + 400, 10, 100, 30);
+            let placed = Anchor::of(area, window).place(Rect::new(x, 0, 901, 600), 1.0);
+            placed.origin.x - x
+        };
+        assert_eq!(odd(1000), 400);
+        assert_eq!(odd(-1000), 400);
+        assert_eq!(odd(-450), 400, "a window that straddles zero");
     }
 
     #[test]
@@ -399,6 +459,14 @@ mod tests {
         // A tiny factor cannot make the area vanish.
         let placed = anchor.place(nothing, 0.000_1);
         assert_eq!((placed.size.width, placed.size.height), (1, 1));
+    }
+
+    fn doubled_centre_x(rect: Rect) -> i64 {
+        2 * i64::from(rect.origin.x) + i64::from(rect.size.width)
+    }
+
+    fn doubled_centre_y(rect: Rect) -> i64 {
+        2 * i64::from(rect.origin.y) + i64::from(rect.size.height)
     }
 
     fn rect() -> impl Strategy<Value = Rect> {
@@ -487,7 +555,14 @@ mod tests {
                     resized.right() - placed.right(),
                     window.right() - area.right()
                 ),
-                Side::Centre => {}
+                // A centred area keeps its distance from the middle to within
+                // the half pixel a whole-pixel position can be off by, and
+                // always to the same side.
+                Side::Centre => {
+                    let before = doubled_centre_x(area) - doubled_centre_x(window);
+                    let after = doubled_centre_x(placed) - doubled_centre_x(resized);
+                    prop_assert!(before - after == 0 || before - after == 1, "{before} {after}");
+                }
             }
             match anchor.sides().1 {
                 Side::Near => prop_assert_eq!(
@@ -498,8 +573,34 @@ mod tests {
                     resized.bottom() - placed.bottom(),
                     window.bottom() - area.bottom()
                 ),
-                Side::Centre => {}
+                Side::Centre => {
+                    let before = doubled_centre_y(area) - doubled_centre_y(window);
+                    let after = doubled_centre_y(placed) - doubled_centre_y(resized);
+                    prop_assert!(before - after == 0 || before - after == 1, "{before} {after}");
+                }
             }
+        }
+
+        /// Where the window is on the desktop never changes where the area
+        /// sits on it, for a resized window too. This is what holds a centred
+        /// area to one rounding on both sides of zero.
+        #[test]
+        fn a_resized_window_places_the_area_the_same_wherever_it_is(
+            area in area(),
+            window in rect(),
+            width in 0u32..8_000,
+            height in 0u32..8_000,
+            dx in -30_000i32..30_000,
+            dy in -30_000i32..30_000,
+        ) {
+            let anchor = Anchor::of(area, window);
+            let here = Rect::new(window.origin.x, window.origin.y, width, height);
+            let there = Rect::new(window.origin.x + dx, window.origin.y + dy, width, height);
+            let placed_here = anchor.place(here, 1.0);
+            let placed_there = anchor.place(there, 1.0);
+            prop_assert_eq!(placed_there.origin.x - placed_here.origin.x, dx);
+            prop_assert_eq!(placed_there.origin.y - placed_here.origin.y, dy);
+            prop_assert_eq!(placed_there.size, placed_here.size);
         }
 
         /// No window and no factor can produce an empty area, which the store
