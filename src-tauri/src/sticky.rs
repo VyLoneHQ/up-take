@@ -22,8 +22,12 @@
 //! progress:
 //!
 //! - Outside a drag, [`on_event`] hears the move and the area is placed at
-//!   once. No window is polled while none is being dragged. What does run is a
-//!   check once a second, for as long as any area is sticky (see below).
+//!   once. There is no per-frame poll outside a drag. There IS a slow one: for
+//!   as long as any area is sticky, every followed window is looked at once a
+//!   second (see below). The design measured on 2026-10-09 had no such check
+//!   and "cost nothing while no window moves". This build costs one look per
+//!   followed window per second, and that cost is not yet measured against the
+//!   idle CPU bar.
 //! - Between `EVENT_SYSTEM_MOVESIZESTART` and `EVENT_SYSTEM_MOVESIZEEND`,
 //!   [`follow_drag`] reads the window's rectangle once per composed frame
 //!   (`DwmFlush`). That bounds the lag at a monitor crossing by one frame,
@@ -69,6 +73,12 @@
 //! - "The same program" is the same full path. A program that updates itself
 //!   into a folder named for its version is another program by this test, and
 //!   its area stays paused.
+//! - "The window under the area" is the first one `EnumWindows` reports that
+//!   contains the area's centre. Windows reports top-level windows topmost
+//!   first in practice, and does not promise to.
+//! - A link remembers which windows were open when its window closed, by
+//!   handle. A new window that Windows gives one of those handle values is
+//!   passed by, and the area would wait until the next one.
 //! - Content that scrolls inside the window is not followed. That is roadmap
 //!   `1.43`.
 
@@ -136,8 +146,19 @@ struct Outlet {
 static OUTLET: OnceLock<Outlet> = OnceLock::new();
 
 /// Every sticky area's link to its window. Shared between the thread that
-/// handles the menu and the follower thread, and never held across a call that
-/// takes the area store's lock.
+/// handles the menu and the follower thread.
+///
+/// **The lock rule.** This lock may be held while the area store's lock is
+/// taken. The area store's lock is never held while this one is taken. One
+/// direction only, so the two cannot wait on each other.
+///
+/// Until the second review this lock was never held across a store call at
+/// all, and every step that touched both did so in two halves. Each pair of
+/// halves had a gap, and two reviews each found a different thread landing in
+/// one: a new link dropped by the once-a-second check, an area left ticked
+/// with nothing following it. The steps that touch both ([`stick_in`],
+/// [`release_in`], [`prune_in`]) now hold this lock for the whole step, so
+/// there is no gap to land in.
 static LINKS: Mutex<Vec<Link>> = Mutex::new(Vec::new());
 
 /// The follower thread, which does not exist until the first area is made
@@ -269,15 +290,12 @@ fn stick(app: &AppHandle, id: AreaId) -> bool {
     changed
 }
 
-/// Records that an area follows a window: the store is told first, and the
-/// link is added second.
-///
-/// The order is the point. The follower drops any link whose area the store
-/// does not call sticky. With the link first, a once-a-second check landing
-/// between the two steps dropped the new link, and the store then said
-/// "following" about an area nothing would ever move.
+/// Records that an area follows a window, as one step: the links are held
+/// while the store is told and the link is added, so the follower never sees
+/// one without the other.
 fn stick_in(store: &Mutex<AreaStore>, links: &Mutex<Vec<Link>>, link: Link) -> bool {
     let id = link.area;
+    let mut links = lock(links);
     let changed = {
         let mut store = lock(store);
         if store.get(id).is_none() {
@@ -285,7 +303,6 @@ fn stick_in(store: &Mutex<AreaStore>, links: &Mutex<Vec<Link>>, link: Link) -> b
         }
         store.set_sticky(id, Sticky::Following)
     };
-    let mut links = lock(links);
     links.retain(|existing| existing.area != id);
     links.push(link);
     changed
@@ -299,11 +316,12 @@ fn release(app: &AppHandle, id: AreaId) -> bool {
     changed
 }
 
-/// Drops the link, then tells the store the area is free. A decision the
-/// follower made a moment before cannot undo this: [`write`] leaves an area
-/// alone once the store calls it free.
+/// Drops the link and tells the store the area is free, as one step. A
+/// decision the follower made a moment before cannot undo this: [`write`]
+/// leaves an area alone once the store calls it free.
 fn release_in(store: &Mutex<AreaStore>, links: &Mutex<Vec<Link>>, id: AreaId) -> bool {
-    lock(links).retain(|link| link.area != id);
+    let mut links = lock(links);
+    links.retain(|link| link.area != id);
     lock(store).set_sticky(id, Sticky::Free)
 }
 
@@ -348,13 +366,29 @@ fn retake(link: &mut Link, bounds: Rect, seen: Seen) {
     }
 }
 
+/// The first of `windows`, in the order given, that can be followed and has
+/// `point` inside it. The order is topmost first, so this is the window the
+/// user sees under the area.
+fn first_under(
+    windows: impl IntoIterator<Item = (isize, Candidate)>,
+    point: Point,
+    own_pid: u32,
+) -> Option<isize> {
+    windows
+        .into_iter()
+        .find(|(_, candidate)| candidate.is_under(point, own_pid))
+        .map(|(window, _)| window)
+}
+
 /// Builds the link for an area that is about to become sticky.
 fn link_under(id: AreaId, bounds: Rect) -> Option<Link> {
-    let centre = centre_of(bounds);
-    let own = std::process::id();
-    let window = top_level_windows()
-        .into_iter()
-        .find(|&window| describe(window).is_under(centre, own))?;
+    let window = first_under(
+        top_level_windows()
+            .into_iter()
+            .map(|window| (window, describe(window))),
+        centre_of(bounds),
+        std::process::id(),
+    )?;
     let pid = owner_of(window);
     let Seen::At { rect, scale } = see(window, pid) else {
         return None;
@@ -725,15 +759,22 @@ fn refresh() {
 /// store is the one answer to "is this area sticky", so a path that removes
 /// an area without telling this module is still cleaned up within a second.
 fn prune() {
-    let Some(outlet) = OUTLET.get() else {
-        return;
-    };
-    let linked: Vec<AreaId> = lock(&LINKS).iter().map(|link| link.area).collect();
-    if linked.is_empty() {
+    if let Some(outlet) = OUTLET.get() {
+        prune_in(&LINKS, outlet.still_sticky);
+    }
+}
+
+/// [`prune`] on a given set of links. The links are held from the question to
+/// the answer, so a link added meanwhile is either asked about or not there
+/// yet. It cannot be dropped for never having been asked about.
+fn prune_in(links: &Mutex<Vec<Link>>, still_sticky: impl FnOnce(&[AreaId]) -> HashSet<AreaId>) {
+    let mut links = lock(links);
+    if links.is_empty() {
         return;
     }
-    let kept = (outlet.still_sticky)(&linked);
-    lock(&LINKS).retain(|link| kept.contains(&link.area));
+    let linked: Vec<AreaId> = links.iter().map(|link| link.area).collect();
+    let kept = still_sticky(&linked);
+    links.retain(|link| kept.contains(&link.area));
 }
 
 /// [`Outlet::still_sticky`] for the app: asks the area store.
@@ -1010,15 +1051,41 @@ fn app_place(changes: &[Change]) -> Vec<AreaId> {
         let store = app.state::<Mutex<AreaStore>>();
         write(&mut lock(&store), changes)
     };
-    if (changed || !moved.is_empty())
-        && let Err(error) = overlay::emit_areas(app)
-    {
-        crate::diagnostics::trouble(
-            "sticky: an area followed its window and the page was not told",
-            &error,
-        );
+    if changed || !moved.is_empty() {
+        tell_the_page(app);
     }
     moved
+}
+
+/// Sends the page the area set, from the main thread.
+///
+/// The follower runs on its own thread, and where a set is sent from decides
+/// when the page gets it. Sent from the main thread it is handed over at once.
+/// Sent from any other thread it is queued behind the main thread's event
+/// loop. So a set read here and queued could arrive AFTER a newer one that the
+/// mouse hook, which runs on the main thread, read and sent a moment later,
+/// and the page would stay on the older set. The second review found that
+/// ordering, and that a lock around the send did not prevent it.
+///
+/// Running the send on the main thread puts it in the same line as every
+/// other one. The set is read when the closure runs and not when it is
+/// posted, so it is never older than a set already sent.
+fn tell_the_page(app: &AppHandle) {
+    let on_main = app.clone();
+    let posted = app.run_on_main_thread(move || {
+        if let Err(error) = overlay::emit_areas(&on_main) {
+            crate::diagnostics::trouble(
+                "sticky: an area followed its window and the page was not told",
+                &error,
+            );
+        }
+    });
+    if let Err(error) = posted {
+        crate::diagnostics::trouble(
+            "sticky: an area followed its window and the main thread could not be reached",
+            &error.to_string(),
+        );
+    }
 }
 
 /// Writes the follower's decisions to the store. Returns whether any state
@@ -1101,19 +1168,62 @@ fn window_again<'a>(
     })
 }
 
+/// One link whose window closed, as far as re-attaching cares.
+struct Waiting {
+    area: AreaId,
+    /// The window it was on, which no longer exists. Areas with the same one
+    /// here were on the same window.
+    was: isize,
+    program: String,
+    title: String,
+    open_at_close: HashSet<isize>,
+}
+
+/// Decides which open window each waiting link joins, in the order given.
+///
+/// Areas that were on one window go to one window. Areas that were on two
+/// different windows never share one: with two windows of one program closed
+/// under one title, the first to reopen takes the areas of one of them, and
+/// the areas of the other wait for the second.
+fn rejoin<'a>(
+    waiting: &[Waiting],
+    open: &'a [Open],
+    mut same_program: impl FnMut(&Waiting, &Open) -> bool,
+) -> Vec<Option<&'a Open>> {
+    // Which reopened window each closed window's areas went to.
+    let mut taken: HashMap<isize, isize> = HashMap::new();
+    waiting
+        .iter()
+        .map(|link| {
+            let found = match taken.get(&link.was) {
+                Some(&window) => open.iter().find(|open| open.window == window),
+                None => window_again(&link.title, &link.open_at_close, open, |candidate| {
+                    !taken.values().any(|&window| window == candidate.window)
+                        && same_program(link, candidate)
+                }),
+            };
+            if let Some(found) = found {
+                taken.insert(link.was, found.window);
+            }
+            found
+        })
+        .collect()
+}
+
 /// Looks for the windows of links whose window closed, and joins each area to
 /// a window of the same program with the same title, if one has appeared.
 fn reattach() {
-    let waiting: Vec<(AreaId, String, String, HashSet<isize>)> = lock(&LINKS)
+    let waiting: Vec<Waiting> = lock(&LINKS)
         .iter()
         .filter(|link| link.gone)
         .filter_map(|link| {
-            Some((
-                link.area,
-                link.program.clone()?,
-                link.title.clone(),
-                link.open_at_close.clone(),
-            ))
+            Some(Waiting {
+                area: link.area,
+                was: link.window,
+                program: link.program.clone()?,
+                title: link.title.clone(),
+                open_at_close: link.open_at_close.clone(),
+            })
         })
         .collect();
     if waiting.is_empty() {
@@ -1133,30 +1243,26 @@ fn reattach() {
                 title: title_of(window),
             })
         })
-        .filter(|open| {
-            waiting
-                .iter()
-                .any(|(_, _, wanted, _)| *wanted == open.title)
-        })
+        .filter(|open| waiting.iter().any(|waiting| waiting.title == open.title))
         .collect();
+    let joins = rejoin(&waiting, &open, |link, candidate| {
+        describe(candidate.window).can_be_followed(own)
+            && program_of(candidate.pid).as_deref() == Some(link.program.as_str())
+    });
     let mut joined = false;
-    for (area, program, title, open_at_close) in waiting {
-        let found = window_again(&title, &open_at_close, &open, |candidate| {
-            describe(candidate.window).can_be_followed(own)
-                && program_of(candidate.pid).as_deref() == Some(program.as_str())
-        });
+    for (link, found) in waiting.iter().zip(joins) {
         let Some(found) = found else {
             continue;
         };
-        if let Some(link) = lock(&LINKS)
+        if let Some(live) = lock(&LINKS)
             .iter_mut()
-            .find(|link| link.area == area && link.gone)
+            .find(|live| live.area == link.area && live.gone)
         {
-            link.window = found.window;
-            link.pid = found.pid;
-            link.gone = false;
-            link.seen = None;
-            link.open_at_close.clear();
+            live.window = found.window;
+            live.pid = found.pid;
+            live.gone = false;
+            live.seen = None;
+            live.open_at_close.clear();
             joined = true;
         }
     }
@@ -1179,8 +1285,8 @@ mod tests {
 
     use super::{
         Candidate, Change, EVENT_RANGES, FOLLOWER, Follower, LINKS, Link, OUTLET, Open, Outlet,
-        Seen, centre_of, dragged, forget, lock, plan, release_in, retake, see, stick_in, text_of,
-        title_of, wake, window_again, write,
+        Seen, Waiting, centre_of, dragged, first_under, forget, lock, plan, prune_in, rejoin,
+        release_in, retake, see, stick_in, text_of, title_of, wake, window_again, write,
     };
 
     const WINDOW: Rect = Rect::new(100, 200, 900, 600);
@@ -1241,9 +1347,9 @@ mod tests {
     fn a_real_window_is_followed_by_its_events_and_paused_when_it_closes() {
         use windows_sys::Win32::UI::Accessibility::NotifyWinEvent;
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW, SW_SHOWNOACTIVATE,
-            SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos, SetWindowTextW, ShowWindow,
-            WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+            CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW, SW_SHOWMINNOACTIVE,
+            SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
+            SetWindowTextW, ShowWindow, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
         };
         use windows_sys::Win32::UI::WindowsAndMessaging::{
             EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART, OBJID_WINDOW,
@@ -1429,6 +1535,35 @@ mod tests {
                 Some(Rect::new(x + 20, y + 30, 50, 40))
             )),
             "a move after the drag ended was not followed within 250 ms"
+        );
+
+        // Minimised: the area pauses and is NOT sent to where Windows parks a
+        // minimised window, far off every screen. Restored: it follows again.
+        // SAFETY: shows the window created above, minimised and then as it
+        // was, without activating it either time.
+        unsafe {
+            ShowWindow(handle, SW_SHOWMINNOACTIVE);
+        }
+        assert!(
+            wait_for(Duration::from_millis(500), || placed(
+                id,
+                Sticky::Paused,
+                None
+            )),
+            "a minimised window pauses the area and moves nothing"
+        );
+        lock(&PLACED).clear();
+        // SAFETY: as above.
+        unsafe {
+            ShowWindow(handle, SW_SHOWNOACTIVATE);
+        }
+        assert!(
+            wait_for(Duration::from_millis(500), || {
+                lock(&PLACED)
+                    .iter()
+                    .any(|&(area, state, _)| area == id && state == Sticky::Following)
+            }),
+            "a restored window is followed again"
         );
 
         // A new title is remembered, so that when the window closes the title
@@ -1831,25 +1966,65 @@ mod tests {
         assert_eq!(found.map(|open| open.window), Some(31));
     }
 
-    /// `source` up to its test module, with comment lines dropped, so a call
-    /// that survives only in a comment or in a test does not count.
+    /// `source` with its test module cut off and its comment lines dropped, so
+    /// that a call which survives only in a comment or only in a test does not
+    /// count as made.
+    ///
+    /// The test module is everything from the line `mod tests {` on. The first
+    /// version looked for that line directly under `#[cfg(test)]`, found it in
+    /// one of three files, and returned the other two whole, comments and
+    /// tests included. The second review commented a guarded call out in each
+    /// and the test stayed green.
     fn production(source: &str) -> String {
-        let Some((production, _)) = source.split_once("#[cfg(test)]\nmod tests") else {
-            return source.to_owned();
-        };
-        production
-            .lines()
+        let code = source
+            .split_once("\nmod tests {")
+            .map_or(source, |(before, _)| before);
+        code.lines()
             .filter(|line| !line.trim_start().starts_with("//"))
             .collect::<Vec<_>>()
             .join("\n")
     }
 
-    /// The four places the rest of the app calls into this module. Each is one
-    /// line, and with any of them gone the feature is dead in the app while
-    /// every test of this module's own logic stays green: the first review
-    /// removed each in turn and the suite passed.
+    /// The body of one function in `code`: from its signature to the first
+    /// closing brace at the start of a line.
+    fn body<'a>(code: &'a str, signature: &str) -> &'a str {
+        let Some((_, after)) = code.split_once(signature) else {
+            panic!("`{signature}` not found: renamed? An unfound function must not read as a pass")
+        };
+        let Some((body, _)) = after.split_once("\n}") else {
+            panic!("`{signature}` has no end")
+        };
+        body
+    }
+
     #[test]
-    fn the_app_calls_into_this_module_at_the_four_places_it_must() {
+    fn the_source_helpers_cannot_be_satisfied_by_a_comment_or_a_test() {
+        let call = "sticky::init(app.handle());";
+        // Commented out, in a file with no test module at all.
+        assert!(!production(&format!("fn setup() {{\n    // {call}\n}}\n")).contains(call));
+        // Present only in a test module, under either spelling of its header.
+        for header in [
+            "#[cfg(test)]\nmod tests {",
+            "#[cfg(test)]\n#[allow(dead_code)]\nmod tests {",
+        ] {
+            let source = format!("fn setup() {{}}\n{header}\n    fn t() {{ {call} }}\n}}\n");
+            assert!(!production(&source).contains(call), "{header}");
+        }
+        // Present in production code: found.
+        assert!(production(&format!("fn setup() {{\n    {call}\n}}\n")).contains(call));
+        // A body ends at its own closing brace, not at the next function's.
+        let two = "fn one() {\n    a();\n}\n\nfn two() {\n    b();\n}\n";
+        assert!(body(two, "fn one() {").contains("a();"));
+        assert!(!body(two, "fn one() {").contains("b();"));
+    }
+
+    /// The single lines without which the feature is dead in the app while
+    /// every test of this module's own logic stays green. Two reviews removed
+    /// them one at a time, ten and then six more, and the suite passed each
+    /// time. Each is asserted in production source, comments and tests cut
+    /// away, inside the function it has to be in.
+    #[test]
+    fn every_line_the_feature_hangs_on_is_where_it_must_be() {
         let lib = production(include_str!("lib.rs"));
         assert!(
             lib.contains("sticky::init(app.handle());"),
@@ -1868,12 +2043,245 @@ mod tests {
         );
         let overlay = production(include_str!("overlay.rs"));
         assert!(
-            overlay.contains("crate::sticky::forget(id);"),
+            body(&overlay, "pub(crate) fn dismiss_area(").contains("crate::sticky::forget(id);"),
             "a dismissed area drops its link"
         );
-        // And the helper can fail: a call that exists only in a comment or in
-        // a test module is not found.
-        let decoy = "// sticky::init(app.handle());\n#[cfg(test)]\nmod tests { sticky::init(app.handle()); }";
-        assert!(!production(decoy).contains("sticky::init(app.handle());"));
+
+        let this = production(include_str!("sticky.rs"));
+        for (signature, line, why) in [
+            (
+                "fn stick(app: &AppHandle, id: AreaId) -> bool {",
+                "wake();",
+                "sticking starts the follower thread, or nothing ever follows",
+            ),
+            (
+                "fn stick(app: &AppHandle, id: AreaId) -> bool {",
+                "stick_in(store.inner(), &LINKS, link)",
+                "sticking records the link",
+            ),
+            (
+                "fn release(app: &AppHandle, id: AreaId) -> bool {",
+                "release_in(store.inner(), &LINKS, id)",
+                "freeing an area drops its link",
+            ),
+            (
+                "pub(crate) fn reanchor(app: &AppHandle, id: AreaId) {",
+                "retake(link, bounds, seen);",
+                "a hand move takes the new anchor, or the area snaps back",
+            ),
+            (
+                "fn app_place(changes: &[Change]) -> Vec<AreaId> {",
+                "write(&mut lock(&store), changes)",
+                "the follower's decisions reach the store",
+            ),
+            (
+                "fn app_place(changes: &[Change]) -> Vec<AreaId> {",
+                "tell_the_page(app);",
+                "the page is told, or the store moves and the screen does not",
+            ),
+            (
+                "fn tell_the_page(app: &AppHandle) {",
+                "app.run_on_main_thread(move || {",
+                "the set is sent from the main thread, in line with every other one",
+            ),
+            (
+                "fn tell_the_page(app: &AppHandle) {",
+                "overlay::emit_areas(&on_main)",
+                "and it is sent at all",
+            ),
+            (
+                "fn app_settle(id: AreaId) {",
+                "overlay::refresh_magnification(app, id);",
+                "a moved Upscale area re-takes its still",
+            ),
+            (
+                "fn app_settle(id: AreaId) {",
+                "placement::reread_in_place_ocr(app, id);",
+                "a moved OCR area reads again",
+            ),
+            (
+                "fn handle(message: &MSG) {",
+                "reattach();",
+                "the once-a-second check looks for a closed window coming back",
+            ),
+            (
+                "fn prune() {",
+                "prune_in(&LINKS, outlet.still_sticky);",
+                "links of areas that are gone are dropped",
+            ),
+        ] {
+            assert!(body(&this, signature).contains(line), "{why}");
+        }
+    }
+
+    #[test]
+    fn pruning_keeps_the_links_of_sticky_areas_and_drops_the_rest() {
+        let (store, first, second) = store_with_two();
+        let store = Mutex::new(store);
+        let links: Mutex<Vec<Link>> = Mutex::new(Vec::new());
+        stick_in(
+            &store,
+            &links,
+            link_for(first, Rect::new(140, 260, 200, 80)),
+        );
+        stick_in(
+            &store,
+            &links,
+            link_for(second, Rect::new(600, 500, 100, 50)),
+        );
+        // The second area is freed behind this module's back.
+        lock(&store).set_sticky(second, Sticky::Free);
+        let mut asked: Vec<AreaId> = Vec::new();
+        prune_in(&links, |linked| {
+            asked = linked.to_vec();
+            let store = lock(&store);
+            linked
+                .iter()
+                .copied()
+                .filter(|&id| store.get(id).is_some_and(|area| area.sticky.is_sticky()))
+                .collect()
+        });
+        assert_eq!(asked, vec![first, second], "every link is asked about");
+        let left: Vec<AreaId> = lock(&links).iter().map(|link| link.area).collect();
+        assert_eq!(left, vec![first]);
+        // With no links there is nothing to ask.
+        let none: Mutex<Vec<Link>> = Mutex::new(Vec::new());
+        prune_in(&none, |_| panic!("asked about no links"));
+    }
+
+    #[test]
+    fn a_link_cannot_be_added_between_the_question_and_the_answer() {
+        // The ordering the second review found: the menu thread added a link
+        // while the follower was between listing the links and dropping the
+        // ones not vouched for, and the new link was dropped unasked. The
+        // links are now held for the whole of both steps. Asserted from
+        // inside the question: another thread cannot take the lock there.
+        let (store, first, _) = store_with_two();
+        let store = Mutex::new(store);
+        let links: Mutex<Vec<Link>> = Mutex::new(Vec::new());
+        stick_in(
+            &store,
+            &links,
+            link_for(first, Rect::new(140, 260, 200, 80)),
+        );
+        prune_in(&links, |linked| {
+            assert!(
+                links.try_lock().is_err(),
+                "the links are held while the store is asked"
+            );
+            linked.iter().copied().collect()
+        });
+        assert_eq!(lock(&links).len(), 1);
+    }
+
+    #[test]
+    fn sticking_and_releasing_hold_the_links_while_they_tell_the_store() {
+        // The same property for the two steps the menu thread takes, checked
+        // by another thread trying the links while this one holds the store.
+        // If a step took the links only for its own half, the second thread
+        // would get in between.
+        let (store, first, _) = store_with_two();
+        let store = Mutex::new(store);
+        let links: Mutex<Vec<Link>> = Mutex::new(Vec::new());
+        let bounds = Rect::new(140, 260, 200, 80);
+        for release in [false, true] {
+            let held = lock(&store);
+            std::thread::scope(|scope| {
+                let step = scope.spawn(|| {
+                    if release {
+                        release_in(&store, &links, first);
+                    } else {
+                        stick_in(&store, &links, link_for(first, bounds));
+                    }
+                });
+                // The step is now waiting for the store, which this thread
+                // holds. It must already hold the links.
+                let blocked = wait_for(Duration::from_secs(2), || links.try_lock().is_err());
+                drop(held);
+                let _ = step.join();
+                assert!(
+                    blocked,
+                    "release {release}: the links are held across the store"
+                );
+            });
+        }
+        assert!(lock(&links).is_empty(), "stuck, then released");
+    }
+
+    #[test]
+    fn areas_of_one_closed_window_rejoin_together_and_two_windows_never_share_one() {
+        let ids: Vec<AreaId> = {
+            let mut store = AreaStore::new();
+            (0..3)
+                .filter_map(|_| store.create(AreaType::Default, Rect::new(0, 0, 10, 10)))
+                .collect()
+        };
+        assert_eq!(ids.len(), 3);
+        let waiting = |area: AreaId, was: isize| Waiting {
+            area,
+            was,
+            program: "editor.exe".to_owned(),
+            title: "notes.txt".to_owned(),
+            open_at_close: HashSet::new(),
+        };
+        // Two areas were on window 70, one on window 71. Same program, same
+        // title, both closed.
+        let links = [
+            waiting(ids[0], 70),
+            waiting(ids[1], 71),
+            waiting(ids[2], 70),
+        ];
+        let chosen = |open: &[Open]| -> Vec<Option<isize>> {
+            rejoin(&links, open, |_, _| true)
+                .into_iter()
+                .map(|found| found.map(|open| open.window))
+                .collect()
+        };
+        // One window reopens: the areas of window 70 take it together, and the
+        // area of window 71 waits. It must not pile onto the same window.
+        assert_eq!(
+            chosen(&[open(90, "notes.txt")]),
+            vec![Some(90), None, Some(90)]
+        );
+        // Both reopen: each closed window's areas get a window of their own.
+        assert_eq!(
+            chosen(&[open(90, "notes.txt"), open(91, "notes.txt")]),
+            vec![Some(90), Some(91), Some(90)]
+        );
+        // Nothing fitting is open: everyone waits.
+        assert_eq!(chosen(&[open(90, "other.txt")]), vec![None, None, None]);
+        // Another program under the same title is nobody's window.
+        let refused: Vec<Option<isize>> = rejoin(&links, &[open(90, "notes.txt")], |_, _| false)
+            .into_iter()
+            .map(|found| found.map(|open| open.window))
+            .collect();
+        assert_eq!(refused, vec![None, None, None]);
+    }
+
+    #[test]
+    fn the_window_under_the_area_is_the_topmost_one_that_can_be_followed() {
+        let inside = Point::new(500, 500);
+        let overlay = Candidate {
+            click_through: true,
+            ..window("SomeOverlay")
+        };
+        let elsewhere = Candidate {
+            rect: Rect::new(2000, 0, 400, 300),
+            ..window("Elsewhere")
+        };
+        // Topmost first: an overlay, a window somewhere else, then two that
+        // both contain the point. The upper of those two is the answer.
+        let windows = vec![
+            (1, overlay),
+            (2, elsewhere),
+            (3, window("Editor")),
+            (4, window("Browser")),
+            (5, window("Progman")),
+        ];
+        assert_eq!(first_under(windows.clone(), inside, OWN), Some(3));
+        // Nothing followable under the point: the desktop alone is no answer.
+        let bare = vec![(5, window("Progman"))];
+        assert_eq!(first_under(bare, inside, OWN), None);
+        assert_eq!(first_under(windows, Point::new(-50, -50), OWN), None);
     }
 }

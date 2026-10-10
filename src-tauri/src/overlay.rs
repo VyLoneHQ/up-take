@@ -1080,19 +1080,14 @@ fn payload_of(area: &Area, monitors: &[Rect]) -> AreaPayload {
     }
 }
 
-/// Held from reading the store to handing the set to the page, so two threads
-/// cannot send their sets in the opposite order to the one they read them in.
-static EMITTING_AREAS: Mutex<()> = Mutex::new(());
-
 /// Emits the current area set. Called on entering a visible state, on the
-/// frontend's mount request, by the placement hook after every change, and,
-/// since roadmap `1.47`, by the thread that follows windows each time a
-/// sticky area moves or pauses.
+/// frontend's mount request, and by the placement hook after every change.
 ///
-/// That last caller is why the read and the send are one step under
-/// [`EMITTING_AREAS`]. With two threads sending, the one that read first could
-/// send last, and the page would end on the older set until something else
-/// changed.
+/// Since roadmap `1.47` the thread that follows windows also needs the page
+/// told, each time a sticky area moves or pauses. It does not call this from
+/// its own thread. It runs it on the main thread (`sticky::tell_the_page`),
+/// because a set sent from another thread is queued behind the event loop and
+/// can reach the page after a newer one the main thread sent directly.
 pub(crate) fn emit_areas(app: &AppHandle) -> Result<(), String> {
     // Fetched once, before the store lock: the close control's position depends
     // on the monitors, because on a small area it sits *outside* the area and
@@ -1100,7 +1095,6 @@ pub(crate) fn emit_areas(app: &AppHandle) -> Result<(), String> {
     // same dependence for the same reason (it picks above or below), while the
     // outside handles deliberately do not (see `outside_resize_handles`).
     let monitors = monitor_rects();
-    let _one_at_a_time = lock(&EMITTING_AREAS);
     let areas = {
         let store = app.state::<Mutex<AreaStore>>();
         lock(&store)
@@ -2853,6 +2847,39 @@ mod tests {
             assert_eq!(payload.sticky, state);
             assert_eq!(payload.id, id.get());
             assert_eq!(payload.rect, (10, 20, 300, 200));
+            // The menu reads the same field through the summary. A summary
+            // that called every area free would never tick the row, and the
+            // row's action would always be "stick", so nothing could be freed.
+            assert_eq!(AreaSummary::of(area).sticky, state);
+        }
+    }
+
+    #[test]
+    fn the_sticky_state_reaches_the_page_in_the_spelling_the_page_compares() {
+        // The page asks `sticky === 'following'` and `=== 'paused'`. The enum
+        // travelling as `Following` would compare false everywhere, with no
+        // error: no mark, no "Paused", and every test of the enum still green.
+        for (state, word) in [
+            (Sticky::Free, "free"),
+            (Sticky::Following, "following"),
+            (Sticky::Paused, "paused"),
+        ] {
+            let payload = AreaPayload {
+                id: 1,
+                rect: (0, 0, 10, 10),
+                close: (0, 0, 18, 18),
+                layer: "auto",
+                kind: "default",
+                ocr_behaviour: OcrBehaviour::InPlace,
+                sticky: state,
+                zoom: 1.0,
+                bar: None,
+                handles: Vec::new(),
+            };
+            let Ok(json) = serde_json::to_value(&payload) else {
+                panic!("the payload serialises")
+            };
+            assert_eq!(json["sticky"], serde_json::json!(word));
         }
     }
 

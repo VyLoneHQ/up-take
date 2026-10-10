@@ -442,6 +442,20 @@ mod tests {
     }
 
     #[test]
+    fn a_scaled_distance_rounds_to_the_nearest_pixel() {
+        // 10 px in and 10 px down, 30 x 30, moved to a monitor at 125 %. The
+        // distances become 12.5 and the sides 37.5: halves, which round up.
+        // Every other scaled case in this file is an exact multiple, so
+        // rounding down passed all of them.
+        let area = Rect::new(110, 210, 30, 30);
+        let placed = Anchor::of(area, WINDOW).place(WINDOW, 1.25);
+        assert_eq!(placed, Rect::new(113, 213, 38, 38));
+        // And 0.9: 9.0 and 27.0 exactly, then 0.84: 8.4 rounds down, 25.2 too.
+        let placed = Anchor::of(area, WINDOW).place(WINDOW, 0.84);
+        assert_eq!(placed, Rect::new(108, 208, 25, 25));
+    }
+
+    #[test]
     fn a_factor_that_is_not_a_size_is_read_as_one() {
         let area = Rect::new(140, 260, 200, 80);
         let anchor = Anchor::of(area, WINDOW);
