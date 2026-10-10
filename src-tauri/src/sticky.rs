@@ -144,6 +144,11 @@ enum Follower {
 /// Posted to the follower thread when the links changed.
 const WAKE: u32 = WM_APP + 0x47;
 
+/// Posted by the follower thread to itself when a drag starts, so its wait for
+/// a message ends and the per-frame poll begins. It carries nothing: the drag
+/// is in [`DRAG`].
+const DRAG_STARTED: u32 = WM_APP + 0x48;
+
 /// How often the follower checks every followed window when no event says to,
 /// and looks for a window that closed. One second is what "re-attaches by
 /// itself" costs a user in the worst case.
@@ -787,7 +792,18 @@ unsafe extern "system" fn on_event(
     #[cfg(test)]
     tests::EVENTS_HEARD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     match event {
-        EVENT_SYSTEM_MOVESIZESTART => DRAG.set(Some(window)),
+        EVENT_SYSTEM_MOVESIZESTART => {
+            DRAG.set(Some(window));
+            // This callback runs inside the thread's wait for a message, and
+            // the wait does not end because a callback ran. Without a message
+            // of its own the per-frame poll would start at the next timer
+            // tick, up to a second into the drag, with every move ignored
+            // until then.
+            // SAFETY: posts a message with no payload to this thread.
+            unsafe {
+                PostThreadMessageW(GetCurrentThreadId(), DRAG_STARTED, 0, 0);
+            }
+        }
         EVENT_SYSTEM_MOVESIZEEND => {
             if DRAG.get() == Some(window) {
                 DRAG.set(None);
@@ -1059,9 +1075,13 @@ mod tests {
     #[test]
     #[ignore = "needs a desktop session: it creates a real window, off every monitor, and listens to its events"]
     fn a_real_window_is_followed_by_its_events_and_paused_when_it_closes() {
+        use windows_sys::Win32::UI::Accessibility::NotifyWinEvent;
         use windows_sys::Win32::UI::WindowsAndMessaging::{
             CreateWindowExW, DestroyWindow, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE,
             SWP_NOZORDER, SetWindowPos, ShowWindow, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+        };
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART, OBJID_WINDOW,
         };
         let class: Vec<u16> = "Static\0".encode_utf16().collect();
         let title: Vec<u16> = "uptake sticky test\0".encode_utf16().collect();
@@ -1161,6 +1181,66 @@ mod tests {
         // this count says outright that the events arrived.
         let heard = EVENTS_HEARD.load(Ordering::Relaxed) - heard_before;
         assert!(heard >= 5, "{heard} events heard for 5 moves");
+
+        // A drag. Windows announces one with `EVENT_SYSTEM_MOVESIZESTART`, and
+        // a program may raise that event for its own window, which is how this
+        // test starts one without a hand on the mouse. From here to the end
+        // event the callback ignores every move, so an area that still follows
+        // inside 250 ms was placed by the per-frame poll and by nothing else.
+        // SAFETY: raises an event for the window created above.
+        unsafe {
+            NotifyWinEvent(EVENT_SYSTEM_MOVESIZESTART, handle, OBJID_WINDOW, 0);
+        }
+        for step in 6..=10 {
+            let (x, y) = (rect.origin.x + 10 * step, rect.origin.y + 7 * step);
+            // SAFETY: as above.
+            unsafe {
+                SetWindowPos(
+                    handle,
+                    std::ptr::null_mut(),
+                    x,
+                    y,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+            let expected = Some(Rect::new(x + 20, y + 30, 50, 40));
+            assert!(
+                wait_for(Duration::from_millis(250), || placed(
+                    id,
+                    Sticky::Following,
+                    expected
+                )),
+                "move {step}, during a drag, was not followed within 250 ms"
+            );
+        }
+        // SAFETY: as above.
+        unsafe {
+            NotifyWinEvent(EVENT_SYSTEM_MOVESIZEEND, handle, OBJID_WINDOW, 0);
+        }
+        // After the end event a plain move is followed by its event again.
+        let (x, y) = (rect.origin.x + 200, rect.origin.y + 100);
+        // SAFETY: as above.
+        unsafe {
+            SetWindowPos(
+                handle,
+                std::ptr::null_mut(),
+                x,
+                y,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+        assert!(
+            wait_for(Duration::from_millis(250), || placed(
+                id,
+                Sticky::Following,
+                Some(Rect::new(x + 20, y + 30, 50, 40))
+            )),
+            "a move after the drag ended was not followed within 250 ms"
+        );
 
         // SAFETY: destroys the window created above, on the thread that made it.
         unsafe {
