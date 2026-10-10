@@ -94,9 +94,33 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use crate::overlay;
 use crate::placement;
 
-/// The app handle, for the follower thread and the event callback, neither of
-/// which is handed one.
+/// The app handle, for the outlet's three functions, which are called from the
+/// follower thread and are not handed one.
 static APP: OnceLock<AppHandle> = OnceLock::new();
+
+/// One decision of the follower: this area, in this state, and at this
+/// rectangle if its window can be followed.
+type Change = (AreaId, Sticky, Option<Rect>);
+
+/// Where the follower's decisions go.
+///
+/// The follower thread knows windows and nothing about the app: it decides
+/// where each area belongs and hands that here. [`init`] sets the outlet to
+/// the three `app_*` functions, which write to the area store and tell the
+/// page. Keeping the two apart is what lets a test follow a real window with
+/// no app running, by setting an outlet of its own.
+#[derive(Clone, Copy)]
+struct Outlet {
+    /// Which of these areas still exist and are still sticky.
+    still_sticky: fn(&[AreaId]) -> HashSet<AreaId>,
+    /// Takes the decisions and returns the areas that actually moved.
+    place: fn(&[Change]) -> Vec<AreaId>,
+    /// Called for each moved area once the windows have been still for
+    /// [`SETTLE_MS`].
+    settle: fn(AreaId),
+}
+
+static OUTLET: OnceLock<Outlet> = OnceLock::new();
 
 /// Every sticky area's link to its window. Shared between the thread that
 /// handles the menu and the follower thread, and never held across a call that
@@ -186,9 +210,15 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Remembers the app handle. Called once at startup. It starts nothing.
+/// Remembers the app handle and points the follower's decisions at the app.
+/// Called once at startup. It starts nothing.
 pub(crate) fn init(app: &AppHandle) {
     let _ = APP.set(app.clone());
+    let _ = OUTLET.set(Outlet {
+        still_sticky: app_still_sticky,
+        place: app_place,
+        settle: app_settle,
+    });
 }
 
 /// Makes an area sticky or frees it. Returns whether the area changed, so the
@@ -605,10 +635,7 @@ fn handle(message: &MSG) {
 /// the once-a-second timer only while something is sticky, and places every
 /// area by its window.
 fn refresh() {
-    let Some(app) = APP.get() else {
-        return;
-    };
-    prune(app);
+    prune();
     let (programs, windows, any) = {
         let links = lock(&LINKS);
         let live = || links.iter().filter(|link| !link.gone);
@@ -628,20 +655,30 @@ fn refresh() {
 /// Drops the links whose area no longer exists or is no longer sticky. The
 /// store is the one answer to "is this area sticky", so a path that removes
 /// an area without telling this module is still cleaned up within a second.
-fn prune(app: &AppHandle) {
+fn prune() {
+    let Some(outlet) = OUTLET.get() else {
+        return;
+    };
     let linked: Vec<AreaId> = lock(&LINKS).iter().map(|link| link.area).collect();
     if linked.is_empty() {
         return;
     }
-    let kept: HashSet<AreaId> = {
-        let store = app.state::<Mutex<AreaStore>>();
-        let store = lock(&store);
-        linked
-            .into_iter()
-            .filter(|&id| store.get(id).is_some_and(|area| area.sticky.is_sticky()))
-            .collect()
-    };
+    let kept = (outlet.still_sticky)(&linked);
     lock(&LINKS).retain(|link| kept.contains(&link.area));
+}
+
+/// [`Outlet::still_sticky`] for the app: asks the area store.
+fn app_still_sticky(linked: &[AreaId]) -> HashSet<AreaId> {
+    let Some(app) = APP.get() else {
+        return linked.iter().copied().collect();
+    };
+    let store = app.state::<Mutex<AreaStore>>();
+    let store = lock(&store);
+    linked
+        .iter()
+        .copied()
+        .filter(|&id| store.get(id).is_some_and(|area| area.sticky.is_sticky()))
+        .collect()
 }
 
 /// The events one followed program is listened to for, as inclusive ranges.
@@ -747,6 +784,8 @@ unsafe extern "system" fn on_event(
     {
         return;
     }
+    #[cfg(test)]
+    tests::EVENTS_HEARD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     match event {
         EVENT_SYSTEM_MOVESIZESTART => DRAG.set(Some(window)),
         EVENT_SYSTEM_MOVESIZEEND => {
@@ -820,8 +859,7 @@ fn follow_drag(window: isize) {
 /// Returns what was seen, or `None` if no live link follows this window. A
 /// window that looks exactly as it did last time costs one look and no more.
 fn sync(window: isize) -> Option<Seen> {
-    let app = APP.get()?;
-    let mut changes: Vec<(AreaId, Sticky, Option<Rect>)> = Vec::new();
+    let mut changes: Vec<Change> = Vec::new();
     let seen = {
         let mut links = lock(&LINKS);
         let pid = links
@@ -843,15 +881,28 @@ fn sync(window: isize) -> Option<Seen> {
         }
         seen
     };
-    if !changes.is_empty() {
-        apply(app, &changes);
+    if !changes.is_empty()
+        && let Some(outlet) = OUTLET.get()
+    {
+        let moved = (outlet.place)(&changes);
+        if !moved.is_empty() {
+            UNSETTLED.with_borrow_mut(|unsettled| unsettled.extend(moved));
+            // SAFETY: as in `keep_ticking`. Passing the id of the timer that
+            // is already running restarts it, so the wait is counted from the
+            // last move and not from the first.
+            SETTLE.set(unsafe { SetTimer(std::ptr::null_mut(), SETTLE.get(), SETTLE_MS, None) });
+        }
     }
     Some(seen)
 }
 
-/// Writes the new states and rectangles to the store and sends the page the
-/// new set, once, if anything changed.
-fn apply(app: &AppHandle, changes: &[(AreaId, Sticky, Option<Rect>)]) {
+/// [`Outlet::place`] for the app: writes the new states and rectangles to the
+/// store and sends the page the new set, once, if anything changed. Returns
+/// the areas that moved.
+fn app_place(changes: &[Change]) -> Vec<AreaId> {
+    let Some(app) = APP.get() else {
+        return Vec::new();
+    };
     let mut moved: Vec<AreaId> = Vec::new();
     let mut changed = false;
     {
@@ -871,27 +922,28 @@ fn apply(app: &AppHandle, changes: &[(AreaId, Sticky, Option<Rect>)]) {
             }
         }
     }
-    if !changed && moved.is_empty() {
-        return;
-    }
-    if let Err(error) = overlay::emit_areas(app) {
+    if (changed || !moved.is_empty())
+        && let Err(error) = overlay::emit_areas(app)
+    {
         crate::diagnostics::trouble(
             "sticky: an area followed its window and the page was not told",
             &error,
         );
     }
-    if !moved.is_empty() {
-        UNSETTLED.with_borrow_mut(|unsettled| unsettled.extend(moved));
-        // SAFETY: as in `keep_ticking`. Passing the id of the timer that is
-        // already running restarts it, so the wait is counted from the last
-        // move and not from the first.
-        SETTLE.set(unsafe { SetTimer(std::ptr::null_mut(), SETTLE.get(), SETTLE_MS, None) });
+    moved
+}
+
+/// [`Outlet::settle`] for the app: the area re-takes what it shows, exactly as
+/// it does when the user lets go after moving it by hand.
+fn app_settle(id: AreaId) {
+    if let Some(app) = APP.get() {
+        overlay::refresh_magnification(app, id);
+        placement::reread_in_place_ocr(app, id);
     }
 }
 
 /// The windows have been still for [`SETTLE_MS`]: each area that moved
-/// re-takes what it shows, exactly as it does when the user lets go after
-/// moving it by hand.
+/// re-takes what it shows.
 fn settle() {
     let timer = SETTLE.replace(0);
     if timer != 0 {
@@ -900,12 +952,11 @@ fn settle() {
             KillTimer(std::ptr::null_mut(), timer);
         }
     }
-    let Some(app) = APP.get() else {
-        return;
-    };
-    for id in UNSETTLED.take() {
-        overlay::refresh_magnification(app, id);
-        placement::reread_in_place_ocr(app, id);
+    let moved = UNSETTLED.take();
+    if let Some(outlet) = OUTLET.get() {
+        for id in moved {
+            (outlet.settle)(id);
+        }
     }
 }
 
@@ -962,10 +1013,169 @@ mod tests {
     use uptake_core::geometry::{Point, Rect};
     use uptake_core::sticky::{Anchor, Sticky};
 
-    use super::{Candidate, EVENT_RANGES, Seen, centre_of, plan, text_of};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    use uptake_core::area::{AreaId, AreaStore, AreaType};
+
+    use super::{
+        Candidate, Change, EVENT_RANGES, FOLLOWER, Follower, LINKS, Link, OUTLET, Outlet, Seen,
+        centre_of, forget, lock, plan, see, text_of, title_of, wake,
+    };
 
     const WINDOW: Rect = Rect::new(100, 200, 900, 600);
     const OWN: u32 = 4242;
+
+    /// Every placement `sync` decided, for the real-window test to read.
+    static PLACED: Mutex<Vec<Change>> = Mutex::new(Vec::new());
+    /// How many events about a followed window reached the callback.
+    pub(super) static EVENTS_HEARD: AtomicUsize = AtomicUsize::new(0);
+
+    fn wait_for(limit: Duration, mut done: impl FnMut() -> bool) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < limit {
+            if done() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        done()
+    }
+
+    fn placed(id: AreaId, state: Sticky, bounds: Option<Rect>) -> bool {
+        lock(&PLACED).contains(&(id, state, bounds))
+    }
+
+    /// The whole path with a real window: the thread starts, the hooks are
+    /// set, Windows reports each move, the callback places the area, and a
+    /// destroyed window pauses it.
+    ///
+    /// The window is created far off every monitor and never activated, so
+    /// running this draws nothing on anyone's screen and takes no keystroke.
+    /// What it cannot cover is a drag by hand (the per-frame poll) and the
+    /// re-attach, which refuses windows of its own process. Those are rig
+    /// steps.
+    #[test]
+    #[ignore = "needs a desktop session: it creates a real window, off every monitor, and listens to its events"]
+    fn a_real_window_is_followed_by_its_events_and_paused_when_it_closes() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE,
+            SWP_NOZORDER, SetWindowPos, ShowWindow, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+        };
+        let class: Vec<u16> = "Static\0".encode_utf16().collect();
+        let title: Vec<u16> = "uptake sticky test\0".encode_utf16().collect();
+        // SAFETY: both strings are null-terminated and outlive the call. Every
+        // handle argument may be null for a top-level window of a system class.
+        let handle = unsafe {
+            CreateWindowExW(
+                WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                class.as_ptr(),
+                title.as_ptr(),
+                WS_POPUP,
+                30_000,
+                30_000,
+                400,
+                300,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            )
+        };
+        assert!(!handle.is_null(), "the test window was created");
+        // SAFETY: `handle` is the window created above, on this thread.
+        unsafe {
+            ShowWindow(handle, SW_SHOWNOACTIVATE);
+        }
+        let window = handle as isize;
+        let pid = std::process::id();
+        let Seen::At { rect, scale } = see(window, pid) else {
+            panic!("Windows counts the test window as on screen")
+        };
+        let area = Rect::new(rect.origin.x + 20, rect.origin.y + 30, 50, 40);
+        let Some(id) = AreaStore::new().create(AreaType::Default, area) else {
+            panic!("an area id")
+        };
+        lock(&LINKS).push(Link {
+            area: id,
+            window,
+            pid,
+            program: None,
+            title: title_of(window),
+            anchor: Anchor::of(area, rect),
+            scale,
+            seen: Some(Seen::At { rect, scale }),
+            gone: false,
+        });
+        // An outlet of the test's own, in place of the app: every area is
+        // still sticky, and each decision is written down to be read below.
+        let _ = OUTLET.set(Outlet {
+            still_sticky: |linked| linked.iter().copied().collect(),
+            place: |changes| {
+                lock(&PLACED).extend_from_slice(changes);
+                Vec::new()
+            },
+            settle: |_| {},
+        });
+        wake();
+        assert!(
+            wait_for(Duration::from_secs(2), || matches!(
+                *lock(&FOLLOWER),
+                Follower::Running(_)
+            )),
+            "the follower thread started"
+        );
+        // The hooks are set in the thread's first pass, right after it reports
+        // itself running.
+        std::thread::sleep(Duration::from_millis(150));
+
+        let heard_before = EVENTS_HEARD.load(Ordering::Relaxed);
+        for step in 1..=5 {
+            let (x, y) = (rect.origin.x + 10 * step, rect.origin.y + 7 * step);
+            // SAFETY: moves the window created above. No size, order or
+            // activation changes.
+            unsafe {
+                SetWindowPos(
+                    handle,
+                    std::ptr::null_mut(),
+                    x,
+                    y,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+            let expected = Some(Rect::new(x + 20, y + 30, 50, 40));
+            assert!(
+                wait_for(Duration::from_millis(250), || placed(
+                    id,
+                    Sticky::Following,
+                    expected
+                )),
+                "move {step} was not followed within 250 ms"
+            );
+        }
+        // The once-a-second check would also place the area, a second late.
+        // Five moves followed inside 250 ms each cannot all be that check, and
+        // this count says outright that the events arrived.
+        let heard = EVENTS_HEARD.load(Ordering::Relaxed) - heard_before;
+        assert!(heard >= 5, "{heard} events heard for 5 moves");
+
+        // SAFETY: destroys the window created above, on the thread that made it.
+        unsafe {
+            DestroyWindow(handle);
+        }
+        assert!(
+            wait_for(Duration::from_millis(2500), || placed(
+                id,
+                Sticky::Paused,
+                None
+            )),
+            "a destroyed window pauses the area"
+        );
+        forget(id);
+    }
 
     fn window(class: &str) -> Candidate {
         Candidate {
