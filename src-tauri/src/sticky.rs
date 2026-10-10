@@ -1174,6 +1174,13 @@ mod tests {
             )),
             "a destroyed window pauses the area"
         );
+        // Paused because it is GONE, not merely hidden. Only a link marked
+        // gone is looked for again, so a closed window read as hidden would
+        // leave its area waiting for a handle that never comes back.
+        assert!(
+            lock(&LINKS).iter().any(|link| link.area == id && link.gone),
+            "a destroyed window is marked gone, so it can be re-attached"
+        );
         forget(id);
     }
 
