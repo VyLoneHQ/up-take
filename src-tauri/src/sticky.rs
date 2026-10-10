@@ -1176,9 +1176,13 @@ mod tests {
         );
         // Paused because it is GONE, not merely hidden. Only a link marked
         // gone is looked for again, so a closed window read as hidden would
-        // leave its area waiting for a handle that never comes back.
+        // leave its area waiting for a handle that never comes back. Waited
+        // for, because Windows reports the window hidden first and destroyed
+        // a moment later.
         assert!(
-            lock(&LINKS).iter().any(|link| link.area == id && link.gone),
+            wait_for(Duration::from_millis(2500), || lock(&LINKS)
+                .iter()
+                .any(|link| link.area == id && link.gone)),
             "a destroyed window is marked gone, so it can be re-attached"
         );
         forget(id);
