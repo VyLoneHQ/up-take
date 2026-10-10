@@ -2622,6 +2622,18 @@ mod tests {
         let mut links = vec![closed(ids[1], 71)];
         assert!(!join_in(&mut links, &[join(ids[0], 70)]));
         assert!(links[0].open_at_close.is_empty());
+        // The area was stuck to another window by hand in the meantime. It is
+        // following window 55 and is left there.
+        let mut links = vec![
+            Link {
+                window: 55,
+                ..link_for(ids[0], Rect::new(140, 260, 200, 80))
+            },
+            closed(ids[1], 71),
+        ];
+        assert!(!join_in(&mut links, &[join(ids[0], 70)]));
+        assert_eq!((links[0].window, links[0].gone), (55, false));
+        assert!(links[1].open_at_close.is_empty());
         // Made for one area of window 70. The other area of window 70, still
         // waiting, may take window 90 too. The area of window 71 may not.
         let mut links = vec![closed(ids[0], 70), closed(ids[1], 71), closed(ids[2], 70)];
