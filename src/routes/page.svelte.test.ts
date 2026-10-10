@@ -389,6 +389,7 @@ describe('an area renders the badges its state earns and no others', () => {
       close: [492, 92, 18, 18],
       layer: 'auto',
       kind,
+      sticky: 'free',
       // 2 rather than some larger number because the badge turns on `> 1`; the
       // value only has to be magnified, and inventing a bigger one would imply
       // this file knows a factor Rust no longer defines.
@@ -562,6 +563,55 @@ describe('an area renders the badges its state earns and no others', () => {
 
     await emit('overlay://areas', { areas: [area({ layer: 'auto' })] });
     expect(container.querySelectorAll('.layer-badge')).toHaveLength(0);
+  });
+
+  /**
+   * Roadmap 1.47. Three states, three renderings, and the word is the part
+   * that matters: a paused area sits where its window used to be, and
+   * "Paused" is the only thing on screen that says why. Asserted per state so
+   * that showing the word on a following area, or dropping it from a paused
+   * one, both fail here. The first review of this feature swapped the two in
+   * the template and the whole suite stayed green.
+   */
+  test('a sticky area shows its mark, and says Paused only while paused', async () => {
+    const { container } = await mount();
+    await emit('overlay://state', state());
+
+    await emit('overlay://areas', { areas: [area({ sticky: 'free' })] });
+    expect(container.querySelectorAll('.sticky-badge')).toHaveLength(0);
+
+    await emit('overlay://areas', { areas: [area({ sticky: 'following' })] });
+    const following = container.querySelector('.sticky-badge');
+    expect(following?.textContent?.trim()).toBe('◈');
+    expect(following?.classList.contains('paused')).toBe(false);
+
+    await emit('overlay://areas', { areas: [area({ sticky: 'paused' })] });
+    const paused = container.querySelector('.sticky-badge');
+    expect(paused?.textContent?.trim()).toBe('◈ Paused');
+    expect(paused?.classList.contains('paused')).toBe(true);
+  });
+
+  test('the sticky mark moves over when the area also shows a tier arrow', async () => {
+    const { container } = await mount();
+    await emit('overlay://state', state());
+    await emit('overlay://areas', {
+      areas: [area({ sticky: 'following', layer: 'front' })],
+    });
+    expect(container.querySelectorAll('.layer-badge')).toHaveLength(1);
+    expect(
+      container
+        .querySelector('.sticky-badge')
+        ?.classList.contains('beside-layer'),
+    ).toBe(true);
+
+    await emit('overlay://areas', {
+      areas: [area({ sticky: 'following', layer: 'auto' })],
+    });
+    expect(
+      container
+        .querySelector('.sticky-badge')
+        ?.classList.contains('beside-layer'),
+    ).toBe(false);
   });
 
   /**

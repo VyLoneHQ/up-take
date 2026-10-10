@@ -20,6 +20,7 @@ use uptake_core::area::{
 };
 use uptake_core::geometry::{Monitor, Point, Rect, Size, virtual_desktop_bounds};
 use uptake_core::interaction;
+use uptake_core::sticky::Sticky;
 
 use crate::click_through;
 use crate::overlay_state::{Event, OverlayState, next};
@@ -992,6 +993,10 @@ struct AreaPayload {
     /// Before `1.45` the page took it from the settings, for every OCR area at
     /// once.
     ocr_behaviour: OcrBehaviour,
+    /// Whether the area follows a window, and whether it is waiting for one
+    /// (roadmap `1.47`): `free`, `following` or `paused`. The page marks a
+    /// sticky area and says so when it is paused.
+    sticky: Sticky,
     /// The area's magnification (§3.4), `1.0` at natural size.
     ///
     /// **The frontend does not scale anything with this.** The magnified
@@ -1052,8 +1057,37 @@ pub(crate) const fn as_tuple(rect: Rect) -> (i32, i32, u32, u32) {
     )
 }
 
+/// What the page is told about one area.
+///
+/// A function of its own so that a test can ask what an area is sent as. The
+/// first review of sticky areas (roadmap `1.47`) sent every area as `free`
+/// from inside [`emit_areas`] and no test noticed.
+fn payload_of(area: &Area, monitors: &[Rect]) -> AreaPayload {
+    AreaPayload {
+        id: area.id.get(),
+        rect: as_tuple(area.bounds),
+        close: as_tuple(interaction::close_control(area.bounds, monitors)),
+        layer: layer_name(area.layer),
+        kind: type_name(area.kind),
+        ocr_behaviour: area.ocr_behaviour,
+        sticky: area.sticky,
+        zoom: area.zoom.factor(),
+        bar: interaction::grab_bar(area.bounds, monitors).map(as_tuple),
+        handles: interaction::outside_resize_handles(area.bounds)
+            .into_iter()
+            .map(as_tuple)
+            .collect(),
+    }
+}
+
 /// Emits the current area set. Called on entering a visible state, on the
 /// frontend's mount request, and by the placement hook after every change.
+///
+/// Since roadmap `1.47` the thread that follows windows also needs the page
+/// told, each time a sticky area moves or pauses. It does not call this from
+/// its own thread. It runs it on the main thread (`sticky::tell_the_page`),
+/// because a set sent from another thread is queued behind the event loop and
+/// can reach the page after a newer one the main thread sent directly.
 pub(crate) fn emit_areas(app: &AppHandle) -> Result<(), String> {
     // Fetched once, before the store lock: the close control's position depends
     // on the monitors, because on a small area it sits *outside* the area and
@@ -1061,24 +1095,13 @@ pub(crate) fn emit_areas(app: &AppHandle) -> Result<(), String> {
     // same dependence for the same reason (it picks above or below), while the
     // outside handles deliberately do not (see `outside_resize_handles`).
     let monitors = monitor_rects();
-    let store = app.state::<Mutex<AreaStore>>();
-    let areas = lock(&store)
-        .iter()
-        .map(|area| AreaPayload {
-            id: area.id.get(),
-            rect: as_tuple(area.bounds),
-            close: as_tuple(interaction::close_control(area.bounds, &monitors)),
-            layer: layer_name(area.layer),
-            kind: type_name(area.kind),
-            ocr_behaviour: area.ocr_behaviour,
-            zoom: area.zoom.factor(),
-            bar: interaction::grab_bar(area.bounds, &monitors).map(as_tuple),
-            handles: interaction::outside_resize_handles(area.bounds)
-                .into_iter()
-                .map(as_tuple)
-                .collect(),
-        })
-        .collect();
+    let areas = {
+        let store = app.state::<Mutex<AreaStore>>();
+        lock(&store)
+            .iter()
+            .map(|area| payload_of(area, &monitors))
+            .collect()
+    };
     app.emit(AREAS_EVENT, AreasPayload { areas })
         .map_err(|e| format!("Could not emit overlay areas: {e}"))
 }
@@ -1096,6 +1119,9 @@ pub(crate) struct AreaSummary {
     /// How it shows what it read, for an OCR area's Behaviour rows (roadmap
     /// `1.45`).
     pub ocr_behaviour: OcrBehaviour,
+    /// Whether the area follows a window (roadmap `1.47`), for the menu's
+    /// tick.
+    pub sticky: Sticky,
 }
 
 impl AreaSummary {
@@ -1106,6 +1132,7 @@ impl AreaSummary {
             input: area.input,
             kind: area.kind,
             ocr_behaviour: area.ocr_behaviour,
+            sticky: area.sticky,
         }
     }
 }
@@ -1710,6 +1737,7 @@ pub(crate) fn dismiss_area(app: &AppHandle, id: AreaId) -> bool {
         // area still exists before announcing anything, so the result itself is
         // discarded there rather than drawn on a dismissed rectangle.
         crate::ocr::forget(id);
+        crate::sticky::forget(id);
         collapse_living_if_empty(app);
     }
     removed
@@ -1760,9 +1788,11 @@ pub(crate) fn set_area_layer(app: &AppHandle, id: AreaId, layer: Layer) -> bool 
 /// Read fresh at the moment Copy/Save is activated rather than carried from
 /// the menu's own opening: the menu can stay open across pump ticks, and a
 /// capture should target where the area is *now*, not where it was when the
-/// menu was drawn (it cannot move while a menu is open today, but this is the
-/// same "read state at the point of action" discipline [`overlay_dismiss_focused`]
-/// already follows).
+/// menu was drawn. Since roadmap `1.47` that is a real case and not only
+/// discipline: a sticky area moves with its window while its menu is open.
+/// (This said "it cannot move while a menu is open today" until then.) It is
+/// the same "read state at the point of action" rule [`overlay_dismiss_focused`]
+/// already follows.
 pub(crate) fn area_bounds(app: &AppHandle, id: AreaId) -> Option<Rect> {
     let store = app.state::<Mutex<AreaStore>>();
     lock(&store).get(id).map(|area| area.bounds)
@@ -2800,6 +2830,60 @@ mod tests {
     ];
 
     #[test]
+    fn an_area_is_sent_with_the_sticky_state_it_has() {
+        // Roadmap 1.47. The page marks a sticky area and says "Paused" from
+        // this field alone, so an area sent as `free` whatever it is leaves
+        // the menu row ticked and the screen saying nothing.
+        let mut store = AreaStore::new();
+        let Some(id) = store.create(AreaType::Default, Rect::new(10, 20, 300, 200)) else {
+            panic!("an area")
+        };
+        for state in [Sticky::Free, Sticky::Following, Sticky::Paused] {
+            store.set_sticky(id, state);
+            let Some(area) = store.get(id) else {
+                panic!("the area")
+            };
+            let payload = payload_of(area, &[Rect::new(0, 0, 1920, 1080)]);
+            assert_eq!(payload.sticky, state);
+            assert_eq!(payload.id, id.get());
+            assert_eq!(payload.rect, (10, 20, 300, 200));
+            // The menu reads the same field through the summary. A summary
+            // that called every area free would never tick the row, and the
+            // row's action would always be "stick", so nothing could be freed.
+            assert_eq!(AreaSummary::of(area).sticky, state);
+        }
+    }
+
+    #[test]
+    fn the_sticky_state_reaches_the_page_in_the_spelling_the_page_compares() {
+        // The page asks `sticky === 'following'` and `=== 'paused'`. The enum
+        // travelling as `Following` would compare false everywhere, with no
+        // error: no mark, no "Paused", and every test of the enum still green.
+        for (state, word) in [
+            (Sticky::Free, "free"),
+            (Sticky::Following, "following"),
+            (Sticky::Paused, "paused"),
+        ] {
+            let payload = AreaPayload {
+                id: 1,
+                rect: (0, 0, 10, 10),
+                close: (0, 0, 18, 18),
+                layer: "auto",
+                kind: "default",
+                ocr_behaviour: OcrBehaviour::InPlace,
+                sticky: state,
+                zoom: 1.0,
+                bar: None,
+                handles: Vec::new(),
+            };
+            let Ok(json) = serde_json::to_value(&payload) else {
+                panic!("the payload serialises")
+            };
+            assert_eq!(json["sticky"], serde_json::json!(word));
+        }
+    }
+
+    #[test]
     fn every_payload_this_module_emits_keeps_the_keys_the_frontend_reads() {
         assert_keys(
             "StatePayload",
@@ -2821,6 +2905,7 @@ mod tests {
             layer: "auto",
             kind: "default",
             ocr_behaviour: OcrBehaviour::InPlace,
+            sticky: Sticky::Paused,
             zoom: 1.0,
             bar: Some((0, -18, 10, 18)),
             handles: vec![(0, 0, 18, 18)],
@@ -2835,6 +2920,7 @@ mod tests {
                 "layer",
                 "kind",
                 "ocr_behaviour",
+                "sticky",
                 "zoom",
                 "bar",
                 "handles",

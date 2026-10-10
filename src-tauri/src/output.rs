@@ -980,9 +980,12 @@ fn magnify() -> std::sync::MutexGuard<'static, Magnify> {
 ///
 /// # Threading
 ///
-/// Returns immediately. The only caller is the mouse hook, and a capture is far
+/// Returns immediately. One caller is the mouse hook, and a capture is far
 /// past `LowLevelHooksTimeout`, the F-33 failure class, and the same reason
-/// [`capture_into_area`] spawns.
+/// [`capture_into_area`] spawns. Since roadmap `1.47` the thread that follows
+/// windows is a second caller, through `overlay::refresh_magnification`, when
+/// a sticky area has moved with its window. (This said "the only caller is the
+/// mouse hook" until then.)
 pub(crate) fn magnify_into_area(app: &AppHandle, id: AreaId, retake: Retake) {
     {
         let mut state = magnify();

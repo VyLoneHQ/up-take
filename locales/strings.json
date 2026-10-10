@@ -70,6 +70,16 @@
       "de": "Immer im Hintergrund",
       "de_from": "f569eaf0"
     },
+    "menu.sticky": {
+      "en": "Stick to window",
+      "de": "An Fenster heften",
+      "de_from": "ac13c0d0"
+    },
+    "area.sticky.paused": {
+      "en": "Paused",
+      "de": "Pausiert",
+      "de_from": "de281feb"
+    },
     "menu.click_through": {
       "en": "Click-through",
       "de": "Durchklickbar",

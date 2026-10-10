@@ -87,6 +87,14 @@ export function stillsFromWire(
 export type LayerName = 'front' | 'auto' | 'back';
 
 /**
+ * Whether an area follows a window (roadmap 1.47). `free` is anchored to the
+ * screen, as every new area is. `following` moves with its window. `paused`
+ * is anchored to a window that is minimised, hidden or closed: the area waits
+ * where it was and follows again when the window is back.
+ */
+export type StickyState = 'free' | 'following' | 'paused';
+
+/**
  * Every area type on the wire, matching `type_name` in `overlay.rs`.
  *
  * All seven are listed because Rust sends all seven, not only the ones a
@@ -133,6 +141,8 @@ export interface AreaView {
    * OCR area at once; the setting is now only what a new OCR area starts with.
    */
   ocr_behaviour: OcrBehaviour;
+  /** Whether the area follows a window. See {@link StickyState}. */
+  sticky: StickyState;
   /**
    * Magnification (§3.4), `1` at natural size.
    *
@@ -486,6 +496,13 @@ export interface MenuItemView {
   label: string;
   checked: boolean;
   /**
+   * A press on this row does something. `false` on a row that would do nothing
+   * right now, such as "Stick to window" with no window under the area: Rust
+   * ignores a click there and never reports the row hovered, and the page
+   * draws it greyed out.
+   */
+  enabled: boolean;
+  /**
    * This row opens a child list, so it draws the marker that says so.
    *
    * One lowercase word, like every other key in this payload, and that is
@@ -574,6 +591,8 @@ export interface AreaFrame {
   kind: AreaKind;
   /** How an OCR area shows what it read. See {@link AreaView.ocr_behaviour}. */
   ocrBehaviour: OcrBehaviour;
+  /** Whether the area follows a window. See {@link StickyState}. */
+  sticky: StickyState;
   /** Magnification (§3.4), `1` at natural size. See {@link AreaView.zoom}. */
   zoom: number;
   /** Draw this area as the one a press would grab: brighter, lit border. */
@@ -648,6 +667,8 @@ export interface MenuItemFrame {
   label: string;
   checked: boolean;
   hovered: boolean;
+  /** Draw the row greyed out: a press on it does nothing right now. */
+  disabled: boolean;
   /** Draw the marker that says this row opens a child list. */
   parent: boolean;
   /** This row's child list is open, so draw it as the list's source. */
@@ -712,6 +733,7 @@ export function areaFramesCss(
     layer: area.layer,
     kind: area.kind,
     ocrBehaviour: area.ocr_behaviour,
+    sticky: area.sticky,
     zoom: area.zoom,
     // A dragged area is not also "hovered": the hover chrome invites a gesture
     // that is already under way, and its close control would sit at the source
@@ -754,6 +776,7 @@ function menuItemsCss(
     label: item.label,
     checked: item.checked,
     hovered: index === view.hovered,
+    disabled: !item.enabled,
     parent: item.parent,
     open: index === openIndex,
   }));

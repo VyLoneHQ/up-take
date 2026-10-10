@@ -31,6 +31,7 @@ mod placement;
 mod precapture;
 mod settings;
 mod settings_window;
+mod sticky;
 mod strings;
 mod tray;
 
@@ -327,6 +328,10 @@ pub fn run() -> tauri::Result<()> {
             // can override the cursor, so a panic while placing does not leave
             // every app showing the crosshair. See `placement`.
             placement::install_panic_guard();
+            // Sticky areas (roadmap 1.47). This only remembers the handle:
+            // the thread that follows windows starts with the first area
+            // that is made sticky, and never for a user who has none.
+            sticky::init(app.handle());
             // Clear any cursor override a *previous* run left behind. The system
             // cursor is global and survives a hard kill (ADR-0014 accepts that),
             // so without this the user keeps a crosshair everywhere until they

@@ -40,11 +40,17 @@ Until then it is written by hand.
   installer carries the OCR runtime and the models; they are not in this repository, and three
   checksummed scripts fetch them before a build can bundle them. (This said "two" scripts until
   2026-09-08; there are three, one each for the runtime, the detector and the recogniser.)
+- Sticky areas. Any area can be told from its menu to follow the window under it. It moves with
+  that window, keeps its distance from the window's nearest corner or edge when the window is
+  resized, and waits, marked "Paused", while the window is minimised or closed. When a window of
+  the same program with the same title appears, the area joins it. Content that scrolls inside the
+  window is not followed.
 - Freeze the screen while placing an area, with `Ctrl+Space`.
 - The overlay is excluded from screen capture, so other recording tools do not see it.
 
 <!-- source: STATUS.md Phase 1 (1A merged, 1B partial, 1D partial); ROADMAP.md tasks 1.1 to 1.9f,
      plus 1.34 and ADR-0044 decisions 1 and 3 (the entry about starting the app),
+     1.47 and ADR-0049 decision 3 (the sticky entry, written on the branch that built it),
      1.23 (Filter), 1.24 and 1.29 (Upscale; 1.29 and ADR-0031 are what make the entry say
      "sharpens" rather than "magnified", reversing 1.24 on the founder's verdict), 1.26 and 1.31
      (the OCR area and the pipeline behind it; ADR-0035 and BACKLOG.md I-337 are the source of

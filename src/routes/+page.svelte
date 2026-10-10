@@ -805,6 +805,17 @@ onMount(() => {
           {#if area.layer !== 'auto'}
             <span class="layer-badge">{area.layer === 'front' ? '▲' : '▼'}</span>
           {/if}
+          <!-- A sticky area (roadmap 1.47) carries a small mark, so an area
+               that will move with its window can be told from one that will
+               not. Paused is said in words: the area has stopped following,
+               and a mark alone would not say why it sits where it does. -->
+          {#if area.sticky === 'following' || area.sticky === 'paused'}
+            <span
+              class="sticky-badge"
+              class:beside-layer={area.layer !== 'auto'}
+              class:paused={area.sticky === 'paused'}
+            >◈{area.sticky === 'paused' ? ` ${text(language, 'area.sticky.paused')}` : ''}</span>
+          {/if}
         </div>
       {/if}
       {#if area.showClose}
@@ -878,6 +889,7 @@ onMount(() => {
       <div
         class="menu-item"
         class:hovered={item.hovered}
+        class:disabled={item.disabled}
         class:open={item.open}
         style="left: {item.rect.x}px; top: {item.rect.y}px; width: {item.rect
           .width}px; height: {item.rect.height}px"
@@ -907,6 +919,7 @@ onMount(() => {
         <div
           class="menu-item"
           class:hovered={item.hovered}
+          class:disabled={item.disabled}
           style="left: {item.rect.x}px; top: {item.rect.y}px; width: {item.rect
             .width}px; height: {item.rect.height}px"
         >
@@ -1064,6 +1077,27 @@ onMount(() => {
   font: 11px/1 system-ui, sans-serif;
   color: rgba(160, 210, 255, 0.95);
   text-shadow: 0 0 3px rgba(0, 0, 0, 0.8);
+}
+
+/* The sticky mark sits where the depth mark does, and one place to the right
+   when the area has both. Paused is amber: the one state here that means the
+   area is not doing what it was asked to. */
+.sticky-badge {
+  position: absolute;
+  left: 4px;
+  top: 2px;
+  font: 11px/1 system-ui, sans-serif;
+  color: rgba(160, 210, 255, 0.95);
+  text-shadow: 0 0 3px rgba(0, 0, 0, 0.8);
+  white-space: nowrap;
+}
+
+.sticky-badge.beside-layer {
+  left: 18px;
+}
+
+.sticky-badge.paused {
+  color: rgba(255, 196, 96, 0.98);
 }
 
 /* One-shot acknowledgement that a Copy or Save landed (F-35's success half).
@@ -1500,6 +1534,13 @@ onMount(() => {
 
 .menu-item.hovered {
   background: rgba(120, 180, 255, 0.22);
+}
+
+/* A row that does nothing right now, such as "Stick to window" with no window
+   under the area. Only the text dims. Rust never reports such a row hovered,
+   so this rule sets no background and has nothing to win against `.hovered`. */
+.menu-item.disabled {
+  color: rgba(235, 240, 250, 0.38);
 }
 
 /* The row whose child list is open, drawn as the list's source. Dimmer than a
