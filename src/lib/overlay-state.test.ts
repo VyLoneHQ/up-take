@@ -282,12 +282,14 @@ describe('menuFrameCss', () => {
         rect: [400, 305, 176, 28],
         label: 'Area type',
         checked: false,
+        enabled: true,
         parent: true,
       },
       {
         rect: [400, 333, 176, 28],
         label: 'Auto',
         checked: true,
+        enabled: true,
         parent: false,
       },
     ],
@@ -305,12 +307,14 @@ describe('menuFrameCss', () => {
           rect: [576, 305, 176, 28],
           label: 'Type: Default',
           checked: true,
+          enabled: true,
           parent: false,
         },
         {
           rect: [576, 333, 176, 28],
           label: 'Type: Screenshot',
           checked: false,
+          enabled: true,
           parent: false,
         },
       ],
@@ -331,6 +335,25 @@ describe('menuFrameCss', () => {
     });
     expect(frame?.items.map((item) => item.hovered)).toEqual([false, true]);
     expect(frame?.items.map((item) => item.checked)).toEqual([false, true]);
+  });
+
+  it('draws greyed out exactly the rows Rust says do nothing', () => {
+    // Rust ignores a click on such a row, so a row drawn as live here would
+    // be a row that looks clickable and is not.
+    const greyed: MenuView = {
+      ...menu,
+      items: menu.items.map((item, index) => ({
+        ...item,
+        enabled: index !== 1,
+      })),
+    };
+
+    expect(
+      menuFrameCss(greyed, [0, 0], 1)?.items.map((item) => item.disabled),
+    ).toEqual([false, true]);
+    expect(
+      menuFrameCss(menu, [0, 0], 1)?.items.map((item) => item.disabled),
+    ).toEqual([false, false]);
   });
 
   it('marks the row that opens a child list and no other', () => {

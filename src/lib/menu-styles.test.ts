@@ -226,4 +226,23 @@ describe('the markup that renders the child list', () => {
       'the child rows no longer highlight what the pointer is on',
     ).toContain('class:hovered={item.hovered}');
   });
+
+  it('draws a row that does nothing greyed out, in BOTH lists', () => {
+    // Rust ignores a click on such a row (`activation` in placement.rs). If
+    // the page drew it like the others, "Stick to window" over the bare
+    // desktop would look live and do nothing, which is what the grey says.
+    const all = pageSvelte.match(/class:disabled=\{item\.disabled\}/g) ?? [];
+    expect(all.length, 'a list no longer greys out its dead rows').toBe(2);
+    // The grey is the text colour, dimmer than a live row's.
+    const alpha = (selector: string): number => {
+      const found = rule(selector).match(
+        /(?:^|[;\s])color:\s*rgba\([^)]*?,\s*([\d.]+)\s*\)/,
+      );
+      if (!found) {
+        throw new Error(`\`${selector}\` sets no rgba text colour`);
+      }
+      return Number(found[1]);
+    };
+    expect(alpha('.menu-item.disabled')).toBeLessThan(alpha('.menu-item') / 2);
+  });
 });

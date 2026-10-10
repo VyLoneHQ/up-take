@@ -402,8 +402,17 @@ fn first_under(
         .map(|(window, _)| window)
 }
 
-/// Builds the link for an area that is about to become sticky.
-fn link_under(id: AreaId, bounds: Rect) -> Option<Link> {
+/// Whether an area at `bounds` has a window under it to stick to. The menu
+/// greys its row out when it has none, so the row never ticks nothing and
+/// says nothing. It asks [`window_under`], the question [`stick`] asks, so
+/// the two cannot disagree about the same screen.
+pub(crate) fn can_stick(bounds: Rect) -> bool {
+    window_under(bounds).is_some()
+}
+
+/// The window an area at `bounds` would stick to: the topmost one under its
+/// centre that can be followed, with its owner, its rectangle and its scale.
+fn window_under(bounds: Rect) -> Option<(isize, u32, Rect, f64)> {
     let window = first_under(
         top_level_windows()
             .into_iter()
@@ -415,6 +424,12 @@ fn link_under(id: AreaId, bounds: Rect) -> Option<Link> {
     let Seen::At { rect, scale } = see(window, pid) else {
         return None;
     };
+    Some((window, pid, rect, scale))
+}
+
+/// Builds the link for an area that is about to become sticky.
+fn link_under(id: AreaId, bounds: Rect) -> Option<Link> {
+    let (window, pid, rect, scale) = window_under(bounds)?;
     Some(Link {
         area: id,
         window,

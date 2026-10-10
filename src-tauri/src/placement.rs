@@ -470,6 +470,8 @@ struct MenuEntry {
     label: &'static str,
     /// Whether this row shows a tick: the area's current tier.
     checked: bool,
+    /// Whether a press on this row does anything. See [`MenuRow::enabled`].
+    enabled: bool,
     /// The rows this row opens as a child list. Empty on a leaf row, and empty
     /// on every row of a child list: menus here are two deep.
     children: Vec<MenuRow>,
@@ -841,6 +843,9 @@ struct MenuItemView {
     label: &'static str,
     /// Whether to show a tick: this is the area's current tier.
     checked: bool,
+    /// Whether a press on this row does anything. The frontend draws a row
+    /// that does nothing greyed out.
+    enabled: bool,
     /// Whether this row opens a child list, so the frontend draws the marker
     /// that says so. Never true of a row in a child list.
     parent: bool,
@@ -1602,6 +1607,9 @@ fn menu_hit(menu: &AreaMenu, point: Point) -> Option<MenuHit> {
 /// the test did not cover. The invariant was worth keeping and the mechanism
 /// was wrong: a highlight borrowed from another row cannot express it.
 fn apply_menu_hover(menu: &mut AreaMenu, hit: Option<MenuHit>) -> bool {
+    // A greyed-out row is never lit: the highlight says a press here does
+    // something, and on that row it does not.
+    let hit = hit.filter(|hit| entry_at(menu, *hit).is_some_and(|entry| entry.enabled));
     let (row, child) = match hit {
         Some(MenuHit::Child(index)) => (None, Some(index)),
         Some(MenuHit::Row(index)) => (Some(index), None),
@@ -4269,7 +4277,16 @@ fn open_menu(app: &AppHandle, point: Point) {
     // Anchored to the monitor under the cursor, never to the virtual desktop:
     // desktop-relative chrome can land in a dead zone no cursor can reach (F-13).
     let (monitor, scale) = overlay::monitor_metrics_at(app, point);
-    let spec = menu_rows(&area);
+    let mut spec = menu_rows(&area);
+    // "Stick to window" with no window under the area used to tick nothing and
+    // say nothing (review round 3 of roadmap 1.47). The maintainer's call,
+    // 2026-10-10: grey the row out. Asked only when the row would switch
+    // sticking on, so a sticky area can always be freed.
+    if !area.sticky.is_sticky()
+        && !overlay::area_bounds(app, area.id).is_some_and(crate::sticky::can_stick)
+    {
+        grey_out_sticking(&mut spec);
+    }
     #[allow(
         clippy::cast_possible_truncation,
         reason = "a menu this short cannot overflow u32"
@@ -4306,6 +4323,7 @@ fn laid_out(spec: Vec<MenuRow>, bounds: Rect, scale: f64) -> Vec<MenuEntry> {
             action: row.action,
             label: row.label,
             checked: row.checked,
+            enabled: row.enabled,
             children: row.children,
         })
         .collect()
@@ -4364,6 +4382,11 @@ struct MenuRow {
     action: MenuAction,
     label: &'static str,
     checked: bool,
+    /// Whether a press on this row does anything. A row that would do nothing
+    /// right now is greyed out: drawn dim, never lit by the pointer, and deaf
+    /// to a click, which also leaves the menu open. Every row is built
+    /// enabled, and [`grey_out_sticking`] is the one thing that changes it.
+    enabled: bool,
     /// The rows this one opens as a child list (roadmap 1.28), empty on a leaf.
     /// Nothing builds a third level and [`MenuHit`] could not address one.
     children: Vec<MenuRow>,
@@ -4375,7 +4398,19 @@ fn leaf(action: MenuAction, label: &'static str, checked: bool) -> MenuRow {
         action,
         label,
         checked,
+        enabled: true,
         children: Vec::new(),
+    }
+}
+
+/// Greys out the row that would make the area sticky, for a menu opened where
+/// there is no window to stick to. The row that frees a sticky area is a
+/// different action and is left alone: letting go must always work.
+fn grey_out_sticking(rows: &mut [MenuRow]) {
+    for row in rows {
+        if row.action == MenuAction::SetSticky(true) {
+            row.enabled = false;
+        }
     }
 }
 
@@ -4483,6 +4518,7 @@ fn menu_rows(area: &overlay::AreaSummary) -> Vec<MenuRow> {
         action: MenuAction::OpenSubmenu,
         label: text(Text::MenuAreaType),
         checked: false,
+        enabled: true,
         children: types,
     });
     // Roadmap 1.45, ADR-0046 decision 9: an OCR area chooses In place or
@@ -4496,6 +4532,7 @@ fn menu_rows(area: &overlay::AreaSummary) -> Vec<MenuRow> {
             action: MenuAction::OpenSubmenu,
             label: text(Text::MenuOcrBehaviour),
             checked: false,
+            enabled: true,
             children: vec![
                 leaf(
                     MenuAction::SetOcrBehaviour(OcrBehaviour::InPlace),
@@ -4543,6 +4580,7 @@ fn menu_rows(area: &overlay::AreaSummary) -> Vec<MenuRow> {
         action: MenuAction::OpenSubmenu,
         label: text(Text::MenuDepth),
         checked: false,
+        enabled: true,
         children: layers,
     });
     rows.push(leaf(
@@ -4624,23 +4662,30 @@ fn entry_at(menu: &AreaMenu, hit: MenuHit) -> Option<&MenuEntry> {
     }
 }
 
-/// Performs the action of a menu row, if the release landed on the row the press
-/// started on, the same press-and-release contract the close control uses.
+/// The area and the action a press on `hit` performs when it is released at
+/// `release`, or nothing. It is nothing unless the release landed on the row
+/// the press started on, the same press-and-release contract the close control
+/// uses, and nothing on a greyed-out row.
+///
+/// Split from [`activate_menu_item`] so both conditions can be tested: that
+/// one needs an `AppHandle` for everything it does next.
+fn activation(menu: &AreaMenu, hit: MenuHit, release: Point) -> Option<(AreaId, MenuAction)> {
+    let entry = entry_at(menu, hit)?;
+    (entry.enabled && entry.rect.contains(release)).then_some((menu.area, entry.action))
+}
+
+/// Performs the action of a menu row, if [`activation`] says the press and its
+/// release name one.
 fn activate_menu_item(app: &AppHandle, hit: MenuHit, release: Point) {
     let resolved = {
         let guard = lock(&MENU);
-        let Some(menu) = guard.as_ref() else {
-            return;
-        };
-        let Some(entry) = entry_at(menu, hit) else {
-            return;
-        };
-        if !entry.rect.contains(release) {
-            return;
-        }
-        (menu.area, entry.action)
+        guard
+            .as_ref()
+            .and_then(|menu| activation(menu, hit, release))
     };
-    let (area, action) = resolved;
+    let Some((area, action)) = resolved else {
+        return;
+    };
     // A press on a parent row opens its list at once and leaves the menu up:
     // this is the only action that does not act on the area, so it is also the
     // only one that must not close the menu it is navigating. It bypasses
@@ -4706,6 +4751,7 @@ fn item_views(items: &[MenuEntry]) -> Vec<MenuItemView> {
             rect: overlay::as_tuple(item.rect),
             label: item.label,
             checked: item.checked,
+            enabled: item.enabled,
             // Derived from the row's own children rather than from a flag set
             // beside them, so a row cannot advertise a list it does not have.
             parent: !item.children.is_empty(),
@@ -6117,12 +6163,13 @@ mod tests {
             rect: (1, 2, 3, 4),
             label: "Area type",
             checked: false,
+            enabled: true,
             parent: true,
         };
         assert_keys(
             "MenuItemView",
             &item,
-            &["rect", "label", "checked", "parent"],
+            &["rect", "label", "checked", "enabled", "parent"],
         );
         let child = ChildMenuView {
             rect: (5, 6, 7, 8),
@@ -6254,6 +6301,139 @@ mod tests {
                 );
                 assert!(row.children.is_empty());
             }
+        }
+    }
+
+    /// Every row is built enabled, and greying out touches one row only: the
+    /// one that would make a free area sticky. A sticky area's row frees it,
+    /// and that has to work with no window in sight.
+    #[test]
+    fn only_the_row_that_would_stick_is_greyed_out() {
+        use uptake_core::sticky::Sticky;
+        let cases: [(Sticky, &[&str]); 3] = [
+            (Sticky::Free, &["Stick to window"]),
+            (Sticky::Following, &[]),
+            (Sticky::Paused, &[]),
+        ];
+        for kind in AreaType::ALL {
+            for (state, greyed) in cases {
+                let area = crate::overlay::AreaSummary {
+                    sticky: state,
+                    ..summary(kind, Layer::Auto, Input::Interactive)
+                };
+                let mut rows = menu_rows(&area);
+                assert!(
+                    rows.iter().all(|row| row.enabled),
+                    "{kind:?} {state:?}: a row was built greyed out"
+                );
+                super::grey_out_sticking(&mut rows);
+                let off: Vec<&str> = rows
+                    .iter()
+                    .filter(|row| !row.enabled)
+                    .map(|row| row.label)
+                    .collect();
+                assert_eq!(off, greyed, "{kind:?} {state:?}");
+                assert!(
+                    rows.iter()
+                        .all(|row| row.children.iter().all(|child| child.enabled)),
+                    "{kind:?} {state:?}: a child row was greyed out"
+                );
+            }
+        }
+    }
+
+    /// A greyed-out row is not lit by the pointer and a click on it does
+    /// nothing, while the same row enabled does both.
+    #[test]
+    fn a_greyed_out_row_is_never_lit_and_ignores_a_click() {
+        let mut menu = open_menu_over_default();
+        let Some(row) = menu
+            .items
+            .iter()
+            .position(|item| item.action == MenuAction::SetSticky(true))
+        else {
+            panic!("the menu has a sticky row")
+        };
+        let on_row = centre(menu.items[row].rect);
+        let below_it = centre(menu.items[row + 1].rect);
+        let hit = super::menu_hit(&menu, on_row);
+        assert_eq!(hit, Some(super::MenuHit::Row(row)));
+
+        // Enabled: the row is lit, and a release on it performs its action.
+        assert!(super::apply_menu_hover(&mut menu, hit));
+        assert_eq!(menu.hovered, Some(row));
+        assert_eq!(
+            super::activation(&menu, super::MenuHit::Row(row), on_row),
+            Some((menu.area, MenuAction::SetSticky(true)))
+        );
+        // A release that has left the row performs nothing.
+        assert_eq!(
+            super::activation(&menu, super::MenuHit::Row(row), below_it),
+            None
+        );
+
+        // Greyed out with the pointer still on it: the light goes off, and the
+        // same click is ignored.
+        menu.items[row].enabled = false;
+        assert!(super::apply_menu_hover(&mut menu, hit));
+        assert_eq!(menu.hovered, None);
+        assert_eq!(
+            super::activation(&menu, super::MenuHit::Row(row), on_row),
+            None
+        );
+
+        // The row below it still works as before.
+        let hit = super::menu_hit(&menu, below_it);
+        super::apply_menu_hover(&mut menu, hit);
+        assert_eq!(menu.hovered, Some(row + 1));
+        assert!(super::activation(&menu, super::MenuHit::Row(row + 1), below_it).is_some());
+    }
+
+    /// The greyed-out state survives the two copies between the row list and
+    /// the page, `laid_out` and `item_views`.
+    #[test]
+    fn a_greyed_out_row_reaches_the_page_greyed_out() {
+        let mut rows = menu_rows(&summary(AreaType::Default, Layer::Auto, Input::Interactive));
+        super::grey_out_sticking(&mut rows);
+        let monitor = Rect::new(0, 0, 1920, 1080);
+        let bounds =
+            interaction::menu_bounds(Point::new(400, 300), rows.len() as u32, monitor, 1.0);
+        let views = super::item_views(&super::laid_out(rows, bounds, 1.0));
+        let sent: Vec<(&str, bool)> = views
+            .iter()
+            .map(|view| (view.label, view.enabled))
+            .collect();
+        assert_eq!(
+            sent,
+            vec![
+                ("Area type", true),
+                ("Depth", true),
+                ("Stick to window", false),
+                ("Click-through", true),
+                ("Dismiss", true),
+            ]
+        );
+    }
+
+    /// `open_menu` needs an `AppHandle`, so this reads its source, with the
+    /// limits `fn_body` documents. It holds the three parts of the decision:
+    /// only a free area is asked about, the question goes to the function
+    /// `stick` itself uses, and a "no" greys the row out.
+    #[test]
+    fn opening_the_menu_asks_whether_there_is_a_window_to_stick_to() {
+        let body = fn_body(
+            include_str!("placement.rs"),
+            "fn open_menu(app: &AppHandle, point: Point) {",
+        );
+        for required in [
+            "if !area.sticky.is_sticky()",
+            "&& !overlay::area_bounds(app, area.id).is_some_and(crate::sticky::can_stick)",
+            "grey_out_sticking(&mut spec);",
+        ] {
+            assert!(
+                body.contains(required),
+                "`open_menu` no longer contains `{required}`"
+            );
         }
     }
 

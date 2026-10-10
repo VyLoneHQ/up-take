@@ -496,6 +496,13 @@ export interface MenuItemView {
   label: string;
   checked: boolean;
   /**
+   * A press on this row does something. `false` on a row that would do nothing
+   * right now, such as "Stick to window" with no window under the area: Rust
+   * ignores a click there and never reports the row hovered, and the page
+   * draws it greyed out.
+   */
+  enabled: boolean;
+  /**
    * This row opens a child list, so it draws the marker that says so.
    *
    * One lowercase word, like every other key in this payload, and that is
@@ -660,6 +667,8 @@ export interface MenuItemFrame {
   label: string;
   checked: boolean;
   hovered: boolean;
+  /** Draw the row greyed out: a press on it does nothing right now. */
+  disabled: boolean;
   /** Draw the marker that says this row opens a child list. */
   parent: boolean;
   /** This row's child list is open, so draw it as the list's source. */
@@ -767,6 +776,7 @@ function menuItemsCss(
     label: item.label,
     checked: item.checked,
     hovered: index === view.hovered,
+    disabled: !item.enabled,
     parent: item.parent,
     open: index === openIndex,
   }));

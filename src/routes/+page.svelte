@@ -889,6 +889,7 @@ onMount(() => {
       <div
         class="menu-item"
         class:hovered={item.hovered}
+        class:disabled={item.disabled}
         class:open={item.open}
         style="left: {item.rect.x}px; top: {item.rect.y}px; width: {item.rect
           .width}px; height: {item.rect.height}px"
@@ -918,6 +919,7 @@ onMount(() => {
         <div
           class="menu-item"
           class:hovered={item.hovered}
+          class:disabled={item.disabled}
           style="left: {item.rect.x}px; top: {item.rect.y}px; width: {item.rect
             .width}px; height: {item.rect.height}px"
         >
@@ -1532,6 +1534,13 @@ onMount(() => {
 
 .menu-item.hovered {
   background: rgba(120, 180, 255, 0.22);
+}
+
+/* A row that does nothing right now, such as "Stick to window" with no window
+   under the area. Only the text dims. Rust never reports such a row hovered,
+   so this rule sets no background and has nothing to win against `.hovered`. */
+.menu-item.disabled {
+  color: rgba(235, 240, 250, 0.38);
 }
 
 /* The row whose child list is open, drawn as the list's source. Dimmer than a
