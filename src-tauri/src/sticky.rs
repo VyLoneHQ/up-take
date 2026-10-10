@@ -1233,7 +1233,8 @@ struct Waiting {
 /// Areas that were on one window go to one window. Areas that were on two
 /// different windows never share one: with two windows of one program closed
 /// under one title, the first to reopen takes the areas of one of them, and
-/// the areas of the other wait for the second.
+/// the areas of the other wait for the second. This function holds that
+/// inside one check. [`join_in`] carries it to the checks that follow.
 fn rejoin<'a>(
     waiting: &[Waiting],
     open: &'a [Open],
@@ -1259,10 +1260,10 @@ fn rejoin<'a>(
         .collect()
 }
 
-/// Looks for the windows of links whose window closed, and joins each area to
-/// a window of the same program with the same title, if one has appeared.
-fn reattach() {
-    let waiting: Vec<Waiting> = lock(&LINKS)
+/// The links whose window closed, as [`rejoin`] wants them. A link whose
+/// program could not be read is left out: it has nothing to be matched by.
+fn waiting_of(links: &[Link]) -> Vec<Waiting> {
+    links
         .iter()
         .filter(|link| link.gone)
         .filter_map(|link| {
@@ -1274,7 +1275,76 @@ fn reattach() {
                 open_at_close: link.open_at_close.clone(),
             })
         })
-        .collect();
+        .collect()
+}
+
+/// One area joining a reopened window: the area, the closed window it was on,
+/// and the window and owner it joins.
+struct Join {
+    area: AreaId,
+    was: isize,
+    window: isize,
+    pid: u32,
+}
+
+/// What [`rejoin`] decided, as the joins to make.
+fn joins_of(
+    waiting: &[Waiting],
+    open: &[Open],
+    same_program: impl FnMut(&Waiting, &Open) -> bool,
+) -> Vec<Join> {
+    waiting
+        .iter()
+        .zip(rejoin(waiting, open, same_program))
+        .filter_map(|(link, found)| {
+            found.map(|found| Join {
+                area: link.area,
+                was: link.was,
+                window: found.window,
+                pid: found.pid,
+            })
+        })
+        .collect()
+}
+
+/// Applies one check's joins to the links. Returns whether any link joined.
+///
+/// A window that the areas of one closed window joined is taken. Every link
+/// still waiting that was on another window writes it down beside the windows
+/// that were open when its own closed, and passes it by from then on.
+/// [`rejoin`] keeps two closed windows apart inside one check and knows
+/// nothing of the check before it. Without this note the areas of the second
+/// window joined the first one's window a second later (review round 4).
+fn join_in(links: &mut [Link], joins: &[Join]) -> bool {
+    let mut made: Vec<&Join> = Vec::new();
+    for join in joins {
+        if let Some(live) = links
+            .iter_mut()
+            .find(|live| live.area == join.area && live.gone)
+        {
+            live.window = join.window;
+            live.pid = join.pid;
+            live.gone = false;
+            live.seen = None;
+            live.open_at_close.clear();
+            made.push(join);
+        }
+    }
+    for join in &made {
+        for other in links
+            .iter_mut()
+            .filter(|link| link.gone && link.window != join.was)
+        {
+            other.open_at_close.insert(join.window);
+        }
+    }
+    !made.is_empty()
+}
+
+/// Looks for the windows of links whose window closed, and joins each area to
+/// a window of the same program with the same title, if one has appeared.
+fn reattach() {
+    let waiting = waiting_of(&lock(&LINKS));
     if waiting.is_empty() {
         return;
     }
@@ -1294,27 +1364,11 @@ fn reattach() {
         })
         .filter(|open| waiting.iter().any(|waiting| waiting.title == open.title))
         .collect();
-    let joins = rejoin(&waiting, &open, |link, candidate| {
+    let joins = joins_of(&waiting, &open, |link, candidate| {
         describe(candidate.window).can_be_followed(own)
             && program_of(candidate.pid).as_deref() == Some(link.program.as_str())
     });
-    let mut joined = false;
-    for (link, found) in waiting.iter().zip(joins) {
-        let Some(found) = found else {
-            continue;
-        };
-        if let Some(live) = lock(&LINKS)
-            .iter_mut()
-            .find(|live| live.area == link.area && live.gone)
-        {
-            live.window = found.window;
-            live.pid = found.pid;
-            live.gone = false;
-            live.seen = None;
-            live.open_at_close.clear();
-            joined = true;
-        }
-    }
+    let joined = join_in(&mut lock(&LINKS), &joins);
     if joined {
         refresh();
     }
@@ -1325,7 +1379,7 @@ mod tests {
     use uptake_core::geometry::{Point, Rect};
     use uptake_core::sticky::{Anchor, Sticky};
 
-    use super::reanchor_in;
+    use super::{Join, join_in, joins_of, reanchor_in, waiting_of};
     use std::collections::HashSet;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1346,6 +1400,9 @@ mod tests {
     static PLACED: Mutex<Vec<Change>> = Mutex::new(Vec::new());
     /// Every area the follower asked to settle, for the same test.
     static SETTLED: Mutex<Vec<AreaId>> = Mutex::new(Vec::new());
+    /// How many placements reached the outlet after the follower had let go
+    /// of the links, for the same test. It must stay at zero.
+    static PLACED_UNHELD: AtomicUsize = AtomicUsize::new(0);
     /// How many events about a followed window reached the callback.
     pub(super) static EVENTS_HEARD: AtomicUsize = AtomicUsize::new(0);
 
@@ -1476,6 +1533,12 @@ mod tests {
             // Every area given a rectangle counts as moved, as it would be
             // in the app, so the follower's settle timer is set and handled.
             place: |changes| {
+                // The follower writes a decision before it lets go of the
+                // links, so a hand move comes wholly before it or wholly
+                // after. A lock that can be taken here was let go too early.
+                if LINKS.try_lock().is_ok() {
+                    PLACED_UNHELD.fetch_add(1, Ordering::SeqCst);
+                }
                 lock(&PLACED).extend_from_slice(changes);
                 changes
                     .iter()
@@ -1679,6 +1742,13 @@ mod tests {
                 .iter()
                 .any(|link| link.area == id && !link.open_at_close.is_empty()),
             "what was open when the window closed is remembered"
+        );
+        // Every decision above was written with the links still held.
+        assert!(!lock(&PLACED).is_empty());
+        assert_eq!(
+            PLACED_UNHELD.load(Ordering::SeqCst),
+            0,
+            "the follower let go of the links before it wrote a decision"
         );
         forget(id);
     }
@@ -2115,14 +2185,23 @@ mod tests {
         assert_eq!(found.map(|open| open.window), Some(31));
     }
 
-    /// `source` with its test module cut off and its comments dropped, line
-    /// comments and block comments both, so that a call which survives only
-    /// in a comment or only in a test does not count as made.
+    /// `source` with its test module cut off and its comments dropped, so that
+    /// a call which survives only in a comment or only in a test does not
+    /// count as made. A comment is dropped wherever it starts: on a line of
+    /// its own, after code on the same line, or as a block.
+    ///
+    /// The third version kept a comment that followed code on its line, and
+    /// the fourth review left `wake();` only in such a comment with every
+    /// test green.
+    ///
+    /// It does not understand string literals. A comment marker inside one
+    /// cuts the rest of that line, or up to the next block end. That can only
+    /// remove text, so it can make a guard fail and never make one pass.
     ///
     /// What it cannot see is code made dead another way: a call left inside
     /// `if false { }` still reads as made. This guards against a line going
-    /// missing, which is how these calls were lost in two reviews' drills. It
-    /// is not a proof that the line runs.
+    /// missing, which is how these calls were lost in three reviews' drills.
+    /// It is not a proof that the line runs.
     ///
     /// The test module is everything from the line `mod tests {` on. The first
     /// version looked for that line directly under `#[cfg(test)]`, found it in
@@ -2135,15 +2214,29 @@ mod tests {
             .map_or(source, |(before, _)| before);
         let mut kept = String::with_capacity(code.len());
         let mut rest = code;
-        while let Some((before, after)) = rest.split_once("/*") {
+        loop {
+            let (before, comment, is_block) = match (rest.split_once("//"), rest.split_once("/*")) {
+                (None, None) => break,
+                (Some((before, comment)), Some((sooner, block))) => {
+                    if sooner.len() < before.len() {
+                        (sooner, block, true)
+                    } else {
+                        (before, comment, false)
+                    }
+                }
+                (Some((before, comment)), None) => (before, comment, false),
+                (None, Some((before, block))) => (before, block, true),
+            };
             kept.push_str(before);
-            rest = after.split_once("*/").map_or("", |(_, after)| after);
+            rest = if is_block {
+                comment.split_once("*/").map_or("", |(_, after)| after)
+            } else {
+                // The line break stays, so the next line is still its own.
+                comment.find('\n').map_or("", |end| &comment[end..])
+            };
         }
         kept.push_str(rest);
-        kept.lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n")
+        kept
     }
 
     /// The body of one function in `code`: from its signature to the first
@@ -2176,6 +2269,20 @@ mod tests {
         assert!(
             !production(&format!("fn setup() {{\n    /*\n    {call}\n    */\n}}\n")).contains(call)
         );
+        // In a comment that follows code on the same line. The code stays and
+        // so does the line after it.
+        let trailing = production(&format!(
+            "fn setup() {{\n    other(); // {call}\n    last();\n}}\n"
+        ));
+        assert!(!trailing.contains(call));
+        assert!(trailing.contains("other();") && trailing.contains("\n    last();"));
+        // In a line comment that a block comment marker follows, and the
+        // other way round: whichever starts first decides.
+        assert!(!production(&format!("fn setup() {{\n    // {call} /* x */\n}}\n")).contains(call));
+        assert!(
+            !production(&format!("fn setup() {{\n    /* // */ /* {call} */\n}}\n")).contains(call)
+        );
+        assert!(production(&format!("fn setup() {{\n    /* // */ {call}\n}}\n")).contains(call));
         // Present in production code: found.
         assert!(production(&format!("fn setup() {{\n    {call}\n}}\n")).contains(call));
         // A body ends at its own closing brace, not at the next function's.
@@ -2274,6 +2381,16 @@ mod tests {
                 "fn prune() {",
                 "prune_in(&LINKS, outlet.still_sticky);",
                 "links of areas that are gone are dropped",
+            ),
+            (
+                "fn reattach() {",
+                "let joins = joins_of(&waiting, &open, |link, candidate| {",
+                "a closed window coming back is decided by the rule the tests hold",
+            ),
+            (
+                "fn reattach() {",
+                "join_in(&mut lock(&LINKS), &joins)",
+                "and the joins are made, with the taken window noted for the others",
             ),
             (
                 "pub(crate) fn can_stick(bounds: Rect) -> bool {",
@@ -2432,6 +2549,86 @@ mod tests {
             .map(|found| found.map(|open| open.window))
             .collect();
         assert_eq!(refused, vec![None, None, None]);
+    }
+
+    /// Several once-a-second checks in a row, through the functions the check
+    /// itself uses. Review round 4 found the areas of the second closed
+    /// window joining the first one's window on the check after.
+    #[test]
+    fn areas_of_two_closed_windows_never_share_a_window_on_a_later_check() {
+        let ids: Vec<AreaId> = {
+            let mut store = AreaStore::new();
+            (0..3)
+                .filter_map(|_| store.create(AreaType::Default, Rect::new(0, 0, 10, 10)))
+                .collect()
+        };
+        assert_eq!(ids.len(), 3);
+        let closed = |area: AreaId, was: isize| Link {
+            window: was,
+            gone: true,
+            ..link_for(area, Rect::new(140, 260, 200, 80))
+        };
+        // Two areas were on window 70 and one on window 71. Same program,
+        // same title, both closed.
+        let mut links = vec![closed(ids[0], 70), closed(ids[1], 71), closed(ids[2], 70)];
+        let check = |links: &mut [Link], open: &[Open]| {
+            let joins = joins_of(&waiting_of(links), open, |_, _| true);
+            join_in(links, &joins)
+        };
+        let on = |links: &[Link]| -> Vec<(isize, bool)> {
+            links.iter().map(|link| (link.window, link.gone)).collect()
+        };
+
+        // One window reopens. The areas of window 70 take it together.
+        let one = [open(90, "notes.txt")];
+        assert!(check(&mut links, &one));
+        assert_eq!(on(&links), vec![(90, false), (71, true), (90, false)]);
+        // The check after, and the one after that: window 90 is taken, and
+        // the area of window 71 goes on waiting.
+        assert!(!check(&mut links, &one));
+        assert!(!check(&mut links, &one));
+        assert_eq!(on(&links), vec![(90, false), (71, true), (90, false)]);
+        // The second window reopens, and now it is the waiting area's.
+        let both = [open(90, "notes.txt"), open(91, "notes.txt")];
+        assert!(check(&mut links, &both));
+        assert_eq!(on(&links), vec![(90, false), (91, false), (90, false)]);
+    }
+
+    /// A join is made only for a link that is still waiting. An area freed
+    /// between the decision and the join took no window, so the window is not
+    /// counted as taken, and an area that was on the same closed window is
+    /// never told to pass its own window by.
+    #[test]
+    fn only_a_join_that_was_made_marks_its_window_as_taken() {
+        let ids: Vec<AreaId> = {
+            let mut store = AreaStore::new();
+            (0..3)
+                .filter_map(|_| store.create(AreaType::Default, Rect::new(0, 0, 10, 10)))
+                .collect()
+        };
+        assert_eq!(ids.len(), 3);
+        let closed = |area: AreaId, was: isize| Link {
+            window: was,
+            gone: true,
+            ..link_for(area, Rect::new(140, 260, 200, 80))
+        };
+        let join = |area: AreaId, was: isize| Join {
+            area,
+            was,
+            window: 90,
+            pid: 7,
+        };
+        // The area the join was decided for is gone from the links.
+        let mut links = vec![closed(ids[1], 71)];
+        assert!(!join_in(&mut links, &[join(ids[0], 70)]));
+        assert!(links[0].open_at_close.is_empty());
+        // Made for one area of window 70. The other area of window 70, still
+        // waiting, may take window 90 too. The area of window 71 may not.
+        let mut links = vec![closed(ids[0], 70), closed(ids[1], 71), closed(ids[2], 70)];
+        assert!(join_in(&mut links, &[join(ids[0], 70)]));
+        assert!(links[0].open_at_close.is_empty() && !links[0].gone);
+        assert!(links[1].open_at_close.contains(&90));
+        assert!(links[2].open_at_close.is_empty() && links[2].gone);
     }
 
     #[test]
