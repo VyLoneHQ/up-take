@@ -55,6 +55,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::geometry::{Point, Rect, Size};
 use crate::interaction;
+use crate::sticky::Sticky;
 
 /// A stable identity for an area, unique within the [`AreaStore`] that issued
 /// it.
@@ -678,6 +679,10 @@ pub struct Area {
     /// [`OcrBehaviour::InPlace`] at creation; the host replaces it with the
     /// user's default for new OCR areas.
     pub ocr_behaviour: OcrBehaviour,
+    /// Whether the area follows a window (roadmap `1.47`). [`Sticky::Free`] at
+    /// creation. The host sets it, because only the host can tell whether the
+    /// window is still there.
+    pub sticky: Sticky,
 }
 
 /// The capture an area's own contents are made of: which rectangle of screen to
@@ -938,6 +943,7 @@ impl AreaStore {
             // arrive natural through a conversion.
             zoom: kind.default_zoom(),
             ocr_behaviour: OcrBehaviour::default(),
+            sticky: Sticky::default(),
         };
         let index = self.top_of_tier(area.layer);
         self.areas.insert(index, area);
@@ -1044,6 +1050,22 @@ impl AreaStore {
         match self.area_mut(id) {
             Some(area) if area.ocr_behaviour != behaviour => {
                 area.ocr_behaviour = behaviour;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Sets whether an area follows a window (roadmap `1.47`). Returns whether
+    /// it CHANGED, so the caller redraws only on a change; `false` for an
+    /// unknown id as well.
+    ///
+    /// The store does not know which window, or where it is. It holds the
+    /// state so that the menu, the page and the host read one answer.
+    pub fn set_sticky(&mut self, id: AreaId, sticky: Sticky) -> bool {
+        match self.area_mut(id) {
+            Some(area) if area.sticky != sticky => {
+                area.sticky = sticky;
                 true
             }
             _ => false,
@@ -2335,6 +2357,7 @@ mod tests {
             layer: Layer::Auto,
             zoom: AreaType::Upscale.default_zoom(),
             ocr_behaviour: OcrBehaviour::InPlace,
+            sticky: Sticky::Free,
         };
         assert_eq!(
             area.retake(),
@@ -2449,6 +2472,7 @@ mod tests {
             layer: Layer::Auto,
             zoom: Zoom::NATURAL.stepped(4),
             ocr_behaviour: OcrBehaviour::InPlace,
+            sticky: Sticky::Free,
         };
         // A hypothetical second zooming type inherits the factor, so both sides
         // answer with the same rectangle and the same treatment: equal, so
@@ -2548,6 +2572,25 @@ mod tests {
             let quiet = *store.get(ids[0]).unwrap();
             assert!(!quiet.body_takes_input(true) && !quiet.body_takes_input(false));
         }
+    }
+
+    #[test]
+    fn each_area_has_its_own_sticky_state_and_reports_only_a_change() {
+        let (mut store, ids) = store_with(&[AreaType::Default, AreaType::Ocr]);
+        assert_eq!(store.get(ids[0]).unwrap().sticky, Sticky::Free);
+        assert!(store.set_sticky(ids[0], Sticky::Following));
+        assert!(!store.set_sticky(ids[0], Sticky::Following), "no change");
+        assert!(store.set_sticky(ids[0], Sticky::Paused));
+        assert_eq!(store.get(ids[0]).unwrap().sticky, Sticky::Paused);
+        assert_eq!(store.get(ids[1]).unwrap().sticky, Sticky::Free);
+        // Following a window moves the area and nothing else: the state
+        // survives a move and a conversion to another type.
+        assert!(store.set_bounds(ids[0], Rect::new(5, 5, 40, 40)));
+        assert!(store.set_kind(ids[0], AreaType::Filter).is_some());
+        assert_eq!(store.get(ids[0]).unwrap().sticky, Sticky::Paused);
+        let gone = ids[1];
+        assert!(store.remove(gone).is_some());
+        assert!(!store.set_sticky(gone, Sticky::Following), "unknown id");
     }
 
     #[test]

@@ -20,6 +20,7 @@ use uptake_core::area::{
 };
 use uptake_core::geometry::{Monitor, Point, Rect, Size, virtual_desktop_bounds};
 use uptake_core::interaction;
+use uptake_core::sticky::Sticky;
 
 use crate::click_through;
 use crate::overlay_state::{Event, OverlayState, next};
@@ -992,6 +993,10 @@ struct AreaPayload {
     /// Before `1.45` the page took it from the settings, for every OCR area at
     /// once.
     ocr_behaviour: OcrBehaviour,
+    /// Whether the area follows a window, and whether it is waiting for one
+    /// (roadmap `1.47`): `free`, `following` or `paused`. The page marks a
+    /// sticky area and says so when it is paused.
+    sticky: Sticky,
     /// The area's magnification (§3.4), `1.0` at natural size.
     ///
     /// **The frontend does not scale anything with this.** The magnified
@@ -1071,6 +1076,7 @@ pub(crate) fn emit_areas(app: &AppHandle) -> Result<(), String> {
             layer: layer_name(area.layer),
             kind: type_name(area.kind),
             ocr_behaviour: area.ocr_behaviour,
+            sticky: area.sticky,
             zoom: area.zoom.factor(),
             bar: interaction::grab_bar(area.bounds, &monitors).map(as_tuple),
             handles: interaction::outside_resize_handles(area.bounds)
@@ -1096,6 +1102,9 @@ pub(crate) struct AreaSummary {
     /// How it shows what it read, for an OCR area's Behaviour rows (roadmap
     /// `1.45`).
     pub ocr_behaviour: OcrBehaviour,
+    /// Whether the area follows a window (roadmap `1.47`), for the menu's
+    /// tick.
+    pub sticky: Sticky,
 }
 
 impl AreaSummary {
@@ -1106,6 +1115,7 @@ impl AreaSummary {
             input: area.input,
             kind: area.kind,
             ocr_behaviour: area.ocr_behaviour,
+            sticky: area.sticky,
         }
     }
 }
@@ -1710,6 +1720,7 @@ pub(crate) fn dismiss_area(app: &AppHandle, id: AreaId) -> bool {
         // area still exists before announcing anything, so the result itself is
         // discarded there rather than drawn on a dismissed rectangle.
         crate::ocr::forget(id);
+        crate::sticky::forget(id);
         collapse_living_if_empty(app);
     }
     removed
@@ -2821,6 +2832,7 @@ mod tests {
             layer: "auto",
             kind: "default",
             ocr_behaviour: OcrBehaviour::InPlace,
+            sticky: Sticky::Paused,
             zoom: 1.0,
             bar: Some((0, -18, 10, 18)),
             handles: vec![(0, 0, 18, 18)],
@@ -2835,6 +2847,7 @@ mod tests {
                 "layer",
                 "kind",
                 "ocr_behaviour",
+                "sticky",
                 "zoom",
                 "bar",
                 "handles",

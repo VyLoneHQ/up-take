@@ -87,6 +87,14 @@ export function stillsFromWire(
 export type LayerName = 'front' | 'auto' | 'back';
 
 /**
+ * Whether an area follows a window (roadmap 1.47). `free` is anchored to the
+ * screen, as every new area is. `following` moves with its window. `paused`
+ * is anchored to a window that is minimised, hidden or closed: the area waits
+ * where it was and follows again when the window is back.
+ */
+export type StickyState = 'free' | 'following' | 'paused';
+
+/**
  * Every area type on the wire, matching `type_name` in `overlay.rs`.
  *
  * All seven are listed because Rust sends all seven, not only the ones a
@@ -133,6 +141,8 @@ export interface AreaView {
    * OCR area at once; the setting is now only what a new OCR area starts with.
    */
   ocr_behaviour: OcrBehaviour;
+  /** Whether the area follows a window. See {@link StickyState}. */
+  sticky: StickyState;
   /**
    * Magnification (§3.4), `1` at natural size.
    *
@@ -574,6 +584,8 @@ export interface AreaFrame {
   kind: AreaKind;
   /** How an OCR area shows what it read. See {@link AreaView.ocr_behaviour}. */
   ocrBehaviour: OcrBehaviour;
+  /** Whether the area follows a window. See {@link StickyState}. */
+  sticky: StickyState;
   /** Magnification (§3.4), `1` at natural size. See {@link AreaView.zoom}. */
   zoom: number;
   /** Draw this area as the one a press would grab: brighter, lit border. */
@@ -712,6 +724,7 @@ export function areaFramesCss(
     layer: area.layer,
     kind: area.kind,
     ocrBehaviour: area.ocr_behaviour,
+    sticky: area.sticky,
     zoom: area.zoom,
     // A dragged area is not also "hovered": the hover chrome invites a gesture
     // that is already under way, and its close control would sit at the source

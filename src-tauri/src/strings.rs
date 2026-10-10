@@ -121,6 +121,8 @@ texts! {
     MenuDepthAuto => "menu.depth.auto",
     /// Depth list: always below other areas.
     MenuDepthBack => "menu.depth.back",
+    /// Area menu: make the area follow the window under it (roadmap `1.47`).
+    MenuSticky => "menu.sticky",
     /// Area menu: let clicks fall through the area.
     MenuClickThrough => "menu.click_through",
     /// Area menu: remove the area.

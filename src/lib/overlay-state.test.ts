@@ -150,6 +150,7 @@ describe('areaFramesCss', () => {
       layer: 'auto',
       kind: 'default',
       ocr_behaviour: 'in_place',
+      sticky: 'free',
       zoom: 1,
       // 200x150, so it is above `CHROME_INSIDE_SPAN` on both axes: bands
       // inside, and therefore no outside handles. Rust decides this; the
@@ -164,6 +165,7 @@ describe('areaFramesCss', () => {
       layer: 'front',
       kind: 'filter',
       ocr_behaviour: 'rendered',
+      sticky: 'paused',
       zoom: 1,
       bar: [-1000, -218, 300, 18],
       handles: [],
@@ -179,6 +181,14 @@ describe('areaFramesCss', () => {
       'in_place',
       'rendered',
     ]);
+  });
+
+  it("carries each area's sticky state through to the frame", () => {
+    // Roadmap 1.47: the page marks a sticky area and says "Paused" by THIS
+    // field. Dropping it would leave a paused area looking like any other,
+    // sitting where its window used to be with nothing to say why.
+    const frames = areaFramesCss(areas, [-1080, -1080], 2, null);
+    expect(frames?.map((frame) => frame.sticky)).toEqual(['free', 'paused']);
   });
 
   it('carries each area type through to the frame', () => {

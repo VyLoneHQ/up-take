@@ -513,6 +513,10 @@ enum MenuAction {
     /// decision 9). Radio rows like [`MenuAction::SetType`], so the action
     /// carries the behaviour the row names.
     SetOcrBehaviour(OcrBehaviour),
+    /// Make the area follow the window under it, or free it again (roadmap
+    /// `1.47`). A toggle like [`MenuAction::SetInput`], so the action carries
+    /// the value the row would switch *to*.
+    SetSticky(bool),
     /// Remove the area.
     Dismiss,
     /// Capture the area and publish it to the clipboard alone (task 1.9,
@@ -3745,6 +3749,10 @@ fn finish_gesture(release: Point) {
                 // longer covers. It reads again at the release, as a magnified
                 // area re-takes its still (`ADR-0046`, roadmap `1.41`).
                 reread_in_place_ocr(app, id);
+                // A sticky area the user moved by hand keeps the place they
+                // put it: its anchor on the window is taken again from
+                // where it is now (roadmap `1.47`).
+                crate::sticky::reanchor(app, id);
             }
             moved
         }
@@ -4536,6 +4544,11 @@ fn menu_rows(area: &overlay::AreaSummary) -> Vec<MenuRow> {
         children: layers,
     });
     rows.push(leaf(
+        MenuAction::SetSticky(!area.sticky.is_sticky()),
+        text(Text::MenuSticky),
+        area.sticky.is_sticky(),
+    ));
+    rows.push(leaf(
         MenuAction::SetInput(toggled_input),
         text(Text::MenuClickThrough),
         area.input == Input::PassThrough,
@@ -4649,6 +4662,7 @@ fn activate_menu_item(app: &AppHandle, hit: MenuHit, release: Point) {
         MenuAction::SetOcrBehaviour(behaviour) => {
             overlay::set_area_ocr_behaviour(app, area, behaviour)
         }
+        MenuAction::SetSticky(sticky) => crate::sticky::set(app, area, sticky),
         MenuAction::Dismiss => overlay::dismiss_area(app, area),
         // Returned above, before the menu was closed.
         MenuAction::OpenSubmenu => false,
@@ -5066,6 +5080,7 @@ mod tests {
             input,
             kind,
             ocr_behaviour: uptake_core::area::OcrBehaviour::InPlace,
+            sticky: uptake_core::sticky::Sticky::Free,
         }
     }
 
@@ -6178,7 +6193,13 @@ mod tests {
         let rows = menu_rows(&summary(AreaType::Default, Layer::Auto, Input::Interactive));
         assert_eq!(
             labels(&rows),
-            vec!["Area type", "Depth", "Click-through", "Dismiss"]
+            vec![
+                "Area type",
+                "Depth",
+                "Stick to window",
+                "Click-through",
+                "Dismiss"
+            ]
         );
         // ⚠️ **This asserted "one radio group left at this level" until
         // 2026-08-25. There are now NONE**, which is strictly what the row was
@@ -6187,9 +6208,9 @@ mod tests {
         // one axis with one answer -- the same complaint 1.28 fixed for types,
         // arriving eleven days later about the tier directly below it.
         //
-        // `Click-through` survives as the only ticked row here and is a
-        // checkbox, so nothing at this level can read as a selection among
-        // alternatives any more.
+        // `Click-through` and, since roadmap 1.47, `Stick to window` are the
+        // ticked rows here. Both are checkboxes, so nothing at this level can
+        // read as a selection among alternatives.
         let radio_ticks = rows
             .iter()
             .filter(|row| matches!(row.action, MenuAction::SetLayer(_) | MenuAction::SetType(_)))
@@ -6198,6 +6219,40 @@ mod tests {
             radio_ticks, 0,
             "a radio row escaped back into the top level"
         );
+    }
+
+    /// The sticky row is a checkbox on every area type (ADR-0049 decision 3:
+    /// "a property, not a type"), ticked while the area follows a window or
+    /// waits for one, and its action is the opposite of what the area is now.
+    #[test]
+    fn the_sticky_row_is_on_every_type_and_toggles_what_the_area_is() {
+        use uptake_core::sticky::Sticky;
+        for kind in AreaType::ALL {
+            for (state, ticked, switches_to) in [
+                (Sticky::Free, false, true),
+                (Sticky::Following, true, false),
+                // A paused area is still a sticky one: the row stays ticked,
+                // and clicking it frees the area. Offering "stick" again here
+                // would leave no way to stop waiting for a closed window.
+                (Sticky::Paused, true, false),
+            ] {
+                let area = crate::overlay::AreaSummary {
+                    sticky: state,
+                    ..summary(kind, Layer::Auto, Input::Interactive)
+                };
+                let rows = menu_rows(&area);
+                let Some(row) = rows.iter().find(|row| row.label == "Stick to window") else {
+                    panic!("{kind:?} has a sticky row")
+                };
+                assert_eq!(row.checked, ticked, "{kind:?} {state:?}");
+                assert_eq!(
+                    row.action,
+                    MenuAction::SetSticky(switches_to),
+                    "{kind:?} {state:?}"
+                );
+                assert!(row.children.is_empty());
+            }
+        }
     }
 
     /// The `Depth` list holds the whole Layer axis and nothing else, ordered
