@@ -2729,4 +2729,32 @@ mod tests {
         assert_eq!(first_under(bare, inside, OWN), None);
         assert_eq!(first_under(windows, Point::new(-50, -50), OWN), None);
     }
+
+    /// What the menu pays to ask whether there is a window to stick to. The
+    /// menu opens inside the mouse hook, and Windows drops a hook whose
+    /// callback overruns its timeout (300 ms unless the registry says
+    /// otherwise). This times the worst case on the desktop it runs on: no
+    /// window matches, so every one of them is described. The once-a-second
+    /// look for a closed window pays the same walk. Run it by name, with
+    /// `--ignored --exact --nocapture`, to read the figures.
+    #[test]
+    #[ignore = "needs a desktop session: it times a walk over this desktop's real windows"]
+    fn the_window_search_fits_inside_the_mouse_hook() {
+        let mut slowest = Duration::ZERO;
+        let mut count = 0;
+        for _ in 0..20 {
+            let start = Instant::now();
+            count = super::top_level_windows()
+                .into_iter()
+                .map(super::describe)
+                .count();
+            slowest = slowest.max(start.elapsed());
+        }
+        println!("{count} top-level windows, slowest of 20 walks {slowest:?}");
+        assert!(count > 0, "a desktop session has windows");
+        assert!(
+            slowest < Duration::from_millis(30),
+            "{count} windows took {slowest:?}, a tenth of the hook's timeout"
+        );
+    }
 }
