@@ -1,10 +1,11 @@
 # Security Policy
 
 UP-TAKE captures what is on your screen when you ask it to, and listens for a global hotkey in the
-background. When an area follows a window, it also reads the titles of open windows and the paths
-of the programs they belong to, so it can recognise that window again. Both stay in memory. For a
-tool that does that, security is the whole trust story, so this page is meant to be usable rather
-than decorative.
+background. A sticky Upscale or OCR area captures its own region again after the window it follows
+has moved, at most twice a second. When an area follows a window, it also reads the titles of open
+windows and the paths of the programs they belong to, so it can recognise that window again. Both
+stay in memory. For a tool that does that, security is the whole trust story, so this page is meant
+to be usable rather than decorative.
 
 ## Reporting a vulnerability
 
