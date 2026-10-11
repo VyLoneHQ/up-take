@@ -194,6 +194,13 @@ const TICK_MS: u32 = 1000;
 /// capture, so they are answered once.
 const SETTLE_MS: u32 = 150;
 
+/// The shortest time between two re-takes. A followed program moves its own
+/// window whenever it likes, and one that moves, rests for [`SETTLE_MS`] and
+/// moves again would otherwise have every area on it capture and read about
+/// six times a second for as long as it kept going. With the floor it is twice
+/// a second at most. The first re-take after a quiet spell is not delayed.
+const SETTLE_FLOOR_MS: u32 = 500;
+
 /// How long a drag may show no movement before the per-frame poll gives up.
 /// The move event still places the area after that. This exists so a program
 /// that never reports the end of a drag cannot keep a thread waking every
@@ -718,6 +725,19 @@ thread_local! {
     static TICK: Cell<usize> = const { Cell::new(0) };
     /// The one-shot timer that ends in [`settle`]. 0 is "not running".
     static SETTLE: Cell<usize> = const { Cell::new(0) };
+    /// When [`settle`] last ran, for [`SETTLE_FLOOR_MS`]. `None` until it has.
+    static LAST_SETTLE: Cell<Option<Instant>> = const { Cell::new(None) };
+}
+
+/// How long the settle timer waits, in milliseconds: [`SETTLE_MS`] of
+/// stillness, and never less than what is left of [`SETTLE_FLOOR_MS`] since
+/// the last re-take. `since_last` is how long ago that was, `None` if never.
+fn settle_wait(since_last: Option<Duration>) -> u32 {
+    let Some(since_last) = since_last else {
+        return SETTLE_MS;
+    };
+    let since_last = u32::try_from(since_last.as_millis()).unwrap_or(u32::MAX);
+    SETTLE_MS.max(SETTLE_FLOOR_MS.saturating_sub(since_last))
 }
 
 /// The follower thread: a message loop that the event hooks call back into.
@@ -1074,10 +1094,13 @@ fn sync_as(window: isize, known: Option<Seen>) -> Option<Seen> {
     };
     if !moved.is_empty() {
         UNSETTLED.with_borrow_mut(|unsettled| unsettled.extend(moved));
+        // Longer than `SETTLE_MS` only when the last re-take was less than
+        // `SETTLE_FLOOR_MS` ago.
+        let wait = settle_wait(LAST_SETTLE.get().map(|last| last.elapsed()));
         // SAFETY: as in `keep_ticking`. Passing the id of the timer that is
         // already running restarts it, so the wait is counted from the last
         // move and not from the first.
-        SETTLE.set(unsafe { SetTimer(std::ptr::null_mut(), SETTLE.get(), SETTLE_MS, None) });
+        SETTLE.set(unsafe { SetTimer(std::ptr::null_mut(), SETTLE.get(), wait, None) });
     }
     Some(seen)
 }
@@ -1184,6 +1207,7 @@ fn settle() {
         }
     }
     let moved = UNSETTLED.take();
+    LAST_SETTLE.set(Some(Instant::now()));
     if let Some(outlet) = OUTLET.get() {
         for id in moved {
             (outlet.settle)(id);
@@ -1389,8 +1413,9 @@ mod tests {
 
     use super::{
         Candidate, Change, EVENT_RANGES, FOLLOWER, Follower, LINKS, Link, OUTLET, Open, Outlet,
-        Seen, Waiting, centre_of, dragged, first_under, forget, lock, plan, prune_in, rejoin,
-        release_in, retake, see, stick_in, text_of, title_of, wake, window_again, write,
+        SETTLE_FLOOR_MS, SETTLE_MS, Seen, Waiting, centre_of, dragged, first_under, forget, lock,
+        plan, prune_in, rejoin, release_in, retake, see, settle_wait, stick_in, text_of, title_of,
+        wake, window_again, write,
     };
 
     const WINDOW: Rect = Rect::new(100, 200, 900, 600);
@@ -1868,6 +1893,31 @@ mod tests {
             assert!(first <= last);
             assert!(last - first <= 2, "{first:#x} to {last:#x}");
         }
+    }
+
+    /// A program that moves its window, rests and moves again decides how
+    /// often an area on it captures. The floor is what bounds that.
+    #[test]
+    fn a_re_take_waits_out_the_floor_and_the_first_one_does_not() {
+        let ms = Duration::from_millis;
+        assert_eq!(settle_wait(None), SETTLE_MS, "nothing to wait out yet");
+        assert_eq!(
+            settle_wait(Some(ms(0))),
+            SETTLE_FLOOR_MS,
+            "straight after a re-take the whole floor is still to come"
+        );
+        assert_eq!(settle_wait(Some(ms(200))), SETTLE_FLOOR_MS - 200);
+        assert_eq!(
+            settle_wait(Some(ms(u64::from(SETTLE_FLOOR_MS - SETTLE_MS) + 1))),
+            SETTLE_MS,
+            "never less than the stillness a re-take always waits for"
+        );
+        assert_eq!(settle_wait(Some(ms(u64::from(SETTLE_FLOOR_MS)))), SETTLE_MS);
+        assert_eq!(
+            settle_wait(Some(Duration::from_secs(u64::MAX / 2000))),
+            SETTLE_MS,
+            "a quiet spell longer than a u32 of milliseconds is still just quiet"
+        );
     }
 
     fn link_for(area: AreaId, bounds: Rect) -> Link {
@@ -2376,6 +2426,16 @@ mod tests {
                 "fn handle(message: &MSG) {",
                 "reattach();",
                 "the once-a-second check looks for a closed window coming back",
+            ),
+            (
+                "fn sync_as(window: isize, known: Option<Seen>) -> Option<Seen> {",
+                "let wait = settle_wait(LAST_SETTLE.get().map(|last| last.elapsed()));",
+                "a re-take waits out the floor since the last one",
+            ),
+            (
+                "fn settle() {",
+                "LAST_SETTLE.set(Some(Instant::now()));",
+                "and each re-take says when it ran, or the floor measures nothing",
             ),
             (
                 "fn prune() {",
