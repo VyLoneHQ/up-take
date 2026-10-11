@@ -58,10 +58,11 @@
 //!
 //! The window's title and its program's path are kept in memory to recognise
 //! the window again. They say what the user has open, so they are never
-//! written to a log. A test reads this file to hold that
-//! (`a_title_or_a_program_path_never_reaches_a_log`). They are also never
-//! written to disk and never sent to the page, which gets an area's state as
-//! one of three words and nothing about its window.
+//! written to a log, to disk or to the page, which gets an area's state as one
+//! of three words and nothing about its window. The type holds that: both are
+//! a `Kept`, which can be compared and cannot be shown, so a call that would
+//! log one does not compile. `a_title_or_a_program_path_can_only_be_compared`
+//! keeps the type that way.
 //!
 //! # Limits, stated
 //!
@@ -215,6 +216,37 @@ const SETTLE_FLOOR_MS: u32 = 500;
 /// frame for good.
 const DRAG_IDLE: Duration = Duration::from_secs(5);
 
+/// Text that says what the user has open: a window's title or its program's
+/// path. It is kept to be compared and for nothing else.
+///
+/// The type is the rule. It can be made, cloned and compared with another of
+/// its kind. It cannot be shown, formatted, borrowed as text or taken apart,
+/// because none of those is written here and the text inside is private to
+/// this module. So a call that would put one in a log, on disk or in front of
+/// the page does not compile.
+///
+/// Two reviews found a guard on this rule that could be passed. The first
+/// guard was a reader. The second was a test that read this file for calls
+/// into the log, and it looked at one of the log's three ways in. A rule the
+/// compiler holds has no such list to keep complete.
+mod kept {
+    #[derive(Clone, PartialEq, Eq)]
+    pub(super) struct Kept(String);
+
+    impl From<String> for Kept {
+        fn from(text: String) -> Self {
+            Self(text)
+        }
+    }
+
+    impl From<&str> for Kept {
+        fn from(text: &str) -> Self {
+            Self(text.to_owned())
+        }
+    }
+}
+use kept::Kept;
+
 /// One sticky area's link to its window.
 struct Link {
     area: AreaId,
@@ -224,8 +256,8 @@ struct Link {
     /// another window that was given the same number.
     pid: u32,
     /// The full path of the program, or `None` if Windows would not say.
-    program: Option<String>,
-    title: String,
+    program: Option<Kept>,
+    title: Kept,
     anchor: Anchor,
     /// The window's scale when the anchor was taken.
     scale: f64,
@@ -558,13 +590,13 @@ fn owner_of(window: isize) -> u32 {
 }
 
 /// The window's title, as it is now. Empty if it has none.
-fn title_of(window: isize) -> String {
+fn title_of(window: isize) -> Kept {
     let mut buffer = [0u16; 512];
     // SAFETY: the buffer is 512 units long and the call is told so. For a
     // window of another process this reads the title Windows holds and does
     // not send that program a message, so a hung program cannot hang us.
     let length = unsafe { GetWindowTextW(window as HWND, buffer.as_mut_ptr(), 512) };
-    text_of(&buffer, length)
+    Kept::from(text_of(&buffer, length))
 }
 
 fn class_of(window: isize) -> String {
@@ -581,7 +613,7 @@ fn text_of(buffer: &[u16], length: i32) -> String {
 
 /// The full path of a process's program, or `None` if Windows will not open
 /// the process for even this much.
-fn program_of(pid: u32) -> Option<String> {
+fn program_of(pid: u32) -> Option<Kept> {
     // SAFETY: `OpenProcess` returns a handle or null. The handle is closed
     // below on every path that got one.
     let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
@@ -602,7 +634,7 @@ fn program_of(pid: u32) -> Option<String> {
         return None;
     }
     let length = usize::try_from(length).unwrap_or(0).min(buffer.len());
-    Some(String::from_utf16_lossy(&buffer[..length]))
+    Some(Kept::from(String::from_utf16_lossy(&buffer[..length])))
 }
 
 /// Looks at a window: gone, hidden, or on screen at a rectangle and a scale.
@@ -1227,7 +1259,7 @@ fn settle() {
 struct Open {
     window: isize,
     pid: u32,
-    title: String,
+    title: Kept,
 }
 
 /// The window a waiting link should join, if one of `open` is its window come
@@ -1237,13 +1269,13 @@ struct Open {
 /// `same_program` is asked last and only about windows that fit otherwise,
 /// because answering it means opening the window's process.
 fn window_again<'a>(
-    title: &str,
+    title: &Kept,
     open_at_close: &HashSet<isize>,
     open: &'a [Open],
     mut same_program: impl FnMut(&Open) -> bool,
 ) -> Option<&'a Open> {
     open.iter().find(|candidate| {
-        candidate.title == title
+        candidate.title == *title
             && !open_at_close.contains(&candidate.window)
             && same_program(candidate)
     })
@@ -1255,8 +1287,8 @@ struct Waiting {
     /// The window it was on, which no longer exists. Areas with the same one
     /// here were on the same window.
     was: isize,
-    program: String,
-    title: String,
+    program: Kept,
+    title: Kept,
     open_at_close: HashSet<isize>,
 }
 
@@ -1398,7 +1430,7 @@ fn reattach() {
         .collect();
     let joins = joins_of(&waiting, &open, |link, candidate| {
         describe(candidate.window).can_be_followed(own)
-            && program_of(candidate.pid).as_deref() == Some(link.program.as_str())
+            && program_of(candidate.pid).as_ref() == Some(&link.program)
     });
     let joined = join_in(&mut lock(&LINKS), &joins);
     if joined {
@@ -1420,10 +1452,10 @@ mod tests {
     use uptake_core::area::{AreaId, AreaStore, AreaType};
 
     use super::{
-        Candidate, Change, EVENT_RANGES, FOLLOWER, Follower, LINKS, Link, OUTLET, Open, Outlet,
-        SETTLE_FLOOR_MS, SETTLE_MS, Seen, Waiting, centre_of, dragged, first_under, forget, lock,
-        plan, prune_in, rejoin, release_in, retake, see, settle_wait, stick_in, text_of, title_of,
-        wake, window_again, write,
+        Candidate, Change, EVENT_RANGES, FOLLOWER, Follower, Kept, LINKS, Link, OUTLET, Open,
+        Outlet, SETTLE_FLOOR_MS, SETTLE_MS, Seen, Waiting, centre_of, dragged, first_under, forget,
+        lock, plan, prune_in, rejoin, release_in, retake, see, settle_wait, stick_in, text_of,
+        title_of, wake, window_again, write,
     };
 
     const WINDOW: Rect = Rect::new(100, 200, 900, 600);
@@ -1738,9 +1770,10 @@ mod tests {
             SetWindowTextW(handle, renamed.as_ptr());
         }
         assert!(
-            wait_for(Duration::from_millis(250), || lock(&LINKS).iter().any(
-                |link| link.area == id && link.title == "uptake sticky test, renamed"
-            )),
+            wait_for(Duration::from_millis(250), || lock(&LINKS)
+                .iter()
+                .any(|link| link.area == id
+                    && link.title == Kept::from("uptake sticky test, renamed"))),
             "a changed title is remembered"
         );
 
@@ -1933,8 +1966,8 @@ mod tests {
             area,
             window: 0x51,
             pid: 7,
-            program: Some("C:\\Program Files\\Editor\\editor.exe".to_owned()),
-            title: "notes.txt".to_owned(),
+            program: Some(Kept::from("C:\\Program Files\\Editor\\editor.exe")),
+            title: Kept::from("notes.txt"),
             anchor: Anchor::of(bounds, WINDOW),
             scale: 1.0,
             seen: None,
@@ -2204,7 +2237,7 @@ mod tests {
         Open {
             window,
             pid: 7,
-            title: title.to_owned(),
+            title: Kept::from(title),
         }
     }
 
@@ -2216,18 +2249,18 @@ mod tests {
             open(12, "notes.txt"),
         ];
         let none = HashSet::new();
-        let found = window_again("notes.txt", &none, &windows, |_| true);
+        let found = window_again(&Kept::from("notes.txt"), &none, &windows, |_| true);
         assert_eq!(found.map(|open| open.window), Some(11), "the topmost match");
         // Another program with the same title is not the window coming back.
-        assert!(window_again("notes.txt", &none, &windows, |_| false).is_none());
+        assert!(window_again(&Kept::from("notes.txt"), &none, &windows, |_| false).is_none());
         // The program is asked only about windows whose title already fits.
         let mut asked = Vec::new();
-        window_again("notes.txt", &none, &windows, |open| {
+        window_again(&Kept::from("notes.txt"), &none, &windows, |open| {
             asked.push(open.window);
             false
         });
         assert_eq!(asked, vec![11, 12]);
-        assert!(window_again("gone.txt", &none, &windows, |_| true).is_none());
+        assert!(window_again(&Kept::from("gone.txt"), &none, &windows, |_| true).is_none());
     }
 
     #[test]
@@ -2237,9 +2270,11 @@ mod tests {
         // third that appears afterwards is taken.
         let already: HashSet<isize> = [11].into_iter().collect();
         let sibling_only = [open(11, "notes.txt")];
-        assert!(window_again("notes.txt", &already, &sibling_only, |_| true).is_none());
+        assert!(
+            window_again(&Kept::from("notes.txt"), &already, &sibling_only, |_| true).is_none()
+        );
         let reopened = [open(11, "notes.txt"), open(31, "notes.txt")];
-        let found = window_again("notes.txt", &already, &reopened, |_| true);
+        let found = window_again(&Kept::from("notes.txt"), &already, &reopened, |_| true);
         assert_eq!(found.map(|open| open.window), Some(31));
     }
 
@@ -2361,35 +2396,98 @@ mod tests {
         assert!(!body(two, "fn one() {").contains("b();"));
     }
 
-    /// The module says a window's title and its program's path are never
-    /// written to a log. Until the fifth review only a reader held that. Three
-    /// things hold it now: none of the types that carry them can be printed
-    /// with `{:?}`, the production code has no printing macro at all, and no
-    /// call into the diagnostics log mentions one by name.
+    /// A window's title and its program's path are never shown, logged or
+    /// written out. The type holds that: a [`Kept`] can be compared and
+    /// nothing else, so a call that would put one in the log does not
+    /// compile, whichever of the log's functions it is. Until the fifth
+    /// review only a reader held the rule. The sixth review passed a title to
+    /// the log through a function the test of the time did not look at.
     ///
-    /// What it cannot see is a title copied into a variable with another name
-    /// and logged from there. The count at the end is for that: a new call is
-    /// read by a person before the number changes.
+    /// What is left for a test is that the type stays what it is and that the
+    /// text is wrapped before anything else can touch it:
+    ///
+    /// - the `kept` module is exactly the items listed here, so a way to read
+    ///   the text out cannot be added without this test being changed;
+    /// - every field that holds a title or a path has that type;
+    /// - the two functions that read them from Windows wrap them in the
+    ///   statement that produces them and call nothing in the log.
+    ///
+    /// It does not stop code that breaks the type on purpose, with a
+    /// transmute for example. The comparisons here are against text this test
+    /// reads from the file, so the misreading of string literals that
+    /// `production` admits to could hide a line from it. No line it asserts
+    /// holds a comment marker.
     #[test]
-    fn a_title_or_a_program_path_never_reaches_a_log() {
+    fn a_title_or_a_program_path_can_only_be_compared() {
         let code = production(include_str!("sticky.rs"));
-        for name in ["Link", "Open", "Waiting"] {
-            let Some((before, _)) = code.split_once(&format!("\nstruct {name} {{")) else {
-                panic!(
-                    "`struct {name}` not found: renamed? An unfound type must not read as a pass"
-                )
-            };
-            let attributes: Vec<&str> = before
-                .lines()
-                .rev()
-                .skip_while(|line| line.trim().is_empty())
-                .take_while(|line| line.trim_start().starts_with("#["))
-                .collect();
+
+        let Some((_, after)) = code.split_once("\nmod kept {\n") else {
+            panic!("`mod kept` not found: renamed? An unfound module must not read as a pass")
+        };
+        let Some((module, _)) = after.split_once("\n}\n") else {
+            panic!("`mod kept` has no end")
+        };
+        let items: Vec<&str> = module
+            .lines()
+            .map(str::trim)
+            .filter(|line| {
+                [
+                    "#[", "impl", "pub", "use ", "fn ", "struct ", "type ", "trait ",
+                ]
+                .iter()
+                .any(|start| line.starts_with(start))
+            })
+            .collect();
+        assert_eq!(
+            items,
+            [
+                "#[derive(Clone, PartialEq, Eq)]",
+                "pub(super) struct Kept(String);",
+                "impl From<String> for Kept {",
+                "fn from(text: String) -> Self {",
+                "impl From<&str> for Kept {",
+                "fn from(text: &str) -> Self {",
+            ],
+            "the type that keeps titles and paths gained or lost an item: anything that reads \
+             the text out of it ends the rule"
+        );
+        assert_eq!(
+            code.matches(" for Kept {").count(),
+            2,
+            "a trait is implemented for `Kept` outside its module"
+        );
+        assert!(
+            !code.contains("impl Kept"),
+            "`Kept` gained a method outside its module"
+        );
+
+        for (field, times) in [
+            ("    title: Kept,\n", 3),
+            ("    program: Option<Kept>,\n", 1),
+            ("    program: Kept,\n", 1),
+        ] {
+            assert_eq!(code.matches(field).count(), times, "{field:?}");
+        }
+        for plain in [
+            "title: String",
+            "program: String",
+            "program: Option<String>",
+            "title: &str",
+        ] {
             assert!(
-                !attributes.iter().any(|line| line.contains("Debug")),
-                "`{name}` holds a title or a path and must not be printable: {attributes:?}"
+                !code.contains(plain),
+                "`{plain}`: a title or a path held as plain text"
             );
         }
+
+        let title = body(&code, "fn title_of(window: isize) -> Kept {");
+        assert!(title.contains("Kept::from(text_of(&buffer, length))"));
+        let program = body(&code, "fn program_of(pid: u32) -> Option<Kept> {");
+        assert!(program.contains("Some(Kept::from(String::from_utf16_lossy(&buffer[..length])))"));
+        for (name, text) in [("title_of", title), ("program_of", program)] {
+            assert!(!text.contains("diagnostics"), "`{name}` calls into the log");
+        }
+
         for macro_name in [
             "println!",
             "eprintln!",
@@ -2404,23 +2502,6 @@ mod tests {
                 "`{macro_name}` in the follower's production code"
             );
         }
-        let mut calls = 0;
-        let mut rest = code.as_str();
-        while let Some((_, after)) = rest.split_once("diagnostics::trouble") {
-            let Some((call, tail)) = after.split_once(");") else {
-                panic!("a call into the log has no end")
-            };
-            for word in ["title", "program", "path"] {
-                assert!(!call.contains(word), "a log call mentions `{word}`: {call}");
-            }
-            calls += 1;
-            rest = tail;
-        }
-        assert_eq!(
-            calls, 4,
-            "the follower's calls into the log changed: read each new one for a title or a path, \
-             then change this number"
-        );
     }
 
     /// The single lines without which the feature is dead in the app while
@@ -2513,6 +2594,11 @@ mod tests {
                 "fn sync_as(window: isize, known: Option<Seen>) -> Option<Seen> {",
                 "let wait = settle_wait(LAST_SETTLE.get().map(|last| last.elapsed()));",
                 "a re-take waits out the floor since the last one",
+            ),
+            (
+                "fn sync_as(window: isize, known: Option<Seen>) -> Option<Seen> {",
+                "SetTimer(std::ptr::null_mut(), SETTLE.get(), wait, None)",
+                "and the timer is given that wait and no other",
             ),
             (
                 "fn settle() {",
@@ -2655,8 +2741,8 @@ mod tests {
         let waiting = |area: AreaId, was: isize| Waiting {
             area,
             was,
-            program: "editor.exe".to_owned(),
-            title: "notes.txt".to_owned(),
+            program: Kept::from("editor.exe"),
+            title: Kept::from("notes.txt"),
             open_at_close: HashSet::new(),
         };
         // Two areas were on window 70, one on window 71. Same program, same

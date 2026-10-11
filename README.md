@@ -248,8 +248,9 @@ destination and not the current state.
   UP-TAKE remembers its title and the path of its program. While an area is waiting, it checks the
   titles of open windows once a second to spot the window coming back. All of this stays in
   memory. It is not written to disk or to a log, and it does not leave the app.
-  <!-- source: src-tauri/src/sticky.rs, the module's "What is never logged" section and the test
-       a_title_or_a_program_path_never_reaches_a_log; the security review of pull request 135
+  <!-- source: src-tauri/src/sticky.rs, the module's "What is never logged" section, the type
+       `Kept` (a title or a path can be compared and cannot be shown) and the test
+       a_title_or_a_program_path_can_only_be_compared; the security review of pull request 135
        (titles and paths held in memory only, never sent to the page, no network use). Approved by
        the maintainer on 2026-10-11. -->
 - **Processing is meant to stay on your machine.** VyLone runs no endpoint and does not intend to.
