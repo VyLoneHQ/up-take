@@ -229,14 +229,34 @@ destination and not the current state.
   <!-- source: Projects/UP-TAKE/HEADLINE-INTERVIEW.md A8 (his words, verbatim there); ADR-0039
        decision 4 (consolidation is the reason and a consequence, never the pitch); ADR-0009, whose
        foreclosure of the "replaces N apps" pitch stands. Do not turn this bullet into that pitch. -->
-- **It captures when you ask it to.** There is no continuous background recording and no
-  plan for one.
-  <!-- source: PRODUCT-VISION.md section 3.5; ADR-0026 (freeze is explicit, PLACEMENT only) -->
+- **It captures when you ask it to.** UP-TAKE never watches your screen. An area looks only at the
+  region you gave it, and only while it visibly says so. A sticky Upscale or OCR area, for example,
+  looks at its region once more after its window has moved, never more than twice a second. One
+  area type that records its own region continuously, with a timeline to scroll back through, is
+  planned and not built yet. It will record only that region, only once you switch it on, and it
+  will show a mark while it does. Nothing it records leaves your machine.
+  <!-- source: ADR-0048 decision 3 (the principle, restated 2026-09-27) and decisions 1 and 2 (an
+       area reads repeatedly only if the user made it, it is marked, it is switched on per area,
+       and what it reads stays on the machine); ROADMAP.md 2.34 (the Rewind area, planned, nothing
+       built); ROADMAP.md 1.47 and src-tauri/src/sticky.rs SETTLE_FLOOR_MS (the sticky re-read and
+       its twice a second); ADR-0026 (freeze is explicit, PLACEMENT only).
+       This bullet said "There is no continuous background recording and no plan for one" until
+       2026-10-11. The second half had been false since ADR-0048 admitted the Rewind area on
+       2026-09-27, and that record says a page that says "never watches" without the rest would be
+       false. The maintainer caught it and approved this wording on 2026-10-11. -->
+- **A sticky area has to recognise its window.** To find the window again after it was closed,
+  UP-TAKE remembers its title and the path of its program. While an area is waiting, it checks the
+  titles of open windows once a second to spot the window coming back. All of this stays in
+  memory. It is not written to disk or to a log, and it does not leave the app.
+  <!-- source: src-tauri/src/sticky.rs, the module's "What is never logged" section and the test
+       a_title_or_a_program_path_never_reaches_a_log; the security review of pull request 135
+       (titles and paths held in memory only, never sent to the page, no network use). Approved by
+       the maintainer on 2026-10-11. -->
 - **Processing is meant to stay on your machine.** VyLone runs no endpoint and does not intend to.
   Where a model is needed you point UP-TAKE at your own.
   <!-- source: ADR-0010 (no VyLone-run services); PRODUCT-VISION.md section 12 (custom endpoint,
        free and never gated) -->
-- **No telemetry, no analytics, no crash reporting.** A tool that reads your screen has to be
+- **No telemetry, no analytics, no crash reporting.** A tool that can see your screen has to be
   inspectable to be worth trusting, which is most of why it is open source.
   <!-- source: PRODUCT-VISION.md; SECURITY.md. NOTE: this is a design commitment. The dependency
        graph now supports it -- no HTTP client crate on the Windows target, checked 2026-08-02 and
