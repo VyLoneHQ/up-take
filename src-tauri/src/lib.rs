@@ -31,6 +31,10 @@ mod placement;
 mod precapture;
 mod settings;
 mod settings_window;
+// Test-only: where a block comment ends, for the tests that read this crate's
+// own source. `sticky` and `placement` both strip comments and share it.
+#[cfg(test)]
+mod source_guard;
 mod sticky;
 mod strings;
 mod tray;

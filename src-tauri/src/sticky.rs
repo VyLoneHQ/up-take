@@ -58,7 +58,10 @@
 //!
 //! The window's title and its program's path are kept in memory to recognise
 //! the window again. They say what the user has open, so they are never
-//! written to a log.
+//! written to a log. A test reads this file to hold that
+//! (`a_title_or_a_program_path_never_reaches_a_log`). They are also never
+//! written to disk and never sent to the page, which gets an area's state as
+//! one of three words and nothing about its window.
 //!
 //! # Limits, stated
 //!
@@ -152,6 +155,11 @@ static OUTLET: OnceLock<Outlet> = OnceLock::new();
 /// **The lock rule.** This lock may be held while the area store's lock is
 /// taken. The area store's lock is never held while this one is taken. One
 /// direction only, so the two cannot wait on each other.
+///
+/// Nothing enforces this rule. No test and no type stops a new caller from
+/// taking the links with the store's lock in hand. The fifth review checked
+/// all eleven places that take the links, and every caller into this module,
+/// and none did. A caller added after that has only this paragraph.
 ///
 /// Until the second review this lock was never held across a store call at
 /// all, and every step that touched both did so in two halves. Each pair of
@@ -2238,15 +2246,19 @@ mod tests {
     /// `source` with its test module cut off and its comments dropped, so that
     /// a call which survives only in a comment or only in a test does not
     /// count as made. A comment is dropped wherever it starts: on a line of
-    /// its own, after code on the same line, or as a block.
+    /// its own, after code on the same line, or as a block, nested or not.
     ///
     /// The third version kept a comment that followed code on its line, and
     /// the fourth review left `wake();` only in such a comment with every
-    /// test green.
+    /// test green. The fourth version ended a block comment at the first
+    /// `*/`, and the fifth review left `wake();` inside a nested one, which
+    /// the compiler reads as one comment. `crate::source_guard` lists every
+    /// comment form Rust has and decides where a block ends.
     ///
     /// It does not understand string literals. A comment marker inside one
-    /// cuts the rest of that line, or up to the next block end. That can only
-    /// remove text, so it can make a guard fail and never make one pass.
+    /// cuts the rest of that line, or up to where a block opened there would
+    /// end. That only removes text the compiler keeps, so it can make a guard
+    /// fail and never make one pass.
     ///
     /// What it cannot see is code made dead another way: a call left inside
     /// `if false { }` still reads as made. This guards against a line going
@@ -2279,7 +2291,7 @@ mod tests {
             };
             kept.push_str(before);
             rest = if is_block {
-                comment.split_once("*/").map_or("", |(_, after)| after)
+                crate::source_guard::after_block_comment(comment)
             } else {
                 // The line break stays, so the next line is still its own.
                 comment.find('\n').map_or("", |end| &comment[end..])
@@ -2333,12 +2345,82 @@ mod tests {
             !production(&format!("fn setup() {{\n    /* // */ /* {call} */\n}}\n")).contains(call)
         );
         assert!(production(&format!("fn setup() {{\n    /* // */ {call}\n}}\n")).contains(call));
+        // Inside a block comment that holds another one. The compiler reads
+        // the whole span as one comment, so the call is not made, and what
+        // follows the outer end is code again.
+        let nested = production(&format!(
+            "fn setup() {{\n    /* off /* for now */ {call} */\n    last();\n}}\n"
+        ));
+        assert!(!nested.contains(call));
+        assert!(nested.contains("\n    last();"));
         // Present in production code: found.
         assert!(production(&format!("fn setup() {{\n    {call}\n}}\n")).contains(call));
         // A body ends at its own closing brace, not at the next function's.
         let two = "fn one() {\n    a();\n}\n\nfn two() {\n    b();\n}\n";
         assert!(body(two, "fn one() {").contains("a();"));
         assert!(!body(two, "fn one() {").contains("b();"));
+    }
+
+    /// The module says a window's title and its program's path are never
+    /// written to a log. Until the fifth review only a reader held that. Three
+    /// things hold it now: none of the types that carry them can be printed
+    /// with `{:?}`, the production code has no printing macro at all, and no
+    /// call into the diagnostics log mentions one by name.
+    ///
+    /// What it cannot see is a title copied into a variable with another name
+    /// and logged from there. The count at the end is for that: a new call is
+    /// read by a person before the number changes.
+    #[test]
+    fn a_title_or_a_program_path_never_reaches_a_log() {
+        let code = production(include_str!("sticky.rs"));
+        for name in ["Link", "Open", "Waiting"] {
+            let Some((before, _)) = code.split_once(&format!("\nstruct {name} {{")) else {
+                panic!(
+                    "`struct {name}` not found: renamed? An unfound type must not read as a pass"
+                )
+            };
+            let attributes: Vec<&str> = before
+                .lines()
+                .rev()
+                .skip_while(|line| line.trim().is_empty())
+                .take_while(|line| line.trim_start().starts_with("#["))
+                .collect();
+            assert!(
+                !attributes.iter().any(|line| line.contains("Debug")),
+                "`{name}` holds a title or a path and must not be printable: {attributes:?}"
+            );
+        }
+        for macro_name in [
+            "println!",
+            "eprintln!",
+            "print!",
+            "eprint!",
+            "dbg!",
+            "log::",
+            "tracing::",
+        ] {
+            assert!(
+                !code.contains(macro_name),
+                "`{macro_name}` in the follower's production code"
+            );
+        }
+        let mut calls = 0;
+        let mut rest = code.as_str();
+        while let Some((_, after)) = rest.split_once("diagnostics::trouble") {
+            let Some((call, tail)) = after.split_once(");") else {
+                panic!("a call into the log has no end")
+            };
+            for word in ["title", "program", "path"] {
+                assert!(!call.contains(word), "a log call mentions `{word}`: {call}");
+            }
+            calls += 1;
+            rest = tail;
+        }
+        assert_eq!(
+            calls, 4,
+            "the follower's calls into the log changed: read each new one for a title or a path, \
+             then change this number"
+        );
     }
 
     /// The single lines without which the feature is dead in the app while

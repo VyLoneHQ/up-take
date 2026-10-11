@@ -5813,9 +5813,7 @@ mod tests {
                 }
                 (None, Some(at)) => {
                     out.push_str(&rest[..at]);
-                    rest = rest[at..]
-                        .find("*/")
-                        .map_or("", |end| &rest[at + end + 2..]);
+                    rest = crate::source_guard::after_block_comment(&rest[at + 2..]);
                 }
                 (Some(l), Some(b)) if l < b => {
                     out.push_str(&rest[..l]);
@@ -5823,7 +5821,7 @@ mod tests {
                 }
                 (Some(_), Some(b)) => {
                     out.push_str(&rest[..b]);
-                    rest = rest[b..].find("*/").map_or("", |end| &rest[b + end + 2..]);
+                    rest = crate::source_guard::after_block_comment(&rest[b + 2..]);
                 }
             }
         }
@@ -5839,6 +5837,13 @@ mod tests {
         // presence of tokens is ever asked about, never the layout.
         assert_eq!(strip_comments("a();\n// b();\nc();\n"), "a();\n\nc();\n");
         assert_eq!(strip_comments("a(); /* b(); */ c();"), "a();  c();");
+        // Block comments nest, and the compiler reads this as one comment.
+        // The fifth review of roadmap `1.47` hid `grey_out_sticking` this way
+        // and the guard on it stayed green (`crate::source_guard`).
+        assert_eq!(
+            strip_comments("a(); /* off /* now */ b(); */ c();"),
+            "a();  c();"
+        );
         assert!(!strip_comments("    // emit_menu(app);\n").contains("emit_menu"));
         // And it must not eat live code that merely follows a comment.
         assert!(strip_comments("// note\nemit_menu(app);\n").contains("emit_menu(app);"));
