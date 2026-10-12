@@ -169,6 +169,21 @@ Around those:
 - **Change an area's type from its own menu.** Right-click an area and pick a type from the submenu;
   it becomes that type in place.
   <!-- source: ROADMAP.md tasks 1.27 (PR #55, merged 2026-08-14) and 1.28 (PR #59, merged 2026-08-18). -->
+- **Stick an area to a window.** Right-click an area and pick *Stick to window*, and it belongs to
+  the window under it from then on. Move the window and the area moves with it, onto another
+  monitor too. Resize the window and the area scales with it; its menu has three other ways to
+  answer a resize if scaling is wrong for what you are looking at. Minimise or close the window and
+  the area hides until the window is back. It still floats above everything, so another window that
+  covers its window does not cover the area.
+  <!-- source: ROADMAP.md task 1.47 and pull request 135. Each sentence is something the maintainer
+       did at his desk on 2026-10-12, on builds of this branch: the menu row, a drag, a crossing to
+       a monitor with another scale, the four answers to a resize, and hiding on minimise. Closing
+       and reopening he walked on the first build that day, before hiding was built. "Until the
+       window is back" means, for a closed window, a window of the same program with the same
+       title (src-tauri/src/sticky.rs, `reattach`). The last sentence is a limit, stated on
+       purpose: ROADMAP.md 2.45 is the probe for an area that another window can cover.
+       The maintainer approved this wording on 2026-10-12, after a web search for its sentences
+       in quotes found no match. -->
 - **Freeze while you place.** `Ctrl+Space` holds the screen still so something about to disappear
   does not have to be caught in time. It is late by roughly 350 ms by default, which matters for
   anything moving fast. There is a faster path behind a setting that is off by default because it
