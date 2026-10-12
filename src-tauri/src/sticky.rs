@@ -82,9 +82,12 @@
 //!   because "the same program" cannot be established.
 //! - Events from such a program may not arrive at all. The once-a-second check
 //!   still places the area, a second late at worst.
-//! - An area moved by hand while its window is minimised or closed keeps its
-//!   old anchor, and goes back to it when the window returns. There is no
-//!   window rectangle to take a new anchor from.
+//! - An area moved by hand while its window is minimised or closed takes its
+//!   new anchor from where the window was last seen, because there is no
+//!   window on screen to measure from. When the window comes back where it
+//!   was, the area is where the hand left it. When it comes back somewhere
+//!   else, the area keeps that place on the window. A link that never saw its
+//!   window on screen has nothing to measure from and keeps its old anchor.
 //! - "The same program" is the same full path. A program that updates itself
 //!   into a folder named for its version is another program by this test, and
 //!   its area stays paused.
@@ -281,6 +284,10 @@ struct Link {
     /// What was last seen of the window and acted on. A poll that sees the
     /// same again does nothing at all.
     seen: Option<Seen>,
+    /// Where the window last was on screen, and its scale there. Kept while
+    /// the window is minimised or closed, so that an area moved by hand in
+    /// that time has something to take its new anchor from.
+    last_at: Option<(Rect, f64)>,
     /// The window closed. The link waits for [`reattach`].
     gone: bool,
     /// Every top-level window that was open when this one closed. None of
@@ -449,8 +456,9 @@ pub(crate) fn forget(id: AreaId) {
 /// so the place they put it is the place it keeps. `placed` is where the hand
 /// left it.
 ///
-/// Nothing happens if the area is not sticky, or if its window is not on
-/// screen (see the module's limits).
+/// Nothing happens if the area is not sticky. If its window is not on screen
+/// the anchor is taken from where the window was last seen (see the module's
+/// limits).
 pub(crate) fn reanchor(app: &AppHandle, id: AreaId, placed: Rect) {
     let store = app.state::<Mutex<AreaStore>>();
     reanchor_in(store.inner(), &LINKS, id, placed, see);
@@ -470,7 +478,7 @@ fn reanchor_in(
     see: impl FnOnce(isize, u32) -> Seen,
 ) {
     let mut links = lock(links);
-    let Some(link) = links.iter_mut().find(|link| link.area == id && !link.gone) else {
+    let Some(link) = links.iter_mut().find(|link| link.area == id) else {
         return;
     };
     {
@@ -479,18 +487,38 @@ fn reanchor_in(
             store.set_bounds(id, placed);
         }
     }
-    let seen = see(link.window, link.pid);
+    // A closed window is not looked at: its handle may belong to another
+    // window by now.
+    let seen = if link.gone {
+        Seen::Gone
+    } else {
+        see(link.window, link.pid)
+    };
     retake(link, placed, seen);
 }
 
-/// Takes a link's anchor again from where the area and its window are now. A
-/// window that is not on screen has no rectangle to measure from, so the old
-/// anchor stays.
+/// Takes a link's anchor again from where the area is now.
+///
+/// With the window on screen, it is measured from the window as it is. With
+/// the window minimised or closed, it is measured from where the window was
+/// last seen: a paused area is drawn in placing mode so that it can be moved,
+/// and a move that the window's return undid would not be one (the tenth
+/// review). What was last acted on is left alone in that case, so the
+/// follower still places the area when the window is back.
 fn retake(link: &mut Link, bounds: Rect, seen: Seen) {
-    if let Seen::At { rect, scale } = seen {
-        link.anchor = Anchor::of(bounds, rect);
-        link.scale = scale;
-        link.seen = Some(seen);
+    match seen {
+        Seen::At { rect, scale } => {
+            link.anchor = Anchor::of(bounds, rect);
+            link.scale = scale;
+            link.seen = Some(seen);
+            link.last_at = Some((rect, scale));
+        }
+        Seen::Hidden | Seen::Gone => {
+            if let Some((rect, scale)) = link.last_at {
+                link.anchor = Anchor::of(bounds, rect);
+                link.scale = scale;
+            }
+        }
     }
 }
 
@@ -546,6 +574,7 @@ fn link_under(id: AreaId, bounds: Rect) -> Option<Link> {
         on_resize: OnResize::default(),
         scale,
         seen: Some(Seen::At { rect, scale }),
+        last_at: Some((rect, scale)),
         gone: false,
         open_at_close: HashSet::new(),
     })
@@ -1193,6 +1222,9 @@ fn sync_as(window: isize, known: Option<Seen>) -> Option<Seen> {
                 continue;
             }
             link.seen = Some(seen);
+            if let Seen::At { rect, scale } = seen {
+                link.last_at = Some((rect, scale));
+            }
             link.gone = seen == Seen::Gone;
             if link.gone {
                 link.open_at_close.clone_from(&open_now);
@@ -1715,6 +1747,7 @@ mod tests {
             on_resize: OnResize::default(),
             scale,
             seen: Some(Seen::At { rect, scale }),
+            last_at: Some((rect, scale)),
             gone: false,
             open_at_close: HashSet::new(),
         });
@@ -2138,6 +2171,7 @@ mod tests {
             on_resize: OnResize::default(),
             scale: 1.0,
             seen: None,
+            last_at: None,
             gone: false,
             open_at_close: HashSet::new(),
         }
@@ -2373,6 +2407,78 @@ mod tests {
     }
 
     #[test]
+    fn a_paused_area_moved_by_hand_keeps_its_new_place_when_the_window_returns() {
+        // Review round 10. A paused area is drawn in placing mode so that it
+        // can be moved. Its window is minimised or closed, so the new anchor
+        // is taken from where the window was last seen.
+        let (store, first, second) = store_with_two();
+        let store = Mutex::new(store);
+        let links: Mutex<Vec<Link>> = Mutex::new(Vec::new());
+        let was = Rect::new(140, 260, 200, 80);
+        stick_in(&store, &links, link_for(first, was));
+        stick_in(
+            &store,
+            &links,
+            link_for(second, Rect::new(600, 500, 100, 50)),
+        );
+        let at = Seen::At {
+            rect: WINDOW,
+            scale: 1.0,
+        };
+        for link in lock(&links).iter_mut() {
+            link.seen = Some(Seen::Hidden);
+            link.last_at = Some((WINDOW, 1.0));
+        }
+        // Minimised: the hand moves the first area 300 right and 100 down.
+        let dropped = Rect::new(440, 360, 200, 80);
+        reanchor_in(&store, &links, first, dropped, |_, _| Seen::Hidden);
+        assert_eq!(
+            lock(&store).get(first).map(|area| area.bounds),
+            Some(dropped)
+        );
+        {
+            let links = lock(&links);
+            assert_eq!(links[0].anchor, Anchor::of(dropped, WINDOW));
+            // Not marked as acted on: the follower has still to place the
+            // area when the window is back.
+            assert_eq!(links[0].seen, Some(Seen::Hidden));
+            // The window is restored where it was: the area is where the
+            // hand left it, whatever the area's answer to a resize.
+            for rule in OnResize::ALL {
+                assert_eq!(
+                    plan(links[0].anchor, rule, links[0].scale, at).1,
+                    Some(dropped),
+                    "{rule:?}"
+                );
+            }
+            // Restored 500 to the left: the area keeps its place on it.
+            let moved = Seen::At {
+                rect: Rect::new(WINDOW.origin.x - 500, WINDOW.origin.y, 900, 600),
+                scale: 1.0,
+            };
+            assert_eq!(
+                plan(links[0].anchor, OnResize::Scale, links[0].scale, moved).1,
+                Some(Rect::new(440 - 500, 360, 200, 80))
+            );
+        }
+        // Closed: the same, and the dead handle is never looked at.
+        lock(&links)[1].gone = true;
+        let dropped = Rect::new(300, 300, 100, 50);
+        reanchor_in(&store, &links, second, dropped, |_, _| {
+            panic!("a closed window was looked at")
+        });
+        assert_eq!(
+            lock(&store).get(second).map(|area| area.bounds),
+            Some(dropped)
+        );
+        assert_eq!(lock(&links)[1].anchor, Anchor::of(dropped, WINDOW));
+        assert!(
+            lock(&links)[1].gone,
+            "moving it does not bring the window back"
+        );
+    }
+
+    #[test]
     fn a_hand_move_takes_a_new_anchor_only_from_a_window_on_screen() {
         let was = Rect::new(140, 260, 200, 80);
         let Some(id) = AreaStore::new().create(AreaType::Default, was) else {
@@ -2402,11 +2508,29 @@ mod tests {
                 scale: 1.25
             })
         );
-        // Minimised or closed: there is no rectangle to measure from.
-        let kept = link.anchor;
-        retake(&mut link, was, Seen::Hidden);
+        // Seen on screen, so where it was is remembered.
+        assert_eq!(link.last_at, Some((WINDOW, 1.25)));
+        // Minimised or closed: measured from where the window was last seen,
+        // and what was last acted on is not touched.
+        let elsewhere = Rect::new(300, 300, 200, 80);
+        retake(&mut link, elsewhere, Seen::Hidden);
+        assert_eq!(link.anchor, Anchor::of(elsewhere, WINDOW));
+        assert_eq!(
+            link.seen,
+            Some(Seen::At {
+                rect: WINDOW,
+                scale: 1.25
+            })
+        );
         retake(&mut link, was, Seen::Gone);
-        assert_eq!(link.anchor, kept);
+        assert_eq!(link.anchor, Anchor::of(was, WINDOW));
+        // A link that never saw its window has nothing to measure from.
+        let mut blind = link_for(id, was);
+        assert_eq!(blind.last_at, None);
+        let kept = blind.anchor;
+        retake(&mut blind, elsewhere, Seen::Hidden);
+        retake(&mut blind, elsewhere, Seen::Gone);
+        assert_eq!(blind.anchor, kept);
     }
 
     fn open(window: isize, title: &str) -> Open {
