@@ -91,9 +91,13 @@
 //! - "The same program" is the same full path. A program that updates itself
 //!   into a folder named for its version is another program by this test, and
 //!   its area stays paused.
-//! - "The window under the area" is the first one `EnumWindows` reports that
-//!   contains the area's centre. Windows reports top-level windows topmost
-//!   first in practice, and does not promise to.
+//! - "The window under the area" is the first one in the documented Z order
+//!   that contains the area's centre ([`windows_top_down`]). The first
+//!   version took `EnumWindows`' order for that, which Windows does not
+//!   promise. On the maintainer's desktop the two list the same windows in
+//!   another order, and the same order for the windows that are on screen. A
+//!   window that is destroyed while the order is being walked ends the walk
+//!   early, and the windows below it are then not seen that time.
 //! - A link remembers which windows were open when its window closed, by
 //!   handle. A new window that Windows gives one of those handle values is
 //!   passed by, and the area would wait until the next one.
@@ -127,11 +131,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     EVENT_OBJECT_CLOAKED, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, EVENT_OBJECT_LOCATIONCHANGE,
     EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_UNCLOAKED, EVENT_SYSTEM_MINIMIZEEND,
     EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART, EnumWindows,
-    GWL_EXSTYLE, GetClassNameW, GetMessageW, GetWindowLongW, GetWindowRect, GetWindowTextW,
-    GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, KillTimer, MSG, OBJID_WINDOW,
-    PM_NOREMOVE, PM_REMOVE, PeekMessageW, PostThreadMessageW, SetTimer, WINEVENT_OUTOFCONTEXT,
-    WM_APP, WM_TIMER, WM_USER, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TRANSPARENT,
+    GW_HWNDNEXT, GWL_EXSTYLE, GetClassNameW, GetMessageW, GetTopWindow, GetWindow, GetWindowLongW,
+    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
+    KillTimer, MSG, OBJID_WINDOW, PM_NOREMOVE, PM_REMOVE, PeekMessageW, PostThreadMessageW,
+    SetTimer, WINEVENT_OUTOFCONTEXT, WM_APP, WM_TIMER, WM_USER, WS_EX_APPWINDOW, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
 };
 
 use crate::overlay;
@@ -548,7 +552,7 @@ pub(crate) fn can_stick(bounds: Rect) -> bool {
 /// centre that can be followed, with its owner, its rectangle and its scale.
 fn window_under(bounds: Rect) -> Option<(isize, u32, Rect, f64)> {
     let window = first_under(
-        top_level_windows()
+        windows_top_down()
             .into_iter()
             .map(|window| (window, describe(window))),
         centre_of(bounds),
@@ -667,8 +671,46 @@ const fn is_helper(style: u32) -> bool {
     tool || style & WS_EX_NOACTIVATE != 0
 }
 
-/// Every top-level window, topmost first. `EnumWindows` walks them in that
-/// order, which is what makes "the window under the area" the first match.
+/// The most windows [`windows_top_down`] walks. The desktop this was written
+/// on has about 470 top-level windows, most of them never shown. The bound
+/// is there so that a Z order that changes under the walk cannot keep it
+/// going for good, and for nothing else.
+const Z_ORDER_LIMIT: usize = 8192;
+
+/// Every top-level window in the Z order Windows documents, topmost first:
+/// the window at the top, then the one below each. **This is the order that
+/// decides "the window under the area".**
+///
+/// `EnumWindows` is not promised to be that order, which the twelfth review
+/// pointed out. Compared on the maintainer's desktop the same evening, ten
+/// times: the same 465 windows, in a different order every time. The windows
+/// that differed were hidden helper windows, and the 37 visible ones came in
+/// the same order from both. So no wrong window is known to have been taken,
+/// and the order is now the one Windows documents and not one it happens to
+/// give.
+///
+/// A window destroyed during the walk ends it early. The caller then finds
+/// no window, or a higher one, and never a wrong order.
+fn windows_top_down() -> Vec<isize> {
+    let mut windows: Vec<isize> = Vec::with_capacity(512);
+    // SAFETY: `GetTopWindow` with no parent returns the top-level window at
+    // the top of the Z order, or null. It takes no pointer from us.
+    let mut window = unsafe { GetTopWindow(std::ptr::null_mut()) };
+    while !window.is_null() && windows.len() < Z_ORDER_LIMIT {
+        windows.push(window as isize);
+        // SAFETY: `GetWindow` takes a handle and a relation and returns the
+        // window below, or null. A handle that has gone stale makes it
+        // return null, which ends the walk.
+        window = unsafe { GetWindow(window, GW_HWNDNEXT) };
+    }
+    windows
+}
+
+/// Every top-level window, as one snapshot, in no order this module relies
+/// on. For the two questions that need the whole set and not an order: which
+/// windows were open when one closed, and which are open now.
+/// `EnumWindows` is the right call for a set, because a window that goes
+/// away during it does not cut the list short.
 fn top_level_windows() -> Vec<isize> {
     unsafe extern "system" fn collect(window: HWND, list: LPARAM) -> i32 {
         // SAFETY: `list` is the `&mut Vec<isize>` that `top_level_windows`
@@ -1626,6 +1668,7 @@ mod tests {
     use uptake_core::sticky::{Anchor, Sticky};
 
     use super::set_on_resize_in;
+    use super::windows_top_down;
     use super::{Join, join_in, joins_of, reanchor_in, waiting_of};
     use super::{TITLE_UNITS, filled};
     use super::{WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, is_helper, paused_in};
@@ -3015,6 +3058,11 @@ mod tests {
                 "and the joins are made, with the taken window noted for the others",
             ),
             (
+                "fn window_under(bounds: Rect) -> Option<(isize, u32, Rect, f64)> {",
+                "windows_top_down()",
+                "the window under an area is found in the documented Z order",
+            ),
+            (
                 "pub(crate) fn can_stick(bounds: Rect) -> bool {",
                 "window_under(bounds).is_some()",
                 "the menu greys its row out by asking for the window sticking would take",
@@ -3417,6 +3465,33 @@ mod tests {
         assert_eq!(first_under(over_a_window, inside, OWN), Some(2));
     }
 
+    /// The documented Z order on a real desktop: the walk ends, lists no
+    /// window twice, and finds the windows `EnumWindows` finds. Its ORDER is
+    /// not asserted. The always-on-top flag was tried as a check and is not
+    /// one: on the desktop this was written on, both lists put one visible
+    /// window with that flag below ordinary ones. Run it by name, with
+    /// `--ignored --exact`: it needs a desktop session.
+    #[test]
+    #[ignore = "needs a desktop session: it reads this desktop's real Z order"]
+    fn the_walk_ends_and_finds_the_windows_the_snapshot_finds() {
+        let walked = windows_top_down();
+        assert!(!walked.is_empty(), "a desktop session has windows");
+        assert!(
+            walked.len() < super::Z_ORDER_LIMIT,
+            "the walk hit its bound"
+        );
+        let unique: HashSet<isize> = walked.iter().copied().collect();
+        assert_eq!(unique.len(), walked.len(), "a window is listed twice");
+        // Windows come and go between two calls, so most and not all.
+        let snapshot: HashSet<isize> = super::top_level_windows().into_iter().collect();
+        let shared = unique.intersection(&snapshot).count();
+        assert!(
+            shared * 10 >= snapshot.len() * 9,
+            "the walk found {shared} of the snapshot's {} windows",
+            snapshot.len()
+        );
+    }
+
     /// What the menu pays to ask whether there is a window to stick to. The
     /// menu opens inside the mouse hook, and Windows drops a hook whose
     /// callback overruns its timeout (300 ms unless the registry says
@@ -3431,7 +3506,7 @@ mod tests {
         let mut count = 0;
         for _ in 0..20 {
             let start = Instant::now();
-            count = super::top_level_windows()
+            count = super::windows_top_down()
                 .into_iter()
                 .map(super::describe)
                 .count();
