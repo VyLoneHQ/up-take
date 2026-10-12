@@ -1341,6 +1341,15 @@ fn write(store: &mut AreaStore, changes: &[Change], monitors: &[Rect]) -> (bool,
 ///
 /// An area that has gone out of sight since it moved re-takes nothing: the
 /// wait before a re-take is long enough for its window to be minimised in.
+///
+/// An area that was FREED since it moved is re-taken all the same, and that
+/// is meant. It is drawn, and it is somewhere new, exactly as after a move by
+/// hand: skipping it would leave an Upscale area showing what was under its
+/// old place. "Only an area that follows its window is sent to re-take" is
+/// said of [`write`], at the moment the follower decides a move; it is not a
+/// second condition here. The eighth review read the two as one rule. An
+/// area that was removed since it moved has nothing to re-take: both calls
+/// below do nothing for an id the store no longer has.
 fn app_settle(id: AreaId) {
     if let Some(app) = APP.get() {
         if overlay::area_waits_out_of_sight(app, id) {
