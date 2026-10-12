@@ -2603,6 +2603,12 @@ pub fn overlay_dismiss_focused(app: AppHandle) -> Result<(), String> {
 
 /// The area under the cursor, the one a key like `Delete` acts on.
 ///
+/// While the user places areas that is any area, a paused one too: placing
+/// mode is where a paused area is drawn so that it can be removed. Outside
+/// placing mode it is an area in sight only (roadmap `1.47`). The overlay can
+/// still hold the keyboard there, and `Delete` over a spot where a hidden
+/// area waits would remove something the user cannot see.
+///
 /// Read from the window rather than from the placement hook's last reported
 /// position: the hook only reports while it is installed, so a key pressed
 /// before the mouse has moved since entering Placement would act on a stale
@@ -2616,7 +2622,12 @@ fn area_under_cursor(app: &AppHandle) -> Result<Option<AreaSummary>, String> {
     let Some(point) = Point::from_physical_f64(position.x, position.y) else {
         return Ok(None);
     };
-    Ok(area_at(app, point))
+    if placement::is_placing() {
+        return Ok(area_at(app, point));
+    }
+    let store = app.state::<Mutex<AreaStore>>();
+    let guard = lock(&store);
+    Ok(guard.hit_test_in_sight(point).map(AreaSummary::of))
 }
 
 /// IPC surface and hook route for `Ctrl+C` in Placement (roadmap `1.41`).

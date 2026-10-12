@@ -1400,9 +1400,20 @@ impl AreaStore {
         // The topmost area in sight, and not `hit_test_any`: that one is the
         // Placement question and finds an area that waits out of sight, which
         // would then stand between the chord and the area the user sees.
+        self.hit_test_in_sight(point).filter(|area| !body(area))
+    }
+
+    /// The topmost area containing `point` among the areas in sight, whatever
+    /// its [`Input`]: what the user is pointing at while they work.
+    ///
+    /// [`AreaStore::hit_test_any`] with the areas that wait out of sight left
+    /// out. A key that acts on "the area under the cursor" asks this outside
+    /// Placement, so that `Delete` cannot remove an area that is not drawn,
+    /// and reaches the area the user sees beneath one.
+    #[must_use]
+    pub fn hit_test_in_sight(&self, point: Point) -> Option<&Area> {
         self.iter_in_sight()
             .find(|area| area.bounds.contains(point))
-            .filter(|area| !body(area))
     }
 
     /// The topmost area containing `point`, **whatever its [`Input`]** — the
@@ -2682,6 +2693,11 @@ mod tests {
         assert_eq!(store.grab_test(inside, &screens()).unwrap().0.id, under);
         assert_eq!(store.hover_test(inside, &screens()).unwrap().id, under);
         assert_eq!(
+            store.hit_test_in_sight(inside).unwrap().id,
+            under,
+            "a key acts on the area the user sees"
+        );
+        assert_eq!(
             store.interactive_regions(&screens()).len(),
             1,
             "one area takes input, not two"
@@ -2708,6 +2724,10 @@ mod tests {
         assert!(store.hit_test(inside, &screens()).is_none());
         assert!(store.grab_test(inside, &screens()).is_none());
         assert!(store.hover_test(inside, &screens()).is_none());
+        assert!(
+            store.hit_test_in_sight(inside).is_none(),
+            "and on nothing where only a hidden area is"
+        );
         assert!(store.interactive_regions(&screens()).is_empty());
 
         // Following again, it is in sight again. So is a free area.

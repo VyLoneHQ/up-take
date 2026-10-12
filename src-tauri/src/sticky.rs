@@ -2722,6 +2722,15 @@ mod tests {
             body(&overlay, "pub(crate) fn area_reads_in_place(").contains("area.text_is_live()"),
             "no gesture on text reaches an area that waits out of sight"
         );
+        let under_cursor = body(
+            &overlay,
+            "fn area_under_cursor(app: &AppHandle) -> Result<Option<AreaSummary>, String> {",
+        );
+        assert!(
+            under_cursor.contains("if placement::is_placing() {")
+                && under_cursor.contains("guard.hit_test_in_sight(point).map(AreaSummary::of)"),
+            "outside placing mode a key acts only on an area that is drawn"
+        );
 
         let this = production(include_str!("sticky.rs"));
         for (signature, line, why) in [
