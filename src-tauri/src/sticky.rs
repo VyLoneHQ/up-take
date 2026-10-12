@@ -697,14 +697,40 @@ fn owner_of(window: isize) -> u32 {
     pid
 }
 
-/// The window's title, as it is now. Empty if it has none.
+/// The longest title that is read whole, in UTF-16 units. A title longer than
+/// this is cut here, and two such titles that agree up to the cut are taken
+/// for the same one.
+const TITLE_UNITS: usize = 32_768;
+
+/// Whether a title of `length` units filled a buffer of `capacity`, which is
+/// what a title that was cut looks like: Windows writes at most one unit
+/// less than the buffer holds and does not say that there was more.
+fn filled(length: i32, capacity: usize) -> bool {
+    usize::try_from(length).is_ok_and(|length| length + 1 >= capacity)
+}
+
+/// The window's title, as it is now, whole. Empty if it has none.
+///
+/// A window is recognised again by its title, so a title cut short would
+/// make two windows the same that are not. The eleventh review found the
+/// first version reading at most 511 units. This reads again into a larger
+/// buffer for as long as the title fills the one it was given, up to
+/// [`TITLE_UNITS`].
 fn title_of(window: isize) -> Kept {
-    let mut buffer = [0u16; 512];
-    // SAFETY: the buffer is 512 units long and the call is told so. For a
-    // window of another process this reads the title Windows holds and does
-    // not send that program a message, so a hung program cannot hang us.
-    let length = unsafe { GetWindowTextW(window as HWND, buffer.as_mut_ptr(), 512) };
-    Kept::from(text_of(&buffer, length))
+    let mut capacity = 512usize;
+    loop {
+        let mut buffer = vec![0u16; capacity];
+        let told = i32::try_from(capacity).unwrap_or(i32::MAX);
+        // SAFETY: the buffer is `capacity` units long and the call is told
+        // so. For a window of another process this reads the title Windows
+        // holds and does not send that program a message, so a hung program
+        // cannot hang us.
+        let length = unsafe { GetWindowTextW(window as HWND, buffer.as_mut_ptr(), told) };
+        if !filled(length, capacity) || capacity >= TITLE_UNITS {
+            return Kept::from(text_of(&buffer, length));
+        }
+        capacity *= 8;
+    }
 }
 
 fn class_of(window: isize) -> String {
@@ -1601,6 +1627,7 @@ mod tests {
 
     use super::set_on_resize_in;
     use super::{Join, join_in, joins_of, reanchor_in, waiting_of};
+    use super::{TITLE_UNITS, filled};
     use super::{WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, is_helper, paused_in};
     use std::collections::HashSet;
     use std::sync::Mutex;
@@ -2782,6 +2809,10 @@ mod tests {
 
         let title = body(&code, "fn title_of(window: isize) -> Kept {");
         assert!(title.contains("Kept::from(text_of(&buffer, length))"));
+        assert!(
+            title.contains("if !filled(length, capacity) || capacity >= TITLE_UNITS {"),
+            "a title that was cut is read again, or two long titles are one"
+        );
         let program = body(&code, "fn program_of(pid: u32) -> Option<Kept> {");
         assert!(program.contains("Some(Kept::from(String::from_utf16_lossy(&buffer[..length])))"));
         for (name, text) in [("title_of", title), ("program_of", program)] {
@@ -3312,6 +3343,21 @@ mod tests {
         if unknown != first && unknown != second {
             assert!(!set_on_resize_in(&links, unknown, OnResize::TopLeft));
         }
+    }
+
+    #[test]
+    fn a_title_that_fills_its_buffer_is_read_again_into_a_larger_one() {
+        // Windows writes at most one unit less than the buffer holds.
+        assert!(filled(511, 512), "cut: read again");
+        assert!(!filled(510, 512), "whole");
+        assert!(!filled(0, 512), "no title");
+        assert!(!filled(-1, 512), "a failed call is not a long title");
+        // 512, 4096, 32768: the third buffer is the last one.
+        let steps: Vec<usize> =
+            std::iter::successors(Some(512usize), |capacity| Some(capacity * 8))
+                .take_while(|capacity| *capacity <= TITLE_UNITS)
+                .collect();
+        assert_eq!(steps, vec![512, 4096, 32_768]);
     }
 
     #[test]

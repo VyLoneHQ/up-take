@@ -619,6 +619,33 @@ describe('an area renders the badges its state earns and no others', () => {
     ).toBe(false);
   });
 
+  /**
+   * Review round 11 read `area.source` as "has captured pixels" and concluded
+   * that a paused Screenshot or Upscale area kept showing its still. `source`
+   * is the dragged-area flag. The still is an `<img>` inside the area's own
+   * element, so it goes with it. Asserted, so that this is a fact and not a
+   * reading: a paused area holding a still draws nothing of it in living.
+   */
+  test('a paused area that holds a still draws no still in living', async () => {
+    const { container } = await mount();
+    await emit('overlay://state', state({ state: 'living' }));
+    await emit('overlay://areas', {
+      areas: [area({ kind: 'screenshot', sticky: 'following' })],
+    });
+    await emit('overlay://pin', { id: 1, url: 'uptake-area://1-7.png' });
+    expect(container.querySelectorAll('.pin')).toHaveLength(1);
+
+    await emit('overlay://areas', {
+      areas: [area({ kind: 'screenshot', sticky: 'paused' })],
+    });
+    expect(container.querySelectorAll('.pin')).toHaveLength(0);
+    expect(container.querySelectorAll('.area')).toHaveLength(0);
+
+    // Back in placement it is drawn again, still and all.
+    await emit('overlay://state', state());
+    expect(container.querySelectorAll('.pin')).toHaveLength(1);
+  });
+
   test('the sticky mark moves over when the area also shows a tier arrow', async () => {
     const { container } = await mount();
     await emit('overlay://state', state());
