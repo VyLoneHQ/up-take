@@ -591,6 +591,34 @@ describe('an area renders the badges its state earns and no others', () => {
     expect(paused?.classList.contains('paused')).toBe(true);
   });
 
+  /**
+   * Decided at the rig on 2026-10-12: a paused area is out of sight while the
+   * user works. In placement it is drawn, dimmed, so it can be freed, moved or
+   * removed. A following area is drawn in both states and is never dimmed.
+   */
+  test('a paused area is drawn dimmed in placement and not at all in living', async () => {
+    const { container } = await mount();
+    await emit('overlay://state', state());
+    await emit('overlay://areas', { areas: [area({ sticky: 'paused' })] });
+    const waiting = container.querySelectorAll('.area');
+    expect(waiting).toHaveLength(1);
+    expect(waiting[0]?.classList.contains('waiting')).toBe(true);
+
+    await emit('overlay://state', state({ state: 'living' }));
+    expect(container.querySelectorAll('.area')).toHaveLength(0);
+    expect(container.querySelectorAll('.sticky-badge')).toHaveLength(0);
+
+    await emit('overlay://areas', { areas: [area({ sticky: 'following' })] });
+    const following = container.querySelectorAll('.area');
+    expect(following).toHaveLength(1);
+    expect(following[0]?.classList.contains('waiting')).toBe(false);
+
+    await emit('overlay://state', state());
+    expect(
+      container.querySelector('.area')?.classList.contains('waiting'),
+    ).toBe(false);
+  });
+
   test('the sticky mark moves over when the area also shows a tier arrow', async () => {
     const { container } = await mount();
     await emit('overlay://state', state());

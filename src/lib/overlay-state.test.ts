@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   type AreaView,
   areaFramesCss,
+  areaInSight,
   armAreaType,
   armedTypeForKey,
   dismissFocusedArea,
@@ -189,6 +190,23 @@ describe('areaFramesCss', () => {
     // sitting where its window used to be with nothing to say why.
     const frames = areaFramesCss(areas, [-1080, -1080], 2, null);
     expect(frames?.map((frame) => frame.sticky)).toEqual(['free', 'paused']);
+  });
+
+  it('draws a paused area in placement and nowhere else', () => {
+    // Roadmap 1.47, decided 2026-10-12: an area whose window is minimised or
+    // closed is out of sight while the user works. Every other pairing is
+    // drawn. Asserted as the whole table, so that hiding a following area, or
+    // drawing a paused one in living, both fail here.
+    const drawn = (['free', 'following', 'paused'] as const).map((sticky) =>
+      (['placement', 'living', 'hidden'] as const).map((state) =>
+        areaInSight(sticky, state),
+      ),
+    );
+    expect(drawn).toEqual([
+      [true, true, true],
+      [true, true, true],
+      [true, false, false],
+    ]);
   });
 
   it('carries each area type through to the frame', () => {

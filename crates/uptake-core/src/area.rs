@@ -738,6 +738,21 @@ impl Area {
         self.is_interactive() && (holds_text || !self.reads_in_place())
     }
 
+    /// True when the area is out of sight while the user works: a sticky area
+    /// whose window is minimised, hidden or closed (roadmap `1.47`, the
+    /// maintainer's decision of 2026-10-12).
+    ///
+    /// Such an area is not drawn in Living and takes no part in any Living
+    /// question: no press, no grab, no chord, no hover and no input region. It
+    /// comes back by itself when its window does. In Placement it is drawn,
+    /// dimmed and marked paused, and every Placement question still finds it
+    /// ([`AreaStore::hit_test_any`]), so it can be freed, moved or removed
+    /// while its window is away.
+    #[must_use]
+    pub fn waits_out_of_sight(self) -> bool {
+        self.sticky == Sticky::Paused
+    }
+
     /// True for an OCR area that shows what it read over the screen, in place,
     /// rather than in a panel of its own (ADR-0046). The one condition every
     /// selection gesture and every in-place mark needs.
@@ -1276,7 +1291,7 @@ impl AreaStore {
         monitors: &[Rect],
         body: impl Fn(&Area) -> bool,
     ) -> Option<&Area> {
-        self.iter_top_down().find(|area| {
+        self.iter_in_sight().find(|area| {
             if body(area) {
                 area.bounds.contains(point)
             } else {
@@ -1314,7 +1329,7 @@ impl AreaStore {
         monitors: &[Rect],
         body: impl Fn(&Area) -> bool,
     ) -> Option<(&Area, interaction::Handle)> {
-        self.iter_top_down().find_map(|area| {
+        self.iter_in_sight().find_map(|area| {
             let handle = interaction::handle_at(area.bounds, point, monitors)?;
             (body(area) || !matches!(handle, interaction::Handle::Body)).then_some((area, handle))
         })
@@ -1366,7 +1381,12 @@ impl AreaStore {
         point: Point,
         body: impl Fn(&Area) -> bool,
     ) -> Option<&Area> {
-        self.hit_test_any(point).filter(|area| !body(area))
+        // The topmost area in sight, and not `hit_test_any`: that one is the
+        // Placement question and finds an area that waits out of sight, which
+        // would then stand between the chord and the area the user sees.
+        self.iter_in_sight()
+            .find(|area| area.bounds.contains(point))
+            .filter(|area| !body(area))
     }
 
     /// The topmost area containing `point`, **whatever its [`Input`]** — the
@@ -1418,7 +1438,7 @@ impl AreaStore {
     /// still belongs to the application underneath.
     #[must_use]
     pub fn hover_test(&self, point: Point, monitors: &[Rect]) -> Option<&Area> {
-        self.iter_top_down().find(|area| {
+        self.iter_in_sight().find(|area| {
             area.bounds.contains(point)
                 || interaction::close_control(area.bounds, monitors).contains(point)
         })
@@ -1463,7 +1483,7 @@ impl AreaStore {
         monitors: &[Rect],
         body: impl Fn(&Area) -> bool,
     ) -> Vec<Rect> {
-        self.iter_top_down()
+        self.iter_in_sight()
             .flat_map(|area| {
                 if body(area) {
                     vec![area.bounds]
@@ -1491,6 +1511,16 @@ impl AreaStore {
     /// Every area, topmost first. This is hit-test order, tiers included.
     pub fn iter_top_down(&self) -> impl Iterator<Item = &Area> {
         self.areas.iter().rev()
+    }
+
+    /// Every area the user can see while they work, topmost first: all of
+    /// them but the ones that wait out of sight
+    /// ([`Area::waits_out_of_sight`]). **Every Living question walks this**
+    /// and not [`AreaStore::iter_top_down`], so an area that is not drawn can
+    /// never take a press, show chrome or stand in front of one that is.
+    fn iter_in_sight(&self) -> impl Iterator<Item = &Area> {
+        self.iter_top_down()
+            .filter(|area| !area.waits_out_of_sight())
     }
 
     /// How many areas exist.
@@ -2591,6 +2621,63 @@ mod tests {
         let gone = ids[1];
         assert!(store.remove(gone).is_some());
         assert!(!store.set_sticky(gone, Sticky::Following), "unknown id");
+    }
+
+    #[test]
+    fn an_area_that_waits_out_of_sight_answers_no_living_question() {
+        // Roadmap 1.47, decided 2026-10-12: a sticky area whose window is
+        // minimised or closed is hidden while the user works. Two areas, the
+        // paused one on top. Every Living question must answer as if it were
+        // not there, and the Placement question must still find it.
+        let (mut store, ids) = store_with(&[AreaType::Default, AreaType::Default]);
+        let (under, over) = (ids[0], ids[1]);
+        let inside = Point::new(50, 50);
+        let everything = |area: &Area| area.is_interactive();
+        assert_eq!(store.hit_test_any(inside).unwrap().id, over);
+        assert_eq!(store.hit_test(inside, &screens()).unwrap().id, over);
+
+        assert!(store.set_sticky(over, Sticky::Paused));
+        assert!(store.get(over).unwrap().waits_out_of_sight());
+        assert_eq!(
+            store.hit_test(inside, &screens()).unwrap().id,
+            under,
+            "a press goes to the area the user sees"
+        );
+        assert_eq!(store.grab_test(inside, &screens()).unwrap().0.id, under);
+        assert_eq!(store.hover_test(inside, &screens()).unwrap().id, under);
+        assert_eq!(
+            store.interactive_regions(&screens()).len(),
+            1,
+            "one area takes input, not two"
+        );
+        assert_eq!(
+            store.hit_test_any(inside).unwrap().id,
+            over,
+            "Placement still reaches it, to free, move or remove it"
+        );
+
+        // The chord reaches a pass-through body. A hidden area on top of one
+        // must not stand in its way, and must not answer for itself either.
+        assert!(store.set_input(under, Input::PassThrough));
+        assert_eq!(
+            store.chord_move_test_with(inside, everything).unwrap().id,
+            under
+        );
+        assert!(store.set_input(over, Input::PassThrough));
+        assert!(store.remove(under).is_some());
+        assert!(
+            store.chord_move_test_with(inside, everything).is_none(),
+            "the chord does not grab an area that is not drawn"
+        );
+        assert!(store.hit_test(inside, &screens()).is_none());
+        assert!(store.grab_test(inside, &screens()).is_none());
+        assert!(store.hover_test(inside, &screens()).is_none());
+        assert!(store.interactive_regions(&screens()).is_empty());
+
+        // Following again, it is in sight again. So is a free area.
+        assert!(store.set_sticky(over, Sticky::Following));
+        assert!(!store.get(over).unwrap().waits_out_of_sight());
+        assert_eq!(store.hover_test(inside, &screens()).unwrap().id, over);
     }
 
     #[test]

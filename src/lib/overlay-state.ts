@@ -90,9 +90,25 @@ export type LayerName = 'front' | 'auto' | 'back';
  * Whether an area follows a window (roadmap 1.47). `free` is anchored to the
  * screen, as every new area is. `following` moves with its window. `paused`
  * is anchored to a window that is minimised, hidden or closed: the area waits
- * where it was and follows again when the window is back.
+ * where it was, out of sight unless the user is placing areas (see
+ * {@link areaInSight}), and follows again when the window is back.
  */
 export type StickyState = 'free' | 'following' | 'paused';
+
+/**
+ * Whether an area is drawn at all in this overlay state (roadmap 1.47, the
+ * maintainer's decision of 2026-10-12). A paused area's window is minimised,
+ * hidden or closed, so while the user works the area is out of sight. It is
+ * drawn only in placement, where it can be freed, moved or removed. Rust
+ * holds the same rule for input (`Area::waits_out_of_sight`): an area this
+ * hides takes no press either.
+ */
+export function areaInSight(
+  sticky: StickyState,
+  state: OverlayStateName,
+): boolean {
+  return sticky !== 'paused' || state === 'placement';
+}
 
 /**
  * Every area type on the wire, matching `type_name` in `overlay.rs`.

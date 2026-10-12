@@ -19,6 +19,7 @@ import {
   type AreaView,
   type ArmableType,
   areaFramesCss,
+  areaInSight,
   armAreaType,
   armedTypeForKey,
   type CoachPayload,
@@ -651,9 +652,10 @@ onMount(() => {
 
   {#if overlayState !== 'hidden'}
     {#each areaFrames as area (area.id)}
-      {#if !area.source}
+      {#if !area.source && areaInSight(area.sticky, overlayState)}
         <div
           class="area"
+          class:waiting={area.sticky === 'paused'}
           class:hovered={area.hovered}
           class:pinned={area.layer !== 'auto'}
           class:filter={area.kind === 'filter'}
@@ -808,7 +810,8 @@ onMount(() => {
           <!-- A sticky area (roadmap 1.47) carries a small mark, so an area
                that will move with its window can be told from one that will
                not. Paused is said in words: the area has stopped following,
-               and a mark alone would not say why it sits where it does. -->
+               and a mark alone would not say why it sits where it does. A
+               paused area is drawn in placement only (`areaInSight`). -->
           {#if area.sticky === 'following' || area.sticky === 'paused'}
             <span
               class="sticky-badge"
@@ -1077,6 +1080,12 @@ onMount(() => {
   font: 11px/1 system-ui, sans-serif;
   color: rgba(160, 210, 255, 0.95);
   text-shadow: 0 0 3px rgba(0, 0, 0, 0.8);
+}
+
+/* A paused area, which is drawn in placement only: its window is away, so it
+   is dimmed to say it is waiting and not showing anything live. */
+.area.waiting {
+  opacity: 0.45;
 }
 
 /* The sticky mark sits where the depth mark does, and one place to the right

@@ -54,8 +54,11 @@ pub enum Sticky {
     /// Anchored to a window that is on screen. The area moves with it.
     Following,
     /// Anchored to a window that cannot be followed right now: it is
-    /// minimised, hidden, or closed. The area waits where it was and is shown
-    /// as paused. It follows again by itself when the window comes back.
+    /// minimised, hidden, or closed. The area waits where it was. While the
+    /// user works it is out of sight; while they place areas it is drawn,
+    /// dimmed and marked paused, so it can be freed, moved or removed
+    /// ([`Area::waits_out_of_sight`](crate::area::Area::waits_out_of_sight)).
+    /// It follows again by itself when the window comes back.
     Paused,
 }
 

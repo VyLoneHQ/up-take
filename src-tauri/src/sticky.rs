@@ -41,10 +41,21 @@
 //! # When the window cannot be followed
 //!
 //! A minimised, hidden or cloaked window pauses the area: it waits where it
-//! was, shown as paused, and follows again when the window is back. A closed
-//! window pauses it too, and once a second [`reattach`] looks for a window of
-//! the same program with the same title and joins the area to that one (the
-//! founder's decision of 2026-10-09). His word was that such a window
+//! was and follows again when the window is back. A closed window pauses it
+//! too, and once a second [`reattach`] looks for a window of the same program
+//! with the same title and joins the area to that one (the founder's decision
+//! of 2026-10-09).
+//!
+//! A paused area is out of sight while the user works, and drawn dimmed and
+//! marked paused while they place areas, where it can be freed, moved or
+//! removed. That is his decision of 2026-10-12, at the rig, and it replaced
+//! "shown as paused" everywhere: an area sitting over the desktop where its
+//! window used to be was in the way. The area store holds the rule
+//! (`Area::waits_out_of_sight`), so no Living question finds such an area,
+//! and [`app_place`] drops the text selection of an area as it pauses, so a
+//! hidden selection cannot keep the copy key.
+//!
+//! About re-attaching, his word was that such a window
 //! "appears", so a window that was already open when the followed one closed
 //! is not taken: two windows of one program can share a title, and the area
 //! was on one of them, not on the other.
@@ -116,7 +127,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GetClassNameW, GetMessageW, GetWindowLongW, GetWindowRect, GetWindowTextW,
     GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, KillTimer, MSG, OBJID_WINDOW,
     PM_NOREMOVE, PM_REMOVE, PeekMessageW, PostThreadMessageW, SetTimer, WINEVENT_OUTOFCONTEXT,
-    WM_APP, WM_TIMER, WM_USER, WS_EX_TRANSPARENT,
+    WM_APP, WM_TIMER, WM_USER, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TRANSPARENT,
 };
 
 use crate::overlay;
@@ -287,7 +299,7 @@ enum Seen {
 /// its rectangle if the window can be followed.
 ///
 /// A window that cannot be followed moves nothing. The area waits where it
-/// was, which is the founder's "waits, shown as paused".
+/// was, out of sight while the user works (see the module's second section).
 fn plan(anchor: Anchor, scale: f64, seen: Seen) -> (Sticky, Option<Rect>) {
     match seen {
         Seen::At { rect, scale: now } => (Sticky::Following, Some(anchor.place(rect, now / scale))),
@@ -511,6 +523,16 @@ struct Candidate {
     /// programs' overlays are like this, cover whole monitors, and are never
     /// what the user means by "the window under the area".
     click_through: bool,
+    /// A helper window of its program and not one the user works in: a tool
+    /// window that does not ask for a taskbar button (`WS_EX_TOOLWINDOW`
+    /// without `WS_EX_APPWINDOW`), or a window that can never be made the
+    /// active one (`WS_EX_NOACTIVATE`). Overlays that take the mouse, desktop
+    /// widgets and floating palettes are like this. Found at the maintainer's
+    /// desk on 2026-10-12: a graphics driver's overlay kept an invisible
+    /// window of this kind over a whole monitor, it was not click-through, and
+    /// every area on that monitor stuck to it. The menu row was live over the
+    /// bare desktop and the area then followed a window that never moves.
+    helper: bool,
     class: String,
 }
 
@@ -529,6 +551,7 @@ impl Candidate {
     fn can_be_followed(&self, own_pid: u32) -> bool {
         self.on_screen
             && !self.click_through
+            && !self.helper
             && self.pid != own_pid
             && !SHELL_CLASSES.contains(&self.class.as_str())
     }
@@ -544,7 +567,7 @@ fn describe(window: isize) -> Candidate {
     // SAFETY: `GetWindowLongW` takes a handle and an index and returns a value.
     // A handle that has gone stale makes it return 0, which reads as "not
     // click-through", and `see` below then reports the window as gone.
-    let style = unsafe { GetWindowLongW(handle, GWL_EXSTYLE) };
+    let style = unsafe { GetWindowLongW(handle, GWL_EXSTYLE) }.cast_unsigned();
     let pid = owner_of(window);
     let seen = see(window, pid);
     Candidate {
@@ -554,9 +577,17 @@ fn describe(window: isize) -> Candidate {
             Seen::Hidden | Seen::Gone => Rect::new(0, 0, 0, 0),
         },
         on_screen: matches!(seen, Seen::At { .. }),
-        click_through: style.cast_unsigned() & WS_EX_TRANSPARENT != 0,
+        click_through: style & WS_EX_TRANSPARENT != 0,
+        helper: is_helper(style),
         class: class_of(window),
     }
+}
+
+/// Whether a window with this extended style is a helper of its program. See
+/// [`Candidate::helper`].
+const fn is_helper(style: u32) -> bool {
+    let tool = style & WS_EX_TOOLWINDOW != 0 && style & WS_EX_APPWINDOW == 0;
+    tool || style & WS_EX_NOACTIVATE != 0
 }
 
 /// Every top-level window, topmost first. `EnumWindows` walks them in that
@@ -1157,9 +1188,19 @@ fn app_place(changes: &[Change]) -> Vec<AreaId> {
         write(&mut lock(&store), changes, &overlay::monitor_rects())
     };
     if changed || !moved.is_empty() {
-        tell_the_page(app);
+        tell_the_page(app, paused_in(changes));
     }
     moved
+}
+
+/// The areas these decisions pause. Each goes out of sight, so each gives up
+/// its text selection: see [`tell_the_page`].
+fn paused_in(changes: &[Change]) -> Vec<AreaId> {
+    changes
+        .iter()
+        .filter(|(_, state, _)| *state == Sticky::Paused)
+        .map(|&(id, _, _)| id)
+        .collect()
 }
 
 /// Sends the page the area set, from the main thread.
@@ -1175,9 +1216,20 @@ fn app_place(changes: &[Change]) -> Vec<AreaId> {
 /// Running the send on the main thread puts it in the same line as every
 /// other one. The set is read when the closure runs and not when it is
 /// posted, so it is never older than a set already sent.
-fn tell_the_page(app: &AppHandle) {
+///
+/// `paused` are the areas that just went out of sight. An in-place OCR area
+/// among them may hold a text selection, and while any selection exists the
+/// keyboard hook takes the copy key. A selection nobody can see must not take
+/// it, so it is dropped here, on the same thread that makes and clears every
+/// other selection, and the page is told before it is sent the set.
+fn tell_the_page(app: &AppHandle, paused: Vec<AreaId>) {
     let on_main = app.clone();
     let posted = app.run_on_main_thread(move || {
+        for id in paused {
+            if crate::ocr::clear_selection(id) {
+                overlay::emit_ocr_selection(&on_main, id, None);
+            }
+        }
         if let Err(error) = overlay::emit_areas(&on_main) {
             crate::diagnostics::trouble(
                 "sticky: an area followed its window and the page was not told",
@@ -1444,6 +1496,7 @@ mod tests {
     use uptake_core::sticky::{Anchor, Sticky};
 
     use super::{Join, join_in, joins_of, reanchor_in, waiting_of};
+    use super::{WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, is_helper, paused_in};
     use std::collections::HashSet;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1825,6 +1878,7 @@ mod tests {
             rect: WINDOW,
             on_screen: true,
             click_through: false,
+            helper: false,
             class: class.to_owned(),
         }
     }
@@ -1898,6 +1952,11 @@ mod tests {
             ..window("SomeOverlay")
         };
         assert!(!overlay.is_under(inside, OWN), "another program's overlay");
+        let helper = Candidate {
+            helper: true,
+            ..window("SomeWidget")
+        };
+        assert!(!helper.is_under(inside, OWN), "another program's helper");
         let ours = Candidate {
             pid: OWN,
             ..window("UP-TAKE")
@@ -2562,18 +2621,38 @@ mod tests {
             ),
             (
                 "fn app_place(changes: &[Change]) -> Vec<AreaId> {",
-                "tell_the_page(app);",
+                "tell_the_page(app, paused_in(changes));",
                 "the page is told, or the store moves and the screen does not",
             ),
             (
-                "fn tell_the_page(app: &AppHandle) {",
+                "fn tell_the_page(app: &AppHandle, paused: Vec<AreaId>) {",
                 "app.run_on_main_thread(move || {",
                 "the set is sent from the main thread, in line with every other one",
             ),
             (
-                "fn tell_the_page(app: &AppHandle) {",
+                "fn tell_the_page(app: &AppHandle, paused: Vec<AreaId>) {",
                 "overlay::emit_areas(&on_main)",
                 "and it is sent at all",
+            ),
+            (
+                "fn tell_the_page(app: &AppHandle, paused: Vec<AreaId>) {",
+                "if crate::ocr::clear_selection(id) {",
+                "an area that goes out of sight gives up its selection, or it keeps the copy key",
+            ),
+            (
+                "fn tell_the_page(app: &AppHandle, paused: Vec<AreaId>) {",
+                "overlay::emit_ocr_selection(&on_main, id, None);",
+                "and the page is told the selection is gone",
+            ),
+            (
+                "fn can_be_followed(&self, own_pid: u32) -> bool {",
+                "&& !self.helper",
+                "a helper window is never the window under the area",
+            ),
+            (
+                "fn describe(window: isize) -> Candidate {",
+                "helper: is_helper(style),",
+                "and a real window's own style is what says it is one",
             ),
             (
                 "fn app_settle(id: AreaId) {",
@@ -2896,6 +2975,63 @@ mod tests {
         let bare = vec![(5, window("Progman"))];
         assert_eq!(first_under(bare, inside, OWN), None);
         assert_eq!(first_under(windows, Point::new(-50, -50), OWN), None);
+    }
+
+    #[test]
+    fn the_areas_that_pause_are_the_ones_that_give_up_their_selection() {
+        let mut store = AreaStore::new();
+        let ids: Vec<AreaId> = (0..3)
+            .map(|_| {
+                let Some(id) = store.create(AreaType::Default, Rect::new(0, 0, 50, 50)) else {
+                    panic!("an area")
+                };
+                id
+            })
+            .collect();
+        let changes: Vec<Change> = vec![
+            (ids[0], Sticky::Following, Some(Rect::new(5, 5, 50, 50))),
+            (ids[1], Sticky::Paused, None),
+            (ids[2], Sticky::Paused, None),
+        ];
+        assert_eq!(paused_in(&changes), vec![ids[1], ids[2]]);
+        assert!(paused_in(&changes[..1]).is_empty());
+    }
+
+    #[test]
+    fn a_tool_window_or_one_that_cannot_be_activated_is_a_helper() {
+        // The three windows found over the maintainer's desktop on 2026-10-12,
+        // by their extended styles: a driver's overlay (layered, tool window,
+        // never activated), a desktop widget (layered, tool window), and an
+        // ordinary program window with none of those.
+        const LAYERED: u32 = 0x0008_0000;
+        assert!(is_helper(LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE));
+        assert!(is_helper(LAYERED | WS_EX_TOOLWINDOW));
+        assert!(is_helper(WS_EX_NOACTIVATE));
+        assert!(!is_helper(0));
+        assert!(!is_helper(LAYERED), "layered alone is an ordinary window");
+        // A tool window that asks for a taskbar button is one the user
+        // switches to, so it can be followed.
+        assert!(!is_helper(WS_EX_TOOLWINDOW | WS_EX_APPWINDOW));
+        assert!(
+            is_helper(WS_EX_TOOLWINDOW | WS_EX_APPWINDOW | WS_EX_NOACTIVATE),
+            "and still not if it can never be activated"
+        );
+    }
+
+    #[test]
+    fn a_helper_over_the_whole_monitor_leaves_the_desktop_bare() {
+        // What the menu asks before it greys its row: with only the desktop
+        // and a helper under the point, there is nothing to stick to. And a
+        // helper lying over a real window does not hide that window.
+        let inside = Point::new(500, 500);
+        let helper = Candidate {
+            helper: true,
+            ..window("SomeOverlay")
+        };
+        let bare = vec![(1, helper.clone()), (2, window("Progman"))];
+        assert_eq!(first_under(bare, inside, OWN), None);
+        let over_a_window = vec![(1, helper), (2, window("Editor")), (3, window("Progman"))];
+        assert_eq!(first_under(over_a_window, inside, OWN), Some(2));
     }
 
     /// What the menu pays to ask whether there is a window to stick to. The
