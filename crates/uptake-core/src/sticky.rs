@@ -11,9 +11,25 @@
 //!
 //! # The rule
 //!
-//! The founder's decision of 2026-10-09: when the window is resized, the area
-//! keeps its own size and its distance from the window's **nearest corner or
-//! edge**. Read per axis, that is one of three things:
+//! What an area does when its window is resized is the area's own choice, an
+//! [`OnResize`], and it has four answers:
+//!
+//! - [`OnResize::Scale`], the default. The area's edges keep their places as
+//!   shares of the window, so the area grows and shrinks with it.
+//! - [`OnResize::ScalePosition`]. The area's centre keeps its share of the
+//!   window, and the area keeps its own size.
+//! - [`OnResize::Corner`]. The area keeps its size and its distance from the
+//!   window's **nearest corner or edge**.
+//! - [`OnResize::TopLeft`]. The area keeps its size and its distance from the
+//!   window's top left corner.
+//!
+//! The founder chose nearest corner or edge on 2026-10-09, asked in words. On
+//! 2026-10-12 he tried all four on real windows at his desk and made scaling
+//! the default, with the other three kept as choices. Text in a window stays
+//! by its top left corner when the window grows, and a video or a game scales,
+//! so no one answer fits every program.
+//!
+//! Nearest corner or edge, read per axis, is one of three things:
 //!
 //! - the area sits in the first third of the window, so it keeps its distance
 //!   from the left (or top) edge;
@@ -70,6 +86,38 @@ impl Sticky {
     }
 }
 
+/// What a sticky area does when its window is resized. See the module's
+/// account of the rule for who chose the default and why there are four.
+///
+/// Moving the window is the same under all four: the area moves by as much.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnResize {
+    /// The area's edges keep their places as shares of the window, so the
+    /// area grows and shrinks with it.
+    #[default]
+    Scale,
+    /// The area's centre keeps its share of the window. The area keeps its
+    /// own size.
+    ScalePosition,
+    /// The area keeps its size and its distance from the window's nearest
+    /// corner or edge, by thirds.
+    Corner,
+    /// The area keeps its size and its distance from the window's top left
+    /// corner.
+    TopLeft,
+}
+
+impl OnResize {
+    /// Every answer, in the order the menu lists them: the default first.
+    pub const ALL: [Self; 4] = [
+        Self::Scale,
+        Self::ScalePosition,
+        Self::Corner,
+        Self::TopLeft,
+    ];
+}
+
 /// Which part of the window one axis of the area keeps its distance from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Side {
@@ -95,16 +143,21 @@ struct Axis {
 }
 
 /// Where an area sits on a window: the nearest corner or edge, the distance
-/// from it, and the area's own size.
+/// from it, the area's own size, and the two rectangles all of that was taken
+/// from, which the scaling answers work from.
 ///
 /// Take one with [`Anchor::of`] and ask it for the area's rectangle with
-/// [`Anchor::place`]. For the same window the answer is the rectangle the
-/// anchor was taken from, exactly.
+/// [`Anchor::place_by`]. For the same window the answer is the rectangle the
+/// anchor was taken from, exactly, whichever [`OnResize`] is asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Anchor {
     horizontal: Axis,
     vertical: Axis,
     size: Size,
+    /// The area when the anchor was taken.
+    area: Rect,
+    /// The window when the anchor was taken.
+    window: Rect,
 }
 
 /// A span along one axis: where it starts and how long it is.
@@ -206,6 +259,54 @@ impl Anchor {
                 offset: offset(sides.1, down.0, down.1),
             },
             size: area.size,
+            area,
+            window,
+        }
+    }
+
+    /// Where the area belongs on `window` as it is now, under `rule`.
+    ///
+    /// `factor` is what [`Anchor::place`] says it is. [`OnResize::Scale`] does
+    /// not use it: a window that moves to a monitor with another scale is
+    /// itself drawn larger or smaller, so shares of the window already carry
+    /// the whole of it. The other three scale the area's size by it.
+    ///
+    /// The area is never smaller than one pixel a side.
+    #[must_use]
+    pub fn place_by(self, rule: OnResize, window: Rect, factor: f64) -> Rect {
+        let across = (horizontal(self.area), horizontal(self.window));
+        let down = (vertical(self.area), vertical(self.window));
+        match rule {
+            OnResize::Corner => self.place(window, factor),
+            OnResize::TopLeft => {
+                let near = |(area, was): (Span, Span)| Axis {
+                    side: Side::Near,
+                    offset: offset(Side::Near, area, was),
+                };
+                Self {
+                    horizontal: near(across),
+                    vertical: near(down),
+                    ..self
+                }
+                .place(window, factor)
+            }
+            OnResize::ScalePosition => {
+                let factor = if factor.is_finite() && factor > 0.0 {
+                    factor
+                } else {
+                    1.0
+                };
+                let width = scale(i64::from(self.size.width), factor).max(1);
+                let height = scale(i64::from(self.size.height), factor).max(1);
+                let x = share_centre(across.0, across.1, horizontal(window), width);
+                let y = share_centre(down.0, down.1, vertical(window), height);
+                Rect::new(saturate(x), saturate(y), extent(width), extent(height))
+            }
+            OnResize::Scale => {
+                let (x, width) = share_span(across.0, across.1, horizontal(window));
+                let (y, height) = share_span(down.0, down.1, vertical(window));
+                Rect::new(saturate(x), saturate(y), extent(width), extent(height))
+            }
         }
     }
 
@@ -216,7 +317,8 @@ impl Anchor {
         (self.horizontal.side, self.vertical.side)
     }
 
-    /// Where the area belongs on `window` as it is now.
+    /// Where the area belongs on `window` as it is now, by its nearest corner
+    /// or edge: [`OnResize::Corner`].
     ///
     /// `factor` is how much larger the window's contents are drawn than when
     /// the anchor was taken: the window's scale now divided by its scale then.
@@ -251,6 +353,51 @@ fn start(axis: Axis, window: Span, length: i64, factor: f64) -> i64 {
         Side::Far => window.end() - distance - length,
         Side::Centre => (window.centre_doubled() + distance - length).div_euclid(2),
     }
+}
+
+/// `value * numerator / denominator`, rounded to the nearest whole number,
+/// for a denominator above zero. Exact when the two are equal, which is what
+/// puts an area back where it was when its window is. Held inside the range a
+/// position can be added to.
+fn share(value: i64, numerator: i64, denominator: i64) -> i64 {
+    let (value, numerator, denominator) = (
+        i128::from(value),
+        i128::from(numerator),
+        i128::from(denominator),
+    );
+    let rounded = (2 * value * numerator + denominator).div_euclid(2 * denominator);
+    i64::try_from(rounded.clamp(-SHARE_FAR, SHARE_FAR)).unwrap_or(0)
+}
+
+/// [`FAR`] as a whole number, for [`share`].
+const SHARE_FAR: i128 = 1_000_000_000_000;
+
+/// Where an area of `length` starts when its centre keeps its share of the
+/// window. A window that had no length has no shares, so the area keeps its
+/// distance from the near edge.
+fn share_centre(area: Span, was: Span, window: Span, length: i64) -> i64 {
+    if was.length <= 0 {
+        return window.start + (area.start - was.start);
+    }
+    let centre = share(
+        area.centre_doubled() - 2 * was.start,
+        window.length,
+        was.length,
+    );
+    (2 * window.start + centre - length).div_euclid(2)
+}
+
+/// The start and the length of an area whose two edges keep their shares of
+/// the window. Never shorter than one pixel. A window that had no length has
+/// no shares, so the area keeps its length and its distance from the near
+/// edge.
+fn share_span(area: Span, was: Span, window: Span) -> (i64, i64) {
+    if was.length <= 0 {
+        return (window.start + (area.start - was.start), area.length.max(1));
+    }
+    let start = window.start + share(area.start - was.start, window.length, was.length);
+    let end = window.start + share(area.end() - was.start, window.length, was.length);
+    (start, (end - start).max(1))
 }
 
 /// `value * factor`, rounded to the nearest whole pixel. Exact at `1.0`.
@@ -289,8 +436,81 @@ mod tests {
 
     use proptest::prelude::*;
 
-    use super::{Anchor, Side, Sticky};
+    use super::{Anchor, OnResize, Side, Sticky};
     use crate::geometry::Rect;
+
+    #[test]
+    fn an_area_scales_with_its_window_unless_it_is_told_otherwise() {
+        assert_eq!(OnResize::default(), OnResize::Scale);
+        assert_eq!(
+            OnResize::ALL[0],
+            OnResize::default(),
+            "the default is listed first"
+        );
+        let mut all = OnResize::ALL.to_vec();
+        all.dedup();
+        assert_eq!(all.len(), 4, "four different answers");
+    }
+
+    #[test]
+    fn each_answer_to_a_resize_places_the_area_its_own_way() {
+        // A 100 x 50 area, 300 in and 200 down, on a 900 x 600 window that
+        // becomes 1800 x 1200 with its top left corner where it was.
+        let area = Rect::new(400, 400, 100, 50);
+        let anchor = Anchor::of(area, WINDOW);
+        let doubled = Rect::new(100, 200, 1800, 1200);
+        // Both edges are twice as far in: twice as far, and twice as large.
+        assert_eq!(
+            anchor.place_by(OnResize::Scale, doubled, 1.0),
+            Rect::new(100 + 600, 200 + 400, 200, 100)
+        );
+        // The centre was 350 in and 225 down. It is now 700 and 450, and the
+        // area is the size it was.
+        assert_eq!(
+            anchor.place_by(OnResize::ScalePosition, doubled, 1.0),
+            Rect::new(100 + 700 - 50, 200 + 450 - 25, 100, 50)
+        );
+        // The top left corner did not move, so neither does the area.
+        assert_eq!(anchor.place_by(OnResize::TopLeft, doubled, 1.0), area);
+        // Nearest corner or edge is the rule every other test here is about.
+        assert_eq!(
+            anchor.place_by(OnResize::Corner, doubled, 1.0),
+            anchor.place(doubled, 1.0)
+        );
+    }
+
+    #[test]
+    fn a_window_shrunk_to_nothing_leaves_a_scaled_area_one_pixel_and_brings_it_back() {
+        let area = Rect::new(400, 400, 100, 50);
+        let anchor = Anchor::of(area, WINDOW);
+        let nothing = Rect::new(100, 200, 0, 0);
+        let placed = anchor.place_by(OnResize::Scale, nothing, 1.0);
+        assert_eq!(placed, Rect::new(100, 200, 1, 1));
+        assert_eq!(anchor.place_by(OnResize::Scale, WINDOW, 1.0), area);
+    }
+
+    #[test]
+    fn another_scale_sizes_the_area_under_every_answer_but_scaling_which_has_no_need() {
+        // 40 px in and 60 px down on a 100 % monitor, then the same window on
+        // a 150 % monitor, where Windows draws it half again as large.
+        let area = Rect::new(140, 260, 200, 80);
+        let anchor = Anchor::of(area, WINDOW);
+        let scaled_window = Rect::new(3000, 0, 1350, 900);
+        let on_it = Rect::new(3060, 90, 300, 120);
+        // Scaling takes it from the window's own size, whatever the factor.
+        assert_eq!(anchor.place_by(OnResize::Scale, scaled_window, 1.5), on_it);
+        assert_eq!(anchor.place_by(OnResize::Scale, scaled_window, 1.0), on_it);
+        // The others are told the factor, and land on the same content.
+        assert_eq!(
+            anchor.place_by(OnResize::TopLeft, scaled_window, 1.5),
+            on_it
+        );
+        assert_eq!(anchor.place_by(OnResize::Corner, scaled_window, 1.5), on_it);
+        assert_eq!(
+            anchor.place_by(OnResize::ScalePosition, scaled_window, 1.5),
+            on_it
+        );
+    }
 
     const WINDOW: Rect = Rect::new(100, 200, 900, 600);
 
@@ -511,6 +731,73 @@ mod tests {
         #[test]
         fn the_same_window_gives_the_same_area(area in area(), window in rect()) {
             prop_assert_eq!(Anchor::of(area, window).place(window, 1.0), area);
+        }
+
+        /// Under every answer the same window gives back the same area, a
+        /// moved window carries the area with it exactly, and no window
+        /// produces an empty area.
+        #[test]
+        fn every_answer_keeps_the_area_on_the_same_window_and_follows_a_move(
+            area in area(),
+            window in rect(),
+            later in rect(),
+            factor in 0.01f64..16.0,
+            dx in -5_000i32..5_000,
+            dy in -5_000i32..5_000,
+        ) {
+            let anchor = Anchor::of(area, window);
+            let moved = Rect::new(
+                window.origin.x + dx,
+                window.origin.y + dy,
+                window.size.width,
+                window.size.height,
+            );
+            let carried = Rect::new(
+                area.origin.x + dx,
+                area.origin.y + dy,
+                area.size.width,
+                area.size.height,
+            );
+            for rule in OnResize::ALL {
+                prop_assert_eq!(anchor.place_by(rule, window, 1.0), area, "{:?}", rule);
+                prop_assert_eq!(anchor.place_by(rule, moved, 1.0), carried, "{:?}", rule);
+                prop_assert!(
+                    !anchor.place_by(rule, later, factor).size.is_empty(),
+                    "{:?}",
+                    rule
+                );
+            }
+        }
+
+        /// A scaled area stays inside a window it was inside, and a window
+        /// resized and put back puts the area back.
+        #[test]
+        fn a_scaled_area_stays_inside_the_window_it_was_inside(
+            window in (-20_000i32..20_000, -20_000i32..20_000, 4u32..8_000, 4u32..8_000),
+            inset in (0u32..1_000, 0u32..1_000, 1u32..1_000, 1u32..1_000),
+            width in 1u32..8_000,
+            height in 1u32..8_000,
+        ) {
+            let window = Rect::new(window.0, window.1, window.2, window.3);
+            // An area inside the window: an inset from its corner, cut to fit.
+            let left = inset.0 % window.size.width;
+            let top = inset.1 % window.size.height;
+            let area = Rect::new(
+                window.origin.x + i32::try_from(left).unwrap(),
+                window.origin.y + i32::try_from(top).unwrap(),
+                inset.2.min(window.size.width - left),
+                inset.3.min(window.size.height - top),
+            );
+            let anchor = Anchor::of(area, window);
+            let resized = Rect::new(window.origin.x, window.origin.y, width, height);
+            let placed = anchor.place_by(OnResize::Scale, resized, 1.0);
+            prop_assert!(placed.origin.x >= resized.origin.x);
+            prop_assert!(placed.origin.y >= resized.origin.y);
+            // One pixel of grace: an area is never thinner than a pixel, even
+            // in a window resized to less than the area's share of it.
+            prop_assert!(placed.right() <= resized.right().max(i64::from(placed.origin.x) + 1));
+            prop_assert!(placed.bottom() <= resized.bottom().max(i64::from(placed.origin.y) + 1));
+            prop_assert_eq!(anchor.place_by(OnResize::Scale, window, 1.0), area);
         }
 
         /// Moving the window moves the area by exactly as much, whatever the

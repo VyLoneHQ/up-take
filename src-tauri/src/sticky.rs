@@ -107,7 +107,7 @@ use tauri::{AppHandle, Manager};
 use uptake_core::area::{AreaId, AreaStore};
 use uptake_core::geometry::{Point, Rect};
 use uptake_core::interaction;
-use uptake_core::sticky::{Anchor, Sticky};
+use uptake_core::sticky::{Anchor, OnResize, Sticky};
 
 use windows_sys::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT};
 use windows_sys::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmFlush, DwmGetWindowAttribute};
@@ -271,6 +271,9 @@ struct Link {
     program: Option<Kept>,
     title: Kept,
     anchor: Anchor,
+    /// What the area does when the window is resized. Chosen per area from
+    /// its menu, and scaling with the window until it is.
+    on_resize: OnResize,
     /// The window's scale when the anchor was taken.
     scale: f64,
     /// What was last seen of the window and acted on. A poll that sees the
@@ -300,9 +303,12 @@ enum Seen {
 ///
 /// A window that cannot be followed moves nothing. The area waits where it
 /// was, out of sight while the user works (see the module's second section).
-fn plan(anchor: Anchor, scale: f64, seen: Seen) -> (Sticky, Option<Rect>) {
+fn plan(anchor: Anchor, on_resize: OnResize, scale: f64, seen: Seen) -> (Sticky, Option<Rect>) {
     match seen {
-        Seen::At { rect, scale: now } => (Sticky::Following, Some(anchor.place(rect, now / scale))),
+        Seen::At { rect, scale: now } => (
+            Sticky::Following,
+            Some(anchor.place_by(on_resize, rect, now / scale)),
+        ),
         Seen::Hidden | Seen::Gone => (Sticky::Paused, None),
     }
 }
@@ -383,6 +389,45 @@ fn release_in(store: &Mutex<AreaStore>, links: &Mutex<Vec<Link>>, id: AreaId) ->
     let mut links = lock(links);
     links.retain(|link| link.area != id);
     lock(store).set_sticky(id, Sticky::Free)
+}
+
+/// What a sticky area does when its window is resized, for its menu's tick.
+/// The default for an area that is not sticky, which has no such row.
+pub(crate) fn on_resize_of(id: AreaId) -> OnResize {
+    lock(&LINKS)
+        .iter()
+        .find(|link| link.area == id)
+        .map_or_else(OnResize::default, |link| link.on_resize)
+}
+
+/// Sets what a sticky area does when its window is resized, from its menu,
+/// and places the area by the new answer at once. Returns whether it changed.
+///
+/// The anchor is not taken again. It is the place the area was given on the
+/// window, and each answer reads that same place its own way, so switching
+/// back and forth loses nothing.
+pub(crate) fn set_on_resize(id: AreaId, on_resize: OnResize) -> bool {
+    let changed = set_on_resize_in(&LINKS, id, on_resize);
+    if changed {
+        wake();
+    }
+    changed
+}
+
+/// [`set_on_resize`] on given links. What was last seen of the window is
+/// forgotten, because the follower does nothing for a window that looks as it
+/// did, and this window does: only the answer changed.
+fn set_on_resize_in(links: &Mutex<Vec<Link>>, id: AreaId, on_resize: OnResize) -> bool {
+    let mut links = lock(links);
+    let Some(link) = links
+        .iter_mut()
+        .find(|link| link.area == id && link.on_resize != on_resize)
+    else {
+        return false;
+    };
+    link.on_resize = on_resize;
+    link.seen = None;
+    true
 }
 
 /// Drops an area's link, because the area is gone or was freed.
@@ -496,6 +541,7 @@ fn link_under(id: AreaId, bounds: Rect) -> Option<Link> {
         program: program_of(pid),
         title: title_of(window),
         anchor: Anchor::of(bounds, rect),
+        on_resize: OnResize::default(),
         scale,
         seen: Some(Seen::At { rect, scale }),
         gone: false,
@@ -1149,7 +1195,7 @@ fn sync_as(window: isize, known: Option<Seen>) -> Option<Seen> {
             if link.gone {
                 link.open_at_close.clone_from(&open_now);
             }
-            let (state, bounds) = plan(link.anchor, link.scale, seen);
+            let (state, bounds) = plan(link.anchor, link.on_resize, link.scale, seen);
             changes.push((link.area, state, bounds));
         }
         // Written before the links are let go. A hand move takes the links to
@@ -1495,12 +1541,14 @@ mod tests {
     use uptake_core::geometry::{Point, Rect};
     use uptake_core::sticky::{Anchor, Sticky};
 
+    use super::set_on_resize_in;
     use super::{Join, join_in, joins_of, reanchor_in, waiting_of};
     use super::{WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, is_helper, paused_in};
     use std::collections::HashSet;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
+    use uptake_core::sticky::OnResize;
 
     use uptake_core::area::{AreaId, AreaStore, AreaType};
 
@@ -1636,6 +1684,7 @@ mod tests {
             program: None,
             title: title_of(window),
             anchor: Anchor::of(area, rect),
+            on_resize: OnResize::default(),
             scale,
             seen: Some(Seen::At { rect, scale }),
             gone: false,
@@ -1891,6 +1940,7 @@ mod tests {
         assert_eq!(
             plan(
                 anchor,
+                OnResize::Corner,
                 1.0,
                 Seen::At {
                     rect: moved,
@@ -1899,11 +1949,32 @@ mod tests {
             ),
             (Sticky::Following, Some(Rect::new(-1460, 100, 200, 80)))
         );
+        // A resize is answered by the rule the plan is given, and by no
+        // other. The window is twice as large with its corner where it was.
+        let doubled = Seen::At {
+            rect: Rect::new(100, 200, 1800, 1200),
+            scale: 1.0,
+        };
+        assert_eq!(
+            plan(anchor, OnResize::Scale, 1.0, doubled).1,
+            Some(Rect::new(180, 320, 400, 160)),
+            "scaled with the window"
+        );
+        assert_eq!(
+            plan(anchor, OnResize::TopLeft, 1.0, doubled).1,
+            Some(area),
+            "kept by the top left corner"
+        );
         // Minimised, hidden or closed: the area waits where it was. A
         // minimised window reports a rectangle far off every screen, and an
         // area sent there would be lost.
-        assert_eq!(plan(anchor, 1.0, Seen::Hidden), (Sticky::Paused, None));
-        assert_eq!(plan(anchor, 1.0, Seen::Gone), (Sticky::Paused, None));
+        for rule in OnResize::ALL {
+            assert_eq!(
+                plan(anchor, rule, 1.0, Seen::Hidden),
+                (Sticky::Paused, None)
+            );
+            assert_eq!(plan(anchor, rule, 1.0, Seen::Gone), (Sticky::Paused, None));
+        }
     }
 
     #[test]
@@ -1916,6 +1987,7 @@ mod tests {
         assert_eq!(
             plan(
                 anchor,
+                OnResize::Corner,
                 1.25,
                 Seen::At {
                     rect: smaller,
@@ -2028,6 +2100,7 @@ mod tests {
             program: Some(Kept::from("C:\\Program Files\\Editor\\editor.exe")),
             title: Kept::from("notes.txt"),
             anchor: Anchor::of(bounds, WINDOW),
+            on_resize: OnResize::default(),
             scale: 1.0,
             seen: None,
             gone: false,
@@ -2586,6 +2659,16 @@ mod tests {
             placement.contains("crate::sticky::reanchor(app, id, Rect::new(x, y, width, height));"),
             "a hand move takes a new anchor"
         );
+        assert!(
+            placement.contains(
+                "MenuAction::SetOnResize(on_resize) => crate::sticky::set_on_resize(area, on_resize),"
+            ),
+            "the rows that choose what a resize does do something"
+        );
+        assert!(
+            placement.contains("tick_on_resize(&mut spec, crate::sticky::on_resize_of(area.id));"),
+            "and the menu ticks the one the area has"
+        );
         let overlay = production(include_str!("overlay.rs"));
         assert!(
             body(&overlay, "pub(crate) fn dismiss_area(").contains("crate::sticky::forget(id);"),
@@ -2668,6 +2751,16 @@ mod tests {
                 "fn handle(message: &MSG) {",
                 "reattach();",
                 "the once-a-second check looks for a closed window coming back",
+            ),
+            (
+                "fn sync_as(window: isize, known: Option<Seen>) -> Option<Seen> {",
+                "plan(link.anchor, link.on_resize, link.scale, seen);",
+                "each area is placed by its own answer to a resize",
+            ),
+            (
+                "pub(crate) fn set_on_resize(id: AreaId, on_resize: OnResize) -> bool {",
+                "wake();",
+                "a new answer places the area at once, and not at the next move",
             ),
             (
                 "fn sync_as(window: isize, known: Option<Seen>) -> Option<Seen> {",
@@ -2975,6 +3068,59 @@ mod tests {
         let bare = vec![(5, window("Progman"))];
         assert_eq!(first_under(bare, inside, OWN), None);
         assert_eq!(first_under(windows, Point::new(-50, -50), OWN), None);
+    }
+
+    #[test]
+    fn a_new_answer_to_a_resize_is_kept_and_makes_the_follower_look_again() {
+        let (store, first, second) = store_with_two();
+        let store = Mutex::new(store);
+        let links: Mutex<Vec<Link>> = Mutex::new(Vec::new());
+        stick_in(
+            &store,
+            &links,
+            link_for(first, Rect::new(140, 260, 200, 80)),
+        );
+        stick_in(
+            &store,
+            &links,
+            link_for(second, Rect::new(600, 500, 100, 50)),
+        );
+        let seen = Seen::At {
+            rect: WINDOW,
+            scale: 1.0,
+        };
+        for link in lock(&links).iter_mut() {
+            assert_eq!(link.on_resize, OnResize::Scale, "a new link scales");
+            link.seen = Some(seen);
+        }
+        assert!(set_on_resize_in(&links, second, OnResize::Corner));
+        {
+            let links = lock(&links);
+            assert_eq!(
+                links[0].on_resize,
+                OnResize::Scale,
+                "the other area keeps its own"
+            );
+            assert_eq!(links[0].seen, Some(seen));
+            assert_eq!(links[1].on_resize, OnResize::Corner);
+            // Forgotten, or the follower would see the same window as before
+            // and leave the area where the old answer put it.
+            assert_eq!(links[1].seen, None);
+        }
+        assert!(
+            !set_on_resize_in(&links, second, OnResize::Corner),
+            "the same answer again changes nothing"
+        );
+        assert_eq!(lock(&links)[1].seen, None);
+        let Some(unknown) = AreaStore::new().create(AreaType::Default, Rect::new(0, 0, 9, 9))
+        else {
+            panic!("an area")
+        };
+        // An id no link has. `first` and `second` came from another store,
+        // so the number may be taken: ask for one that is not.
+        if unknown != first && unknown != second {
+            assert!(!set_on_resize_in(&links, unknown, OnResize::TopLeft));
+        }
     }
 
     #[test]

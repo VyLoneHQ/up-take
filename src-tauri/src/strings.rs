@@ -123,6 +123,17 @@ texts! {
     MenuDepthBack => "menu.depth.back",
     /// Area menu: make the area follow the window under it (roadmap `1.47`).
     MenuSticky => "menu.sticky",
+    /// Area menu: the list of what a sticky area does when its window is
+    /// resized (roadmap `1.47`).
+    MenuOnResize => "menu.on_resize",
+    /// That list: grow and shrink with the window. The default.
+    MenuOnResizeScale => "menu.on_resize.scale",
+    /// That list: keep the size, keep the place as a share of the window.
+    MenuOnResizeScalePosition => "menu.on_resize.scale_position",
+    /// That list: keep the size and the distance from the nearest corner.
+    MenuOnResizeCorner => "menu.on_resize.corner",
+    /// That list: keep the size and the distance from the top left corner.
+    MenuOnResizeTopLeft => "menu.on_resize.top_left",
     /// Area menu: let clicks fall through the area.
     MenuClickThrough => "menu.click_through",
     /// Area menu: remove the area.

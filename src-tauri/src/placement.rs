@@ -519,6 +519,10 @@ enum MenuAction {
     /// `1.47`). A toggle like [`MenuAction::SetInput`], so the action carries
     /// the value the row would switch *to*.
     SetSticky(bool),
+    /// Choose what a sticky area does when its window is resized (roadmap
+    /// `1.47`). Radio rows like [`MenuAction::SetType`], so the action carries
+    /// the answer the row names.
+    SetOnResize(uptake_core::sticky::OnResize),
     /// Remove the area.
     Dismiss,
     /// Capture the area and publish it to the clipboard alone (task 1.9,
@@ -4287,6 +4291,9 @@ fn open_menu(app: &AppHandle, point: Point) {
     {
         grey_out_sticking(&mut spec);
     }
+    // Which answer to a resize the area has is the follower's to say: it is
+    // kept with the area's link to its window, and nowhere else.
+    tick_on_resize(&mut spec, crate::sticky::on_resize_of(area.id));
     #[allow(
         clippy::cast_possible_truncation,
         reason = "a menu this short cannot overflow u32"
@@ -4410,6 +4417,18 @@ fn grey_out_sticking(rows: &mut [MenuRow]) {
     for row in rows {
         if row.action == MenuAction::SetSticky(true) {
             row.enabled = false;
+        }
+    }
+}
+
+/// Ticks the one row, in the list that chooses what a resize does, that names
+/// the answer the area has. [`menu_rows`] builds those rows unticked: the
+/// answer is kept by the follower and not by the area, so it is asked for
+/// where the menu opens. A menu with no such list is left as it is.
+fn tick_on_resize(rows: &mut [MenuRow], now: uptake_core::sticky::OnResize) {
+    for child in rows.iter_mut().flat_map(|row| row.children.iter_mut()) {
+        if let MenuAction::SetOnResize(on_resize) = child.action {
+            child.checked = on_resize == now;
         }
     }
 }
@@ -4588,6 +4607,32 @@ fn menu_rows(area: &overlay::AreaSummary) -> Vec<MenuRow> {
         text(Text::MenuSticky),
         area.sticky.is_sticky(),
     ));
+    // What a sticky area does when its window is resized, offered only once
+    // the area is sticky: a free area has no window to be resized. The
+    // maintainer tried the four at his desk on 2026-10-12, made scaling the
+    // default and kept the others as choices. Built unticked, see
+    // `tick_on_resize`.
+    if area.sticky.is_sticky() {
+        use uptake_core::sticky::OnResize;
+        rows.push(MenuRow {
+            action: MenuAction::OpenSubmenu,
+            label: text(Text::MenuOnResize),
+            checked: false,
+            enabled: true,
+            children: OnResize::ALL
+                .into_iter()
+                .map(|on_resize| {
+                    let label = match on_resize {
+                        OnResize::Scale => Text::MenuOnResizeScale,
+                        OnResize::ScalePosition => Text::MenuOnResizeScalePosition,
+                        OnResize::Corner => Text::MenuOnResizeCorner,
+                        OnResize::TopLeft => Text::MenuOnResizeTopLeft,
+                    };
+                    leaf(MenuAction::SetOnResize(on_resize), text(label), false)
+                })
+                .collect(),
+        });
+    }
     rows.push(leaf(
         MenuAction::SetInput(toggled_input),
         text(Text::MenuClickThrough),
@@ -4710,6 +4755,7 @@ fn activate_menu_item(app: &AppHandle, hit: MenuHit, release: Point) {
             overlay::set_area_ocr_behaviour(app, area, behaviour)
         }
         MenuAction::SetSticky(sticky) => crate::sticky::set(app, area, sticky),
+        MenuAction::SetOnResize(on_resize) => crate::sticky::set_on_resize(area, on_resize),
         MenuAction::Dismiss => overlay::dismiss_area(app, area),
         // Returned above, before the menu was closed.
         MenuAction::OpenSubmenu => false,
@@ -6344,6 +6390,91 @@ mod tests {
                     "{kind:?} {state:?}: a child row was greyed out"
                 );
             }
+        }
+    }
+
+    /// What a resize does is offered on a sticky area and on no other, as one
+    /// list of four with the default first, and exactly one of them is ticked
+    /// once the menu has asked which the area has.
+    #[test]
+    fn a_sticky_area_offers_what_a_resize_does_and_ticks_the_one_it_has() {
+        use uptake_core::sticky::{OnResize, Sticky};
+        let free = menu_rows(&summary(AreaType::Default, Layer::Auto, Input::Interactive));
+        assert!(
+            !labels(&free).contains(&"On resize"),
+            "a free area has no window to be resized"
+        );
+        for state in [Sticky::Following, Sticky::Paused] {
+            let area = crate::overlay::AreaSummary {
+                sticky: state,
+                ..summary(AreaType::Default, Layer::Auto, Input::Interactive)
+            };
+            let mut rows = menu_rows(&area);
+            assert_eq!(
+                labels(&rows),
+                vec![
+                    "Area type",
+                    "Depth",
+                    "Stick to window",
+                    "On resize",
+                    "Click-through",
+                    "Dismiss"
+                ],
+                "{state:?}"
+            );
+            let list = |rows: &[super::MenuRow]| -> Vec<(&'static str, MenuAction, bool)> {
+                let Some(parent) = rows.iter().find(|row| row.label == "On resize") else {
+                    panic!("the list is there")
+                };
+                assert_eq!(parent.action, MenuAction::OpenSubmenu);
+                parent
+                    .children
+                    .iter()
+                    .map(|child| (child.label, child.action, child.checked))
+                    .collect()
+            };
+            assert_eq!(
+                list(&rows),
+                vec![
+                    (
+                        "Scale with window",
+                        MenuAction::SetOnResize(OnResize::Scale),
+                        false
+                    ),
+                    (
+                        "Scale position",
+                        MenuAction::SetOnResize(OnResize::ScalePosition),
+                        false
+                    ),
+                    (
+                        "Keep nearest corner",
+                        MenuAction::SetOnResize(OnResize::Corner),
+                        false
+                    ),
+                    (
+                        "Keep top left",
+                        MenuAction::SetOnResize(OnResize::TopLeft),
+                        false
+                    ),
+                ],
+                "{state:?}: built unticked, in the order of `OnResize::ALL`"
+            );
+            for now in OnResize::ALL {
+                super::tick_on_resize(&mut rows, now);
+                let ticked: Vec<MenuAction> = list(&rows)
+                    .into_iter()
+                    .filter(|(_, _, checked)| *checked)
+                    .map(|(_, action, _)| action)
+                    .collect();
+                assert_eq!(ticked, vec![MenuAction::SetOnResize(now)], "{state:?}");
+            }
+            // Ticking touches that list and nothing else.
+            assert!(
+                rows.iter()
+                    .filter(|row| row.label != "On resize" && row.label != "Stick to window")
+                    .all(|row| !row.checked),
+                "{state:?}"
+            );
         }
     }
 
