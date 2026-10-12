@@ -787,8 +787,16 @@ fn text_of(buffer: &[u16], length: i32) -> String {
     String::from_utf16_lossy(&buffer[..length])
 }
 
+/// The longest path Windows has, in UTF-16 units: 32,767 and the unit that
+/// ends it. A buffer this long cannot be too short for a program's path.
+const PATH_UNITS: u32 = 32_768;
+
 /// The full path of a process's program, or `None` if Windows will not open
 /// the process for even this much.
+///
+/// The first version read into 1024 units. A longer path made the call fail,
+/// which read as "Windows will not say", and such a program's area was then
+/// never re-attached (the thirteenth review).
 fn program_of(pid: u32) -> Option<Kept> {
     // SAFETY: `OpenProcess` returns a handle or null. The handle is closed
     // below on every path that got one.
@@ -796,10 +804,10 @@ fn program_of(pid: u32) -> Option<Kept> {
     if process.is_null() {
         return None;
     }
-    let mut buffer = [0u16; 1024];
-    let mut length = 1024u32;
-    // SAFETY: the buffer is 1024 units long and `length` says so going in. The
-    // call writes at most that many and sets `length` to what it wrote.
+    let mut buffer = vec![0u16; PATH_UNITS as usize];
+    let mut length = PATH_UNITS;
+    // SAFETY: the buffer is `PATH_UNITS` long and `length` says so going in.
+    // The call writes at most that many and sets `length` to what it wrote.
     let read =
         unsafe { QueryFullProcessImageNameW(process, 0, buffer.as_mut_ptr(), &raw mut length) };
     // SAFETY: `process` is the handle opened above, closed exactly once.
@@ -2858,6 +2866,12 @@ mod tests {
         );
         let program = body(&code, "fn program_of(pid: u32) -> Option<Kept> {");
         assert!(program.contains("Some(Kept::from(String::from_utf16_lossy(&buffer[..length])))"));
+        assert!(
+            program.contains("let mut buffer = vec![0u16; PATH_UNITS as usize];")
+                && program.contains("let mut length = PATH_UNITS;"),
+            "a program's path is read at the longest length Windows has"
+        );
+        assert_eq!(super::PATH_UNITS, 32_768);
         for (name, text) in [("title_of", title), ("program_of", program)] {
             assert!(!text.contains("diagnostics"), "`{name}` calls into the log");
         }
