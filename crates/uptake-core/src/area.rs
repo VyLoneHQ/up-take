@@ -753,6 +753,22 @@ impl Area {
         self.sticky == Sticky::Paused
     }
 
+    /// True when the text this area read can be selected, copied or read
+    /// again: it reads in place and it is in sight.
+    ///
+    /// An area that waits out of sight keeps the words it read, and they are
+    /// no longer what is on the screen: its window is minimised or closed. So
+    /// it takes no selection in Placement either, where it is drawn. Without
+    /// that, a selection made on a paused area while placing was carried into
+    /// Living on an area nobody could see, and took the copy key there (the
+    /// seventh review of roadmap `1.47`). **Every gesture on text asks this**
+    /// and not [`Area::reads_in_place`], which says only how the area shows
+    /// what it read.
+    #[must_use]
+    pub fn text_is_live(self) -> bool {
+        self.reads_in_place() && !self.waits_out_of_sight()
+    }
+
     /// True for an OCR area that shows what it read over the screen, in place,
     /// rather than in a panel of its own (ADR-0046). The one condition every
     /// selection gesture and every in-place mark needs.
@@ -2621,6 +2637,26 @@ mod tests {
         let gone = ids[1];
         assert!(store.remove(gone).is_some());
         assert!(!store.set_sticky(gone, Sticky::Following), "unknown id");
+    }
+
+    #[test]
+    fn only_an_in_place_ocr_area_in_sight_has_text_to_select() {
+        let (mut store, ids) = store_with(&[AreaType::Ocr, AreaType::Default]);
+        let (ocr, plain) = (ids[0], ids[1]);
+        assert!(store.get(ocr).unwrap().text_is_live());
+        assert!(!store.get(plain).unwrap().text_is_live(), "not an OCR area");
+        // Following its window, the text is what is on the screen.
+        assert!(store.set_sticky(ocr, Sticky::Following));
+        assert!(store.get(ocr).unwrap().text_is_live());
+        // Paused, it still reads in place and its text is no longer live.
+        assert!(store.set_sticky(ocr, Sticky::Paused));
+        let paused = *store.get(ocr).unwrap();
+        assert!(paused.reads_in_place());
+        assert!(!paused.text_is_live());
+        // Rendered, it never was.
+        assert!(store.set_sticky(ocr, Sticky::Free));
+        assert!(store.set_ocr_behaviour(ocr, OcrBehaviour::Rendered));
+        assert!(!store.get(ocr).unwrap().text_is_live());
     }
 
     #[test]

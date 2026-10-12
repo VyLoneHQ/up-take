@@ -1348,13 +1348,26 @@ pub(crate) fn set_area_ocr_behaviour(app: &AppHandle, id: AreaId, behaviour: Ocr
     true
 }
 
-/// Whether `id` is an OCR area that reads in place (`Area::reads_in_place`).
-/// `false` for an area that is gone.
+/// Whether `id` is an OCR area whose text can be selected, copied or read
+/// again (`Area::text_is_live`): it reads in place and it is in sight. `false`
+/// for an area that is gone.
+///
+/// The name is older than the second half. A sticky area whose window is
+/// minimised or closed still reads in place and answers `false` here, so that
+/// no gesture on text reaches an area that is hidden while the user works:
+/// every caller is such a gesture, or the re-read after a move.
 pub(crate) fn area_reads_in_place(app: &AppHandle, id: AreaId) -> bool {
+    let store = app.state::<Mutex<AreaStore>>();
+    lock(&store).get(id).is_some_and(|area| area.text_is_live())
+}
+
+/// Whether `id` waits out of sight (`Area::waits_out_of_sight`). `false` for
+/// an area that is gone.
+pub(crate) fn area_waits_out_of_sight(app: &AppHandle, id: AreaId) -> bool {
     let store = app.state::<Mutex<AreaStore>>();
     lock(&store)
         .get(id)
-        .is_some_and(|area| area.reads_in_place())
+        .is_some_and(|area| area.waits_out_of_sight())
 }
 
 /// Converts an area to another type from its own menu (roadmap task 1.27),

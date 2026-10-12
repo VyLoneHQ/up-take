@@ -175,10 +175,14 @@ Around those:
   answer a resize if scaling is wrong for what you are looking at. Minimise or close the window and
   the area hides until the window is back. It still floats above everything, so another window that
   covers its window does not cover the area.
-  <!-- source: ROADMAP.md task 1.47 and pull request 135. Each sentence is something the maintainer
-       did at his desk on 2026-10-12, on builds of this branch: the menu row, a drag, a crossing to
-       a monitor with another scale, the four answers to a resize, and hiding on minimise. Closing
-       and reopening he walked on the first build that day, before hiding was built. "Until the
+  <!-- source: ROADMAP.md task 1.47 and pull request 135. The maintainer did each of these at his
+       desk on 2026-10-12, on builds of this branch: the menu row, a drag, a crossing to a monitor
+       with another scale, and hiding on minimise. **The resize sentence rests on less, and says
+       so here:** he tried the four answers on a trial build that had the same arithmetic behind
+       a plainer switch, and chose scaling there. The menu list as it is built ("On resize", four
+       rows) had not been run in the app when this was written. A test holds what the list holds
+       and that each row is wired. Update this note when he has walked it. Closing and reopening
+       he walked on the first build that day, before hiding was built. "Until the
        window is back" means, for a closed window, a window of the same program with the same
        title (src-tauri/src/sticky.rs, `reattach`). The last sentence is a limit, stated on
        purpose: ROADMAP.md 2.45 is the probe for an area that another window can cover.

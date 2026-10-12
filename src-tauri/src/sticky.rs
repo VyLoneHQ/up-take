@@ -171,8 +171,10 @@ static OUTLET: OnceLock<Outlet> = OnceLock::new();
 ///
 /// Nothing enforces this rule. No test and no type stops a new caller from
 /// taking the links with the store's lock in hand. The fifth review checked
-/// all eleven places that take the links, and every caller into this module,
-/// and none did. A caller added after that has only this paragraph.
+/// all eleven places that then took the links, and every caller into this
+/// module, and none did. Two were added after it with the resize answers
+/// ([`on_resize_of`], [`set_on_resize_in`]), and the seventh review read both
+/// and their callers. A caller added after that has only this paragraph.
 ///
 /// Until the second review this lock was never held across a store call at
 /// all, and every step that touched both did so in two halves. Each pair of
@@ -1291,8 +1293,9 @@ fn tell_the_page(app: &AppHandle, paused: Vec<AreaId>) {
     }
 }
 
-/// Writes the follower's decisions to the store. Returns whether any state
-/// changed, and the areas that moved.
+/// Writes the follower's decisions to the store. Returns whether anything the
+/// page draws changed, and the areas that moved with their window and so
+/// re-take what they show.
 ///
 /// An area the store calls free is left alone, state and rectangle both. The
 /// follower decides on its own thread, so a decision can arrive just after the
@@ -1319,7 +1322,15 @@ fn write(store: &mut AreaStore, changes: &[Change], monitors: &[Rect]) -> (bool,
         // Following a window does not raise the area: the user did not touch
         // it, so the stack stays as they left it.
         if area.bounds != bounds && store.set_bounds(id, bounds) {
-            moved.push(id);
+            changed = true;
+            // "Moved" is the list of areas that re-take what they show. An
+            // area that was pulled back onto the desktop as it paused is out
+            // of sight, and an area nobody can see must not look at the
+            // screen (ADR-0048 decision 3: only while it visibly says so).
+            // The seventh review found it captured once there.
+            if state == Sticky::Following {
+                moved.push(id);
+            }
         }
     }
     (changed, moved)
@@ -1327,8 +1338,14 @@ fn write(store: &mut AreaStore, changes: &[Change], monitors: &[Rect]) -> (bool,
 
 /// [`Outlet::settle`] for the app: the area re-takes what it shows, exactly as
 /// it does when the user lets go after moving it by hand.
+///
+/// An area that has gone out of sight since it moved re-takes nothing: the
+/// wait before a re-take is long enough for its window to be minimised in.
 fn app_settle(id: AreaId) {
     if let Some(app) = APP.get() {
+        if overlay::area_waits_out_of_sight(app, id) {
+            return;
+        }
         overlay::refresh_magnification(app, id);
         placement::reread_in_place_ocr(app, id);
     }
@@ -1612,8 +1629,10 @@ mod tests {
     ///
     /// The window is created far off every monitor and never activated, so
     /// running this draws nothing on anyone's screen and takes no keystroke.
-    /// It covers the per-frame poll by announcing a drag the way Windows does.
-    /// What it cannot cover is the re-attach, which refuses windows of its own
+    /// It announces a drag the way Windows does, and holds that the area
+    /// follows inside one. It does not tell the per-frame poll from the move
+    /// event there: see the note at the drag below. What it cannot cover is
+    /// the re-attach, which refuses windows of its own
     /// process, and a drag by a hand on a mouse. CI runs this test on the
     /// Windows runner, and `quality-bars.md` section 3 carries the two rig
     /// scenarios.
@@ -1773,7 +1792,14 @@ mod tests {
         // a program may raise that event for its own window, which is how this
         // test starts one without a hand on the mouse. From here to the end
         // event the callback ignores every move, so an area that still follows
-        // inside 250 ms was placed by the per-frame poll and by nothing else.
+        // inside 250 ms was placed by the per-frame poll.
+        //
+        // That last step holds only while the callback does ignore them. The
+        // seventh review made `set_dragged` do nothing: the flag was never
+        // set, the callback went on placing the area by the move event, and
+        // this test passed with the poll gone. So this holds that a drag is
+        // followed and that the poll is started (removing the `DRAG_STARTED`
+        // post fails it). It does not hold that the poll is what follows.
         // SAFETY: raises an event for the window created above.
         unsafe {
             NotifyWinEvent(EVENT_SYSTEM_MOVESIZESTART, handle, OBJID_WINDOW, 0);
@@ -2245,7 +2271,9 @@ mod tests {
         // by the same rule a hand move obeys.
         let (changed, moved) = write(&mut store, &[(first, Sticky::Paused, None)], &monitor);
         assert!(changed);
-        assert_eq!(moved, vec![first]);
+        // It moved, and it is not in the list of areas that re-take what they
+        // show: it is out of sight now, and must not look at the screen.
+        assert!(moved.is_empty(), "a paused area was sent to re-take");
         let held = uptake_core::interaction::contain(off, &monitor);
         assert_ne!(held, off);
         assert_eq!(store.get(first).map(|area| area.bounds), Some(held));
@@ -2254,6 +2282,13 @@ mod tests {
         let (_, moved) = write(&mut store, &[(second, Sticky::Paused, None)], &monitor);
         assert!(moved.is_empty());
         assert_eq!(store.get(second).map(|area| area.bounds), was);
+        // A paused area that is pulled back with no change of state still
+        // tells the page: the page draws it in placing mode, at its place.
+        let off_again = Rect::new(2450, 300, 200, 80);
+        store.set_bounds(first, off_again);
+        let (changed, moved) = write(&mut store, &[(first, Sticky::Paused, None)], &monitor);
+        assert!(changed, "the page was not told the area moved");
+        assert!(moved.is_empty());
     }
 
     #[test]
@@ -2674,6 +2709,10 @@ mod tests {
             body(&overlay, "pub(crate) fn dismiss_area(").contains("crate::sticky::forget(id);"),
             "a dismissed area drops its link"
         );
+        assert!(
+            body(&overlay, "pub(crate) fn area_reads_in_place(").contains("area.text_is_live()"),
+            "no gesture on text reaches an area that waits out of sight"
+        );
 
         let this = production(include_str!("sticky.rs"));
         for (signature, line, why) in [
@@ -2736,6 +2775,16 @@ mod tests {
                 "fn describe(window: isize) -> Candidate {",
                 "helper: is_helper(style),",
                 "and a real window's own style is what says it is one",
+            ),
+            (
+                "fn app_settle(id: AreaId) {",
+                "if overlay::area_waits_out_of_sight(app, id) {",
+                "an area that went out of sight re-takes nothing",
+            ),
+            (
+                "fn write(store: &mut AreaStore, changes: &[Change], monitors: &[Rect]) -> (bool, Vec<AreaId>) {",
+                "if state == Sticky::Following {",
+                "only an area that follows its window is sent to re-take what it shows",
             ),
             (
                 "fn app_settle(id: AreaId) {",
