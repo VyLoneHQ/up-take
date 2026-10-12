@@ -919,6 +919,34 @@ describe('an area outside chrome appears with its hover and not otherwise', () =
     expect(container.querySelectorAll('.outside-handle')).toHaveLength(4);
   });
 
+  test('an area that pauses under the pointer loses its chrome with its body', async () => {
+    // Review round 9 of roadmap 1.47. A hovered area whose window is
+    // minimised becomes paused while the page still holds it as hovered. In
+    // living nothing of it may stay: not the close control, not the bar, not
+    // the four handles. In placement all of it is drawn again.
+    const { container } = await mount();
+    await emit('overlay://state', state({ state: 'living' }));
+    await emit('overlay://areas', {
+      areas: [smallArea({ sticky: 'following' })],
+    });
+    await hover(1);
+    const chrome = () => [
+      container.querySelectorAll('.area').length,
+      container.querySelectorAll('.close').length,
+      container.querySelectorAll('.grab-bar').length,
+      container.querySelectorAll('.outside-handle').length,
+    ];
+    expect(chrome()).toEqual([1, 1, 1, 4]);
+
+    // The window is minimised. No hover report follows: the pointer has not
+    // moved.
+    await emit('overlay://areas', { areas: [smallArea({ sticky: 'paused' })] });
+    expect(chrome()).toEqual([0, 0, 0, 0]);
+
+    await emit('overlay://state', state());
+    expect(chrome()).toEqual([1, 1, 1, 4]);
+  });
+
   test('the outside handles are placed where Rust put them', async () => {
     const { container } = await mount();
     await emit('overlay://state', state({ state: 'living' }));

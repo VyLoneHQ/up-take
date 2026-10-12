@@ -652,7 +652,13 @@ onMount(() => {
 
   {#if overlayState !== 'hidden'}
     {#each areaFrames as area (area.id)}
-      {#if !area.source && areaInSight(area.sticky, overlayState)}
+      <!-- One answer for the whole of an area: its body and all of its
+           outside chrome. The ninth review of roadmap 1.47 found the close
+           control, the bar and the handles outside this rule: an area that
+           paused while the pointer was on it lost its body and kept its
+           chrome until the next hover report. -->
+      {@const inSight = areaInSight(area.sticky, overlayState)}
+      {#if !area.source && inSight}
         <div
           class="area"
           class:waiting={area.sticky === 'paused'}
@@ -821,7 +827,7 @@ onMount(() => {
           {/if}
         </div>
       {/if}
-      {#if area.showClose}
+      {#if area.showClose && inSight}
         <div
           class="close"
           style="transform: translate3d({area.close.x}px, {area.close.y}px, 0); width: {area
@@ -842,7 +848,7 @@ onMount(() => {
            above `CHROME_INSIDE_SPAN`, because a large area resizes from the
            bands on its own border, so this loop draws nothing in the common
            case. -->
-      {#if area.showBar && area.bar}
+      {#if area.showBar && area.bar && inSight}
         <div
           class="grab-bar"
           style="transform: translate3d({area.bar.x}px, {area.bar.y}px, 0); width: {area
@@ -851,7 +857,7 @@ onMount(() => {
           <span class="grab-bar-label">{area.label}</span>
         </div>
       {/if}
-      {#if area.showBar}
+      {#if area.showBar && inSight}
         {#each area.handles as handle, index (index)}
           <div
             class="outside-handle"
