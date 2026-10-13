@@ -109,8 +109,9 @@
 //!   handle. A new window that Windows gives one of those handle values is
 //!   passed by, and the area would wait until the next one.
 //! - A closed window is known by its handle value together with its program
-//!   and its title. Two windows that closed under one value, one program and
-//!   one title are taken for one window, and their areas rejoin together.
+//!   and its title, in both places that ask ([`rejoin`] and [`join_in`]). Two
+//!   windows that closed under one value, one program and one title are
+//!   taken for one window, and their areas rejoin together.
 //! - Content that scrolls inside the window is not followed. That is roadmap
 //!   `1.43`.
 
@@ -1689,26 +1690,38 @@ fn joins_of(
 /// nothing of the check before it. Without this note the areas of the second
 /// window joined the first one's window a second later (review round 4).
 fn join_in(links: &mut [Link], joins: &[Join]) -> bool {
-    let mut made: Vec<&Join> = Vec::new();
+    // Each join that was made: the closed window its area was on, known as
+    // `rejoin` knows one (handle value, program and title), and the window
+    // it joined.
+    let mut made: Vec<(isize, Option<Kept>, Kept, isize)> = Vec::new();
     for join in joins {
         if let Some(live) = links
             .iter_mut()
             .find(|live| live.area == join.area && live.gone)
         {
+            made.push((
+                join.was,
+                live.program.clone(),
+                live.title.clone(),
+                join.window,
+            ));
             live.window = join.window;
             live.pid = join.pid;
             live.gone = false;
             live.seen = None;
             live.open_at_close.clear();
-            made.push(join);
         }
     }
-    for join in &made {
-        for other in links
-            .iter_mut()
-            .filter(|link| link.gone && link.window != join.was)
-        {
-            other.open_at_close.insert(join.window);
+    // The sixteenth review found this comparing the handle value alone, one
+    // round after `rejoin` stopped doing so. A waiting link whose own closed
+    // window had carried the same value was then never told the reopened
+    // window is taken, and joined it too as soon as its title fitted, which
+    // a change of tab is enough for.
+    for (was, program, title, joined) in &made {
+        for other in links.iter_mut().filter(|link| {
+            link.gone && !(link.window == *was && link.program == *program && link.title == *title)
+        }) {
+            other.open_at_close.insert(*joined);
         }
     }
     !made.is_empty()
@@ -3589,6 +3602,87 @@ mod tests {
             .map(|join| (join.area, join.window))
             .collect();
         assert_eq!(joins, [(first, 90), (second, 90)]);
+
+        // Each half of the identity on its own. The first case above differs
+        // in both, so either comparison could be dropped with it still green
+        // (the sixteenth review dropped each). `rejoin` is asked directly,
+        // with every candidate let through, so that only its own memory of
+        // where a closed window's areas went can send the second area along.
+        let pair = |program: &str, title: &str| {
+            vec![
+                Waiting {
+                    area: first,
+                    was: 0x51,
+                    program: Kept::from(EDITOR),
+                    title: Kept::from("notes.txt"),
+                    open_at_close: HashSet::new(),
+                },
+                Waiting {
+                    area: second,
+                    was: 0x51,
+                    program: Kept::from(program),
+                    title: Kept::from(title),
+                    open_at_close: HashSet::new(),
+                },
+            ]
+        };
+        let one_open = [open(90, "notes.txt")];
+        let went = |waiting: &[Waiting]| -> Vec<Option<isize>> {
+            rejoin(waiting, &one_open, |_, _| true)
+                .iter()
+                .map(|found| found.map(|open| open.window))
+                .collect()
+        };
+        assert_eq!(
+            went(&pair(EDITOR, "todo.txt")),
+            [Some(90), None],
+            "one value and one program, two titles"
+        );
+        assert_eq!(
+            went(&pair(
+                "C:\\Program Files\\Browser\\browser.exe",
+                "notes.txt"
+            )),
+            [Some(90), None],
+            "one value and one title, two programs"
+        );
+        assert_eq!(went(&pair(EDITOR, "notes.txt")), [Some(90), Some(90)]);
+    }
+
+    /// The scenario of the sixteenth review, through the functions the check
+    /// itself uses. Two editor windows closed, one after the other, under one
+    /// handle value: `notes.txt` with area A, `todo.txt` with area B. A window
+    /// titled `notes.txt` opens and A joins it. Then that window shows
+    /// `todo.txt`. B must go on waiting: the window is A's.
+    #[test]
+    fn a_window_taken_by_one_closed_window_is_not_joined_by_another_under_the_same_value() {
+        let (_, a, b) = store_with_two();
+        let closed = |area: AreaId, title: &str| Link {
+            window: 0x51,
+            gone: true,
+            title: Kept::from(title),
+            ..link_for(area, Rect::new(140, 260, 200, 80))
+        };
+        let mut links = vec![closed(a, "notes.txt"), closed(b, "todo.txt")];
+        let check = |links: &mut [Link], open: &[Open]| {
+            let joins = joins_of(&waiting_of(links), open, |_, _| true);
+            join_in(links, &joins)
+        };
+        let on = |links: &[Link]| -> Vec<(isize, bool)> {
+            links.iter().map(|link| (link.window, link.gone)).collect()
+        };
+
+        assert!(check(&mut links, &[open(90, "notes.txt")]));
+        assert_eq!(on(&links), vec![(90, false), (0x51, true)]);
+        // The joined window changes its title to the one B waits for.
+        assert!(!check(&mut links, &[open(90, "todo.txt")]));
+        assert_eq!(on(&links), vec![(90, false), (0x51, true)]);
+        // Another window with that title is B's.
+        assert!(check(
+            &mut links,
+            &[open(90, "todo.txt"), open(91, "todo.txt")]
+        ));
+        assert_eq!(on(&links), vec![(90, false), (91, false)]);
     }
 
     /// Reading the title of a window in this process sends that window a
