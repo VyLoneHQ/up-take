@@ -70,7 +70,8 @@ pub enum Sticky {
     /// Anchored to a window that is on screen. The area moves with it.
     Following,
     /// Anchored to a window that cannot be followed right now: it is
-    /// minimised, hidden, or closed. The area waits where it was. While the
+    /// minimised, hidden, or closed. The area waits where it was, or just
+    /// inside the desktop if it hung off it when it paused. While the
     /// user works it is out of sight; while they place areas it is drawn,
     /// dimmed and marked paused, so it can be freed, moved or removed
     /// ([`Area::waits_out_of_sight`](crate::area::Area::waits_out_of_sight)).
@@ -662,6 +663,23 @@ mod tests {
             anchor.place(scaled_window, 1.5),
             Rect::new(3060, 90, 300, 120)
         );
+    }
+
+    /// The scaling rule's own arithmetic. Every scaled case in this file came
+    /// out whole, so rounding a share down passed all of them (the fifteenth
+    /// review removed the half that rounds and 211 tests stayed green).
+    #[test]
+    fn a_share_rounds_to_the_nearest_whole_number() {
+        // A third of 1, of 2 and of 4: 0.33, 0.67 and 1.33.
+        assert_eq!(super::share(1, 1, 3), 0);
+        assert_eq!(super::share(2, 1, 3), 1);
+        assert_eq!(super::share(4, 1, 3), 1);
+        // A half rounds up, and below zero that is towards zero.
+        assert_eq!(super::share(1, 1, 2), 1);
+        assert_eq!(super::share(-1, 1, 2), 0);
+        assert_eq!(super::share(-2, 1, 3), -1);
+        // Exact when the window is the size it was.
+        assert_eq!(super::share(37, 900, 900), 37);
     }
 
     #[test]

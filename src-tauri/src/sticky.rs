@@ -41,7 +41,8 @@
 //! # When the window cannot be followed
 //!
 //! A minimised, hidden or cloaked window pauses the area: it waits where it
-//! was and follows again when the window is back. A closed window pauses it
+//! was, pulled back onto the desktop if it hung off it, and follows again
+//! when the window is back. A closed window pauses it
 //! too, and once a second [`reattach`] looks for a window of the same program
 //! with the same title and joins the area to that one (the founder's decision
 //! of 2026-10-09).
@@ -107,6 +108,9 @@
 //! - A link remembers which windows were open when its window closed, by
 //!   handle. A new window that Windows gives one of those handle values is
 //!   passed by, and the area would wait until the next one.
+//! - A closed window is known by its handle value together with its program
+//!   and its title. Two windows that closed under one value, one program and
+//!   one title are taken for one window, and their areas rejoin together.
 //! - Content that scrolls inside the window is not followed. That is roadmap
 //!   `1.43`.
 
@@ -320,8 +324,10 @@ enum Seen {
 /// What an area should be, given what was seen of its window: its state, and
 /// its rectangle if the window can be followed.
 ///
-/// A window that cannot be followed moves nothing. The area waits where it
-/// was, out of sight while the user works (see the module's second section).
+/// A window that cannot be followed gives the area no new place. It waits
+/// where it was, out of sight while the user works (see the module's second
+/// section). [`write`] makes the one exception: an area that pauses while it
+/// hangs off the desktop is pulled back onto it.
 fn plan(anchor: Anchor, on_resize: OnResize, scale: f64, seen: Seen) -> (Sticky, Option<Rect>) {
     match seen {
         Seen::At { rect, scale: now } => (
@@ -1594,20 +1600,33 @@ fn rejoin<'a>(
     open: &'a [Open],
     mut same_program: impl FnMut(&Waiting, &Open) -> bool,
 ) -> Vec<Option<&'a Open>> {
-    // Which reopened window each closed window's areas went to.
-    let mut taken: HashMap<isize, isize> = HashMap::new();
+    // Which reopened window the areas of each closed window went to. A
+    // closed window is its handle value with its program and its title, and
+    // not the value alone: Windows gives a value out again, and the fifteenth
+    // review had a browser's area follow an editor's area to the editor's
+    // window, with no title or program asked, because the two windows had
+    // carried one value.
+    let mut taken: Vec<(&Waiting, isize)> = Vec::new();
     waiting
         .iter()
         .map(|link| {
-            let found = match taken.get(&link.was) {
-                Some(&window) => open.iter().find(|open| open.window == window),
+            let went = taken
+                .iter()
+                .find(|(other, _)| {
+                    other.was == link.was
+                        && other.program == link.program
+                        && other.title == link.title
+                })
+                .map(|&(_, window)| window);
+            let found = match went {
+                Some(window) => open.iter().find(|open| open.window == window),
                 None => window_again(&link.title, &link.open_at_close, open, |candidate| {
-                    !taken.values().any(|&window| window == candidate.window)
+                    !taken.iter().any(|&(_, window)| window == candidate.window)
                         && same_program(link, candidate)
                 }),
             };
             if let Some(found) = found {
-                taken.insert(link.was, found.window);
+                taken.push((link, found.window));
             }
             found
         })
@@ -1783,7 +1802,7 @@ mod tests {
 
     use super::set_on_resize_in;
     use super::windows_top_down;
-    use super::{Desktop, Under, joins_on, new_link, remember};
+    use super::{Desktop, Under, describe, joins_on, new_link, remember};
     use super::{Join, join_in, joins_of, reanchor_in, waiting_of};
     use super::{TITLE_UNITS, filled};
     use super::{WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, is_helper, paused_in};
@@ -1922,6 +1941,19 @@ mod tests {
         let Seen::At { rect, scale } = see(window, pid) else {
             panic!("Windows counts the test window as on screen")
         };
+        // The app learns what a window is through `describe`. This window was
+        // made a helper on purpose, a tool window that is never activated, so
+        // it has to be read as one. The fifteenth review read the styles from
+        // the wrong word and every test passed, because the link below is
+        // pushed directly and nothing here had gone through `describe`.
+        let described = describe(window);
+        assert!(
+            described.helper,
+            "the window's own style says it is a helper"
+        );
+        assert!(!described.click_through, "and that it takes the mouse");
+        assert!(described.on_screen);
+        assert_eq!((described.pid, described.rect), (pid, rect));
         let area = Rect::new(rect.origin.x + 20, rect.origin.y + 30, 50, 40);
         let Some(id) = AreaStore::new().create(AreaType::Default, area) else {
             panic!("an area id")
@@ -3222,6 +3254,12 @@ mod tests {
                 "the window under an area is found in the documented Z order",
             ),
             (
+                "fn windows(&self) -> Vec<isize> {",
+                "windows_top_down()",
+                "and so is the window a waiting area joins: the rule takes the first that \
+                 fits, and this line is what makes the first the topmost",
+            ),
+            (
                 "pub(crate) fn can_stick(bounds: Rect) -> bool {",
                 "window_under(bounds).is_some()",
                 "the menu greys its row out by asking for the window sticking would take",
@@ -3497,6 +3535,60 @@ mod tests {
             }]);
             assert!(joined(&desktop, &waiting).is_empty(), "{what} was joined");
         }
+    }
+
+    /// The decoy of the fifteenth review. Windows gives a handle value out
+    /// again, so two windows that closed can have carried one value. They are
+    /// two windows all the same: the browser's area must not follow the
+    /// editor's area to the editor's window.
+    #[test]
+    fn two_closed_windows_that_carried_one_handle_value_are_not_one_window() {
+        let (_, first, second) = store_with_two();
+        let waiting = vec![
+            Waiting {
+                area: first,
+                was: 0x51,
+                program: Kept::from(EDITOR),
+                title: Kept::from("notes.txt"),
+                open_at_close: HashSet::new(),
+            },
+            Waiting {
+                area: second,
+                was: 0x51,
+                program: Kept::from("C:\\Program Files\\Browser\\browser.exe"),
+                title: Kept::from("News"),
+                open_at_close: HashSet::new(),
+            },
+        ];
+        let desktop = FakeDesktop::of(vec![editor_window(90, 9)]);
+        let joins: Vec<(AreaId, isize)> = joins_on(&desktop, &waiting, OWN)
+            .iter()
+            .map(|join| (join.area, join.window))
+            .collect();
+        assert_eq!(joins, [(first, 90)]);
+
+        // Two areas that were on the one editor window still go together.
+        let together = vec![
+            Waiting {
+                area: first,
+                was: 0x51,
+                program: Kept::from(EDITOR),
+                title: Kept::from("notes.txt"),
+                open_at_close: HashSet::new(),
+            },
+            Waiting {
+                area: second,
+                was: 0x51,
+                program: Kept::from(EDITOR),
+                title: Kept::from("notes.txt"),
+                open_at_close: HashSet::new(),
+            },
+        ];
+        let joins: Vec<(AreaId, isize)> = joins_on(&desktop, &together, OWN)
+            .iter()
+            .map(|join| (join.area, join.window))
+            .collect();
+        assert_eq!(joins, [(first, 90), (second, 90)]);
     }
 
     /// Reading the title of a window in this process sends that window a

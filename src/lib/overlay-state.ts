@@ -90,8 +90,9 @@ export type LayerName = 'front' | 'auto' | 'back';
  * Whether an area follows a window (roadmap 1.47). `free` is anchored to the
  * screen, as every new area is. `following` moves with its window. `paused`
  * is anchored to a window that is minimised, hidden or closed: the area waits
- * where it was, out of sight unless the user is placing areas (see
- * {@link areaInSight}), and follows again when the window is back.
+ * where it was (pulled back onto the desktop if it hung off it), out of sight
+ * unless the user is placing areas (see {@link areaInSight}), and follows
+ * again when the window is back.
  */
 export type StickyState = 'free' | 'following' | 'paused';
 
