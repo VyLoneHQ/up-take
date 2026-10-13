@@ -3152,9 +3152,6 @@ mod tests {
         );
     }
 
-    /// The termination property of the sync ↔ window-event cycle. Everything
-    /// else in this module needs a real window; this one decision does not, and
-    /// it is the one whose failure mode is an infinite loop.
     /// The overlay window is created without taking the keyboard.
     ///
     /// Tauri's default is `focus: true`, and with it the web view asks for
@@ -3181,6 +3178,9 @@ mod tests {
         assert_eq!(overlay[0]["visible"], false, "and it is created hidden");
     }
 
+    /// The termination property of the sync ↔ window-event cycle. Everything
+    /// else in this module needs a real window; this one decision does not, and
+    /// it is the one whose failure mode is an infinite loop.
     #[test]
     fn matching_bounds_are_never_rewritten() {
         let bounds = Rect::new(-1080, -1080, 5560, 2733);
