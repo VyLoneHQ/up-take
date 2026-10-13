@@ -3536,6 +3536,20 @@ mod tests {
             unsafe { ShowWindow(self.0, if show { SW_SHOWNOACTIVATE } else { SW_HIDE }) };
         }
 
+        /// The display affinity Windows holds for the window, read back.
+        fn affinity(&self) -> Option<u32> {
+            let mut affinity = 0;
+            // SAFETY: the handle is this value's own live window, and
+            // `affinity` is a plain integer the call writes.
+            let read = unsafe {
+                windows_sys::Win32::UI::WindowsAndMessaging::GetWindowDisplayAffinity(
+                    self.0,
+                    &raw mut affinity,
+                )
+            };
+            (read != 0).then_some(affinity)
+        }
+
         /// Whether the compositor draws the window, asked the one way that
         /// can see it: Windows Graphics Capture accepts a window that is drawn
         /// and refuses a hidden one, whatever `IsWindowVisible` answers.
@@ -3639,6 +3653,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn the_rule_leaves_a_real_hidden_window_hidden() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{WDA_EXCLUDEFROMCAPTURE, WDA_NONE};
         let second = std::time::Duration::from_secs(1);
         let window = PlainWindow::new();
         let excluded = RwLock::new(false);
@@ -3665,6 +3680,22 @@ mod tests {
         window.show(false);
         assert!(window.becomes(false, 3 * second));
         assert!(window.stays_hidden(second));
+
+        // The setting reaches Windows as the affinity it names, both ways. The
+        // window has been shown, so an exclusion now waits for the next show.
+        assert_eq!(window.affinity(), Some(WDA_NONE));
+        let visible = || Ok(window.visible());
+        assert_eq!(
+            apply_setting(&excluded, &ledger, false, visible, write),
+            Ok(())
+        );
+        assert_eq!(window.affinity(), Some(WDA_NONE), "owed, not written");
+        assert_eq!(
+            show_settling(&excluded, &ledger, show, write, |_| {}),
+            Ok(())
+        );
+        assert_eq!(window.affinity(), Some(WDA_EXCLUDEFROMCAPTURE));
+        window.show(false);
     }
 
     #[test]
