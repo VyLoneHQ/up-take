@@ -307,6 +307,10 @@ pub fn settings_open_licence(app: AppHandle, which: &str) -> Result<(), String> 
 /// When the settings file could not be written, the Run key could not be
 /// changed, or the capture affinity could not be applied. The message names
 /// which, and the setting is in force for this run regardless.
+///
+/// A capture affinity that waits for the overlay's next show is not among
+/// them. If that write fails, the show reports it to the log, and this command
+/// returned long before.
 #[tauri::command]
 pub fn settings_write(app: AppHandle, settings: Settings) -> Result<(), String> {
     let previous = crate::settings::current();
