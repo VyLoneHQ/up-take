@@ -371,7 +371,8 @@ enum AffinityWrite {
 /// stays until the window is next shown and hidden. Measured on Windows 11
 /// build 26200 by asking Windows Graphics Capture for the window, on this
 /// overlay and on a plain window with a caption that belongs to no framework,
-/// so the behaviour is the system's:
+/// so the behaviour is the system's and not a framework's. Not every system:
+/// GitHub's Windows Server 2025 runner draws nothing for the first row.
 ///
 /// | The hidden window | told `WDA_NONE` | told `WDA_EXCLUDEFROMCAPTURE` |
 /// | --- | --- | --- |
@@ -3588,12 +3589,22 @@ mod tests {
         }
     }
 
-    /// The first row of the table in `affinity_write`'s docs, asked of Windows
-    /// itself, with a window nobody touched as the control. If Windows ever
-    /// stops drawing a hidden window told `WDA_NONE`, this goes red and the
-    /// rule can be made simpler.
+    /// The first row of the table in `affinity_write`'s docs, asked of the
+    /// machine it runs on, with a window nobody touched as the control.
+    ///
+    /// **Ignored by default, because the answer depends on the machine.** A
+    /// Windows 11 workstation (build 26200) draws the window told `WDA_NONE`.
+    /// GitHub's Windows Server 2025 runner does not: there this test fails at
+    /// its first assertion while the one below it passes, so that runner can
+    /// see a visible window and still draws no hidden one. The rule is written
+    /// for the machines that do.
+    ///
+    /// Run it on a workstation when the rule is touched, or to learn whether
+    /// a new Windows build still needs it:
+    /// `cargo test -p up-take --lib windows_draws_a_hidden_window -- --ignored`
     #[cfg(windows)]
     #[test]
+    #[ignore = "asks this machine's compositor: a workstation draws the window, CI's runner does not"]
     fn windows_draws_a_hidden_window_told_wda_none_and_not_one_told_to_exclude() {
         let second = std::time::Duration::from_secs(1);
         let untouched = PlainWindow::new();
@@ -3620,6 +3631,11 @@ mod tests {
     /// `I-451` on a real window: the setting applied while it is hidden draws
     /// nothing, the show that follows writes it, and after a hide the window
     /// is hidden.
+    ///
+    /// The first assertion can only fail on a machine that draws a hidden
+    /// window told `WDA_NONE` (see the test above). On one that does, breaking
+    /// the rule turns this red. On CI's runner it holds the rest: a shown
+    /// window is seen, and a hidden one is not.
     #[cfg(windows)]
     #[test]
     fn the_rule_leaves_a_real_hidden_window_hidden() {
