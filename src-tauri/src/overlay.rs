@@ -298,7 +298,10 @@ pub(crate) fn overlay_window(app: &AppHandle) -> Result<WebviewWindow, String> {
 /// `#109`'s review). A freeze that decided *excluded, nothing to hide* and then
 /// had the setting flip to *show* mid-capture would capture the overlay's
 /// drawing. So a change made during a freeze waits for it, at most one
-/// capture, and a freeze never runs across a change.
+/// capture, and a freeze never runs across a change. Every other capture that
+/// asks whether the drawing is in shot holds the same lock for as long
+/// ([`capture_aside`], [`with_exclusion_held`]), and a change waits for one of
+/// those in the same way.
 ///
 /// # A hidden overlay is written to in one case only
 ///
@@ -371,8 +374,10 @@ enum AffinityWrite {
 /// stays until the window is next shown and hidden. Measured on Windows 11
 /// build 26200 by asking Windows Graphics Capture for the window, on this
 /// overlay and on a plain window with a caption that belongs to no framework,
-/// so the behaviour is the system's and not a framework's. Not every system:
-/// GitHub's Windows Server 2025 runner draws nothing for the first row.
+/// so the behaviour is the system's and not a framework's. Not every system
+/// does it: the test
+/// `windows_draws_a_hidden_window_told_wda_none_and_not_one_told_to_exclude`
+/// asks the machine it runs on, and says where the answer was no.
 ///
 /// | The hidden window | told `WDA_NONE` | told `WDA_EXCLUDEFROMCAPTURE` |
 /// | --- | --- | --- |
@@ -491,9 +496,11 @@ fn show_settling(
 /// show after a setting was applied to a hidden overlay. No freeze can be
 /// running then, because a freeze needs Placement. A capture that runs while
 /// the overlay is hidden can be: the whole-screen grab holds the same lock
-/// through [`capture_aside`]. That show then waits for the one capture, as a
-/// change of the setting always has. An ordinary show owes nothing and never
-/// takes the lock.
+/// through [`capture_aside`]. That show then waits until that capture lets go
+/// of the lock, as a change of the setting always has. How long that is with
+/// a setting owed, when the capture first asks the page to hide its drawing,
+/// has not been measured. An ordinary show owes nothing and never takes the
+/// lock.
 #[cfg(windows)]
 fn settle(
     excluded: &RwLock<bool>,
@@ -555,8 +562,9 @@ fn write_affinity_to(
 }
 
 /// Whether the overlay is excluded from capture right now -- see
-/// [`apply_capture_exclusion`]. A lock rather than an atomic because a freeze
-/// reads it and then holds it for its whole capture.
+/// [`apply_capture_exclusion`]. A lock rather than an atomic because a capture
+/// reads it and then holds it until it is done: a freeze, [`capture_aside`]
+/// and [`with_exclusion_held`] all do.
 ///
 /// Starts `false`, the answer that makes a freeze hide the drawing, so a freeze
 /// that could somehow run before startup applies the affinity errs toward a
@@ -3178,8 +3186,9 @@ mod tests {
         assert!(!needs_write(bounds, bounds));
     }
 
-    /// The stray window of `I-451`: Windows draws a hidden window that is told
-    /// `WDA_NONE`, whether or not it was ever shown. So that write always
+    /// The stray window of `I-451`: a desktop Windows draws a hidden window
+    /// that is told `WDA_NONE`, whether or not it was ever shown
+    /// (`affinity_write` says where that was measured). So that write always
     /// waits until the window is on screen.
     #[cfg(windows)]
     #[test]
@@ -3608,17 +3617,19 @@ mod tests {
     ///
     /// **Ignored by default, because the answer depends on the machine.** A
     /// Windows 11 workstation (build 26200) draws the window told `WDA_NONE`.
-    /// GitHub's Windows Server 2025 runner does not: there this test fails at
-    /// its first assertion while the one below it passes, so that runner can
-    /// see a visible window and still draws no hidden one. The rule is written
-    /// for the machines that do.
+    /// On 2026-10-13 GitHub's `windows-latest` runner, then Windows Server
+    /// 2025, did not: this test failed there at its first assertion while the
+    /// one below it passed, so that runner saw a visible window and drew no
+    /// hidden one. That is one run of a runner GitHub is free to change, and
+    /// nothing asks it again. The rule is written for the machines that do
+    /// draw the window.
     ///
     /// Run it on a workstation when the rule is touched, or to learn whether
-    /// a new Windows build still needs it:
+    /// a new Windows build still needs it. Nothing makes anyone do that:
     /// `cargo test -p up-take --lib windows_draws_a_hidden_window -- --ignored`
     #[cfg(windows)]
     #[test]
-    #[ignore = "asks this machine's compositor: a workstation draws the window, CI's runner does not"]
+    #[ignore = "asks this machine's compositor, and not every machine draws the hidden window"]
     fn windows_draws_a_hidden_window_told_wda_none_and_not_one_told_to_exclude() {
         let second = std::time::Duration::from_secs(1);
         let untouched = PlainWindow::new();
@@ -3642,14 +3653,20 @@ mod tests {
         }
     }
 
-    /// `I-451` on a real window: the setting applied while it is hidden draws
-    /// nothing, the show that follows writes it, and after a hide the window
-    /// is hidden.
+    /// `I-451` on a real window, from a default start to the setting switched
+    /// both ways: what is applied while the window is hidden draws nothing,
+    /// the next show writes it, and after a hide the window is hidden.
     ///
-    /// The first assertion can only fail on a machine that draws a hidden
-    /// window told `WDA_NONE` (see the test above). On one that does, breaking
-    /// the rule turns this red. On CI's runner it holds the rest: a shown
-    /// window is seen, and a hidden one is not.
+    /// **Each read of the affinity is taken where it can fail.** Windows
+    /// answers 0, which is `WDA_NONE`, for a window that was shown and then
+    /// hidden, whatever was written to it. So the read that looks for
+    /// `WDA_NONE` is taken while the window is on screen, on a window that
+    /// read as excluded a moment before. The first version read it after the
+    /// hide, where it could only pass (review round 1 of `#138`).
+    ///
+    /// `stays_hidden` before the first show can only fail on a machine that
+    /// draws a hidden window told `WDA_NONE` (the test above). On one that
+    /// does, breaking the rule turns this red. The rest holds on any machine.
     #[cfg(windows)]
     #[test]
     fn the_rule_leaves_a_real_hidden_window_hidden() {
@@ -3659,32 +3676,49 @@ mod tests {
         let excluded = RwLock::new(false);
         let ledger = Mutex::new(AffinityLedger::new());
         let write = |setting| write_affinity_to(window.0, setting);
-
-        assert_eq!(
-            apply_setting(&excluded, &ledger, true, || Ok(window.visible()), write),
-            Ok(())
-        );
-        assert!(window.stays_hidden(second));
-
+        let visible = || Ok(window.visible());
         let show = || {
             window.show(true);
             Ok(())
         };
+
+        // A default start: excluded at once, on a window never shown.
+        assert_eq!(
+            apply_setting(&excluded, &ledger, false, visible, write),
+            Ok(())
+        );
+        assert_eq!(window.affinity(), Some(WDA_EXCLUDEFROMCAPTURE));
+
+        // The setting switched on while the window is hidden: owed, nothing
+        // written, nothing drawn.
+        assert_eq!(
+            apply_setting(&excluded, &ledger, true, visible, write),
+            Ok(())
+        );
+        assert_eq!(
+            window.affinity(),
+            Some(WDA_EXCLUDEFROMCAPTURE),
+            "owed, not written"
+        );
+        assert!(window.stays_hidden(second));
+
+        // The show writes it. Read while the window is on screen.
         assert_eq!(
             show_settling(&excluded, &ledger, show, write, |_| {}),
             Ok(())
         );
         assert!(window.visible());
+        assert_eq!(window.affinity(), Some(WDA_NONE));
         assert!(window.becomes(true, 3 * second));
 
         window.show(false);
         assert!(window.becomes(false, 3 * second));
         assert!(window.stays_hidden(second));
 
-        // The setting reaches Windows as the affinity it names, both ways. The
-        // window has been shown, so an exclusion now waits for the next show.
-        assert_eq!(window.affinity(), Some(WDA_NONE));
-        let visible = || Ok(window.visible());
+        // Switched off again, on a window that has now been shown: owed until
+        // the next show, which writes it before the window appears. A hidden
+        // window that is told to exclude itself reads 17 at once, so this
+        // read fails if the exclusion did not wait.
         assert_eq!(
             apply_setting(&excluded, &ledger, false, visible, write),
             Ok(())
