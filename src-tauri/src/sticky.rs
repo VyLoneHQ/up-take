@@ -98,6 +98,12 @@
 //!   another order, and the same order for the windows that are on screen. A
 //!   window that is destroyed while the order is being walked ends the walk
 //!   early, and the windows below it are then not seen that time.
+//! - A waiting area joins the topmost window that fits: the title its
+//!   window closed with, the same program, a window that could be stuck to,
+//!   and one that has a size. A window with no size is passed by, because an
+//!   area that scales with its window would be scaled to one pixel on it.
+//!   Two windows of one program under one title cannot be told apart, and
+//!   the topmost of them is taken.
 //! - A link remembers which windows were open when its window closed, by
 //!   handle. A new window that Windows gives one of those handle values is
 //!   passed by, and the area would wait until the next one.
@@ -548,9 +554,18 @@ pub(crate) fn can_stick(bounds: Rect) -> bool {
     window_under(bounds).is_some()
 }
 
+/// A window an area can stick to, as it was when it was looked for: its
+/// handle, its owner, its rectangle and its scale.
+struct Under {
+    window: isize,
+    pid: u32,
+    rect: Rect,
+    scale: f64,
+}
+
 /// The window an area at `bounds` would stick to: the topmost one under its
-/// centre that can be followed, with its owner, its rectangle and its scale.
-fn window_under(bounds: Rect) -> Option<(isize, u32, Rect, f64)> {
+/// centre that can be followed.
+fn window_under(bounds: Rect) -> Option<Under> {
     let window = first_under(
         windows_top_down()
             .into_iter()
@@ -562,26 +577,43 @@ fn window_under(bounds: Rect) -> Option<(isize, u32, Rect, f64)> {
     let Seen::At { rect, scale } = see(window, pid) else {
         return None;
     };
-    Some((window, pid, rect, scale))
+    Some(Under {
+        window,
+        pid,
+        rect,
+        scale,
+    })
 }
 
 /// Builds the link for an area that is about to become sticky.
 fn link_under(id: AreaId, bounds: Rect) -> Option<Link> {
-    let (window, pid, rect, scale) = window_under(bounds)?;
-    Some(Link {
+    let under = window_under(bounds)?;
+    let (program, title) = (program_of(under.pid), title_of(under.window));
+    Some(new_link(id, bounds, &under, program, title))
+}
+
+/// The link of an area at `bounds` that has just been stuck to `under`.
+///
+/// A new link scales with its window. The maintainer chose that on 2026-10-12
+/// from four rules he tried, and an area can be given one of the other three.
+fn new_link(id: AreaId, bounds: Rect, under: &Under, program: Option<Kept>, title: Kept) -> Link {
+    Link {
         area: id,
-        window,
-        pid,
-        program: program_of(pid),
-        title: title_of(window),
-        anchor: Anchor::of(bounds, rect),
+        window: under.window,
+        pid: under.pid,
+        program,
+        title,
+        anchor: Anchor::of(bounds, under.rect),
         on_resize: OnResize::default(),
-        scale,
-        seen: Some(Seen::At { rect, scale }),
-        last_at: Some((rect, scale)),
+        scale: under.scale,
+        seen: Some(Seen::At {
+            rect: under.rect,
+            scale: under.scale,
+        }),
+        last_at: Some((under.rect, under.scale)),
         gone: false,
         open_at_close: HashSet::new(),
-    })
+    }
 }
 
 fn centre_of(bounds: Rect) -> Point {
@@ -640,6 +672,18 @@ impl Candidate {
     /// Whether this is a followable window with `point` inside it.
     fn is_under(&self, point: Point, own_pid: u32) -> bool {
         self.can_be_followed(own_pid) && self.rect.contains(point)
+    }
+
+    /// Whether a waiting area may join this window: one that can be followed,
+    /// and that has a size.
+    ///
+    /// Sticking asks for the area's centre to be inside the window, which a
+    /// window with no size cannot give. Joining asked for no rectangle at
+    /// all until the fourteenth review ran a decoy: a visible window of no
+    /// size under the right title was joined, and the scaling rule made the
+    /// area one pixel.
+    fn can_be_rejoined(&self, own_pid: u32) -> bool {
+        self.can_be_followed(own_pid) && self.rect.size.width > 0 && self.rect.size.height > 0
     }
 }
 
@@ -707,10 +751,14 @@ fn windows_top_down() -> Vec<isize> {
 }
 
 /// Every top-level window, as one snapshot, in no order this module relies
-/// on. For the two questions that need the whole set and not an order: which
-/// windows were open when one closed, and which are open now.
-/// `EnumWindows` is the right call for a set, because a window that goes
-/// away during it does not cut the list short.
+/// on. For the one question that needs the whole set and not an order: which
+/// windows were open when one closed. `EnumWindows` is the right call for a
+/// set, because a window that goes away during it does not cut the list
+/// short.
+///
+/// Re-attaching asked this too until the fourteenth review, and then took the
+/// first window that fitted, which is an order. It walks the documented Z
+/// order now ([`windows_top_down`]).
 fn top_level_windows() -> Vec<isize> {
     unsafe extern "system" fn collect(window: HWND, list: LPARAM) -> i32 {
         // SAFETY: `list` is the `&mut Vec<isize>` that `top_level_windows`
@@ -1297,14 +1345,7 @@ fn sync_as(window: isize, known: Option<Seen>) -> Option<Seen> {
             if link.seen == Some(seen) {
                 continue;
             }
-            link.seen = Some(seen);
-            if let Seen::At { rect, scale } = seen {
-                link.last_at = Some((rect, scale));
-            }
-            link.gone = seen == Seen::Gone;
-            if link.gone {
-                link.open_at_close.clone_from(&open_now);
-            }
+            remember(link, seen, &open_now);
             let (state, bounds) = plan(link.anchor, link.on_resize, link.scale, seen);
             changes.push((link.area, state, bounds));
         }
@@ -1330,6 +1371,23 @@ fn sync_as(window: isize, known: Option<Seen>) -> Option<Seen> {
         SETTLE.set(unsafe { SetTimer(std::ptr::null_mut(), SETTLE.get(), wait, None) });
     }
     Some(seen)
+}
+
+/// Writes one look at its window into a link: what was seen, where the window
+/// last was on screen, and, for a window that closed, what else was open.
+///
+/// `last_at` is what a hand move of a paused area is measured from. So it
+/// follows the window for as long as the window is on screen, and stays where
+/// it was once the window is not.
+fn remember(link: &mut Link, seen: Seen, open_now: &HashSet<isize>) {
+    link.seen = Some(seen);
+    if let Seen::At { rect, scale } = seen {
+        link.last_at = Some((rect, scale));
+    }
+    link.gone = seen == Seen::Gone;
+    if link.gone {
+        link.open_at_close.clone_from(open_now);
+    }
 }
 
 /// [`Outlet::place`] for the app: writes the new states and rectangles to the
@@ -1637,6 +1695,73 @@ fn join_in(links: &mut [Link], joins: &[Join]) -> bool {
     !made.is_empty()
 }
 
+/// What re-attaching reads from the desktop. The app reads Windows, and the
+/// tests hand in a desktop of their own, so the rule in [`joins_on`] is run
+/// by them whole and not copied into them.
+trait Desktop {
+    /// Every top-level window, topmost first.
+    fn windows(&self) -> Vec<isize>;
+    fn owner_of(&self, window: isize) -> u32;
+    fn title_of(&self, window: isize) -> Kept;
+    fn describe(&self, window: isize) -> Candidate;
+    fn program_of(&self, pid: u32) -> Option<Kept>;
+}
+
+/// The desktop as Windows reports it.
+struct Windows;
+
+impl Desktop for Windows {
+    fn windows(&self) -> Vec<isize> {
+        windows_top_down()
+    }
+
+    fn owner_of(&self, window: isize) -> u32 {
+        owner_of(window)
+    }
+
+    fn title_of(&self, window: isize) -> Kept {
+        title_of(window)
+    }
+
+    fn describe(&self, window: isize) -> Candidate {
+        describe(window)
+    }
+
+    fn program_of(&self, pid: u32) -> Option<Kept> {
+        program_of(pid)
+    }
+}
+
+/// The joins to make now: for each waiting link, the topmost window on
+/// `desktop` that is its window come back.
+///
+/// The windows are walked in the documented Z order, so "the first that fits"
+/// is the topmost and not whatever a snapshot happened to list first. A walk
+/// cut short by a window closing under it finds fewer windows, and the area
+/// waits one more second.
+fn joins_on(desktop: &impl Desktop, waiting: &[Waiting], own: u32) -> Vec<Join> {
+    // UP-TAKE's own windows are passed by before their title is read. Reading
+    // the title of a window in this process sends that window a message and
+    // waits for its thread to answer, which this thread must never do.
+    let open: Vec<Open> = desktop
+        .windows()
+        .into_iter()
+        .filter_map(|window| {
+            let pid = desktop.owner_of(window);
+            (pid != own).then(|| Open {
+                window,
+                pid,
+                title: desktop.title_of(window),
+            })
+        })
+        .filter(|open| waiting.iter().any(|waiting| waiting.title == open.title))
+        .collect();
+    joins_of(waiting, &open, |link, candidate| {
+        desktop.describe(candidate.window).can_be_rejoined(own)
+            && desktop.program_of(candidate.pid).as_ref() == Some(&link.program)
+    })
+}
+
 /// Looks for the windows of links whose window closed, and joins each area to
 /// a window of the same program with the same title, if one has appeared.
 fn reattach() {
@@ -1644,26 +1769,7 @@ fn reattach() {
     if waiting.is_empty() {
         return;
     }
-    let own = std::process::id();
-    // UP-TAKE's own windows are passed by before their title is read. Reading
-    // the title of a window in this process sends that window a message and
-    // waits for its thread to answer, which this thread must never do.
-    let open: Vec<Open> = top_level_windows()
-        .into_iter()
-        .filter_map(|window| {
-            let pid = owner_of(window);
-            (pid != own).then(|| Open {
-                window,
-                pid,
-                title: title_of(window),
-            })
-        })
-        .filter(|open| waiting.iter().any(|waiting| waiting.title == open.title))
-        .collect();
-    let joins = joins_of(&waiting, &open, |link, candidate| {
-        describe(candidate.window).can_be_followed(own)
-            && program_of(candidate.pid).as_ref() == Some(&link.program)
-    });
+    let joins = joins_on(&Windows, &waiting, std::process::id());
     let joined = join_in(&mut lock(&LINKS), &joins);
     if joined {
         refresh();
@@ -1677,6 +1783,7 @@ mod tests {
 
     use super::set_on_resize_in;
     use super::windows_top_down;
+    use super::{Desktop, Under, joins_on, new_link, remember};
     use super::{Join, join_in, joins_of, reanchor_in, waiting_of};
     use super::{TITLE_UNITS, filled};
     use super::{WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, is_helper, paused_in};
@@ -1707,6 +1814,10 @@ mod tests {
     static PLACED_UNHELD: AtomicUsize = AtomicUsize::new(0);
     /// How many events about a followed window reached the callback.
     pub(super) static EVENTS_HEARD: AtomicUsize = AtomicUsize::new(0);
+    /// Set by the same test when its area stops being sticky without this
+    /// module being told.
+    static NO_LONGER_STICKY: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
 
     /// Waits for `done`, answering this thread's own window messages while it
     /// waits. The real-window test owns its window, and reading the title of
@@ -1815,27 +1926,26 @@ mod tests {
         let Some(id) = AreaStore::new().create(AreaType::Default, area) else {
             panic!("an area id")
         };
-        lock(&LINKS).push(Link {
-            area: id,
+        let under = Under {
             window,
             pid,
-            program: None,
-            title: title_of(window),
-            anchor: Anchor::of(area, rect),
-            on_resize: OnResize::default(),
+            rect,
             scale,
-            seen: Some(Seen::At { rect, scale }),
-            last_at: Some((rect, scale)),
-            gone: false,
-            open_at_close: HashSet::new(),
-        });
+        };
+        lock(&LINKS).push(new_link(id, area, &under, None, title_of(window)));
         // A handle whose owner is another process is another window that was
         // given the same number, and must never be followed as this one.
         assert_eq!(see(window, pid.wrapping_add(1)), Seen::Gone);
         // An outlet of the test's own, in place of the app: every area is
         // still sticky, and each decision is written down to be read below.
         let _ = OUTLET.set(Outlet {
-            still_sticky: |linked| linked.iter().copied().collect(),
+            still_sticky: |linked| {
+                if NO_LONGER_STICKY.load(Ordering::SeqCst) {
+                    HashSet::new()
+                } else {
+                    linked.iter().copied().collect()
+                }
+            },
             // Every area given a rectangle counts as moved, as it would be
             // in the app, so the follower's settle timer is set and handled.
             place: |changes| {
@@ -2063,6 +2173,21 @@ mod tests {
             PLACED_UNHELD.load(Ordering::SeqCst),
             0,
             "the follower let go of the links before it wrote a decision"
+        );
+
+        // The once-a-second check, with nothing to stand in for it. The store
+        // now answers that the area is no longer sticky, as a path that
+        // removed it behind this module's back would. The window is destroyed,
+        // so no event comes, and nothing posts a wake. Only the timer's tick
+        // can drop the link: it is running because a link exists, it runs the
+        // refresh, and the refresh prunes. The fourteenth review removed each
+        // of those three lines in turn and this test passed.
+        NO_LONGER_STICKY.store(true, Ordering::SeqCst);
+        assert!(
+            wait_for(Duration::from_millis(2500), || !lock(&LINKS)
+                .iter()
+                .any(|link| link.area == id)),
+            "the once-a-second check drops the link of an area that is no longer sticky"
         );
         forget(id);
     }
@@ -2628,7 +2753,11 @@ mod tests {
         ];
         let none = HashSet::new();
         let found = window_again(&Kept::from("notes.txt"), &none, &windows, |_| true);
-        assert_eq!(found.map(|open| open.window), Some(11), "the topmost match");
+        assert_eq!(
+            found.map(|open| open.window),
+            Some(11),
+            "the first match in the order given, which `joins_on` makes the Z order"
+        );
         // Another program with the same title is not the window coming back.
         assert!(window_again(&Kept::from("notes.txt"), &none, &windows, |_| false).is_none());
         // The program is asked only about windows whose title already fits.
@@ -2892,13 +3021,23 @@ mod tests {
         }
     }
 
-    /// The single lines without which the feature is dead in the app while
-    /// every test of this module's own logic stays green. Two reviews removed
-    /// them one at a time, ten and then six more, and the suite passed each
-    /// time. Each is asserted in production source, comments and tests cut
-    /// away, inside the function it has to be in.
+    /// Lines that hand the app, the store, the page or Windows to the logic
+    /// the tests hold, each asserted in production source, comments and tests
+    /// cut away, inside the function it has to be in. Reviews removed them one
+    /// at a time and the suite passed.
+    ///
+    /// **This is not every line the feature hangs on, and it was named as if
+    /// it were.** The fourteenth review removed six more lines with this test
+    /// green. A line's behaviour belongs in a test wherever one can reach it,
+    /// and each of those six now has one: the default answer to a resize
+    /// (`a_new_link_scales_with_its_window`), the timer, its refresh and the
+    /// pruning (the end of the real-window test), where the window last was
+    /// (`a_look_at_the_window_is_remembered_in_its_link`), and which window
+    /// may be joined (`joins_on`, run on a desktop of the tests' own). What
+    /// is listed here is the rest: wiring no test of this module can run. A
+    /// line that is missing from this list is not thereby held by anything.
     #[test]
-    fn every_line_the_feature_hangs_on_is_where_it_must_be() {
+    fn the_wiring_no_test_runs_is_where_it_must_be() {
         let lib = production(include_str!("lib.rs"));
         assert!(
             lib.contains("sticky::init(app.handle());"),
@@ -3063,8 +3202,14 @@ mod tests {
             ),
             (
                 "fn reattach() {",
-                "let joins = joins_of(&waiting, &open, |link, candidate| {",
-                "a closed window coming back is decided by the rule the tests hold",
+                "let joins = joins_on(&Windows, &waiting, std::process::id());",
+                "a closed window coming back is decided by the rule the tests run",
+            ),
+            (
+                "fn sync_as(window: isize, known: Option<Seen>) -> Option<Seen> {",
+                "remember(link, seen, &open_now);",
+                "each look is written into its link, or a paused area moved by hand is measured \
+                 from where its window was when it was stuck",
             ),
             (
                 "fn reattach() {",
@@ -3072,7 +3217,7 @@ mod tests {
                 "and the joins are made, with the taken window noted for the others",
             ),
             (
-                "fn window_under(bounds: Rect) -> Option<(isize, u32, Rect, f64)> {",
+                "fn window_under(bounds: Rect) -> Option<Under> {",
                 "windows_top_down()",
                 "the window under an area is found in the documented Z order",
             ),
@@ -3089,6 +3234,311 @@ mod tests {
         ] {
             assert!(body(&this, signature).contains(line), "{why}");
         }
+    }
+
+    /// The default answer to a resize is scaling, where the link is made. The
+    /// fourteenth review made a new link keep its nearest corner and every
+    /// test passed: the one assertion of the default read a link the tests
+    /// had built for themselves.
+    #[test]
+    fn a_new_link_scales_with_its_window() {
+        let area = Rect::new(140, 260, 200, 80);
+        let Some(id) = AreaStore::new().create(AreaType::Default, area) else {
+            panic!("an area id")
+        };
+        let under = Under {
+            window: 0x51,
+            pid: 7,
+            rect: WINDOW,
+            scale: 1.25,
+        };
+        let link = new_link(id, area, &under, None, Kept::from("notes.txt"));
+        assert_eq!(link.on_resize, OnResize::Scale);
+        assert_eq!(link.anchor, Anchor::of(area, WINDOW));
+        assert_eq!(link.last_at, Some((WINDOW, 1.25)));
+        assert_eq!(
+            link.seen,
+            Some(Seen::At {
+                rect: WINDOW,
+                scale: 1.25
+            })
+        );
+        assert!(!link.gone);
+    }
+
+    /// Each look is written into the link. Where the window last was on
+    /// screen follows it while it is there and stays once it is not, which is
+    /// what a hand move of a paused area is measured from.
+    #[test]
+    fn a_look_at_the_window_is_remembered_in_its_link() {
+        let area = Rect::new(140, 260, 200, 80);
+        let Some(id) = AreaStore::new().create(AreaType::Default, area) else {
+            panic!("an area id")
+        };
+        let mut link = link_for(id, area);
+        let moved = Rect::new(400, 300, 900, 600);
+        let nothing_open = HashSet::new();
+
+        let at = Seen::At {
+            rect: moved,
+            scale: 1.5,
+        };
+        remember(&mut link, at, &nothing_open);
+        assert_eq!(link.seen, Some(at));
+        assert_eq!(link.last_at, Some((moved, 1.5)), "it follows the window");
+        assert!(!link.gone);
+
+        remember(&mut link, Seen::Hidden, &nothing_open);
+        assert_eq!(link.seen, Some(Seen::Hidden));
+        assert_eq!(link.last_at, Some((moved, 1.5)), "and stays when it hides");
+        assert!(!link.gone, "hidden is not closed");
+
+        let open_now: HashSet<isize> = [3, 5].into_iter().collect();
+        remember(&mut link, Seen::Gone, &open_now);
+        assert!(link.gone);
+        assert_eq!(link.open_at_close, open_now);
+        assert_eq!(link.last_at, Some((moved, 1.5)));
+    }
+
+    const EDITOR: &str = "C:\\Program Files\\Editor\\editor.exe";
+
+    /// One window of a [`FakeDesktop`].
+    struct FakeWindow {
+        window: isize,
+        title: &'static str,
+        program: Option<&'static str>,
+        candidate: Candidate,
+    }
+
+    /// A desktop of the tests' own for [`joins_on`], topmost window first. It
+    /// writes down every title and every program it was asked for.
+    struct FakeDesktop {
+        windows: Vec<FakeWindow>,
+        titles_read: std::cell::RefCell<Vec<isize>>,
+        programs_read: std::cell::RefCell<Vec<u32>>,
+    }
+
+    impl FakeDesktop {
+        fn of(windows: Vec<FakeWindow>) -> Self {
+            Self {
+                windows,
+                titles_read: std::cell::RefCell::new(Vec::new()),
+                programs_read: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+
+        fn find(&self, window: isize) -> &FakeWindow {
+            let Some(found) = self.windows.iter().find(|fake| fake.window == window) else {
+                panic!("the rule asked about a window the desktop never listed")
+            };
+            found
+        }
+    }
+
+    impl Desktop for FakeDesktop {
+        fn windows(&self) -> Vec<isize> {
+            self.windows.iter().map(|fake| fake.window).collect()
+        }
+
+        fn owner_of(&self, window: isize) -> u32 {
+            self.find(window).candidate.pid
+        }
+
+        fn title_of(&self, window: isize) -> Kept {
+            self.titles_read.borrow_mut().push(window);
+            Kept::from(self.find(window).title)
+        }
+
+        fn describe(&self, window: isize) -> Candidate {
+            self.find(window).candidate.clone()
+        }
+
+        fn program_of(&self, pid: u32) -> Option<Kept> {
+            self.programs_read.borrow_mut().push(pid);
+            self.windows
+                .iter()
+                .find(|fake| fake.candidate.pid == pid)
+                .and_then(|fake| fake.program.map(Kept::from))
+        }
+    }
+
+    /// An ordinary window of the editor, titled `notes.txt`, that a waiting
+    /// area may join. Each test changes the one thing it is about.
+    fn editor_window(window: isize, pid: u32) -> FakeWindow {
+        FakeWindow {
+            window,
+            title: "notes.txt",
+            program: Some(EDITOR),
+            candidate: Candidate {
+                pid,
+                ..self::window("Notepad")
+            },
+        }
+    }
+
+    /// One area whose window, the editor's `notes.txt`, closed.
+    fn one_waiting() -> (AreaId, Vec<Waiting>) {
+        let Some(id) = AreaStore::new().create(AreaType::Default, Rect::new(140, 260, 200, 80))
+        else {
+            panic!("an area id")
+        };
+        let waiting = vec![Waiting {
+            area: id,
+            was: 0x51,
+            program: Kept::from(EDITOR),
+            title: Kept::from("notes.txt"),
+            open_at_close: HashSet::new(),
+        }];
+        (id, waiting)
+    }
+
+    fn joined(desktop: &FakeDesktop, waiting: &[Waiting]) -> Vec<isize> {
+        joins_on(desktop, waiting, OWN)
+            .iter()
+            .map(|join| join.window)
+            .collect()
+    }
+
+    #[test]
+    fn a_waiting_area_joins_the_topmost_window_that_fits() {
+        let (id, waiting) = one_waiting();
+        let desktop = FakeDesktop::of(vec![
+            FakeWindow {
+                title: "other.txt",
+                ..editor_window(20, 9)
+            },
+            editor_window(21, 9),
+            editor_window(22, 9),
+        ]);
+        let joins = joins_on(&desktop, &waiting, OWN);
+        assert_eq!(joins.len(), 1);
+        assert_eq!(joins[0].area, id);
+        assert_eq!(joins[0].was, 0x51);
+        assert_eq!((joins[0].window, joins[0].pid), (21, 9));
+    }
+
+    /// The decoy of the fourteenth review: a visible window of no size under
+    /// the right title, of the right program. It was joined when it came
+    /// first, and the scaling rule then made the area one pixel.
+    #[test]
+    fn a_window_with_no_size_is_passed_by() {
+        let (_, waiting) = one_waiting();
+        let no_size = |window, width, height| FakeWindow {
+            candidate: Candidate {
+                pid: 9,
+                rect: Rect::new(500, 400, width, height),
+                ..self::window("Notepad")
+            },
+            ..editor_window(window, 9)
+        };
+        let desktop = FakeDesktop::of(vec![no_size(30, 0, 0), editor_window(31, 9)]);
+        assert_eq!(joined(&desktop, &waiting), [31]);
+
+        for (width, height) in [(0, 0), (0, 300), (400, 0)] {
+            let desktop = FakeDesktop::of(vec![no_size(30, width, height)]);
+            assert!(
+                joined(&desktop, &waiting).is_empty(),
+                "a window of {width} x {height} was joined"
+            );
+        }
+    }
+
+    #[test]
+    fn a_window_of_another_program_is_not_the_window_coming_back() {
+        let (_, waiting) = one_waiting();
+        let desktop = FakeDesktop::of(vec![FakeWindow {
+            program: Some("C:\\Program Files\\Other\\other.exe"),
+            ..editor_window(40, 9)
+        }]);
+        assert!(joined(&desktop, &waiting).is_empty());
+
+        // A program Windows will not name cannot be shown to be the same one.
+        let desktop = FakeDesktop::of(vec![FakeWindow {
+            program: None,
+            ..editor_window(41, 9)
+        }]);
+        assert!(joined(&desktop, &waiting).is_empty());
+    }
+
+    #[test]
+    fn a_window_that_could_not_be_stuck_to_is_not_joined() {
+        let (_, waiting) = one_waiting();
+        let unfit: [(&str, Candidate); 4] = [
+            (
+                "not on screen",
+                Candidate {
+                    on_screen: false,
+                    ..window("Notepad")
+                },
+            ),
+            (
+                "click-through",
+                Candidate {
+                    click_through: true,
+                    ..window("Notepad")
+                },
+            ),
+            (
+                "a helper window",
+                Candidate {
+                    helper: true,
+                    ..window("Notepad")
+                },
+            ),
+            ("the desktop", window("Progman")),
+        ];
+        for (what, candidate) in unfit {
+            let desktop = FakeDesktop::of(vec![FakeWindow {
+                candidate: Candidate {
+                    pid: 9,
+                    ..candidate
+                },
+                ..editor_window(50, 9)
+            }]);
+            assert!(joined(&desktop, &waiting).is_empty(), "{what} was joined");
+        }
+    }
+
+    /// Reading the title of a window in this process sends that window a
+    /// message and waits for its thread, which the follower must never do.
+    #[test]
+    fn re_attaching_never_reads_the_title_of_one_of_its_own_windows() {
+        let (_, waiting) = one_waiting();
+        let desktop = FakeDesktop::of(vec![editor_window(60, OWN), editor_window(61, 9)]);
+        assert_eq!(joined(&desktop, &waiting), [61]);
+        assert_eq!(*desktop.titles_read.borrow(), [61]);
+    }
+
+    /// Answering "the same program" means opening the window's process, so it
+    /// is asked last, and only about a window that fits in every other way.
+    #[test]
+    fn the_program_is_asked_only_about_a_window_that_fits_otherwise() {
+        let (_, waiting) = one_waiting();
+        let desktop = FakeDesktop::of(vec![
+            FakeWindow {
+                title: "other.txt",
+                ..editor_window(70, 11)
+            },
+            FakeWindow {
+                candidate: Candidate {
+                    pid: 12,
+                    helper: true,
+                    ..window("Notepad")
+                },
+                ..editor_window(71, 12)
+            },
+            FakeWindow {
+                candidate: Candidate {
+                    pid: 13,
+                    rect: Rect::new(0, 0, 0, 0),
+                    ..window("Notepad")
+                },
+                ..editor_window(72, 13)
+            },
+            editor_window(73, 14),
+        ]);
+        assert_eq!(joined(&desktop, &waiting), [73]);
+        assert_eq!(*desktop.programs_read.borrow(), [14]);
     }
 
     #[test]
