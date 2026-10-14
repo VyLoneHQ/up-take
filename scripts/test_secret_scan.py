@@ -174,6 +174,15 @@ class SecretScan(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertIn("ci.yml:3", out)
 
+    def test_a_yaml_value_only_the_parsed_read_joins_is_refused_in_the_tree(self) -> None:
+        # The other half of reading the tree both ways: a block scalar puts
+        # the key and the value on different lines.
+        self.repo.write("deploy.yml", "deploy:\n  api_key: >-\n    " + KEYWORD_VALUE + "\n")
+        self.repo.commit("a key in a block scalar")
+        code, out = self.repo.scan()
+        self.assertEqual(code, 1, out)
+        self.assertIn("deploy.yml", out)
+
     def test_a_finding_only_the_written_line_shows_can_be_listed_for_the_range(self) -> None:
         # The case found on this check's own pull request: a YAML comment the
         # keyword pattern matches. Listed from the tree, it passes in the
@@ -292,9 +301,24 @@ class SecretScan(unittest.TestCase):
         self.assertNotIn(KEYWORD_VALUE, out)
 
     def test_staged_reads_a_yaml_comment(self) -> None:
-        self.repo.write("ci.yml", "jobs:\n  # " + LEAK)
+        # Real content around it: a YAML file that parses to nothing is read
+        # as plain lines by detect-secrets anyway, and would not tell the two
+        # reads apart. This one only the line-by-line read can see.
+        self.repo.write("ci.yml", "jobs:\n  a:\n    # " + LEAK + "    runs-on: ubuntu-latest\n")
         self.repo.git("add", "ci.yml")
-        self.assertEqual(self.repo.scan("--staged")[0], 1)
+        code, out = self.repo.scan("--staged")
+        self.assertEqual(code, 1, out)
+        self.assertIn("ci.yml:3", out)
+
+    def test_staged_reads_a_yaml_value_as_parsed(self) -> None:
+        # A block scalar puts the key and the value on different lines, so no
+        # single line as written carries both. Only the parsed read joins them.
+        value = KEYWORD_VALUE
+        self.repo.write("deploy.yml", "deploy:\n  api_key: >-\n    " + value + "\n")
+        self.repo.git("add", "deploy.yml")
+        code, out = self.repo.scan("--staged")
+        self.assertEqual(code, 1, out)
+        self.assertIn("deploy.yml", out)
 
     def test_staged_passes_a_clean_change_and_an_empty_index(self) -> None:
         self.assertEqual(self.repo.scan("--staged")[0], 0)
