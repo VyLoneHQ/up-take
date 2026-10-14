@@ -68,6 +68,10 @@ pnpm install
 pnpm tauri dev
 ```
 
+Recommended once per clone: `pip install pre-commit`, then `pre-commit install`. Before each commit and
+each push it runs the secret check CI runs, while a mistake is still only on your machine. CI runs the
+same check, but by then the commit is public.
+
 ## Before opening a pull request
 
 All of these have to pass clean:
