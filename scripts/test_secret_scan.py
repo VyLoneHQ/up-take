@@ -27,6 +27,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 SCRIPT = HERE / "secret-scan.py"
 REAL_BASELINE = HERE.parent / ".secrets.baseline"
+MAIN_REF = "refs/remotes/origin/main"
 
 KEYWORD_LINE = 'api_key = "Zq3x9KfP0wLm7Tn2Rv8sJ4dH"  # pragma: allowlist secret\n'
 KEYWORD_VALUE = "Zq3x9KfP0wLm7Tn2Rv8sJ4dH"  # pragma: allowlist secret
@@ -211,6 +212,33 @@ class SecretScan(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertIn(f"{added[:12]} src/leak.py:1", out)
 
+    def test_a_judged_finding_outlives_its_line_and_an_unjudged_one_does_not(self) -> None:
+        # The commit that added a judged line is still read after a later one
+        # removes it, so the judgement has to stay, or the branch that removed
+        # the line turns red on its own history.
+        base = self.repo.git("rev-parse", "HEAD")
+        self.repo.write("src/pins.py", LEAK)
+        self.repo.write("src/other.py", 'password = "Pq8Lm2Xv7Rt4Ws9Kd3Nb"\n')  # pragma: allowlist secret
+        self.repo.commit("two values")
+        self.assertEqual(self.repo.scan("--write-baseline")[0], 0)
+        written = json.loads((self.repo.root / ".secrets.baseline").read_text(encoding="utf-8"))
+        for entry in written["results"]["src/pins.py"]:
+            entry["is_secret"] = False
+        self.repo.write(".secrets.baseline", json.dumps(written, indent=2) + "\n")
+        self.repo.commit("pins judged, other not")
+        self.repo.write("src/pins.py", "# gone\n")
+        self.repo.write("src/other.py", "# gone\n")
+        self.repo.commit("both lines removed")
+        self.assertEqual(self.repo.scan("--write-baseline")[0], 0)
+        rewritten = json.loads((self.repo.root / ".secrets.baseline").read_text(encoding="utf-8"))["results"]
+        self.assertIn("src/pins.py", rewritten, "judged: kept")
+        self.assertNotIn("src/other.py", rewritten, "never judged: dropped")
+        self.repo.commit("rewritten")
+        code, out = self.repo.scan("--range", f"{base}..HEAD")
+        self.assertEqual(code, 1, out)
+        self.assertNotIn("src/pins.py", out)
+        self.assertIn("src/other.py:1", out)
+
     def test_a_commit_before_the_range_is_not_read(self) -> None:
         self.repo.write("config.py", LEAK)
         self.repo.commit("add a key")
@@ -221,7 +249,7 @@ class SecretScan(unittest.TestCase):
         code, out = self.repo.scan("--range", f"{base}..HEAD")
         self.assertEqual(code, 0, out)
 
-    def test_a_merge_commit_is_skipped_and_its_parents_are_read(self) -> None:
+    def test_a_clean_merge_adds_nothing_and_its_parents_are_read(self) -> None:
         base = self.repo.git("rev-parse", "HEAD")
         self.repo.git("checkout", "-q", "-b", "side")
         self.repo.write("side.py", LEAK)
@@ -367,16 +395,167 @@ class SecretScan(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn("1 commits no remote has", out)
 
-    def test_unpushed_reads_the_commit_pre_commit_names(self) -> None:
-        # `git push origin side` from main: the hook is told what is pushed.
+    def test_unpushed_reads_every_local_branch_not_only_head(self) -> None:
+        # `git push origin aaa bbb`: pre-commit names only the first branch
+        # to its hook, so a secret on the second passed (review of #140,
+        # finding 2). Every local branch no remote has is read.
         self._remote()
-        self.repo.git("checkout", "-q", "-b", "side")
+        self.repo.git("checkout", "-q", "-b", "bbb")
         self.repo.write("src/leak.py", LEAK)
-        side = self.repo.commit("a key on the side")
+        self.repo.commit("a key on bbb")
+        self.repo.git("rm", "-q", "src/leak.py")
+        self.repo.commit("delete it")
         self.repo.git("checkout", "-q", "main")
-        self.assertEqual(self.repo.scan("--unpushed")[0], 0, "HEAD is clean")
-        code, out = self.repo.scan("--unpushed", env={"PRE_COMMIT_TO_REF": side})
+        self.repo.write("notes.md", "clean\n")
+        main_head = self.repo.commit("aaa is clean")
+        code, out = self.repo.scan("--unpushed", env={"PRE_COMMIT_TO_REF": main_head})
         self.assertEqual(code, 1, out)
+        self.assertIn("src/leak.py:1", out)
+
+    def test_unpushed_reads_the_commit_pre_commit_names_on_no_branch(self) -> None:
+        self._remote()
+        self.repo.write("src/leak.py", LEAK)
+        loose = self.repo.commit("a key")
+        self.repo.git("reset", "-q", "--hard", "HEAD~1")
+        self.assertEqual(self.repo.scan("--unpushed")[0], 0, "no branch holds it")
+        code, out = self.repo.scan("--unpushed", env={"PRE_COMMIT_TO_REF": loose})
+        self.assertEqual(code, 1, out)
+
+    # Merge commits (review of #140, finding 1).
+
+    def test_a_secret_written_into_a_merge_is_refused(self) -> None:
+        base = self.repo.git("rev-parse", "HEAD")
+        self.repo.git("checkout", "-q", "-b", "side")
+        self.repo.write("side.md", "side\n")
+        self.repo.commit("side")
+        self.repo.git("checkout", "-q", "main")
+        self.repo.write("main.md", "main\n")
+        self.repo.commit("main")
+        self.repo.git("merge", "-q", "--no-commit", "side")
+        self.repo.write("src/evil.py", LEAK)
+        self.repo.git("add", "src/evil.py")
+        self.repo.git("commit", "-q", "--no-edit")
+        merge = self.repo.git("rev-parse", "HEAD")
+        self.repo.git("rm", "-q", "src/evil.py")
+        self.repo.commit("delete it")
+        code, out = self.repo.scan("--range", f"{base}..HEAD")
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"{merge[:12]} src/evil.py:1", out)
+
+    def test_a_secret_in_a_conflict_resolution_is_refused(self) -> None:
+        self.repo.write("c.py", "x = 1\n")
+        base = self.repo.commit("base")
+        self.repo.git("checkout", "-q", "-b", "side")
+        self.repo.write("c.py", "x = 2\n")
+        self.repo.commit("side")
+        self.repo.git("checkout", "-q", "main")
+        self.repo.write("c.py", "x = 3\n")
+        self.repo.commit("main")
+        subprocess.run(["git", "merge", "-q", "side"], cwd=self.repo.root, capture_output=True)
+        self.repo.write("c.py", "x = 4\n" + LEAK)
+        self.repo.git("add", "c.py")
+        self.repo.git("commit", "-q", "--no-edit")
+        merge = self.repo.git("rev-parse", "HEAD")
+        self.repo.write("c.py", "x = 4\n")
+        self.repo.commit("clean it")
+        code, out = self.repo.scan("--range", f"{base}..HEAD")
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"{merge[:12]} c.py:2", out)
+
+    def test_a_secret_written_into_an_octopus_merge_is_refused(self) -> None:
+        base = self.repo.git("rev-parse", "HEAD")
+        for branch in ("one", "two"):
+            self.repo.git("checkout", "-q", "-b", branch, base)
+            self.repo.write(f"{branch}.md", branch + "\n")
+            self.repo.commit(branch)
+        self.repo.git("checkout", "-q", "main")
+        # --no-ff, or git fast-forwards to `one` and makes a merge of two parents.
+        self.repo.git("merge", "-q", "--no-ff", "--no-commit", "one", "two")
+        # Into a file one side changed. git's plain diff of a merge is the
+        # combined form (`@@@`), in which detect-secrets finds no added line.
+        self.repo.write("one.md", "one\n" + LEAK)
+        self.repo.git("add", "one.md")
+        self.repo.git("commit", "-q", "-m", "octopus")
+        merge = self.repo.git("rev-parse", "HEAD")
+        parents = self.repo.git("rev-list", "--parents", "-n", "1", merge).split()[1:]
+        self.assertEqual(len(parents), 3, "an octopus merge")
+        self.repo.write("one.md", "one\n")
+        self.repo.commit("clean it")
+        code, out = self.repo.scan("--range", f"{base}..HEAD")
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"{merge[:12]} one.md:2", out)
+
+    # --github: the range from GitHub's own event file.
+
+    def _event(self, name: str, payload: object | str) -> dict[str, str]:
+        path = self.repo.root.parent / (self.repo.root.name + "-event.json")
+        text = payload if isinstance(payload, str) else json.dumps(payload)
+        path.write_text(text, encoding="utf-8")
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        return {"GITHUB_EVENT_NAME": name, "GITHUB_EVENT_PATH": str(path)}
+
+    def _leak_and_delete(self) -> tuple[str, str]:
+        """A key added in one commit and deleted in the next. Returns (base,
+        the commit that added it)."""
+        base = self.repo.git("rev-parse", "HEAD")
+        self.repo.write("src/leak.py", LEAK)
+        added = self.repo.commit("add a key")
+        self.repo.git("rm", "-q", "src/leak.py")
+        self.repo.commit("delete it")
+        return base, added
+
+    def test_github_pull_request_reads_base_to_head(self) -> None:
+        base, added = self._leak_and_delete()
+        head = self.repo.git("rev-parse", "HEAD")
+        env = self._event("pull_request", {"pull_request": {"base": {"sha": base}, "head": {"sha": head}}})
+        code, out = self.repo.scan("--github", env=env)
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"{added[:12]} src/leak.py:1", out)
+
+    def test_github_push_reads_before_to_after_and_nothing_older(self) -> None:
+        _, added = self._leak_and_delete()
+        before = self.repo.git("rev-parse", "HEAD")
+        self.repo.write("notes.md", "later\n")
+        after = self.repo.commit("later")
+        env = self._event("push", {"before": before, "after": after})
+        code, out = self.repo.scan("--github", env=env)
+        self.assertEqual(code, 0, out)
+        env = self._event("push", {"before": added + "~1", "after": after})
+        self.assertEqual(self.repo.scan("--github", env=env)[0], 1)
+
+    def test_github_new_branch_and_lost_head_read_since_main(self) -> None:
+        self.repo.git("update-ref", MAIN_REF, "HEAD")
+        _, added = self._leak_and_delete()
+        after = self.repo.git("rev-parse", "HEAD")
+        for before in ("0" * 40, "1" * 40):  # a new branch; a force push whose old head is gone
+            env = self._event("push", {"before": before, "after": after})
+            code, out = self.repo.scan("--github", env=env)
+            self.assertEqual(code, 1, f"before={before[:4]}: {out}")
+            self.assertIn(f"{added[:12]} src/leak.py:1", out)
+
+    def test_github_manual_run_reads_since_main_and_a_tag_cannot_stand_in(self) -> None:
+        # A tag named origin/main wins over the remote branch for the bare
+        # name (review of #140, finding 4); the full ref is used.
+        self.repo.git("update-ref", MAIN_REF, "HEAD")
+        self._leak_and_delete()
+        self.repo.git("tag", "origin/main", "HEAD")
+        code, out = self.repo.scan("--github", env=self._event("workflow_dispatch", {}))
+        self.assertEqual(code, 1, out)
+
+    def test_github_without_main_cannot_run(self) -> None:
+        code, out = self.repo.scan("--github", env=self._event("workflow_dispatch", {}))
+        self.assertEqual(code, 2, out)
+
+    def test_github_deleted_branch_reads_the_tree_only(self) -> None:
+        env = self._event("push", {"deleted": True, "before": "1" * 40, "after": "0" * 40})
+        code, out = self.repo.scan("--github", env=env)
+        self.assertEqual(code, 0, out)
+
+    def test_github_event_that_cannot_be_read_cannot_run(self) -> None:
+        self.assertEqual(self.repo.scan("--github", env={"GITHUB_EVENT_NAME": "", "GITHUB_EVENT_PATH": ""})[0], 2)
+        self.assertEqual(self.repo.scan("--github", env=self._event("push", "{not json"))[0], 2)
+        self.assertEqual(self.repo.scan("--github", env=self._event("pull_request", {"pull_request": {}}))[0], 2)
+        self.assertEqual(self.repo.scan("--github", env=self._event("push", {"before": "1" * 40}))[0], 2)
 
     def test_the_modes_cannot_be_combined(self) -> None:
         self.assertEqual(self.repo.scan("--staged", "--unpushed")[0], 2)

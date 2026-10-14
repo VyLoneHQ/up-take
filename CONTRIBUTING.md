@@ -80,6 +80,8 @@ All of these have to pass clean:
 - `cargo clippy --all-targets -- -D warnings`
 - `cargo test` and `pnpm test`
 - `biome ci .`
+- `python scripts/secret-scan.py` (after `pip install detect-secrets==1.5.0 unidiff==0.7.5`; the hooks
+  above run it for you)
 
 CI runs clippy in release as well as debug, so a release-only warning fails the build even when your
 local debug run is green.

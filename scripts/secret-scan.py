@@ -14,8 +14,16 @@ this check reads two things.
 2. **The range** (`--range BASE..HEAD`). The lines each commit in the range
    added, one commit at a time. This is what catches a secret that a branch
    added and then removed: the tree is clean, and the commit is still public.
-   Merge commits are skipped, because the lines they bring in were added by
-   commits that are read on their own (or are already on `main`).
+   A merge commit is read for what the merge itself wrote, its conflict
+   resolutions and anything added before it was committed (`git show
+   --remerge-diff`): the lines it brings in from either side were added by
+   commits read on their own. An octopus merge is read against its first
+   parent, which reads more than it needs and misses nothing.
+
+What the range does not do: it reads each commit's lines as written, never
+parsed, so a YAML block scalar (the key on one line, the value on the next)
+added and removed inside a range is not seen. The tree, and `--staged`, read
+both ways.
 
 A finding is refused unless `.secrets.baseline` lists it. The baseline is
 detect-secrets' own file, and it holds two things: the settings (which
@@ -34,13 +42,24 @@ list; `2` the check could not run (no baseline, a git error, nothing to scan).
 
 CI can only find a secret that is already public. The same check runs before
 that, on the machine that makes the commit, through `.pre-commit-config.yaml`:
-`--staged` before each commit, and `--unpushed` before each push, which also
-reads commits made without the first hook (`--no-verify`, a rebase, a merge).
+`--staged` before each commit, and `--unpushed` before each push. The second
+reads every commit of every local branch and tag that no remote has, because
+one `git push` can carry several branches and pre-commit names only the first
+to its hook. So it also catches a commit made without the first hook
+(`--no-verify`, a rebase, a merge). A commit is taken as public once any remote
+has it; a clone with a private second remote would need more than this.
 `pre-commit install` once per clone sets up both.
+
+In CI the workflow runs `--github`, which takes the range from the event
+GitHub describes in the file named by `GITHUB_EVENT_PATH`: a pull request's
+base to its head; a push's old head to its new one; and where there is no old
+head (a new branch, a force push whose old head is gone) or no push at all (a
+manual run), everything since the branch left `refs/remotes/origin/main`.
 
 Usage:
     python3 scripts/secret-scan.py                      # the tree
     python3 scripts/secret-scan.py --range A..B          # the tree and A..B
+    python3 scripts/secret-scan.py --github              # the tree and the event's range
     python3 scripts/secret-scan.py --staged              # the commit being made
     python3 scripts/secret-scan.py --unpushed            # commits no remote has
     python3 scripts/secret-scan.py --write-baseline      # rewrite the findings
@@ -51,8 +70,9 @@ A false positive
 Read the line first. If it is not a secret, either add
 `# pragma: allowlist secret` (or the comment syntax of the file) at the end of
 the line, or run `--write-baseline` and set `"is_secret": false` on the new
-entry. The pragma is the only way to pass a line that is in a commit of the
-range but no longer in the tree, because the baseline lists the tree.
+entry. An entry judged that way stays in the baseline after its line is gone,
+because the commit that added the line is still read. A line added and removed
+inside a range before any baseline was written needs the pragma.
 
 **If it is a secret, it is already public.** Revoke it first, then remove it.
 
@@ -69,6 +89,7 @@ the names `git ls-files` prints, so the baseline is the same on every machine.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -163,15 +184,78 @@ def scan_tree(files: list[str]) -> SecretsCollection:
 
 
 def scan_commit(commit: str) -> SecretsCollection:
-    """The lines one commit added, against its first parent."""
+    """The lines one commit added.
+
+    An ordinary commit against its parent. A merge of two parents by
+    `--remerge-diff`: against what git's own merge of the two would have
+    written, so what shows is what the person merging wrote (a conflict
+    resolution, a file added before the merge was committed) and not the lines
+    either side brings, which their own commits carry. An octopus merge
+    against its first parent, which reads everything the merge brings in:
+    more than needed, never less. The first version skipped every merge, and
+    a secret written into a merge passed CI and the push hook (review of
+    `#140`, finding 1)."""
+    parents = git("rev-list", "--parents", "-n", "1", commit).split()[1:]
+    if len(parents) == 2:
+        return scan_diff(git("show", "--format=", "--remerge-diff", *DIFF_OPTIONS, commit))
+    if len(parents) > 2:
+        return scan_diff(git("show", "--format=", "-m", "--first-parent", *DIFF_OPTIONS, commit))
     return scan_diff(git("show", "--format=", *DIFF_OPTIONS, commit))
 
 
 def commits_in(range_spec: str) -> list[str]:
     if ".." not in range_spec:
         raise CannotRun(f"--range wants BASE..HEAD, not {range_spec!r}")
-    listed = git("rev-list", "--no-merges", "--reverse", range_spec)
-    return listed.split()
+    return git("rev-list", "--reverse", range_spec).split()
+
+
+ZERO_SHA = "0" * 40
+MAIN = "refs/remotes/origin/main"
+
+
+def since_main(head: str) -> str:
+    """Everything on `head` that `main` does not have. The full ref name: git
+    resolves a bare `origin/main` to a tag of that name first (review of
+    `#140`, finding 4)."""
+    git("rev-parse", "--verify", "--quiet", MAIN + "^{commit}")
+    return git("merge-base", MAIN, head).strip() + ".." + head
+
+
+def is_commit(sha: str) -> bool:
+    done = subprocess.run(
+        ["git", "cat-file", "-e", sha + "^{commit}"], capture_output=True, check=False
+    )
+    return done.returncode == 0
+
+
+def github_range() -> str | None:
+    """The range the GitHub event asks for, read from its own event file.
+
+    `None` means there is nothing to read beyond the tree: a branch deleted."""
+    name = os.environ.get("GITHUB_EVENT_NAME", "")
+    path = os.environ.get("GITHUB_EVENT_PATH", "")
+    if not name or not path:
+        raise CannotRun("--github needs GITHUB_EVENT_NAME and GITHUB_EVENT_PATH")
+    try:
+        event = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise CannotRun(f"the event file {path} could not be read: {error}") from error
+    try:
+        if name == "pull_request":
+            return f"{event['pull_request']['base']['sha']}..{event['pull_request']['head']['sha']}"
+        if name == "push" and not event.get("deleted"):
+            after = event["after"]
+    except (KeyError, TypeError) as error:
+        raise CannotRun(f"the {name} event has no {error}") from error
+    if name == "push":
+        if event.get("deleted"):
+            return None
+        before = event.get("before") or ZERO_SHA
+        if before != ZERO_SHA and is_commit(before):
+            return f"{before}..{after}"
+        print(f"secret-scan: the push has no old head here ({before[:12]}), so the range is everything since main.")
+        return since_main(after)
+    return since_main("HEAD")
 
 
 def report(found: SecretsCollection, where: str) -> int:
@@ -188,7 +272,11 @@ def scan_staged() -> tuple[SecretsCollection, int]:
     """What the commit being made would add: the staged files as parsed, and
     the staged lines as written. Under pre-commit the working tree holds the
     staged content, because unstaged changes are set aside while hooks run."""
-    names = [n for n in git("diff", "--cached", "--name-only", "--diff-filter=AM", "-z").split("\0") if n]
+    names = [
+        n
+        for n in git("diff", "--cached", "--name-only", "--no-renames", "--diff-filter=AM", "-z").split("\0")
+        if n
+    ]
     found = SecretsCollection()
     for name in names:
         for secret in scan.scan_file(name):
@@ -199,10 +287,15 @@ def scan_staged() -> tuple[SecretsCollection, int]:
 
 
 def unpushed_commits() -> list[str]:
-    """The commits about to be pushed that no remote has yet. pre-commit names
-    the commit being pushed in `PRE_COMMIT_TO_REF`; outside it, `HEAD`."""
-    head = os.environ.get("PRE_COMMIT_TO_REF") or "HEAD"
-    return git("rev-list", "--no-merges", "--reverse", head, "--not", "--remotes").split()
+    """Every commit of every local branch and tag, and of `HEAD`, that no
+    remote has yet. Not only the commit being pushed: one `git push` can carry
+    several branches, and pre-commit names only the first of them to its hook
+    in `PRE_COMMIT_TO_REF`, so a secret on the second passed (review of
+    `#140`, finding 2). That ref is still read, in case it is none of these."""
+    heads = ["HEAD", "--branches", "--tags"]
+    if os.environ.get("PRE_COMMIT_TO_REF"):
+        heads.append(os.environ["PRE_COMMIT_TO_REF"])
+    return git("rev-list", "--reverse", *heads, "--not", "--remotes").split()
 
 
 ADVICE = {
@@ -275,13 +368,23 @@ def check(
 
 def write_baseline(baseline_path: Path) -> int:
     """Rewrites the findings from the tree, keeping the settings and every
-    judgement (`is_secret`) already recorded."""
+    judgement (`is_secret`) already recorded.
+
+    **A finding judged not a secret is kept after its line is gone.** The
+    range reads commits, and a commit that added the line still adds it after
+    a later one removes it: dropping the entry would turn every range that
+    holds that commit red, the branch that removed the line included. A
+    finding judged a secret, or never judged, is dropped when the tree no
+    longer holds it."""
     old = load_baseline(baseline_path)
     files = tracked_files()
     if not files:
         raise CannotRun("git ls-files printed nothing, so there is nothing to scan")
     new = scan_tree(files)
     new.merge(old)
+    for filename, secret in old:
+        if secret.is_secret is False and secret not in new[filename]:
+            new[filename].add(secret)
     baseline.save_to_file(new, str(baseline_path))
     count = sum(1 for _ in new)
     print(f"secret-scan: wrote {count} finding(s) from {len(files)} tracked files to {baseline_path}.")
@@ -302,6 +405,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--range", dest="range_spec", help="the tree, and each commit in BASE..HEAD")
+    modes.add_argument("--github", action="store_true", help="the tree, and the range of this GitHub event")
     modes.add_argument("--staged", action="store_true", help="what the commit being made adds (pre-commit)")
     modes.add_argument("--unpushed", action="store_true", help="each commit no remote has (pre-push)")
     modes.add_argument("--write-baseline", action="store_true", help="rewrite the findings in the baseline")
@@ -312,7 +416,8 @@ def main(argv: list[str] | None = None) -> int:
         path = Path(args.baseline)
         if args.write_baseline:
             return write_baseline(path)
-        return check(path, args.range_spec, staged=args.staged, unpushed=args.unpushed)
+        range_spec = github_range() if args.github else args.range_spec
+        return check(path, range_spec, staged=args.staged, unpushed=args.unpushed)
     except CannotRun as error:
         print(f"secret-scan: could not run: {error}", file=sys.stderr)
         return 2
