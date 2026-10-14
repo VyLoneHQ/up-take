@@ -11,7 +11,7 @@ this check reads two things.
    Each file is read twice: as detect-secrets parses it, and line by line as
    written, because the parsed read of a YAML file never sees its comments
    (`scan_tree` has the details). A UTF-16 file, which neither read can
-   decode, is read a third way (`as_text`). Of detect-secrets' filters, only
+   decode, is read a third way (`decodings`). Of detect-secrets' filters, only
    two may drop a finding: the `pragma: allowlist secret` a person writes
    (on the line, or `pragma: allowlist nextline secret` on the line above),
    and the baseline's patterns for three exact line shapes (`KEEP_FILTERS`).
@@ -67,6 +67,8 @@ any other branch or tag, and for a manual run, everything since it left
 push GitHub ran nothing for would then be in no range. A commit that has left
 every branch (a force push, a deleted branch) is read by no run, though GitHub
 still serves it by sha; the push hook is what reads it (`github_commits`).
+Once a day a scheduled run reads every commit of every branch, tag and pull
+request head, for the branch whose last push started no run at all.
 
 Usage:
     python3 scripts/secret-scan.py                      # the tree
@@ -218,36 +220,41 @@ def scan_diff(diff: str) -> SecretsCollection:
     return found
 
 
-def as_text(data: bytes) -> str | None:
-    """The text in bytes git calls binary, or `None` for a real binary.
+def decodings(data: bytes) -> list[str]:
+    """Every way the bytes read as text; empty for a real binary. Each is
+    scanned, so a guess between two encodings never decides what is read.
 
     Three kinds of text reach here. UTF-16, which neither read can see: Python
     cannot decode it as UTF-8, so detect-secrets drops the file as binary, and
     git finds NUL bytes in it and prints no lines. Windows PowerShell 5.1
     writes it by default (`>`, `Out-File`). A text file `.gitattributes` marks
     `binary`, such as `*.svg` here, whose diff git prints as `Bin`. And UTF-8
-    text with a NUL byte in it, which git also calls binary: NUL is valid
-    UTF-8, so it is tried as UTF-8 when it is not UTF-16 (third review of
+    text with NUL bytes in it, which git also calls binary (third review of
     `#140`, finding 1).
-    UTF-16 is recognised by its byte-order mark, or, without one, by every
-    other byte being zero, which is what ASCII text in UTF-16 looks like and
-    what no image in this repository does."""
+    UTF-16 is recognised by its byte-order mark, or, without one, by nearly
+    every other byte being zero, which is what ASCII text in UTF-16 looks like
+    and what no image in this repository does. UTF-8 with enough NULs passes
+    that test too, so UTF-8 is always tried as well, and both are read (eighth
+    review of `#140`, finding 1: such a file was read as UTF-16 garbage, or
+    not at all)."""
     if data.startswith((b"\xff\xfe", b"\xfe\xff")):
         try:
-            return data.decode("utf-16")
+            return [data.decode("utf-16")]
         except UnicodeDecodeError:
-            return None
+            return []
+    found = []
     if b"\x00" in data:
         for encoding, zeros in (("utf-16-le", data[1::2]), ("utf-16-be", data[0::2])):
             if zeros and zeros.count(0) >= 0.9 * len(zeros):
                 try:
-                    return data.decode(encoding)
+                    found.append(data.decode(encoding))
                 except UnicodeDecodeError:
-                    return None
+                    pass
     try:
-        return data.decode("utf-8")
+        found.append(data.decode("utf-8"))
     except UnicodeDecodeError:
-        return None
+        pass
+    return found
 
 
 def scan_text(filename: str, text: str) -> SecretsCollection:
@@ -277,13 +284,20 @@ def binary_paths(*diff_args: str) -> list[str]:
     return paths
 
 
+def blob(revision: str, path: str) -> bytes:
+    """The file at `revision`: a commit, or empty for the index. For the index
+    the stage is written out (`:0:<path>`), because git reads `:0:x` as stage
+    0 of `x`, so a file named `0:x` would otherwise be read as `x` (eighth
+    review of `#140`)."""
+    return git_bytes("show", f"{revision}:{path}" if revision else f":0:{path}")
+
+
 def scan_blobs(revision: str, paths: list[str]) -> SecretsCollection:
-    """Each path at `revision` (`<commit>` or empty for the index) read as
-    text, if it is text."""
+    """Each path at `revision` (`<commit>` or empty for the index), read in
+    every way it reads as text."""
     found = SecretsCollection()
     for path in paths:
-        text = as_text(git_bytes("show", f"{revision}:{path}"))
-        if text is not None:
+        for text in decodings(blob(revision, path)):
             for filename, secret in scan_text(path, text):
                 found[filename].add(secret)
     return found
@@ -340,13 +354,11 @@ def scan_changes(diff: str, revision: str) -> SecretsCollection:
     if not diff.strip():
         return found
     for path, numbers in added_lines(diff).items():
-        data = git_bytes("show", f"{revision}:{path}")
-        text = as_text(data)
-        if text is None:
-            text = data.decode("utf-8", errors="replace")
-        for filename, secret in scan_text(path, text):
-            if secret.line_number in numbers:
-                found[filename].add(secret)
+        data = blob(revision, path)
+        for text in decodings(data) or [data.decode("utf-8", errors="replace")]:
+            for filename, secret in scan_text(path, text):
+                if secret.line_number in numbers:
+                    found[filename].add(secret)
     return found
 
 
@@ -374,12 +386,12 @@ def scan_tree(files: list[str]) -> SecretsCollection:
     empty_tree = git("hash-object", "-t", "tree", "--stdin", stdin=b"").strip()
     for filename, secret in scan_diff(git("diff", *DIFF_OPTIONS, empty_tree, "--")):
         found[filename].add(secret)
-    # A third read for what the first two cannot decode: UTF-16 (`as_text`).
+    # A third read for what the first two may not decode: bytes with a NUL or
+    # a byte-order mark, read in every way they read as text (`decodings`).
     for name in files:
         data = Path(name).read_bytes() if Path(name).is_file() else b""
         if b"\x00" in data or data.startswith((b"\xff\xfe", b"\xfe\xff")):
-            text = as_text(data)
-            if text is not None:
+            for text in decodings(data):
                 for filename, secret in scan_text(name, text):
                     found[filename].add(secret)
     return found
@@ -397,7 +409,7 @@ def unreadable(files: list[str]) -> list[str]:
     return [
         name
         for name in files
-        if name in binary and Path(name).is_file() and as_text(Path(name).read_bytes()) is None
+        if name in binary and Path(name).is_file() and not decodings(Path(name).read_bytes())
     ]
 
 
@@ -486,6 +498,13 @@ def github_commits() -> tuple[list[str] | None, str]:
         event = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
         raise CannotRun(f"the event file {path} could not be read: {error}") from error
+    if name == "schedule":
+        # Every commit of every branch, tag and pull request head the runner
+        # fetched: a branch whose last push carried a skip marker, with no
+        # later push and no pull request, has no other run that reads it
+        # (eighth review of `#140`, finding 2).
+        commits = git("rev-list", "--reverse", "--remotes", "--tags").split()
+        return commits, "commits of every branch, tag and pull request head"
     try:
         if name == "pull_request":
             spec = f"{event['pull_request']['base']['sha']}..{event['pull_request']['head']['sha']}"

@@ -1116,6 +1116,74 @@ class SeventhReview(unittest.TestCase):
         self.assertIn(f"{added[:12]} index.html:1", out)
 
 
+class EighthReview(unittest.TestCase):
+    """The eighth review of #140: UTF-8 padded with NULs was read as UTF-16
+    garbage, a branch whose last push started no run was never read, and a
+    staged file named `0:x` was read as `x`."""
+
+    def setUp(self) -> None:
+        self._dir = tempfile.TemporaryDirectory()
+        self.repo = Repo(Path(self._dir.name))
+
+    def tearDown(self) -> None:
+        self._dir.cleanup()
+
+    def test_utf8_padded_with_nuls_is_read_at_odd_and_even_length(self) -> None:
+        remote = self.repo.root.parent / (self.repo.root.name + "-remote.git")
+        subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+        self.addCleanup(lambda: __import__("shutil").rmtree(remote, ignore_errors=True))
+        self.repo.git("remote", "add", "origin", str(remote))
+        self.repo.git("push", "-q", "origin", "main")
+        base = self.repo.git("rev-parse", "HEAD")
+        added = []
+        for pad in (600, 601):
+            name = f"pad{pad}.txt"
+            data = LEAK.encode("utf-8") + b"\x00" * pad
+            (self.repo.root / name).write_bytes(data)
+            self.repo.git("add", name)
+            self.assertEqual(self.repo.scan("--staged")[0], 1, f"staged, {pad}")
+            added.append(self.repo.commit(f"a key and {pad} NULs"))
+            self.repo.git("rm", "-q", name)
+            self.repo.commit("delete it")
+        code, out = self.repo.scan("--range", f"{base}..HEAD")
+        self.assertEqual(code, 1, out)
+        for sha, pad in zip(added, (600, 601)):
+            self.assertIn(f"{sha[:12]} pad{pad}.txt:1", out)
+        code, out = self.repo.scan("--unpushed")
+        self.assertEqual(code, 1, out)
+        for sha in added:
+            self.assertIn(sha[:12], out)
+
+    def test_the_daily_run_reads_every_branch_tag_and_pull_request_head(self) -> None:
+        main = self.repo.git("rev-parse", "HEAD")
+        self.repo.git("update-ref", MAIN_REF, main)
+        found = {}
+        for ref in ("refs/remotes/origin/feature", "refs/remotes/pull/7", "refs/tags/v1"):
+            self.repo.git("checkout", "-q", "--detach", main)
+            name = ref.rsplit("/", 1)[-1] + ".py"
+            self.repo.write(name, LEAK)
+            found[ref] = self.repo.commit(f"a key reached only by {ref}")
+            self.repo.git("update-ref", ref, "HEAD")
+        self.repo.git("checkout", "-q", "main")
+        path = self.repo.root.parent / (self.repo.root.name + "-event.json")
+        path.write_text("{}", encoding="utf-8")
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        env = {"GITHUB_EVENT_NAME": "schedule", "GITHUB_EVENT_PATH": str(path)}
+        code, out = self.repo.scan("--github", env=env)
+        self.assertEqual(code, 1, out)
+        for ref, sha in found.items():
+            self.assertIn(sha[:12], out, ref)
+
+    @unittest.skipIf(os.name == "nt", "Git for Windows refuses a path with a colon")
+    def test_a_staged_file_named_like_a_stage_is_read_as_itself(self) -> None:
+        self.repo.write("x.txt", "nothing here\n")
+        self.repo.commit("a clean x")
+        path = self.repo.root / "0:x.txt"
+        path.write_bytes(b"\x00" + LEAK.encode("utf-8"))
+        self.repo.git("add", "0:x.txt")
+        self.assertEqual(self.repo.scan("--staged")[0], 1)
+
+
 class Pins(unittest.TestCase):
     def test_every_copy_of_the_versions_agrees_with_what_is_installed(self) -> None:
         # Dependabot does not bump pip pins here, so a one-sided bump would
