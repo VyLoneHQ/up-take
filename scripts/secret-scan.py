@@ -250,11 +250,6 @@ def as_text(data: bytes) -> str | None:
         return None
 
 
-# Characters Python and the diff parser take for a line break and git does not.
-# Replaced by a space, so a line's number here is its number in git.
-NOT_GIT_LINE_BREAKS = str.maketrans({c: " " for c in "\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"})
-
-
 def scan_text(filename: str, text: str) -> SecretsCollection:
     """Every line of `text`, through the same code a commit's diff takes: as a
     diff that adds the whole file. Lines are split and numbered as git does,
@@ -262,7 +257,7 @@ def scan_text(filename: str, text: str) -> SecretsCollection:
     lines = text.split("\n")
     if lines and lines[-1] == "":
         lines.pop()
-    lines = [line.removesuffix("\r").translate(NOT_GIT_LINE_BREAKS) for line in lines]
+    lines = [line.removesuffix("\r") for line in lines]
     if not lines:
         return SecretsCollection()
     body = "".join("+" + line + "\n" for line in lines)
