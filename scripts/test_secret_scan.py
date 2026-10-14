@@ -64,6 +64,17 @@ class Repo:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8", newline="\n")
 
+    def judge(self) -> None:
+        """What a person does after reading each new entry and finding no
+        secret: `"is_secret": false` on every entry not judged yet."""
+        path = self.root / ".secrets.baseline"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        for entries in data["results"].values():
+            for entry in entries:
+                if entry.get("is_secret") is None:
+                    entry["is_secret"] = False
+        self.write(".secrets.baseline", json.dumps(data, indent=2) + "\n")
+
     def commit(self, message: str) -> str:
         self.git("add", "-A")
         self.git("commit", "-q", "--allow-empty", "-m", message)
@@ -124,9 +135,7 @@ class SecretScan(unittest.TestCase):
         self.repo.write(name, LEAK)
         self.repo.commit("add a key")
         self.assertEqual(self.repo.scan("--write-baseline")[0], 0)
-        written = json.loads((self.repo.root / ".secrets.baseline").read_text(encoding="utf-8"))
-        written["results"][name][0]["is_secret"] = False
-        self.repo.write(".secrets.baseline", json.dumps(written, indent=2) + "\n")
+        self.repo.judge()
         self.repo.commit("judged")
 
         self.repo.write(name, "# moved down\n\n" + LEAK)
@@ -162,6 +171,7 @@ class SecretScan(unittest.TestCase):
         self.repo.write("src/pins.py", LEAK)
         self.repo.commit("a value that is not a secret")
         self.assertEqual(self.repo.scan("--write-baseline")[0], 0)
+        self.repo.judge()
         self.repo.commit("listed")
         code, out = self.repo.scan("--range", f"{base}..HEAD")
         self.assertEqual(code, 0, out)
@@ -194,6 +204,7 @@ class SecretScan(unittest.TestCase):
         code, out = self.repo.scan("--range", f"{base}..HEAD")
         self.assertEqual(code, 1, "the comment is a finding: " + out)
         self.assertEqual(self.repo.scan("--write-baseline")[0], 0)
+        self.repo.judge()
         self.repo.commit("listed")
         code, out = self.repo.scan("--range", f"{base}..HEAD")
         self.assertEqual(code, 0, out)
@@ -212,10 +223,12 @@ class SecretScan(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertIn(f"{added[:12]} src/leak.py:1", out)
 
-    def test_a_judged_finding_outlives_its_line_and_an_unjudged_one_does_not(self) -> None:
+    def test_a_judgement_outlives_its_line_and_an_unjudged_entry_still_refuses(self) -> None:
         # The commit that added a judged line is still read after a later one
         # removes it, so the judgement has to stay, or the branch that removed
-        # the line turns red on its own history.
+        # the line turns red on its own history. --write-baseline reads the
+        # history, finds the line in that commit and keeps its judgement. The
+        # unjudged one is listed too, from the history, and passes nothing.
         base = self.repo.git("rev-parse", "HEAD")
         self.repo.write("src/pins.py", LEAK)
         self.repo.write("src/other.py", 'password = "Pq8Lm2Xv7Rt4Ws9Kd3Nb"\n')  # pragma: allowlist secret
@@ -231,8 +244,8 @@ class SecretScan(unittest.TestCase):
         self.repo.commit("both lines removed")
         self.assertEqual(self.repo.scan("--write-baseline")[0], 0)
         rewritten = json.loads((self.repo.root / ".secrets.baseline").read_text(encoding="utf-8"))["results"]
-        self.assertIn("src/pins.py", rewritten, "judged: kept")
-        self.assertNotIn("src/other.py", rewritten, "never judged: dropped")
+        self.assertTrue(all(e.get("is_secret") is False for e in rewritten["src/pins.py"]), "judged: kept")
+        self.assertTrue(all(e.get("is_secret") is None for e in rewritten["src/other.py"]), "unjudged: listed, not judged")
         self.repo.commit("rewritten")
         code, out = self.repo.scan("--range", f"{base}..HEAD")
         self.assertEqual(code, 1, out)
@@ -360,6 +373,7 @@ class SecretScan(unittest.TestCase):
         self.repo.write("src/pins.py", LEAK)
         self.repo.commit("a value that is not a secret")
         self.assertEqual(self.repo.scan("--write-baseline")[0], 0)
+        self.repo.judge()
         self.repo.commit("listed")
         self.repo.write("src/pins.py", "# moved\n" + LEAK)
         self.repo.git("add", "src/pins.py")
@@ -512,26 +526,42 @@ class SecretScan(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertIn(f"{added[:12]} src/leak.py:1", out)
 
-    def test_github_push_reads_before_to_after_and_nothing_older(self) -> None:
-        _, added = self._leak_and_delete()
-        before = self.repo.git("rev-parse", "HEAD")
-        self.repo.write("notes.md", "later\n")
-        after = self.repo.commit("later")
-        env = self._event("push", {"before": before, "after": after})
-        code, out = self.repo.scan("--github", env=env)
-        self.assertEqual(code, 0, out)
-        env = self._event("push", {"before": added + "~1", "after": after})
-        self.assertEqual(self.repo.scan("--github", env=env)[0], 1)
-
-    def test_github_new_branch_and_lost_head_read_since_main(self) -> None:
+    def test_github_push_to_a_branch_reads_since_main_whatever_before_says(self) -> None:
+        # A push GitHub ran nothing for ([skip ci]) leaves the next run's
+        # `before` past its commits (second review of #140, finding 2). The
+        # range does not start at `before`, so they are still read. Also a new
+        # branch, and a force push whose old head is gone.
         self.repo.git("update-ref", MAIN_REF, "HEAD")
         _, added = self._leak_and_delete()
-        after = self.repo.git("rev-parse", "HEAD")
-        for before in ("0" * 40, "1" * 40):  # a new branch; a force push whose old head is gone
-            env = self._event("push", {"before": before, "after": after})
+        skipped = self.repo.git("rev-parse", "HEAD")
+        self.repo.write("notes.md", "later\n")
+        after = self.repo.commit("later")
+        for before in (skipped, "0" * 40, "1" * 40):
+            env = self._event("push", {"ref": "refs/heads/feature", "before": before, "after": after})
             code, out = self.repo.scan("--github", env=env)
             self.assertEqual(code, 1, f"before={before[:4]}: {out}")
             self.assertIn(f"{added[:12]} src/leak.py:1", out)
+            self.assertIn("commits since main", out)
+
+    def test_github_push_to_main_reads_its_whole_history(self) -> None:
+        _, added = self._leak_and_delete()
+        self.repo.write("notes.md", "later\n")
+        after = self.repo.commit("later")
+        env = self._event("push", {"ref": "refs/heads/main", "before": after + "~1", "after": after})
+        code, out = self.repo.scan("--github", env=env)
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"{added[:12]} src/leak.py:1", out)
+        self.assertIn("main's whole history", out)
+
+    def test_github_tag_push_reads_since_main(self) -> None:
+        self.repo.git("update-ref", MAIN_REF, "HEAD")
+        _, added = self._leak_and_delete()
+        self.repo.git("tag", "v1")
+        after = self.repo.git("rev-parse", "HEAD")
+        env = self._event("push", {"ref": "refs/tags/v1", "before": "0" * 40, "after": after})
+        code, out = self.repo.scan("--github", env=env)
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"{added[:12]} src/leak.py:1", out)
 
     def test_github_manual_run_reads_since_main_and_a_tag_cannot_stand_in(self) -> None:
         # A tag named origin/main wins over the remote branch for the bare
@@ -556,6 +586,106 @@ class SecretScan(unittest.TestCase):
         self.assertEqual(self.repo.scan("--github", env=self._event("push", "{not json"))[0], 2)
         self.assertEqual(self.repo.scan("--github", env=self._event("pull_request", {"pull_request": {}}))[0], 2)
         self.assertEqual(self.repo.scan("--github", env=self._event("push", {"before": "1" * 40}))[0], 2)
+        self.assertEqual(self.repo.scan("--github", env=self._event("push", {"ref": "refs/heads/x"}))[0], 2)
+
+    # What neither read could see (second review of #140, finding 1), and
+    # entries nobody judged.
+
+    def test_a_secret_in_cargo_lock_is_refused_and_its_checksums_pass(self) -> None:
+        base = self.repo.git("rev-parse", "HEAD")
+        # A real crate checksum from this repository's Cargo.lock: public.
+        checksum = 'checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"\n'  # pragma: allowlist secret
+        self.repo.write("Cargo.lock", '[[package]]\nname = "a"\n' + checksum)
+        self.repo.commit("a lockfile")
+        self.assertEqual(self.repo.scan("--range", f"{base}..HEAD")[0], 0, "checksums pass")
+        self.repo.write("Cargo.lock", '[[package]]\nname = "a"\n' + checksum + LEAK)
+        added = self.repo.commit("a key in the lockfile")
+        code, out = self.repo.scan("--range", f"{base}..HEAD")
+        self.assertEqual(code, 1, out)
+        self.assertIn("\n  Cargo.lock:4", out, "the tree")
+        self.assertIn(f"{added[:12]} Cargo.lock:4", out, "the commit")
+
+    def test_a_secret_in_an_svg_marked_binary_is_refused_in_the_tree_and_the_range(self) -> None:
+        self.repo.write(".gitattributes", "*.svg binary\n")
+        self.repo.commit("svg is binary to git")
+        base = self.repo.git("rev-parse", "HEAD")
+        self.repo.write("logo.svg", "<svg>\n<!-- " + LEAK.strip() + " -->\n</svg>\n")
+        added = self.repo.commit("a key in an svg")
+        self.assertEqual(self.repo.scan()[0], 1, "the tree")
+        self.repo.git("rm", "-q", "logo.svg")
+        self.repo.commit("delete it")
+        code, out = self.repo.scan("--range", f"{base}..HEAD")
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"{added[:12]} logo.svg:2", out)
+
+    def _utf16(self, name: str, bom: bool) -> None:
+        text = "# notes\r\n" + LEAK.replace("\n", "\r\n")
+        data = text.encode("utf-16") if bom else text.encode("utf-16-le")
+        path = self.repo.root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+
+    def test_a_secret_in_a_utf16_file_is_refused_in_tree_range_and_staged(self) -> None:
+        # What Windows PowerShell 5.1 writes by default. With and without the
+        # byte-order mark.
+        for bom in (True, False):
+            with self.subTest(bom=bom):
+                base = self.repo.git("rev-parse", "HEAD")
+                name = f"notes-{bom}.txt"
+                self._utf16(name, bom)
+                self.repo.git("add", name)
+                self.assertEqual(self.repo.scan("--staged")[0], 1, "staged")
+                added = self.repo.commit("utf-16 notes")
+                self.assertEqual(self.repo.scan()[0], 1, "the tree")
+                self.repo.git("rm", "-q", name)
+                self.repo.commit("delete it")
+                code, out = self.repo.scan("--range", f"{base}..HEAD")
+                self.assertEqual(code, 1, out)
+                self.assertIn(f"{added[:12]} {name}:2", out)
+
+    def test_a_binary_file_is_counted_as_not_read(self) -> None:
+        (self.repo.root / "icon.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + bytes(range(256)))
+        self.repo.commit("an image")
+        code, out = self.repo.scan()
+        self.assertEqual(code, 0, out)
+        self.assertIn("(1 of them binary, not text to read)", out)
+
+    def test_an_entry_nobody_judged_passes_nothing(self) -> None:
+        # Otherwise one run of --write-baseline makes a real secret pass.
+        self.repo.write("src/config.py", LEAK)
+        self.repo.commit("add a key")
+        self.assertEqual(self.repo.scan("--write-baseline")[0], 0)
+        code, out = self.repo.scan()
+        self.assertEqual(code, 1, out)
+        self.assertIn("in the baseline, not judged yet", out)
+        self.repo.judge()
+        self.assertEqual(self.repo.scan()[0], 0)
+
+    def test_an_entry_judged_a_secret_passes_nothing(self) -> None:
+        self.repo.write("src/config.py", LEAK)
+        self.repo.commit("add a key")
+        self.repo.scan("--write-baseline")
+        data = json.loads((self.repo.root / ".secrets.baseline").read_text(encoding="utf-8"))
+        data["results"]["src/config.py"][0]["is_secret"] = True
+        self.repo.write(".secrets.baseline", json.dumps(data, indent=2) + "\n")
+        code, out = self.repo.scan()
+        self.assertEqual(code, 1, out)
+        self.assertIn("judged a secret", out)
+
+    def test_write_baseline_lists_what_only_the_history_holds(self) -> None:
+        # A push to main reads all of main's history, so a line that is gone
+        # has to be listable.
+        self.repo.write("src/old.py", LEAK)
+        added = self.repo.commit("a value that is not a secret")
+        self.repo.git("rm", "-q", "src/old.py")
+        self.repo.commit("gone")
+        self.assertEqual(self.repo.scan("--write-baseline")[0], 0)
+        self.repo.judge()
+        self.repo.commit("listed and judged")
+        env = self._event("push", {"ref": "refs/heads/main", "after": self.repo.git("rev-parse", "HEAD")})
+        code, out = self.repo.scan("--github", env=env)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn(added[:12], out)
 
     def test_the_modes_cannot_be_combined(self) -> None:
         self.assertEqual(self.repo.scan("--staged", "--unpushed")[0], 2)
