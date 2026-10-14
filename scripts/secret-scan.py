@@ -139,6 +139,14 @@ NAME_FILTERS = (
     "detect_secrets.filters.heuristic.is_swagger_file",
     "detect_secrets.filters.common.is_baseline_file",
 )
+# Network verification: while this filter is configured, detect-secrets sends
+# every match of a verifiable type (AWS, Slack, Stripe, Telegram, Mailchimp
+# and others) to the provider's API and drops it if the answer is not "valid",
+# which a rate limit or a server error also gives. So a live key could pass
+# with nobody having judged it, and every match left the machine (fifth
+# review of `#140`, finding 1). Off, and out of the baseline: detect-secrets'
+# own `--no-verify`. Nothing here talks to the network.
+VERIFY_FILTER = "detect_secrets.filters.common.is_ignored_due_to_verification_policies"
 
 
 class CannotRun(Exception):
@@ -178,7 +186,7 @@ def load_baseline(path: Path) -> SecretsCollection:
     # git quoted (one holding `"` or `\`) is not a path on disk either. A
     # name it cannot place is now a finding under that name, which fails red,
     # not one that disappears. `scan_file` is only given files that exist.
-    get_settings().disable_filters(*NAME_FILTERS, INVALID_FILE_FILTER)
+    get_settings().disable_filters(*NAME_FILTERS, INVALID_FILE_FILTER, VERIFY_FILTER)
     # detect-secrets turns each name into the local form as it loads, so on
     # Windows `a/b.rs` comes back as `a\b.rs` and matches nothing git lists.
     # Back to git's form, on the key and on each finding, which compares by
@@ -314,11 +322,18 @@ def scan_tree(files: list[str]) -> SecretsCollection:
 
 
 def unreadable(files: list[str]) -> list[str]:
-    """The tracked files that are text in neither UTF-8 nor UTF-16, so no read
-    above saw a line of them: images, fonts, archives. Counted in the result,
-    so "every tracked file" says what it did not read."""
+    """The tracked files no read above saw a line of: git calls them binary,
+    so the line-by-line read had none, and they are text in neither UTF-8 nor
+    UTF-16: images, fonts, archives. Counted in the result, so "every tracked
+    file" says what it did not read. A file git shows as text (Latin-1, say)
+    was read line by line and is not counted (fifth review of `#140`,
+    finding 3)."""
+    empty_tree = git("hash-object", "-t", "tree", "--stdin", stdin=b"").strip()
+    binary = set(binary_paths("diff", empty_tree))
     return [
-        name for name in files if Path(name).is_file() and as_text(Path(name).read_bytes()) is None
+        name
+        for name in files
+        if name in binary and Path(name).is_file() and as_text(Path(name).read_bytes()) is None
     ]
 
 
@@ -388,9 +403,11 @@ def github_commits() -> tuple[list[str] | None, str]:
     GitHub still serves it by sha, and only the push hook, before it was
     pushed, reads it (third review of `#140`, finding 4).
 
-    The whole history of main was 134 commits on 2026-10-14, and reading it
-    took 1 min 35 s on a Windows workstation; the runner was not measured
-    (fourth review of `#140`, finding 4, which corrected "takes seconds").
+    The whole history of main was 124 commits on 2026-10-14. Reading this
+    branch's 134 took 1 min 35 s on a Windows workstation, and 135 took
+    1 min 14 s in a review; the runner was not measured (fourth review of
+    `#140`, finding 4, which corrected "takes seconds", and the fifth,
+    finding 2, which corrected the count).
     Findings in it that are not secrets are listed in the baseline, which
     `--write-baseline` writes from the history too."""
     name = os.environ.get("GITHUB_EVENT_NAME", "")

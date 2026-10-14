@@ -847,13 +847,17 @@ class FourthReview(unittest.TestCase):
         self.assertIn(".secrets.baseline:", out)
 
     def _blob(self, data: bytes) -> str:
-        return subprocess.run(
-            ["git", "hash-object", "-w", "--stdin"],
-            cwd=self.repo.root,
-            input=data,
-            capture_output=True,
-            check=True,
-        ).stdout.decode().strip()
+        return (
+            subprocess.run(
+                ["git", "hash-object", "-w", "--stdin"],
+                cwd=self.repo.root,
+                input=data,
+                capture_output=True,
+                check=True,
+            )
+            .stdout.decode()
+            .strip()
+        )
 
     def _index(self, mode: str, blob: str, name: str) -> None:
         self.repo.git("update-index", "--add", "--cacheinfo", f"{mode},{blob},{name}")
@@ -875,6 +879,108 @@ class FourthReview(unittest.TestCase):
         code, out = self.repo.scan("--range", f"{base}..HEAD")
         self.assertEqual(code, 1, out)
         self.assertIn(f"{changed[:12]} notes.txt:2", out)
+
+
+class FourthReviewStaged(unittest.TestCase):
+    def setUp(self) -> None:
+        self._dir = tempfile.TemporaryDirectory()
+        self.repo = Repo(Path(self._dir.name))
+
+    def tearDown(self) -> None:
+        self._dir.cleanup()
+
+    def test_a_staged_typechange_gets_the_parsed_read(self) -> None:
+        # A link replaced by a YAML file on disk: the value sits in a block
+        # scalar, which only the parsed read joins, and the parsed read takes
+        # its names from the staged list, so T has to be in it.
+        blob = (
+            subprocess.run(
+                ["git", "hash-object", "-w", "--stdin"],
+                cwd=self.repo.root,
+                input=b"somewhere",
+                capture_output=True,
+                check=True,
+            )
+            .stdout.decode()
+            .strip()
+        )
+        self.repo.git("update-index", "--add", "--cacheinfo", f"120000,{blob},deploy.yml")
+        self.repo.git("commit", "-q", "-m", "a link")
+        self.repo.write("deploy.yml", "deploy:\n  api_key: >-\n    " + KEYWORD_VALUE + "\n")
+        # Not `git add`: with core.symlinks off (Windows) it keeps the link mode.
+        file_blob = self.repo.git("hash-object", "-w", "deploy.yml")
+        self.repo.git("update-index", "--cacheinfo", f"100644,{file_blob},deploy.yml")
+        status = self.repo.git("diff", "--cached", "--name-status")
+        self.assertTrue(status.startswith("T"), status)
+        code, out = self.repo.scan("--staged")
+        self.assertEqual(code, 1, out)
+
+
+class NoNetwork(unittest.TestCase):
+    """The fifth review of #140: detect-secrets' network verification sent
+    every match of a verifiable type to its provider, and dropped it when the
+    answer was not "valid", which a rate limit also gives. Run in this process
+    with the network replaced, so a call is seen and answered 429."""
+
+    def setUp(self) -> None:
+        self._dir = tempfile.TemporaryDirectory()
+        self.repo = Repo(Path(self._dir.name))
+        self._cwd = os.getcwd()
+
+    def tearDown(self) -> None:
+        os.chdir(self._cwd)
+        self._dir.cleanup()
+
+    def test_a_telegram_shaped_token_is_refused_and_nothing_is_sent(self) -> None:
+        import importlib.util
+        from unittest import mock
+
+        import requests
+
+        # A made-up value in the shape of a Telegram bot token, unquoted, so
+        # the Telegram detector is the one that sees it.
+        token = "123456789:" + "AAH" + "x7Qp2Lm9Vt4Rw8Ks3Nd6Fb1Hc5Gj0Zy" + "TeK"  # pragma: allowlist secret
+        self.repo.write("bot.env", "TELEGRAM=" + token + "\n")
+        self.repo.commit("a token-shaped value")
+
+        calls = []
+
+        class RateLimited:
+            status_code = 429
+            text = ""
+
+            @staticmethod
+            def json():
+                return {"ok": False}
+
+        def fake(*args, **kwargs):
+            calls.append(args[0] if args else kwargs.get("url"))
+            return RateLimited()
+
+        spec = importlib.util.spec_from_file_location("secret_scan_inproc", SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        os.chdir(self.repo.root)
+        with mock.patch.object(requests, "get", fake), mock.patch.object(requests, "post", fake):
+            code = module.check(Path(".secrets.baseline"), None)
+        self.assertEqual(calls, [], "nothing is sent to a provider")
+        self.assertEqual(code, 1, "the value is refused, whatever a provider would say")
+
+    def test_a_latin1_file_is_read_and_not_counted_as_unread(self) -> None:
+        # Git shows it as text, so the line-by-line read reads it.
+        (self.repo.root / "notes.txt").write_bytes("# café\n".encode("latin-1") + LEAK.encode())
+        self.repo.commit("latin-1")
+        code, out = self.repo.scan()
+        self.assertEqual(code, 1, out)
+        self.assertIn("(0 of them binary", out)
+
+    def test_the_real_baseline_does_not_turn_verification_on(self) -> None:
+        names = [
+            f["path"] for f in json.loads(REAL_BASELINE.read_text(encoding="utf-8"))["filters_used"]
+        ]
+        self.assertNotIn(
+            "detect_secrets.filters.common.is_ignored_due_to_verification_policies", names
+        )
 
 
 class Pins(unittest.TestCase):
