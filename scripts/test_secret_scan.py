@@ -1184,6 +1184,93 @@ class EighthReview(unittest.TestCase):
         self.assertEqual(self.repo.scan("--staged")[0], 1)
 
 
+class NinthReview(unittest.TestCase):
+    """The ninth review of #140: one judged finding switched off detect-
+    secrets' second parse of a file, the daily run judged every branch by
+    main's baseline, and a submodule pointer stopped the commit read."""
+
+    # The SHA-256 of "test", unquoted: only the eager parse of `key = value`
+    # quotes it, and only then can the hex detector see it.
+    HEX = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"  # pragma: allowlist secret
+
+    def setUp(self) -> None:
+        self._dir = tempfile.TemporaryDirectory()
+        self.repo = Repo(Path(self._dir.name))
+
+    def tearDown(self) -> None:
+        self._dir.cleanup()
+
+    def test_a_judged_value_does_not_pass_an_unquoted_one_beside_it(self) -> None:
+        self.repo.write("deploy.env", LEAK)
+        self.repo.commit("a value judged not a secret")
+        self.assertEqual(self.repo.scan("--write-baseline")[0], 0)
+        self.repo.judge()
+        base = self.repo.commit("judged")
+        self.repo.write("deploy.env", LEAK + "colour = " + self.HEX + "\n")
+        self.repo.git("add", "-A")
+        self.assertEqual(self.repo.scan("--staged")[0], 1, "staged")
+        added = self.repo.commit("an unquoted value beside it")
+        self.assertEqual(self.repo.scan()[0], 1, "the tree")
+        self.repo.write("deploy.env", LEAK)
+        self.repo.commit("remove it")
+        code, out = self.repo.scan("--range", f"{base}..HEAD")
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"{added[:12]} deploy.env:2", out)
+
+    def test_a_parsed_only_value_is_read_in_a_commit_range(self) -> None:
+        base = self.repo.git("rev-parse", "HEAD")
+        self.repo.write("deploy.env", "colour = " + self.HEX + "\n")
+        env = self.repo.commit("an unquoted value")
+        self.repo.write("deploy.yml", "deploy:\n  api_key: >-\n    " + KEYWORD_VALUE + "\n")
+        yml = self.repo.commit("a block scalar")
+        self.repo.git("rm", "-q", "deploy.env", "deploy.yml")
+        self.repo.commit("delete both")
+        code, out = self.repo.scan("--range", f"{base}..HEAD")
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"{env[:12]} deploy.env:1", out)
+        self.assertIn(f"{yml[:12]} deploy.yml:", out)
+
+    def _schedule(self) -> tuple[int, str]:
+        path = self.repo.root.parent / (self.repo.root.name + "-event.json")
+        path.write_text("{}", encoding="utf-8")
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        return self.repo.scan(
+            "--github", env={"GITHUB_EVENT_NAME": "schedule", "GITHUB_EVENT_PATH": str(path)}
+        )
+
+    def test_the_daily_run_honours_a_branchs_own_judgement_and_nothing_more(self) -> None:
+        main = self.repo.git("rev-parse", "HEAD")
+        self.repo.git("update-ref", MAIN_REF, main)
+        self.repo.git("checkout", "-q", "-b", "feature")
+        self.repo.write("fixture.py", LEAK)
+        self.repo.commit("a value judged on its branch")
+        self.repo.scan("--write-baseline")
+        self.repo.judge()
+        self.repo.commit("judged on the branch")
+        self.repo.git("update-ref", "refs/remotes/origin/feature", "HEAD")
+        self.repo.git("checkout", "-q", "main")
+        code, out = self._schedule()
+        self.assertEqual(code, 0, "judged on its own branch: " + out)
+        self.repo.git("checkout", "-q", "-b", "other", main)
+        other = 'password = "Pq8Lm2Xv7Rt4Ws9Kd3Nb"\n'  # pragma: allowlist secret
+        self.repo.write("other.py", other)
+        added = self.repo.commit("an unjudged value")
+        self.repo.git("update-ref", "refs/remotes/origin/other", "HEAD")
+        self.repo.git("checkout", "-q", "main")
+        code, out = self._schedule()
+        self.assertEqual(code, 1, out)
+        self.assertIn(added[:12], out)
+
+    def test_a_submodule_pointer_does_not_stop_the_scan(self) -> None:
+        base = self.repo.git("rev-parse", "HEAD")
+        sha = "1" * 40
+        self.repo.git("update-index", "--add", "--cacheinfo", f"160000,{sha},vendor/lib")
+        self.assertEqual(self.repo.scan("--staged")[0], 0, "staged")
+        self.repo.git("commit", "-q", "-m", "a submodule pointer")
+        code, out = self.repo.scan("--range", f"{base}..HEAD")
+        self.assertEqual(code, 0, out)
+
+
 class Pins(unittest.TestCase):
     def test_every_copy_of_the_versions_agrees_with_what_is_installed(self) -> None:
         # Dependabot does not bump pip pins here, so a one-sided bump would

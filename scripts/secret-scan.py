@@ -28,10 +28,9 @@ this check reads two things.
    prints as binary (UTF-16, or text `.gitattributes` marks binary) is read
    whole from the commit.
 
-What the range does not do: it reads each commit's lines as written, never
-parsed, so a YAML block scalar (the key on one line, the value on the next)
-added and removed inside a range is not seen. The tree, and `--staged`, read
-both ways.
+Every read takes each file both ways: line by line as written, and as
+detect-secrets parses it (both of its passes), so a YAML block scalar or an
+unquoted `key = value` is seen in the tree, in a commit and staged alike.
 
 A finding is refused unless `.secrets.baseline` lists it **and a person has
 judged it** (`"is_secret": false`). The baseline is detect-secrets' own file,
@@ -109,6 +108,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 try:
@@ -129,8 +129,9 @@ BASELINE = ".secrets.baseline"
 # `pragma: allowlist nextline secret` on the line above it, which commits and
 # the staged change honour only on the real line above: `scan_changes`), and
 # the patterns in the baseline that match three exact line shapes (lockfile
-# hashes and the baseline's own hashes). Every other filter is off, including
-# any a later detect-secrets adds, because each one dropped findings with
+# hashes and the baseline's own hashes, written for those files but applied
+# to a line of that exact shape in any file: ninth review). Every other
+# filter is off, including any a later detect-secrets adds, because each one dropped findings with
 # nobody judging them, and the reviews of `#140` found them one at a time:
 #
 # - by file name, before a line is read: every `.lock` file, `.svg`, `.css`
@@ -340,6 +341,36 @@ def added_lines(diff: str) -> dict[str, set[int]]:
     return out
 
 
+def parsed(filename: str) -> list:
+    """detect-secrets' own read of a file on disk, both of its passes: the
+    file as its type parses (YAML, INI), then the eager INI parse that quotes
+    an unquoted `key = value`. Its `scan_file` runs the second pass only when
+    the first found nothing, so one judged finding in a file switched the
+    second off and a new unquoted value beside it passed (ninth review of
+    `#140`, finding 1)."""
+    out = []
+    try:
+        for lines in scan._get_lines_from_file(filename):
+            out.extend(
+                scan._process_line_based_plugins(
+                    lines=list(enumerate(lines, start=1)), filename=filename
+                )
+            )
+    except OSError:
+        pass
+    return out
+
+
+def is_gitlink(revision: str, path: str) -> bool:
+    """A submodule pointer, whose content is another repository's commit and
+    not a file: `git show` cannot read it (ninth review of `#140`, finding 3)."""
+    if revision:
+        entry = git("ls-tree", "-z", revision, "--", path)
+    else:
+        entry = git("ls-files", "-s", "-z", "--", path)
+    return entry.startswith("160000 ")
+
+
 def scan_changes(diff: str, revision: str) -> SecretsCollection:
     """The lines a diff adds, each read inside its whole file at `revision`
     (a commit, or empty for the index), and only the findings on added lines
@@ -349,16 +380,31 @@ def scan_changes(diff: str, revision: str) -> SecretsCollection:
     the list of added lines only: a `pragma: allowlist nextline secret`
     anywhere in a commit could then silence a secret on another line (seventh
     review of `#140`, finding 1). Read in its file, a line's neighbour is the
-    line above it."""
+    line above it.
+
+    Each file is read both ways, as the tree is: line by line as written, and
+    as detect-secrets parses it, from a copy under the file's own name so it
+    parses by type. So a YAML block scalar or an unquoted `key = value` added
+    and removed inside a range is read too."""
     found = SecretsCollection()
     if not diff.strip():
         return found
-    for path, numbers in added_lines(diff).items():
-        data = blob(revision, path)
-        for text in decodings(data) or [data.decode("utf-8", errors="replace")]:
-            for filename, secret in scan_text(path, text):
+    with tempfile.TemporaryDirectory() as scratch:
+        for n, (path, numbers) in enumerate(added_lines(diff).items()):
+            if is_gitlink(revision, path):
+                continue
+            data = blob(revision, path)
+            for text in decodings(data) or [data.decode("utf-8", errors="replace")]:
+                for filename, secret in scan_text(path, text):
+                    if secret.line_number in numbers:
+                        found[filename].add(secret)
+            copy = Path(scratch) / str(n) / Path(path).name
+            copy.parent.mkdir()
+            copy.write_bytes(data)
+            for secret in parsed(str(copy)):
                 if secret.line_number in numbers:
-                    found[filename].add(secret)
+                    secret.filename = path
+                    found[path].add(secret)
     return found
 
 
@@ -381,7 +427,7 @@ def scan_tree(files: list[str]) -> SecretsCollection:
     for name in files:
         if not Path(name).is_file():
             continue
-        for secret in scan.scan_file(name):
+        for secret in parsed(name):
             found[name].add(secret)
     empty_tree = git("hash-object", "-t", "tree", "--stdin", stdin=b"").strip()
     for filename, secret in scan_diff(git("diff", *DIFF_OPTIONS, empty_tree, "--")):
@@ -566,7 +612,7 @@ def scan_staged() -> tuple[SecretsCollection, int]:
     for name in names:
         if not Path(name).is_file():
             continue
-        for secret in scan.scan_file(name):
+        for secret in parsed(name):
             found[name].add(secret)
     for filename, secret in scan_changes(git("diff", "--cached", *DIFF_OPTIONS), ""):
         found[filename].add(secret)
@@ -611,17 +657,44 @@ def judged_not_secret(listed: SecretsCollection) -> SecretsCollection:
     return judged
 
 
+def judged_on_every_ref() -> SecretsCollection:
+    """The entries judged not secrets in the baseline of every branch, tag and
+    pull request head the run holds. The daily run reads all of them from the
+    default branch, whose baseline does not hold a branch's own judgements
+    until it merges; without these it went red on values a person had judged
+    on their branch, and stayed red for a pull request closed unmerged (ninth
+    review of `#140`, finding 2). It is the same trust each branch's own push
+    run already gives its baseline, no more."""
+    judged = SecretsCollection()
+    refs = git("for-each-ref", "--format=%(refname)", "refs/remotes", "refs/tags").split()
+    for ref in refs:
+        try:
+            data = json.loads(git("show", f"{ref}:{BASELINE}"))
+            loaded = SecretsCollection.load_from_baseline(data)
+        except (CannotRun, ValueError, KeyError, TypeError):
+            continue
+        for filename, secret in loaded:
+            if secret.is_secret is False:
+                secret.filename = filename.replace("\\", "/")
+                judged[secret.filename].add(secret)
+    return judged
+
+
 def check(
     baseline_path: Path,
     commits: list[str] | None,
     label: str = "",
     staged: bool = False,
     unpushed: bool = False,
+    every_ref: bool = False,
 ) -> int:
     listed = load_baseline(baseline_path)
     for filename, secret in listed:
         LISTED[filename].add(secret)
     known = judged_not_secret(listed)
+    if every_ref:
+        for filename, secret in judged_on_every_ref():
+            known[filename].add(secret)
     total = 0
     if staged:
         found, count = scan_staged()
@@ -734,7 +807,10 @@ def main(argv: list[str] | None = None) -> int:
             commits, label = commits_in(args.range_spec), f"commits in {args.range_spec}"
         else:
             commits, label = None, ""
-        return check(path, commits, label, staged=args.staged, unpushed=args.unpushed)
+        every_ref = args.github and os.environ.get("GITHUB_EVENT_NAME") == "schedule"
+        return check(
+            path, commits, label, staged=args.staged, unpushed=args.unpushed, every_ref=every_ref
+        )
     except CannotRun as error:
         print(f"secret-scan: could not run: {error}", file=sys.stderr)
         return 2
