@@ -17,6 +17,7 @@ unidiff 0.7.5, as CI installs them).
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -67,7 +68,7 @@ class Repo:
         self.git("commit", "-q", "--allow-empty", "-m", message)
         return self.git("rev-parse", "HEAD")
 
-    def scan(self, *args: str) -> tuple[int, str]:
+    def scan(self, *args: str, env: dict[str, str] | None = None) -> tuple[int, str]:
         done = subprocess.run(
             [sys.executable, str(SCRIPT), *args],
             cwd=self.root,
@@ -75,6 +76,7 @@ class Repo:
             text=True,
             encoding="utf-8",
             check=False,
+            env=None if env is None else {**os.environ, **env},
         )
         return done.returncode, done.stdout + done.stderr
 
@@ -276,6 +278,84 @@ class SecretScan(unittest.TestCase):
         self.repo.commit("judged, and the baseline with it")
         code, out = self.repo.scan("--range", f"{base}..HEAD")
         self.assertNotIn(".secrets.baseline", out)
+
+    # The local hooks (.pre-commit-config.yaml): --staged before a commit,
+    # --unpushed before a push.
+
+    def test_staged_refuses_what_the_commit_would_add(self) -> None:
+        self.repo.write("src/config.py", LEAK)
+        self.repo.git("add", "src/config.py")
+        code, out = self.repo.scan("--staged")
+        self.assertEqual(code, 1, out)
+        self.assertIn("src/config.py:1", out)
+        self.assertIn("Nothing is public yet", out)
+        self.assertNotIn(KEYWORD_VALUE, out)
+
+    def test_staged_reads_a_yaml_comment(self) -> None:
+        self.repo.write("ci.yml", "jobs:\n  # " + LEAK)
+        self.repo.git("add", "ci.yml")
+        self.assertEqual(self.repo.scan("--staged")[0], 1)
+
+    def test_staged_passes_a_clean_change_and_an_empty_index(self) -> None:
+        self.assertEqual(self.repo.scan("--staged")[0], 0)
+        self.repo.write("notes.md", "nothing here\n")
+        self.repo.git("add", "notes.md")
+        code, out = self.repo.scan("--staged")
+        self.assertEqual(code, 0, out)
+        self.assertIn("1 staged files", out)
+
+    def test_staged_passes_a_listed_finding(self) -> None:
+        self.repo.write("src/pins.py", LEAK)
+        self.repo.commit("a value that is not a secret")
+        self.assertEqual(self.repo.scan("--write-baseline")[0], 0)
+        self.repo.commit("listed")
+        self.repo.write("src/pins.py", "# moved\n" + LEAK)
+        self.repo.git("add", "src/pins.py")
+        code, out = self.repo.scan("--staged")
+        self.assertEqual(code, 0, out)
+
+    def _remote(self) -> None:
+        remote = self.repo.root.parent / (self.repo.root.name + "-remote.git")
+        subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+        self.addCleanup(lambda: __import__("shutil").rmtree(remote, ignore_errors=True))
+        self.repo.git("remote", "add", "origin", str(remote))
+        self.repo.git("push", "-q", "origin", "main")
+
+    def test_unpushed_reads_each_commit_no_remote_has(self) -> None:
+        self._remote()
+        self.repo.write("src/leak.py", LEAK)
+        added = self.repo.commit("add a key")
+        self.repo.git("rm", "-q", "src/leak.py")
+        self.repo.commit("delete it")
+        code, out = self.repo.scan("--unpushed")
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"{added[:12]} src/leak.py:1", out)
+        self.assertIn("2 commits no remote has", out)
+
+    def test_unpushed_does_not_read_what_a_remote_already_has(self) -> None:
+        self._remote()
+        self.repo.write("src/leak.py", LEAK)
+        self.repo.commit("add a key")
+        self.repo.git("push", "-q", "origin", "main")
+        self.repo.write("notes.md", "later\n")
+        self.repo.commit("later")
+        code, out = self.repo.scan("--unpushed")
+        self.assertEqual(code, 0, out)
+        self.assertIn("1 commits no remote has", out)
+
+    def test_unpushed_reads_the_commit_pre_commit_names(self) -> None:
+        # `git push origin side` from main: the hook is told what is pushed.
+        self._remote()
+        self.repo.git("checkout", "-q", "-b", "side")
+        self.repo.write("src/leak.py", LEAK)
+        side = self.repo.commit("a key on the side")
+        self.repo.git("checkout", "-q", "main")
+        self.assertEqual(self.repo.scan("--unpushed")[0], 0, "HEAD is clean")
+        code, out = self.repo.scan("--unpushed", env={"PRE_COMMIT_TO_REF": side})
+        self.assertEqual(code, 1, out)
+
+    def test_the_modes_cannot_be_combined(self) -> None:
+        self.assertEqual(self.repo.scan("--staged", "--unpushed")[0], 2)
 
     def test_no_baseline_cannot_run(self) -> None:
         (self.repo.root / ".secrets.baseline").unlink()

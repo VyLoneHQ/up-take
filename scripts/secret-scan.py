@@ -32,9 +32,17 @@ Exit codes: `0` nothing new; `1` at least one finding the baseline does not
 list; `2` the check could not run (no baseline, a git error, nothing to scan).
 `2` is not a pass, and a CI step treats it as a failure like `1`.
 
+CI can only find a secret that is already public. The same check runs before
+that, on the machine that makes the commit, through `.pre-commit-config.yaml`:
+`--staged` before each commit, and `--unpushed` before each push, which also
+reads commits made without the first hook (`--no-verify`, a rebase, a merge).
+`pre-commit install` once per clone sets up both.
+
 Usage:
     python3 scripts/secret-scan.py                      # the tree
     python3 scripts/secret-scan.py --range A..B          # the tree and A..B
+    python3 scripts/secret-scan.py --staged              # the commit being made
+    python3 scripts/secret-scan.py --unpushed            # commits no remote has
     python3 scripts/secret-scan.py --write-baseline      # rewrite the findings
 
 A false positive
@@ -176,19 +184,71 @@ def report(found: SecretsCollection, where: str) -> int:
     return count
 
 
-def check(baseline_path: Path, range_spec: str | None) -> int:
+def scan_staged() -> tuple[SecretsCollection, int]:
+    """What the commit being made would add: the staged files as parsed, and
+    the staged lines as written. Under pre-commit the working tree holds the
+    staged content, because unstaged changes are set aside while hooks run."""
+    names = [n for n in git("diff", "--cached", "--name-only", "--diff-filter=AM", "-z").split("\0") if n]
+    found = SecretsCollection()
+    for name in names:
+        for secret in scan.scan_file(name):
+            found[name].add(secret)
+    for filename, secret in scan_diff(git("diff", "--cached", *DIFF_OPTIONS)):
+        found[filename].add(secret)
+    return found, len(names)
+
+
+def unpushed_commits() -> list[str]:
+    """The commits about to be pushed that no remote has yet. pre-commit names
+    the commit being pushed in `PRE_COMMIT_TO_REF`; outside it, `HEAD`."""
+    head = os.environ.get("PRE_COMMIT_TO_REF") or "HEAD"
+    return git("rev-list", "--no-merges", "--reverse", head, "--not", "--remotes").split()
+
+
+ADVICE = {
+    "ci": "If one is a real secret it is already public: revoke it first.",
+    "staged": "Nothing is public yet: take the value out before you commit.",
+    "unpushed": (
+        "Nothing is public yet: take the value out of the commit that added it "
+        "(a later commit that deletes it is not enough, the push carries both)."
+    ),
+}
+
+
+def check(
+    baseline_path: Path,
+    range_spec: str | None,
+    staged: bool = False,
+    unpushed: bool = False,
+) -> int:
     known = load_baseline(baseline_path)
-    files = tracked_files()
-    if not files:
-        raise CannotRun("git ls-files printed nothing, so there is nothing to scan")
-
-    new = scan_tree(files) - known
     total = 0
-    if new:
-        print("Secrets in the tracked files that the baseline does not list:")
-        total += report(new, "")
+    if staged:
+        found, count = scan_staged()
+        scope = f"{count} staged files"
+        new = found - known
+        if new:
+            print("Secrets in the staged changes that the baseline does not list:")
+            total += report(new, "")
+    elif unpushed:
+        scope = ""
+    else:
+        files = tracked_files()
+        if not files:
+            raise CannotRun("git ls-files printed nothing, so there is nothing to scan")
+        scope = f"{len(files)} tracked files"
+        new = scan_tree(files) - known
+        if new:
+            print("Secrets in the tracked files that the baseline does not list:")
+            total += report(new, "")
 
-    commits = commits_in(range_spec) if range_spec else []
+    if unpushed:
+        commits = unpushed_commits()
+        scope = f"{len(commits)} commits no remote has"
+    else:
+        commits = commits_in(range_spec) if range_spec else []
+        if range_spec:
+            scope += f" and {len(commits)} commits in {range_spec}"
     # detect-secrets passes over any name that is not a file on disk, and it
     # applies that to a diff too. A file a later commit deleted is not on disk,
     # so the commit that added a secret to it passed: the very case the range
@@ -202,14 +262,11 @@ def check(baseline_path: Path, range_spec: str | None) -> int:
             print(f"Secrets added by commit {commit[:12]} that the baseline does not list:")
             total += report(new, f"{commit[:12]} ")
 
-    scope = f"{len(files)} tracked files"
-    if range_spec:
-        scope += f" and {len(commits)} commits in {range_spec}"
     if total:
+        advice = ADVICE["staged" if staged else "unpushed" if unpushed else "ci"]
         print(
-            f"\nsecret-scan: {total} finding(s) in {scope}. "
-            "If one is a real secret it is already public: revoke it first. "
-            "If not, see the docstring of scripts/secret-scan.py."
+            f"\nsecret-scan: {total} finding(s) in {scope}. {advice} "
+            "If it is not a secret, see the docstring of scripts/secret-scan.py."
         )
         return 1
     print(f"secret-scan: nothing new in {scope}.")
@@ -243,16 +300,19 @@ def main(argv: list[str] | None = None) -> int:
         return subprocess.run(child, check=False).returncode
 
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("--range", dest="range_spec", help="also read each commit in BASE..HEAD")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--range", dest="range_spec", help="the tree, and each commit in BASE..HEAD")
+    modes.add_argument("--staged", action="store_true", help="what the commit being made adds (pre-commit)")
+    modes.add_argument("--unpushed", action="store_true", help="each commit no remote has (pre-push)")
+    modes.add_argument("--write-baseline", action="store_true", help="rewrite the findings in the baseline")
     parser.add_argument("--baseline", default=BASELINE, help="default: .secrets.baseline")
-    parser.add_argument("--write-baseline", action="store_true", help="rewrite the findings in the baseline")
     args = parser.parse_args(argv)
     try:
         os.chdir(git("rev-parse", "--show-toplevel").strip())
         path = Path(args.baseline)
         if args.write_baseline:
             return write_baseline(path)
-        return check(path, args.range_spec)
+        return check(path, args.range_spec, staged=args.staged, unpushed=args.unpushed)
     except CannotRun as error:
         print(f"secret-scan: could not run: {error}", file=sys.stderr)
         return 2
