@@ -710,6 +710,86 @@ class SecretScan(unittest.TestCase):
         self.assertEqual(code, 2, out)
 
 
+class ThirdReview(unittest.TestCase):
+    """The third review of #140: a NUL byte in UTF-8 text, and git settings
+    that change the names a diff prints."""
+
+    def setUp(self) -> None:
+        self._dir = tempfile.TemporaryDirectory()
+        self.repo = Repo(Path(self._dir.name))
+
+    def tearDown(self) -> None:
+        self._dir.cleanup()
+
+    def test_a_utf8_file_with_a_nul_byte_is_read_in_the_range(self) -> None:
+        # git calls it binary, so a commit's diff has no lines for it; NUL is
+        # valid UTF-8, so its blob is read as UTF-8.
+        base = self.repo.git("rev-parse", "HEAD")
+        path = self.repo.root / "src" / "notes.py"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"# a stray NUL here: \x00\n" + LEAK.encode("utf-8"))
+        added = self.repo.commit("a key beside a NUL")
+        code, out = self.repo.scan()
+        self.assertEqual(code, 1, out)
+        self.assertIn("(0 of them binary", out, "read, so not counted as unread")
+        self.repo.git("rm", "-q", "src/notes.py")
+        self.repo.commit("delete it")
+        code, out = self.repo.scan("--range", f"{base}..HEAD")
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"{added[:12]} src/notes.py:2", out)
+
+    def test_git_diff_prefix_settings_do_not_empty_the_line_reads(self) -> None:
+        # A YAML comment only the line-by-line read can see.
+        for key, value in (("diff.mnemonicPrefix", "true"), ("diff.noprefix", "true"), ("diff.dstPrefix", "new/")):
+            with self.subTest(setting=key):
+                self.repo.git("config", key, value)
+                self.repo.write(".github/ci.yml", "jobs:\n  a:\n    # " + LEAK + "    runs-on: x\n")
+                self.repo.git("add", ".github/ci.yml")
+                code, out = self.repo.scan("--staged")
+                self.assertEqual(code, 1, out)
+                self.assertIn(chr(10) + "  .github/ci.yml:3", out, "under its own name")
+                code, out = self.repo.scan()
+                self.assertEqual(code, 1, out)
+                self.assertIn(chr(10) + "  .github/ci.yml:3", out, "under its own name")
+                self.repo.git("rm", "-q", "--cached", ".github/ci.yml")
+                self.repo.git("config", "--unset", key)
+
+    @unittest.skipIf(os.name == "nt", "Windows cannot name a file with a double quote")
+    def test_a_name_git_quotes_is_refused_not_dropped(self) -> None:
+        # git C-quotes a path holding `"`, and the diff reader keeps the quotes,
+        # so the name is no file on disk. It is refused under that name.
+        self.repo.write('we"ird.yml', "jobs:\n  a:\n    # " + LEAK + "    runs-on: x\n")
+        self.repo.git("add", "-A")
+        self.assertEqual(self.repo.scan("--staged")[0], 1)
+        self.repo.commit("a quoted name")
+        self.assertEqual(self.repo.scan()[0], 1)
+
+
+class Pins(unittest.TestCase):
+    def test_every_copy_of_the_versions_agrees_with_what_is_installed(self) -> None:
+        # Dependabot does not bump pip pins here, so a one-sided bump would
+        # make "a baseline that passes here passes there" false with no signal.
+        import re
+        from importlib.metadata import version
+
+        root = HERE.parent
+        files = [
+            root / ".pre-commit-config.yaml",
+            root / ".github" / "workflows" / "secrets.yml",
+            HERE / "secret-scan.py",
+        ]
+        for package in ("detect-secrets", "unidiff"):
+            versions = {
+                path.name: set(re.findall(re.escape(package) + r"==([0-9][0-9.]*)", path.read_text(encoding="utf-8")))
+                for path in files
+            }
+            found = set().union(*versions.values())
+            self.assertEqual(len(found), 1, f"{package}: {versions}")
+            self.assertTrue(all(versions.values()), f"{package} is pinned in every file: {versions}")
+        pinned = re.search(r"detect-secrets==([0-9.]+)", files[0].read_text(encoding="utf-8")).group(1)
+        self.assertEqual(version("detect-secrets"), pinned, "the installed version is the pinned one")
+
+
 class RealBaseline(unittest.TestCase):
     def test_the_real_baseline_names_files_as_git_does(self) -> None:
         results = json.loads(REAL_BASELINE.read_text(encoding="utf-8"))["results"]

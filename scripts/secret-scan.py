@@ -62,7 +62,9 @@ GitHub describes in the file named by `GITHUB_EVENT_PATH`: a pull request's
 base to its head; for a push to main, the whole history of main; for a push to
 any other branch or tag, and for a manual run, everything since it left
 `refs/remotes/origin/main`. Never a push's old head to its new one, because a
-push GitHub ran nothing for would then be in no range (`github_commits`).
+push GitHub ran nothing for would then be in no range. A commit that has left
+every branch (a force push, a deleted branch) is read by no run, though GitHub
+still serves it by sha; the push hook is what reads it (`github_commits`).
 
 Usage:
     python3 scripts/secret-scan.py                      # the tree
@@ -161,7 +163,13 @@ def load_baseline(path: Path) -> SecretsCollection:
     if not path.is_file():
         raise CannotRun(f"no baseline at {path}")
     loaded = baseline.load(baseline.load_from_file(str(path)), filename=str(path))
-    get_settings().disable_filters(*NAME_FILTERS)
+    # The name filters (NAME_FILTERS has the reason) and detect-secrets' habit
+    # of dropping a name that is not a file on disk: off for every read. In a commit the file may be gone by now (the drill
+    # on GitHub found a deleted file's secret passing), and in a diff a name
+    # git quoted (one holding `"` or `\`) is not a path on disk either. A
+    # name it cannot place is now a finding under that name, which fails red,
+    # not one that disappears. `scan_file` is only given files that exist.
+    get_settings().disable_filters(*NAME_FILTERS, INVALID_FILE_FILTER)
     # detect-secrets turns each name into the local form as it loads, so on
     # Windows `a/b.rs` comes back as `a\b.rs` and matches nothing git lists.
     # Back to git's form, on the key and on each finding, which compares by
@@ -173,7 +181,18 @@ def load_baseline(path: Path) -> SecretsCollection:
     return known
 
 
-DIFF_OPTIONS = ("--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--unified=0")
+# The prefixes are pinned: a diff's file names come from its `+++ b/...` lines,
+# and `diff.mnemonicPrefix`, `diff.noprefix` or `diff.dstPrefix` in someone's
+# git config would otherwise change them (third review of `#140`, finding 2).
+DIFF_OPTIONS = (
+    "--no-color",
+    "--no-ext-diff",
+    "--no-textconv",
+    "--no-renames",
+    "--unified=0",
+    "--src-prefix=a/",
+    "--dst-prefix=b/",
+)
 
 
 def scan_diff(diff: str) -> SecretsCollection:
@@ -186,11 +205,14 @@ def scan_diff(diff: str) -> SecretsCollection:
 def as_text(data: bytes) -> str | None:
     """The text in bytes git calls binary, or `None` for a real binary.
 
-    Two kinds of text reach here. UTF-16, which neither read can see: Python
+    Three kinds of text reach here. UTF-16, which neither read can see: Python
     cannot decode it as UTF-8, so detect-secrets drops the file as binary, and
     git finds NUL bytes in it and prints no lines. Windows PowerShell 5.1
-    writes it by default (`>`, `Out-File`). And a text file `.gitattributes`
-    marks `binary`, such as `*.svg` here, whose diff git prints as `Bin`.
+    writes it by default (`>`, `Out-File`). A text file `.gitattributes` marks
+    `binary`, such as `*.svg` here, whose diff git prints as `Bin`. And UTF-8
+    text with a NUL byte in it, which git also calls binary: NUL is valid
+    UTF-8, so it is tried as UTF-8 when it is not UTF-16 (third review of
+    `#140`, finding 1).
     UTF-16 is recognised by its byte-order mark, or, without one, by every
     other byte being zero, which is what ASCII text in UTF-16 looks like and
     what no image in this repository does."""
@@ -206,7 +228,6 @@ def as_text(data: bytes) -> str | None:
                     return data.decode(encoding)
                 except UnicodeDecodeError:
                     return None
-        return None
     try:
         return data.decode("utf-8")
     except UnicodeDecodeError:
@@ -265,6 +286,8 @@ def scan_tree(files: list[str]) -> SecretsCollection:
     """
     found = SecretsCollection()
     for name in files:
+        if not Path(name).is_file():
+            continue
         for secret in scan.scan_file(name):
             found[name].add(secret)
     empty_tree = git("hash-object", "-t", "tree", "--stdin", stdin=b"").strip()
@@ -352,8 +375,11 @@ def github_commits() -> tuple[list[str] | None, str]:
     ci]`, `[skip actions]`, `[actions skip]`), and a run can fail to start;
     the next run's old head is then the unread push's new head, and those
     commits would be in no range ever again (second review of `#140`, finding
-    2). Neither range above can be shortened by a run that did not happen.
-    The whole history of main is a few hundred commits and takes seconds on
+    2). A run that did not happen cannot shorten either range above, as long
+    as its commits are still on the branch. What no run here can read is a
+    commit that has left every branch, by a force push or a deleted branch:
+    GitHub still serves it by sha, and only the push hook, before it was
+    pushed, reads it (third review of `#140`, finding 4). The whole history of main is a few hundred commits and takes seconds on
     the runner; findings in it that are not secrets are listed in the
     baseline, which `--write-baseline` writes from the history too."""
     name = os.environ.get("GITHUB_EVENT_NAME", "")
@@ -410,6 +436,8 @@ def scan_staged() -> tuple[SecretsCollection, int]:
     ]
     found = SecretsCollection()
     for name in names:
+        if not Path(name).is_file():
+            continue
         for secret in scan.scan_file(name):
             found[name].add(secret)
     for filename, secret in scan_diff(git("diff", "--cached", *DIFF_OPTIONS)):
@@ -493,13 +521,6 @@ def check(
     elif commits is not None:
         scope += f" and {len(commits)} {label}"
     commits = commits or []
-    # detect-secrets passes over any name that is not a file on disk, and it
-    # applies that to a diff too. A file a later commit deleted is not on disk,
-    # so the commit that added a secret to it passed: the very case the range
-    # exists for. Found by a drill on GitHub, after every local test was green.
-    # Off for the commits only; the tree is read before this, and every name
-    # there is a tracked file.
-    get_settings().disable_filters(INVALID_FILE_FILTER)
     for commit in commits:
         new = scan_commit(commit) - known
         if new:
@@ -534,7 +555,6 @@ def write_baseline(baseline_path: Path) -> int:
     # And every commit of HEAD's history: a push to main reads all of it, so
     # what was ever committed has to be listable, not only what is there now.
     # New entries arrive unjudged and pass nothing until a person judges them.
-    get_settings().disable_filters(INVALID_FILE_FILTER)
     for commit in git("rev-list", "--reverse", "HEAD").split():
         for filename, secret in scan_commit(commit):
             new[filename].add(secret)
