@@ -368,9 +368,11 @@ pub fn run() -> tauri::Result<()> {
             //
             // ⚠️ **No longer one-time**, and the word is struck rather than
             // quietly dropped: roadmap 1.14 ships the *Show UP-TAKE in screen
-            // recordings* switch ADR-0019 always named, so the affinity is set
-            // again whenever that setting changes. What is unchanged is the
-            // default and the reasoning behind it: off, so the overlay is
+            // recordings* switch ADR-0019 always named, so the affinity follows
+            // that setting. With the setting on, nothing is written here: the
+            // overlay is still hidden, and the write waits for its first show
+            // (`overlay::affinity_write` has the reason). What is unchanged is
+            // the default and the reasoning behind it: off, so the overlay is
             // excluded until the user says otherwise.
             #[cfg(windows)]
             if let Err(error) =
