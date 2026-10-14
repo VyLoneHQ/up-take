@@ -283,6 +283,67 @@ jobs:
         run: cargo audit
 
   # ---------------------------------------------------------------------------
+  # Secrets: detect-secrets over every tracked file, and over the lines each
+  # new commit added. The second half is the one that matters on a public
+  # repository: a secret pushed in one commit and deleted in the next leaves a
+  # clean tree, and the commit that added it is still public. What the script
+  # reads, what passes, and what to do with a finding are in its docstring.
+  #
+  # The range: on a pull request, the commits between its base and its head;
+  # on a push to main, the commits the push added; on a manual run, the
+  # commits since the branch left main. A first push of a branch has no
+  # "before", so only the tree is read. A range git cannot read (a force push
+  # whose old head is gone) fails the job rather than passing it.
+  #
+  # The values reach the shell through `env`, never by `${{ }}` inside the
+  # script, so nothing an outside contributor controls is pasted into a shell.
+  # ---------------------------------------------------------------------------
+  secrets:
+    name: Secrets (detect-secrets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The whole history, so every commit of the range is here to read.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install detect-secrets
+        run: python -m pip install detect-secrets==1.5.0 unidiff==0.7.5
+
+      # Each test plants a secret in a throwaway repository and asserts the
+      # refusal, so the scan below is known to be able to go red.
+      - name: Test the secret scan
+        run: python scripts/test_secret_scan.py
+
+      - name: Scan the tracked files and the new commits
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+        run: |
+          case "$EVENT" in
+            pull_request) range="$PR_BASE..$PR_HEAD" ;;
+            push)
+              if [ -z "$PUSH_BEFORE" ] || [ "$PUSH_BEFORE" = "0000000000000000000000000000000000000000" ]; then
+                range=""
+              else
+                range="$PUSH_BEFORE..$PUSH_AFTER"
+              fi ;;
+            *) range="$(git merge-base origin/main HEAD)..HEAD" ;;
+          esac
+          if [ -n "$range" ]; then
+            python scripts/secret-scan.py --range "$range"
+          else
+            python scripts/secret-scan.py
+          fi
+
+  # ---------------------------------------------------------------------------
   # Build the installer and publish an SBOM. Unsigned for now — code signing
   # lands in Phase 3 once SignPath approval is in place.
   # ---------------------------------------------------------------------------
