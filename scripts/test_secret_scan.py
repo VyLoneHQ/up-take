@@ -231,7 +231,8 @@ class SecretScan(unittest.TestCase):
         # unjudged one is listed too, from the history, and passes nothing.
         base = self.repo.git("rev-parse", "HEAD")
         self.repo.write("src/pins.py", LEAK)
-        self.repo.write("src/other.py", 'password = "Pq8Lm2Xv7Rt4Ws9Kd3Nb"\n')  # pragma: allowlist secret
+        other = 'password = "Pq8Lm2Xv7Rt4Ws9Kd3Nb"\n'  # pragma: allowlist secret
+        self.repo.write("src/other.py", other)
         self.repo.commit("two values")
         self.assertEqual(self.repo.scan("--write-baseline")[0], 0)
         written = json.loads((self.repo.root / ".secrets.baseline").read_text(encoding="utf-8"))
@@ -243,9 +244,16 @@ class SecretScan(unittest.TestCase):
         self.repo.write("src/other.py", "# gone\n")
         self.repo.commit("both lines removed")
         self.assertEqual(self.repo.scan("--write-baseline")[0], 0)
-        rewritten = json.loads((self.repo.root / ".secrets.baseline").read_text(encoding="utf-8"))["results"]
-        self.assertTrue(all(e.get("is_secret") is False for e in rewritten["src/pins.py"]), "judged: kept")
-        self.assertTrue(all(e.get("is_secret") is None for e in rewritten["src/other.py"]), "unjudged: listed, not judged")
+        rewritten = json.loads((self.repo.root / ".secrets.baseline").read_text(encoding="utf-8"))[
+            "results"
+        ]
+        self.assertTrue(
+            all(e.get("is_secret") is False for e in rewritten["src/pins.py"]), "judged: kept"
+        )
+        self.assertTrue(
+            all(e.get("is_secret") is None for e in rewritten["src/other.py"]),
+            "unjudged: listed, not judged",
+        )
         self.repo.commit("rewritten")
         code, out = self.repo.scan("--range", f"{base}..HEAD")
         self.assertEqual(code, 1, out)
@@ -292,7 +300,9 @@ class SecretScan(unittest.TestCase):
 
     def test_a_lockfile_line_carrying_a_credential_is_refused_in_both(self) -> None:
         base = self.repo.git("rev-parse", "HEAD")
-        lockfile = "lockfileVersion: '9.0'\n\npackages:\n\n  'a@1.0.0':\n" + CREDENTIAL_URL.split("  #")[0]
+        lockfile = (
+            "lockfileVersion: '9.0'\n\npackages:\n\n  'a@1.0.0':\n" + CREDENTIAL_URL.split("  #")[0]
+        )
         self.repo.write("pnpm-lock.yaml", lockfile + "\n")
         added = self.repo.commit("a lockfile with a password in a url")
         code, out = self.repo.scan("--range", f"{base}..HEAD")
@@ -521,7 +531,9 @@ class SecretScan(unittest.TestCase):
     def test_github_pull_request_reads_base_to_head(self) -> None:
         base, added = self._leak_and_delete()
         head = self.repo.git("rev-parse", "HEAD")
-        env = self._event("pull_request", {"pull_request": {"base": {"sha": base}, "head": {"sha": head}}})
+        env = self._event(
+            "pull_request", {"pull_request": {"base": {"sha": base}, "head": {"sha": head}}}
+        )
         code, out = self.repo.scan("--github", env=env)
         self.assertEqual(code, 1, out)
         self.assertIn(f"{added[:12]} src/leak.py:1", out)
@@ -537,7 +549,9 @@ class SecretScan(unittest.TestCase):
         self.repo.write("notes.md", "later\n")
         after = self.repo.commit("later")
         for before in (skipped, "0" * 40, "1" * 40):
-            env = self._event("push", {"ref": "refs/heads/feature", "before": before, "after": after})
+            env = self._event(
+                "push", {"ref": "refs/heads/feature", "before": before, "after": after}
+            )
             code, out = self.repo.scan("--github", env=env)
             self.assertEqual(code, 1, f"before={before[:4]}: {out}")
             self.assertIn(f"{added[:12]} src/leak.py:1", out)
@@ -547,7 +561,9 @@ class SecretScan(unittest.TestCase):
         _, added = self._leak_and_delete()
         self.repo.write("notes.md", "later\n")
         after = self.repo.commit("later")
-        env = self._event("push", {"ref": "refs/heads/main", "before": after + "~1", "after": after})
+        env = self._event(
+            "push", {"ref": "refs/heads/main", "before": after + "~1", "after": after}
+        )
         code, out = self.repo.scan("--github", env=env)
         self.assertEqual(code, 1, out)
         self.assertIn(f"{added[:12]} src/leak.py:1", out)
@@ -582,11 +598,19 @@ class SecretScan(unittest.TestCase):
         self.assertEqual(code, 0, out)
 
     def test_github_event_that_cannot_be_read_cannot_run(self) -> None:
-        self.assertEqual(self.repo.scan("--github", env={"GITHUB_EVENT_NAME": "", "GITHUB_EVENT_PATH": ""})[0], 2)
+        self.assertEqual(
+            self.repo.scan("--github", env={"GITHUB_EVENT_NAME": "", "GITHUB_EVENT_PATH": ""})[0], 2
+        )
         self.assertEqual(self.repo.scan("--github", env=self._event("push", "{not json"))[0], 2)
-        self.assertEqual(self.repo.scan("--github", env=self._event("pull_request", {"pull_request": {}}))[0], 2)
-        self.assertEqual(self.repo.scan("--github", env=self._event("push", {"before": "1" * 40}))[0], 2)
-        self.assertEqual(self.repo.scan("--github", env=self._event("push", {"ref": "refs/heads/x"}))[0], 2)
+        self.assertEqual(
+            self.repo.scan("--github", env=self._event("pull_request", {"pull_request": {}}))[0], 2
+        )
+        self.assertEqual(
+            self.repo.scan("--github", env=self._event("push", {"before": "1" * 40}))[0], 2
+        )
+        self.assertEqual(
+            self.repo.scan("--github", env=self._event("push", {"ref": "refs/heads/x"}))[0], 2
+        )
 
     # What neither read could see (second review of #140, finding 1), and
     # entries nobody judged.
@@ -644,7 +668,9 @@ class SecretScan(unittest.TestCase):
                 self.assertIn(f"{added[:12]} {name}:2", out)
 
     def test_a_binary_file_is_counted_as_not_read(self) -> None:
-        (self.repo.root / "icon.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + bytes(range(256)))
+        (self.repo.root / "icon.png").write_bytes(
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + bytes(range(256))
+        )
         self.repo.commit("an image")
         code, out = self.repo.scan()
         self.assertEqual(code, 0, out)
@@ -682,7 +708,9 @@ class SecretScan(unittest.TestCase):
         self.assertEqual(self.repo.scan("--write-baseline")[0], 0)
         self.repo.judge()
         self.repo.commit("listed and judged")
-        env = self._event("push", {"ref": "refs/heads/main", "after": self.repo.git("rev-parse", "HEAD")})
+        env = self._event(
+            "push", {"ref": "refs/heads/main", "after": self.repo.git("rev-parse", "HEAD")}
+        )
         code, out = self.repo.scan("--github", env=env)
         self.assertEqual(code, 0, out)
         self.assertNotIn(added[:12], out)
@@ -740,7 +768,11 @@ class ThirdReview(unittest.TestCase):
 
     def test_git_diff_prefix_settings_do_not_empty_the_line_reads(self) -> None:
         # A YAML comment only the line-by-line read can see.
-        for key, value in (("diff.mnemonicPrefix", "true"), ("diff.noprefix", "true"), ("diff.dstPrefix", "new/")):
+        for key, value in (
+            ("diff.mnemonicPrefix", "true"),
+            ("diff.noprefix", "true"),
+            ("diff.dstPrefix", "new/"),
+        ):
             with self.subTest(setting=key):
                 self.repo.git("config", key, value)
                 self.repo.write(".github/ci.yml", "jobs:\n  a:\n    # " + LEAK + "    runs-on: x\n")
@@ -765,6 +797,86 @@ class ThirdReview(unittest.TestCase):
         self.assertEqual(self.repo.scan()[0], 1)
 
 
+class FourthReview(unittest.TestCase):
+    """The fourth review of #140: names that still switched the scan off, and
+    a typechange to text git calls binary."""
+
+    def setUp(self) -> None:
+        self._dir = tempfile.TemporaryDirectory()
+        self.repo = Repo(Path(self._dir.name))
+
+    def tearDown(self) -> None:
+        self._dir.cleanup()
+
+    def test_a_path_holding_swagger_is_read(self) -> None:
+        base = self.repo.git("rev-parse", "HEAD")
+        self.repo.write("docs/swagger_client.py", LEAK)
+        self.repo.git("add", "-A")
+        self.assertEqual(self.repo.scan("--staged")[0], 1, "staged")
+        added = self.repo.commit("a key in a swagger file")
+        self.assertEqual(self.repo.scan()[0], 1, "the tree")
+        self.repo.git("rm", "-q", "docs/swagger_client.py")
+        self.repo.commit("delete it")
+        code, out = self.repo.scan("--range", f"{base}..HEAD")
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"{added[:12]} docs/swagger_client.py:1", out)
+
+    def test_a_secrets_baseline_in_a_folder_is_read(self) -> None:
+        self.repo.write("config/.secrets.baseline", LEAK)
+        self.repo.commit("a file that only shares the name")
+        code, out = self.repo.scan()
+        self.assertEqual(code, 1, out)
+        self.assertIn("config/.secrets.baseline:1", out)
+
+    def test_a_value_pasted_into_the_root_baseline_is_read_and_its_hashes_pass(self) -> None:
+        # The root baseline is read like any file. Its own hash lines pass by
+        # their exact shape; anything else in it is read.
+        self.repo.write("src/pins.py", LEAK)
+        self.repo.commit("a value that is not a secret")
+        self.assertEqual(self.repo.scan("--write-baseline")[0], 0)
+        self.repo.judge()
+        self.repo.commit("listed and judged")
+        self.assertEqual(self.repo.scan()[0], 0, "its hash lines pass")
+        path = self.repo.root / ".secrets.baseline"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["note"] = {"api_key": KEYWORD_VALUE}
+        self.repo.write(".secrets.baseline", json.dumps(data, indent=2) + "\n")
+        self.repo.commit("a value pasted into the baseline")
+        code, out = self.repo.scan()
+        self.assertEqual(code, 1, out)
+        self.assertIn(".secrets.baseline:", out)
+
+    def _blob(self, data: bytes) -> str:
+        return subprocess.run(
+            ["git", "hash-object", "-w", "--stdin"],
+            cwd=self.repo.root,
+            input=data,
+            capture_output=True,
+            check=True,
+        ).stdout.decode().strip()
+
+    def _index(self, mode: str, blob: str, name: str) -> None:
+        self.repo.git("update-index", "--add", "--cacheinfo", f"{mode},{blob},{name}")
+
+    def test_a_typechange_to_utf16_text_is_read_in_a_commit_and_staged(self) -> None:
+        # A symlink replaced by a regular file is status T, not A or M. The
+        # modes are set in the index, since not every machine makes symlinks.
+        utf16 = ("# notes\r\n" + LEAK.replace("\n", "\r\n")).encode("utf-16")
+        base = self.repo.git("rev-parse", "HEAD")
+        self._index("120000", self._blob(b"somewhere"), "notes.txt")
+        self.repo.git("commit", "-q", "-m", "a link")
+        self._index("100644", self._blob(utf16), "notes.txt")
+        code, out = self.repo.scan("--staged")
+        self.assertEqual(code, 1, "staged: " + out)
+        self.repo.git("commit", "-q", "-m", "the link becomes a file")
+        changed = self.repo.git("rev-parse", "HEAD")
+        self.repo.git("update-index", "--force-remove", "notes.txt")
+        self.repo.git("commit", "-q", "-m", "delete it")
+        code, out = self.repo.scan("--range", f"{base}..HEAD")
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"{changed[:12]} notes.txt:2", out)
+
+
 class Pins(unittest.TestCase):
     def test_every_copy_of_the_versions_agrees_with_what_is_installed(self) -> None:
         # Dependabot does not bump pip pins here, so a one-sided bump would
@@ -777,17 +889,28 @@ class Pins(unittest.TestCase):
             root / ".pre-commit-config.yaml",
             root / ".github" / "workflows" / "secrets.yml",
             HERE / "secret-scan.py",
+            root / "CONTRIBUTING.md",
         ]
         for package in ("detect-secrets", "unidiff"):
             versions = {
-                path.name: set(re.findall(re.escape(package) + r"==([0-9][0-9.]*)", path.read_text(encoding="utf-8")))
+                path.name: set(
+                    re.findall(
+                        re.escape(package) + r"==([0-9][0-9.]*)", path.read_text(encoding="utf-8")
+                    )
+                )
                 for path in files
             }
             found = set().union(*versions.values())
             self.assertEqual(len(found), 1, f"{package}: {versions}")
-            self.assertTrue(all(versions.values()), f"{package} is pinned in every file: {versions}")
-        pinned = re.search(r"detect-secrets==([0-9.]+)", files[0].read_text(encoding="utf-8")).group(1)
-        self.assertEqual(version("detect-secrets"), pinned, "the installed version is the pinned one")
+            self.assertTrue(
+                all(versions.values()), f"{package} is pinned in every file: {versions}"
+            )
+        pinned = re.search(
+            r"detect-secrets==([0-9.]+)", files[0].read_text(encoding="utf-8")
+        ).group(1)
+        self.assertEqual(
+            version("detect-secrets"), pinned, "the installed version is the pinned one"
+        )
 
 
 class RealBaseline(unittest.TestCase):
@@ -795,7 +918,9 @@ class RealBaseline(unittest.TestCase):
         results = json.loads(REAL_BASELINE.read_text(encoding="utf-8"))["results"]
         self.assertTrue(results, "the real baseline lists the known false positives")
         for name in results:
-            self.assertNotIn("\\", name, "a baseline written with Windows names matches nothing on CI")
+            self.assertNotIn(
+                "\\", name, "a baseline written with Windows names matches nothing on CI"
+            )
 
 
 if __name__ == "__main__":

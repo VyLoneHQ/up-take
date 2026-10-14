@@ -127,9 +127,17 @@ INVALID_FILE_FILTER = "detect_secrets.filters.common.is_invalid_file"
 # key in Cargo.lock and in an .svg and both passed every read. The checksum
 # lines of Cargo.lock are passed instead by a pattern in the baseline that
 # matches only their exact shape, as pnpm-lock.yaml's integrity lines are.
+#
+# Two more work on the name alone, and are off for the same reason (fourth
+# review of `#140`, finding 1): any path containing `swagger`, and any file
+# called `.secrets.baseline` in any folder. The baseline at the root is read
+# like any file; its own `hashed_secret` lines are passed by a pattern in it
+# that matches only their exact shape, so a value pasted into it is read.
 NAME_FILTERS = (
     "detect_secrets.filters.heuristic.is_lock_file",
     "detect_secrets.filters.heuristic.is_non_text_file",
+    "detect_secrets.filters.heuristic.is_swagger_file",
+    "detect_secrets.filters.common.is_baseline_file",
 )
 
 
@@ -164,8 +172,9 @@ def load_baseline(path: Path) -> SecretsCollection:
         raise CannotRun(f"no baseline at {path}")
     loaded = baseline.load(baseline.load_from_file(str(path)), filename=str(path))
     # The name filters (NAME_FILTERS has the reason) and detect-secrets' habit
-    # of dropping a name that is not a file on disk: off for every read. In a commit the file may be gone by now (the drill
-    # on GitHub found a deleted file's secret passing), and in a diff a name
+    # of dropping a name that is not a file on disk: off for every read. In a
+    # commit the file may be gone by now (the drill on GitHub found a deleted
+    # file's secret passing), and in a diff a name
     # git quoted (one holding `"` or `\`) is not a path on disk either. A
     # name it cannot place is now a finding under that name, which fails red,
     # not one that disappears. `scan_file` is only given files that exist.
@@ -248,7 +257,7 @@ def scan_text(filename: str, text: str) -> SecretsCollection:
 def binary_paths(*diff_args: str) -> list[str]:
     """The added or changed paths a diff prints as binary (`-` for its line
     counts in `--numstat`)."""
-    out = git(*diff_args, "--numstat", "-z", "--no-renames", "--diff-filter=AM")
+    out = git(*diff_args, "--numstat", "-z", "--no-renames", "--diff-filter=AMT")
     paths = []
     for record in out.split("\0"):
         parts = record.split("\t", 2)
@@ -309,9 +318,7 @@ def unreadable(files: list[str]) -> list[str]:
     above saw a line of them: images, fonts, archives. Counted in the result,
     so "every tracked file" says what it did not read."""
     return [
-        name
-        for name in files
-        if Path(name).is_file() and as_text(Path(name).read_bytes()) is None
+        name for name in files if Path(name).is_file() and as_text(Path(name).read_bytes()) is None
     ]
 
 
@@ -379,9 +386,13 @@ def github_commits() -> tuple[list[str] | None, str]:
     as its commits are still on the branch. What no run here can read is a
     commit that has left every branch, by a force push or a deleted branch:
     GitHub still serves it by sha, and only the push hook, before it was
-    pushed, reads it (third review of `#140`, finding 4). The whole history of main is a few hundred commits and takes seconds on
-    the runner; findings in it that are not secrets are listed in the
-    baseline, which `--write-baseline` writes from the history too."""
+    pushed, reads it (third review of `#140`, finding 4).
+
+    The whole history of main was 134 commits on 2026-10-14, and reading it
+    took 1 min 35 s on a Windows workstation; the runner was not measured
+    (fourth review of `#140`, finding 4, which corrected "takes seconds").
+    Findings in it that are not secrets are listed in the baseline, which
+    `--write-baseline` writes from the history too."""
     name = os.environ.get("GITHUB_EVENT_NAME", "")
     path = os.environ.get("GITHUB_EVENT_PATH", "")
     if not name or not path:
@@ -403,7 +414,9 @@ def github_commits() -> tuple[list[str] | None, str]:
     except (KeyError, TypeError) as error:
         raise CannotRun(f"the {name} event has no {error}") from error
     if ref == MAIN_BRANCH:
-        return git("rev-list", "--reverse", after).split(), f"commits of main's whole history ({after[:12]})"
+        return git(
+            "rev-list", "--reverse", after
+        ).split(), f"commits of main's whole history ({after[:12]})"
     spec = since_main(after)
     return commits_in(spec), f"commits since main ({spec})"
 
@@ -419,7 +432,11 @@ def report(found: SecretsCollection, where: str) -> int:
         note = ""
         for entry in LISTED[filename]:
             if entry == secret:
-                note = "  (in the baseline, judged a secret)" if entry.is_secret else "  (in the baseline, not judged yet)"
+                note = (
+                    "  (in the baseline, judged a secret)"
+                    if entry.is_secret
+                    else "  (in the baseline, not judged yet)"
+                )
         print(f"  {where}{filename}:{line}  {secret.type}{note}")
         count += 1
     return count
@@ -431,7 +448,9 @@ def scan_staged() -> tuple[SecretsCollection, int]:
     staged content, because unstaged changes are set aside while hooks run."""
     names = [
         n
-        for n in git("diff", "--cached", "--name-only", "--no-renames", "--diff-filter=AM", "-z").split("\0")
+        for n in git(
+            "diff", "--cached", "--name-only", "--no-renames", "--diff-filter=AMT", "-z"
+        ).split("\0")
         if n
     ]
     found = SecretsCollection()
@@ -561,7 +580,9 @@ def write_baseline(baseline_path: Path) -> int:
     new.merge(old)
     baseline.save_to_file(new, str(baseline_path))
     count = sum(1 for _ in new)
-    print(f"secret-scan: wrote {count} finding(s) from {len(files)} tracked files to {baseline_path}.")
+    print(
+        f"secret-scan: wrote {count} finding(s) from {len(files)} tracked files to {baseline_path}."
+    )
     return 0
 
 
@@ -579,10 +600,18 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--range", dest="range_spec", help="the tree, and each commit in BASE..HEAD")
-    modes.add_argument("--github", action="store_true", help="the tree, and the range of this GitHub event")
-    modes.add_argument("--staged", action="store_true", help="what the commit being made adds (pre-commit)")
-    modes.add_argument("--unpushed", action="store_true", help="each commit no remote has (pre-push)")
-    modes.add_argument("--write-baseline", action="store_true", help="rewrite the findings in the baseline")
+    modes.add_argument(
+        "--github", action="store_true", help="the tree, and the range of this GitHub event"
+    )
+    modes.add_argument(
+        "--staged", action="store_true", help="what the commit being made adds (pre-commit)"
+    )
+    modes.add_argument(
+        "--unpushed", action="store_true", help="each commit no remote has (pre-push)"
+    )
+    modes.add_argument(
+        "--write-baseline", action="store_true", help="rewrite the findings in the baseline"
+    )
     parser.add_argument("--baseline", default=BASELINE, help="default: .secrets.baseline")
     args = parser.parse_args(argv)
     try:

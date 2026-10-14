@@ -69,8 +69,8 @@ pnpm tauri dev
 ```
 
 Recommended once per clone: `pip install pre-commit`, then `pre-commit install`. Before each commit and
-each push it runs the secret check CI runs, while a mistake is still only on your machine. CI runs the
-same check, but by then the commit is public.
+each push it checks what you add for secrets, while a mistake is still only on your machine. CI checks
+too, but by then the commit is public.
 
 ## Before opening a pull request
 
@@ -80,8 +80,8 @@ All of these have to pass clean:
 - `cargo clippy --all-targets -- -D warnings`
 - `cargo test` and `pnpm test`
 - `biome ci .`
-- `python scripts/secret-scan.py` (after `pip install detect-secrets==1.5.0 unidiff==0.7.5`; the hooks
-  above run it for you)
+- `python scripts/secret-scan.py`, which reads every tracked file as CI does (after
+  `pip install detect-secrets==1.5.0 unidiff==0.7.5`)
 
 CI runs clippy in release as well as debug, so a release-only warning fails the build even when your
 local debug run is green.
