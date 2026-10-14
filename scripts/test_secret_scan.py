@@ -186,6 +186,20 @@ class SecretScan(unittest.TestCase):
         code, out = self.repo.scan("--range", f"{base}..HEAD")
         self.assertEqual(code, 0, out)
 
+    def test_a_secret_in_a_file_a_later_commit_deletes_is_refused(self) -> None:
+        # The case the range exists for, and the one the first version passed:
+        # detect-secrets skips a name that is not a file on disk, and the file
+        # is gone by the head. Found by the red drill on GitHub.
+        base = self.repo.git("rev-parse", "HEAD")
+        self.repo.write("src/leak.py", LEAK)
+        added = self.repo.commit("add a key")
+        self.repo.git("rm", "-q", "src/leak.py")
+        self.repo.commit("delete the file")
+        self.assertEqual(self.repo.scan()[0], 0, "the tree is clean")
+        code, out = self.repo.scan("--range", f"{base}..HEAD")
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"{added[:12]} src/leak.py:1", out)
+
     def test_a_commit_before_the_range_is_not_read(self) -> None:
         self.repo.write("config.py", LEAK)
         self.repo.commit("add a key")
@@ -238,9 +252,15 @@ class SecretScan(unittest.TestCase):
     def test_a_utf8_file_with_non_ascii_text_is_read(self) -> None:
         # On Windows detect-secrets opens files as cp1252 and skips one it
         # cannot decode as binary. "Á" is C3 81 in UTF-8, and cp1252 has no
-        # character at 81, so without UTF-8 mode this file is never read.
-        # Most non-ASCII text decodes as cp1252 without an error, which is why
-        # the test needs this letter. Linux reads it either way.
+        # character at 81. Most non-ASCII text decodes as cp1252 without an
+        # error, which is why the test needs this letter.
+        #
+        # What this does NOT pin: the script's UTF-8 re-run. The tree is also
+        # read line by line through git, which hands over UTF-8 whatever the
+        # locale, so this file is refused even without the re-run (a drill
+        # showed it). The re-run keeps the parsed read on Windows equal to
+        # Linux's, so a baseline written on Windows lists what CI finds; no
+        # test here can tell the two machines apart.
         self.repo.write("notes.py", "# Ángel\n" + LEAK)
         self.repo.commit("non-ascii")
         code, out = self.repo.scan()

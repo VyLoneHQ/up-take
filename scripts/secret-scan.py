@@ -69,6 +69,7 @@ from pathlib import Path
 try:
     from detect_secrets.core import baseline, scan
     from detect_secrets.core.secrets_collection import SecretsCollection
+    from detect_secrets.settings import get_settings
 except ImportError:  # pragma: no cover
     print(
         "secret-scan: detect-secrets is not installed. "
@@ -78,6 +79,7 @@ except ImportError:  # pragma: no cover
     sys.exit(2)
 
 BASELINE = ".secrets.baseline"
+INVALID_FILE_FILTER = "detect_secrets.filters.common.is_invalid_file"
 
 
 class CannotRun(Exception):
@@ -187,6 +189,13 @@ def check(baseline_path: Path, range_spec: str | None) -> int:
         total += report(new, "")
 
     commits = commits_in(range_spec) if range_spec else []
+    # detect-secrets passes over any name that is not a file on disk, and it
+    # applies that to a diff too. A file a later commit deleted is not on disk,
+    # so the commit that added a secret to it passed: the very case the range
+    # exists for. Found by a drill on GitHub, after every local test was green.
+    # Off for the commits only; the tree is read before this, and every name
+    # there is a tracked file.
+    get_settings().disable_filters(INVALID_FILE_FILTER)
     for commit in commits:
         new = scan_commit(commit) - known
         if new:
