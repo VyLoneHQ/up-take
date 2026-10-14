@@ -267,9 +267,11 @@ pub(crate) fn overlay_window(app: &AppHandle) -> Result<WebviewWindow, String> {
 ///
 /// ⚠️ **This was `exclude_from_capture`, called once, and its docs said
 /// *permanently*.** ADR-0019 always named a *Show UP-TAKE in screen
-/// recordings* setting; 1.14 ships it, so the affinity is now set at startup
-/// **and** whenever that setting changes. The word is struck rather than
-/// dropped because a reader who remembers *permanent* needs to see it go.
+/// recordings* setting; 1.14 ships it, so the affinity now follows that
+/// setting. It is written at startup **and** whenever the setting changes, or
+/// at the next show when the overlay is hidden at the time (the last section
+/// below). The word is struck rather than dropped because a reader who
+/// remembers *permanent* needs to see it go.
 ///
 /// **Decision 1 is untouched, and it is the one that matters.** It says
 /// `uptake-capture` stays ignorant of the overlay forever, which is what makes
@@ -296,7 +298,10 @@ pub(crate) fn overlay_window(app: &AppHandle) -> Result<WebviewWindow, String> {
 /// `#109`'s review). A freeze that decided *excluded, nothing to hide* and then
 /// had the setting flip to *show* mid-capture would capture the overlay's
 /// drawing. So a change made during a freeze waits for it, at most one
-/// capture, and a freeze never runs across a change.
+/// capture, and a freeze never runs across a change. Every other capture that
+/// asks whether the drawing is in shot holds the same lock for as long
+/// ([`capture_aside`], [`with_exclusion_held`]), and a change waits for one of
+/// those in the same way.
 ///
 /// # A hidden overlay is written to in one case only
 ///
@@ -369,7 +374,10 @@ enum AffinityWrite {
 /// stays until the window is next shown and hidden. Measured on Windows 11
 /// build 26200 by asking Windows Graphics Capture for the window, on this
 /// overlay and on a plain window with a caption that belongs to no framework,
-/// so the behaviour is the system's:
+/// so the behaviour is the system's and not a framework's. Not every system
+/// does it: the test
+/// `windows_draws_a_hidden_window_told_wda_none_and_not_one_told_to_exclude`
+/// asks the machine it runs on, and says where the answer was no.
 ///
 /// | The hidden window | told `WDA_NONE` | told `WDA_EXCLUDEFROMCAPTURE` |
 /// | --- | --- | --- |
@@ -484,9 +492,15 @@ fn show_settling(
 
 /// Writes the owed setting if it waits for `at`.
 ///
-/// The write lock is taken only when something is owed. That is the first
-/// show after a setting was applied to a hidden overlay, when no freeze can
-/// be running, so an ordinary show never waits here for a capture to finish.
+/// The write lock is taken only when something is owed, which is the first
+/// show after a setting was applied to a hidden overlay. No freeze can be
+/// running then, because a freeze needs Placement. A capture that runs while
+/// the overlay is hidden can be: the whole-screen grab holds the same lock
+/// through [`capture_aside`]. That show then waits until that capture lets go
+/// of the lock, as a change of the setting always has. How long that is with
+/// a setting owed, when the capture first asks the page to hide its drawing,
+/// has not been measured. An ordinary show owes nothing and never takes the
+/// lock.
 #[cfg(windows)]
 fn settle(
     excluded: &RwLock<bool>,
@@ -509,23 +523,33 @@ fn settle(
     Ok(())
 }
 
-/// The one call that changes the overlay's display affinity.
+/// Changes the overlay's display affinity.
 #[cfg(windows)]
 fn write_affinity(window: &WebviewWindow, show_in_recordings: bool) -> Result<(), String> {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
-    };
     let hwnd = window
         .hwnd()
         .map_err(|e| format!("Could not get the overlay window handle: {e}"))?
         .0;
+    write_affinity_to(hwnd, show_in_recordings)
+}
+
+/// The one call that changes a window's display affinity. Takes a bare handle
+/// so the tests can make the same call on a window of their own.
+#[cfg(windows)]
+fn write_affinity_to(
+    hwnd: windows_sys::Win32::Foundation::HWND,
+    show_in_recordings: bool,
+) -> Result<(), String> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
+    };
     let affinity = if show_in_recordings {
         WDA_NONE
     } else {
         WDA_EXCLUDEFROMCAPTURE
     };
-    // SAFETY: `hwnd` is a live top-level window handle owned by this process,
-    // valid for the duration of this call.
+    // SAFETY: every caller passes a live top-level window handle owned by this
+    // process, valid for the duration of this call.
     let ok = unsafe { SetWindowDisplayAffinity(hwnd, affinity) };
     if ok == 0 {
         return Err(
@@ -538,8 +562,9 @@ fn write_affinity(window: &WebviewWindow, show_in_recordings: bool) -> Result<()
 }
 
 /// Whether the overlay is excluded from capture right now -- see
-/// [`apply_capture_exclusion`]. A lock rather than an atomic because a freeze
-/// reads it and then holds it for its whole capture.
+/// [`apply_capture_exclusion`]. A lock rather than an atomic because a capture
+/// reads it and then holds it until it is done: a freeze, [`capture_aside`]
+/// and [`with_exclusion_held`] all do.
 ///
 /// Starts `false`, the answer that makes a freeze hide the drawing, so a freeze
 /// that could somehow run before startup applies the affinity errs toward a
@@ -3161,8 +3186,9 @@ mod tests {
         assert!(!needs_write(bounds, bounds));
     }
 
-    /// The stray window of `I-451`: Windows draws a hidden window that is told
-    /// `WDA_NONE`, whether or not it was ever shown. So that write always
+    /// The stray window of `I-451`: a desktop Windows draws a hidden window
+    /// that is told `WDA_NONE`, whether or not it was ever shown
+    /// (`affinity_write` says where that was measured). So that write always
     /// waits until the window is on screen.
     #[cfg(windows)]
     #[test]
@@ -3239,6 +3265,8 @@ mod tests {
         /// Makes every write fail, as `SetWindowDisplayAffinity` does below
         /// Windows 10.0.19041.
         writes_fail: std::cell::Cell<bool>,
+        /// Makes the show itself fail.
+        show_fails: std::cell::Cell<bool>,
         troubles: std::cell::Cell<u32>,
     }
 
@@ -3250,6 +3278,7 @@ mod tests {
                 ledger: Mutex::new(AffinityLedger::new()),
                 done: std::cell::RefCell::new(Vec::new()),
                 writes_fail: std::cell::Cell::new(false),
+                show_fails: std::cell::Cell::new(false),
                 troubles: std::cell::Cell::new(0),
             }
         }
@@ -3283,6 +3312,9 @@ mod tests {
                 &self.excluded,
                 &self.ledger,
                 || {
+                    if self.show_fails.get() {
+                        return Err("the show failed".to_string());
+                    }
                     self.done.borrow_mut().push("show");
                     Ok(())
                 },
@@ -3438,6 +3470,266 @@ mod tests {
         overlay.writes_fail.set(true);
         assert!(overlay.set(false, true).is_err());
         assert!(!overlay.excluded());
+    }
+
+    /// A show that fails is the caller's error, and nothing that waits for a
+    /// visible window is written to one that never appeared. The setting stays
+    /// owed, and the window still counts as never shown.
+    #[cfg(windows)]
+    #[test]
+    fn a_show_that_fails_is_returned_and_writes_nothing_after_it() {
+        let overlay = FakeOverlay::new();
+        assert_eq!(overlay.set(true, false), Ok(()));
+
+        overlay.show_fails.set(true);
+        assert!(overlay.show().is_err());
+        assert_eq!(overlay.done(), Vec::<&str>::new());
+
+        overlay.show_fails.set(false);
+        assert_eq!(overlay.show(), Ok(()));
+        assert_eq!(overlay.done(), ["show", "WDA_NONE"]);
+
+        // Never shown, so an exclusion is still the write that does not wait.
+        let overlay = FakeOverlay::new();
+        overlay.show_fails.set(true);
+        assert!(overlay.show().is_err());
+        assert_eq!(overlay.set(false, false), Ok(()));
+        assert_eq!(overlay.done(), ["WDA_EXCLUDEFROMCAPTURE"]);
+    }
+
+    /// A plain window with a caption, created hidden, that belongs to no
+    /// framework. The overlay's own style bits, so Windows treats it alike.
+    #[cfg(windows)]
+    struct PlainWindow(windows_sys::Win32::Foundation::HWND);
+
+    #[cfg(windows)]
+    impl PlainWindow {
+        fn new() -> Self {
+            use windows_sys::Win32::UI::WindowsAndMessaging::{
+                CreateWindowExW, WS_CAPTION, WS_CLIPSIBLINGS, WS_SYSMENU,
+            };
+            let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+            let title: Vec<u16> = "UP-TAKE test window\0".encode_utf16().collect();
+            // SAFETY: both strings end in a NUL and outlive the call, and every
+            // handle argument is null, which the call accepts.
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    0,
+                    class.as_ptr(),
+                    title.as_ptr(),
+                    WS_CAPTION | WS_SYSMENU | WS_CLIPSIBLINGS,
+                    200,
+                    200,
+                    320,
+                    200,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                )
+            };
+            assert!(!hwnd.is_null(), "the test window could not be created");
+            Self(hwnd)
+        }
+
+        fn visible(&self) -> bool {
+            // SAFETY: the handle is this value's own live window.
+            unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible(self.0) != 0 }
+        }
+
+        fn show(&self, show: bool) {
+            use windows_sys::Win32::UI::WindowsAndMessaging::{
+                SW_HIDE, SW_SHOWNOACTIVATE, ShowWindow,
+            };
+            // SAFETY: the handle is this value's own live window.
+            unsafe { ShowWindow(self.0, if show { SW_SHOWNOACTIVATE } else { SW_HIDE }) };
+        }
+
+        /// The display affinity Windows holds for the window, read back.
+        fn affinity(&self) -> Option<u32> {
+            let mut affinity = 0;
+            // SAFETY: the handle is this value's own live window, and
+            // `affinity` is a plain integer the call writes.
+            let read = unsafe {
+                windows_sys::Win32::UI::WindowsAndMessaging::GetWindowDisplayAffinity(
+                    self.0,
+                    &raw mut affinity,
+                )
+            };
+            (read != 0).then_some(affinity)
+        }
+
+        /// Whether the compositor draws the window, asked the one way that
+        /// can see it: Windows Graphics Capture accepts a window that is drawn
+        /// and refuses a hidden one, whatever `IsWindowVisible` answers.
+        fn drawn(&self) -> bool {
+            use windows_capture::settings::GraphicsCaptureItemType;
+            use windows_capture::window::Window;
+            let item: Result<GraphicsCaptureItemType, _> =
+                Window::from_raw_hwnd(self.0.cast()).try_into();
+            item.is_ok()
+        }
+
+        /// Waits up to `within` for [`Self::drawn`] to answer `wanted`, running
+        /// the window's messages meanwhile. `true` if it did.
+        fn becomes(&self, wanted: bool, within: std::time::Duration) -> bool {
+            use windows_sys::Win32::UI::WindowsAndMessaging::{
+                DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage,
+            };
+            let start = std::time::Instant::now();
+            loop {
+                // SAFETY: `message` is a plain struct the calls fill and read,
+                // and it lives for the whole loop body.
+                unsafe {
+                    let mut message: MSG = std::mem::zeroed();
+                    while PeekMessageW(&raw mut message, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0
+                    {
+                        TranslateMessage(&raw const message);
+                        DispatchMessageW(&raw const message);
+                    }
+                }
+                if self.drawn() == wanted {
+                    return true;
+                }
+                if start.elapsed() >= within {
+                    return false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+
+        /// Whether the window is hidden now and for the whole of `during`.
+        fn stays_hidden(&self, during: std::time::Duration) -> bool {
+            !self.becomes(true, during)
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for PlainWindow {
+        fn drop(&mut self) {
+            // SAFETY: the handle is this value's own window, destroyed once.
+            unsafe { windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow(self.0) };
+        }
+    }
+
+    /// The first row of the table in `affinity_write`'s docs, asked of the
+    /// machine it runs on, with a window nobody touched as the control.
+    ///
+    /// **Ignored by default, because the answer depends on the machine.** A
+    /// Windows 11 workstation (build 26200) draws the window told `WDA_NONE`.
+    /// On 2026-10-13 GitHub's `windows-latest` runner, then Windows Server
+    /// 2025, did not: this test failed there at its first assertion while the
+    /// one below it passed, so that runner saw a visible window and drew no
+    /// hidden one. That is one run of a runner GitHub is free to change, and
+    /// nothing asks it again. The rule is written for the machines that do
+    /// draw the window.
+    ///
+    /// Run it on a workstation when the rule is touched, or to learn whether
+    /// a new Windows build still needs it. Nothing makes anyone do that:
+    /// `cargo test -p up-take --lib windows_draws_a_hidden_window -- --ignored`
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "asks this machine's compositor, and not every machine draws the hidden window"]
+    fn windows_draws_a_hidden_window_told_wda_none_and_not_one_told_to_exclude() {
+        let second = std::time::Duration::from_secs(1);
+        let untouched = PlainWindow::new();
+        let told_none = PlainWindow::new();
+        let told_exclude = PlainWindow::new();
+        assert_eq!(write_affinity_to(told_none.0, true), Ok(()));
+        assert_eq!(write_affinity_to(told_exclude.0, false), Ok(()));
+
+        assert!(
+            told_none.becomes(true, 3 * second),
+            "a hidden window told WDA_NONE was not drawn: either this probe cannot see a drawn \
+             window here, or Windows no longer does what `affinity_write` is written around"
+        );
+        assert!(untouched.stays_hidden(second));
+        assert!(told_exclude.stays_hidden(second));
+        for window in [&untouched, &told_none, &told_exclude] {
+            assert!(
+                !window.visible(),
+                "IsWindowVisible answers false throughout"
+            );
+        }
+    }
+
+    /// `I-451` on a real window, from a default start to the setting switched
+    /// both ways: what is applied while the window is hidden draws nothing,
+    /// the next show writes it, and after a hide the window is hidden.
+    ///
+    /// **Each read of the affinity is taken where it can fail.** Windows
+    /// answers 0, which is `WDA_NONE`, for a window that was shown and then
+    /// hidden, whatever was written to it. So the read that looks for
+    /// `WDA_NONE` is taken while the window is on screen, on a window that
+    /// read as excluded a moment before. The first version read it after the
+    /// hide, where it could only pass (review round 1 of `#138`).
+    ///
+    /// `stays_hidden` before the first show can only fail on a machine that
+    /// draws a hidden window told `WDA_NONE` (the test above). On one that
+    /// does, breaking the rule turns this red. The rest holds on any machine.
+    #[cfg(windows)]
+    #[test]
+    fn the_rule_leaves_a_real_hidden_window_hidden() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{WDA_EXCLUDEFROMCAPTURE, WDA_NONE};
+        let second = std::time::Duration::from_secs(1);
+        let window = PlainWindow::new();
+        let excluded = RwLock::new(false);
+        let ledger = Mutex::new(AffinityLedger::new());
+        let write = |setting| write_affinity_to(window.0, setting);
+        let visible = || Ok(window.visible());
+        let show = || {
+            window.show(true);
+            Ok(())
+        };
+
+        // A default start: excluded at once, on a window never shown.
+        assert_eq!(
+            apply_setting(&excluded, &ledger, false, visible, write),
+            Ok(())
+        );
+        assert_eq!(window.affinity(), Some(WDA_EXCLUDEFROMCAPTURE));
+
+        // The setting switched on while the window is hidden: owed, nothing
+        // written, nothing drawn.
+        assert_eq!(
+            apply_setting(&excluded, &ledger, true, visible, write),
+            Ok(())
+        );
+        assert_eq!(
+            window.affinity(),
+            Some(WDA_EXCLUDEFROMCAPTURE),
+            "owed, not written"
+        );
+        assert!(window.stays_hidden(second));
+
+        // The show writes it. Read while the window is on screen.
+        assert_eq!(
+            show_settling(&excluded, &ledger, show, write, |_| {}),
+            Ok(())
+        );
+        assert!(window.visible());
+        assert_eq!(window.affinity(), Some(WDA_NONE));
+        assert!(window.becomes(true, 3 * second));
+
+        window.show(false);
+        assert!(window.becomes(false, 3 * second));
+        assert!(window.stays_hidden(second));
+
+        // Switched off again, on a window that has now been shown: owed until
+        // the next show, which writes it before the window appears. A hidden
+        // window that is told to exclude itself reads 17 at once, so this
+        // read fails if the exclusion did not wait.
+        assert_eq!(
+            apply_setting(&excluded, &ledger, false, visible, write),
+            Ok(())
+        );
+        assert_eq!(window.affinity(), Some(WDA_NONE), "owed, not written");
+        assert_eq!(
+            show_settling(&excluded, &ledger, show, write, |_| {}),
+            Ok(())
+        );
+        assert_eq!(window.affinity(), Some(WDA_EXCLUDEFROMCAPTURE));
+        window.show(false);
     }
 
     #[test]
