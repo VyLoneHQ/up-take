@@ -708,8 +708,9 @@ struct FreezeRevealPayload {
 ///
 /// **`async`, so it does not run on the main thread.** Two callers wait for
 /// this while holding [`EXCLUDED_FROM_CAPTURE`]'s read side: the freeze and
-/// [`capture_aside`]. Two take its write side: `settings_write`, which runs on
-/// the main thread, and [`show`] when a setting is owed to the window. A
+/// [`capture_aside`]. Three take its write side: `settings_write`, which runs
+/// on the main thread; [`show`] when a setting is owed to the window; and
+/// startup's [`apply_capture_exclusion`], once, before anything can read. A
 /// synchronous command here would queue on the main thread behind a writer
 /// that is itself waiting for the reader to let go, and the reader would time
 /// out on a page that had in fact answered.
@@ -3506,6 +3507,10 @@ mod tests {
     /// anyone's screen (`I-462`): at (200, 200) every local `cargo test` put a
     /// captioned window on the desktop for about 2.5 s. Windows Graphics
     /// Capture answers for a window there as it does on a monitor.
+    ///
+    /// A tool window, so showing it adds no taskbar button either. The overlay
+    /// has none (`skipTaskbar`), and the review of `#141` saw the shell told
+    /// of this window twice per run without the style.
     #[cfg(windows)]
     struct PlainWindow(windows_sys::Win32::Foundation::HWND);
 
@@ -3513,7 +3518,7 @@ mod tests {
     impl PlainWindow {
         fn new() -> Self {
             use windows_sys::Win32::UI::WindowsAndMessaging::{
-                CreateWindowExW, WS_CAPTION, WS_CLIPSIBLINGS, WS_SYSMENU,
+                CreateWindowExW, WS_CAPTION, WS_CLIPSIBLINGS, WS_EX_TOOLWINDOW, WS_SYSMENU,
             };
             let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
             let title: Vec<u16> = "UP-TAKE test window\0".encode_utf16().collect();
@@ -3521,7 +3526,7 @@ mod tests {
             // handle argument is null, which the call accepts.
             let hwnd = unsafe {
                 CreateWindowExW(
-                    0,
+                    WS_EX_TOOLWINDOW,
                     class.as_ptr(),
                     title.as_ptr(),
                     WS_CAPTION | WS_SYSMENU | WS_CLIPSIBLINGS,
