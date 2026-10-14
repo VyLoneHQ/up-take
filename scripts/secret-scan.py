@@ -11,8 +11,9 @@ this check reads two things.
    Each file is read twice: as detect-secrets parses it, and line by line as
    written, because the parsed read of a YAML file never sees its comments
    (`scan_tree` has the details). A UTF-16 file, which neither read can
-   decode, is read a third way (`as_text`). detect-secrets' own habit of
-   passing over files by name (every `.lock`, `.svg`, `.css`) is turned off.
+   decode, is read a third way (`as_text`). Of detect-secrets' filters, only
+   two may drop a finding: the `pragma: allowlist secret` a person writes,
+   and the baseline's patterns for three exact line shapes (`KEEP_FILTERS`).
    What is text in neither UTF-8 nor UTF-16 is not read, and the result
    counts it.
 2. **The range** (`--range BASE..HEAD`). The lines each commit in the range
@@ -120,33 +121,32 @@ except ImportError:  # pragma: no cover
     sys.exit(2)
 
 BASELINE = ".secrets.baseline"
-INVALID_FILE_FILTER = "detect_secrets.filters.common.is_invalid_file"
-# Two filters detect-secrets applies by file name, before reading a line:
-# every `.lock` file (Cargo.lock), and `.svg`, `.css`, `.map` and other text
-# formats it takes for media. Both off: the second review of `#140` planted a
-# key in Cargo.lock and in an .svg and both passed every read. The checksum
-# lines of Cargo.lock are passed instead by a pattern in the baseline that
-# matches only their exact shape, as pnpm-lock.yaml's integrity lines are.
+# The only detect-secrets filters allowed to drop a finding. Each is explicit:
+# the `pragma: allowlist secret` comment a person writes on a line, and the
+# patterns in the baseline that match three exact line shapes (lockfile
+# hashes and the baseline's own hashes). Every other filter is off, including
+# any a later detect-secrets adds, because each one dropped findings with
+# nobody judging them, and the reviews of `#140` found them one at a time:
 #
-# Two more work on the name alone, and are off for the same reason (fourth
-# review of `#140`, finding 1): any path containing `swagger`, and any file
-# called `.secrets.baseline` in any folder. The baseline at the root is read
-# like any file; its own `hashed_secret` lines are passed by a pattern in it
-# that matches only their exact shape, so a value pasted into it is read.
-NAME_FILTERS = (
-    "detect_secrets.filters.heuristic.is_lock_file",
-    "detect_secrets.filters.heuristic.is_non_text_file",
-    "detect_secrets.filters.heuristic.is_swagger_file",
-    "detect_secrets.filters.common.is_baseline_file",
+# - by file name, before a line is read: every `.lock` file, `.svg`, `.css`
+#   and other formats taken for media (second review), any path holding
+#   `swagger`, any file called `.secrets.baseline` (fourth), and any name
+#   that is not a file on disk, which is every file a later commit deleted
+#   (the drill on GitHub) and every name git quotes;
+# - by a network answer: every match of a verifiable type (AWS, Slack,
+#   Stripe, Telegram and others) was sent to the provider and dropped on any
+#   answer but "valid", a rate limit included (fifth);
+# - by heuristics on the line or the value: a line shaped like a call
+#   (`personal_token("ghp_...")` in Rust, sixth review), a value after `id`,
+#   inside `{...}` or `<...>`, after `$`, a sequential or UUID-shaped string.
+#   They apply to every detector, the exact provider patterns included.
+#
+# Measured before turning the heuristics off: three new findings in the whole
+# tree, all alphabet strings in tests, judged in the baseline.
+KEEP_FILTERS = (
+    "detect_secrets.filters.allowlist.is_line_allowlisted",
+    "detect_secrets.filters.regex.should_exclude_line",
 )
-# Network verification: while this filter is configured, detect-secrets sends
-# every match of a verifiable type (AWS, Slack, Stripe, Telegram, Mailchimp
-# and others) to the provider's API and drops it if the answer is not "valid",
-# which a rate limit or a server error also gives. So a live key could pass
-# with nobody having judged it, and every match left the machine (fifth
-# review of `#140`, finding 1). Off, and out of the baseline: detect-secrets'
-# own `--no-verify`. Nothing here talks to the network.
-VERIFY_FILTER = "detect_secrets.filters.common.is_ignored_due_to_verification_policies"
 
 
 class CannotRun(Exception):
@@ -179,14 +179,10 @@ def load_baseline(path: Path) -> SecretsCollection:
     if not path.is_file():
         raise CannotRun(f"no baseline at {path}")
     loaded = baseline.load(baseline.load_from_file(str(path)), filename=str(path))
-    # The name filters (NAME_FILTERS has the reason) and detect-secrets' habit
-    # of dropping a name that is not a file on disk: off for every read. In a
-    # commit the file may be gone by now (the drill on GitHub found a deleted
-    # file's secret passing), and in a diff a name
-    # git quoted (one holding `"` or `\`) is not a path on disk either. A
-    # name it cannot place is now a finding under that name, which fails red,
-    # not one that disappears. `scan_file` is only given files that exist.
-    get_settings().disable_filters(*NAME_FILTERS, INVALID_FILE_FILTER, VERIFY_FILTER)
+    # Every filter but the two KEEP_FILTERS is off (the reason is there).
+    # `scan_file` is only given files that exist.
+    settings = get_settings()
+    settings.disable_filters(*[f for f in list(settings.filters) if f not in KEEP_FILTERS])
     # detect-secrets turns each name into the local form as it loads, so on
     # Windows `a/b.rs` comes back as `a\b.rs` and matches nothing git lists.
     # Back to git's form, on the key and on each finding, which compares by

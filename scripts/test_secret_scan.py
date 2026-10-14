@@ -939,7 +939,8 @@ class NoNetwork(unittest.TestCase):
 
         # A made-up value in the shape of a Telegram bot token, unquoted, so
         # the Telegram detector is the one that sees it.
-        token = "123456789:" + "AAH" + "x7Qp2Lm9Vt4Rw8Ks3Nd6Fb1Hc5Gj0Zy" + "TeK"  # pragma: allowlist secret
+        middle = "x7Qp2Lm9Vt4Rw8Ks3Nd6Fb1Hc5Gj0Zy"  # pragma: allowlist secret
+        token = "123456789:" + "AAH" + middle + "TeK"
         self.repo.write("bot.env", "TELEGRAM=" + token + "\n")
         self.repo.commit("a token-shaped value")
 
@@ -981,6 +982,45 @@ class NoNetwork(unittest.TestCase):
         self.assertNotIn(
             "detect_secrets.filters.common.is_ignored_due_to_verification_policies", names
         )
+
+
+class SixthReview(unittest.TestCase):
+    """The sixth review of #140: a heuristic filter dropped a token inside a
+    call, for every detector. Only two filters may drop a finding now."""
+
+    def setUp(self) -> None:
+        self._dir = tempfile.TemporaryDirectory()
+        self.repo = Repo(Path(self._dir.name))
+        self._cwd = os.getcwd()
+
+    def tearDown(self) -> None:
+        os.chdir(self._cwd)
+        self._dir.cleanup()
+
+    def test_a_token_inside_a_rust_call_is_refused_everywhere(self) -> None:
+        token = "ghp_" + "Zq3x9KfP0wLm7Tn2Rv8sJ4dHc5Gj0Yb1Wa6E"  # pragma: allowlist secret
+        line = f'    let c = Octocrab::builder().personal_token("{token}");\n'
+        base = self.repo.git("rev-parse", "HEAD")
+        self.repo.write("src/client.rs", "fn main() {\n" + line + "}\n")
+        self.repo.git("add", "-A")
+        self.assertEqual(self.repo.scan("--staged")[0], 1, "staged")
+        added = self.repo.commit("a token inside a call")
+        self.assertEqual(self.repo.scan()[0], 1, "the tree")
+        self.repo.git("rm", "-q", "src/client.rs")
+        self.repo.commit("delete it")
+        code, out = self.repo.scan("--range", f"{base}..HEAD")
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"{added[:12]} src/client.rs:2", out)
+
+    def test_only_the_two_kept_filters_are_active(self) -> None:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("secret_scan_filters", SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        os.chdir(self.repo.root)
+        module.load_baseline(Path(".secrets.baseline"))
+        self.assertEqual(set(module.get_settings().filters), set(module.KEEP_FILTERS))
 
 
 class Pins(unittest.TestCase):
