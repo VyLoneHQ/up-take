@@ -1037,18 +1037,25 @@ class SeventhReview(unittest.TestCase):
     def tearDown(self) -> None:
         self._dir.cleanup()
 
-    def _misplaced(self) -> str:
-        """A key at line 3 and, in the same commit, a nextline pragma far below
-        it in the same file. Returns the commit."""
-        filler = "".join(f"x{n} = {n}\n" for n in range(40))
-        self.repo.write("app.py", "import os\n\n" + LEAK + filler + self.NEXTLINE + "y = 1\n")
+    @staticmethod
+    def _edit(lines: list[str], at: dict[int, str]) -> str:
+        """The file with the given 1-based lines replaced."""
+        return "".join(at.get(n, line) for n, line in enumerate(lines, 1))
+
+    def _misplaced(self, name: str, lines: list[str], key: str, pragma: str) -> str:
+        """An existing file in which one commit replaces line 3 with a key and
+        line 40 with a nextline pragma: the commit's added lines are then
+        [3, 40], and detect-secrets' diff reader took line 40 for line 3's
+        neighbour (the shape the seventh review drilled). Returns the commit."""
+        self.repo.write(name, self._edit(lines, {3: key, 40: pragma}))
         return self.repo.commit("a key and a pragma elsewhere")
 
     def test_a_misplaced_nextline_pragma_hides_nothing_in_a_commit(self) -> None:
-        self.repo.write("app.py", "import os\n")
+        lines = [f"x{n} = {n}\n" for n in range(1, 51)]
+        self.repo.write("app.py", "".join(lines))
         base = self.repo.commit("a file")
-        added = self._misplaced()
-        self.repo.write("app.py", "import os\n")
+        added = self._misplaced("app.py", lines, LEAK, self.NEXTLINE)
+        self.repo.write("app.py", "".join(lines))
         self.repo.commit("clean it")
         code, out = self.repo.scan("--range", f"{base}..HEAD")
         self.assertEqual(code, 1, out)
@@ -1059,13 +1066,14 @@ class SeventhReview(unittest.TestCase):
         subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
         self.addCleanup(lambda: __import__("shutil").rmtree(remote, ignore_errors=True))
         self.repo.git("remote", "add", "origin", str(remote))
-        self.repo.write("ci.yml", "jobs:\n  a: 1\n")
+        lines = ["jobs:\n"] + [f"  k{n}: {n}\n" for n in range(2, 51)]
+        self.repo.write("ci.yml", "".join(lines))
         self.repo.commit("a yaml file")
         self.repo.git("push", "-q", "origin", "main")
         # A YAML comment: only the line-by-line read sees it, so the parsed
         # read cannot cover for a misread pragma.
-        filler = "".join(f"  k{n}: {n}\n" for n in range(40))
-        self.repo.write("ci.yml", "jobs:\n  # " + LEAK + filler + "  " + self.NEXTLINE + "  z: 1\n")
+        edited = self._edit(lines, {3: "  # " + LEAK, 40: "  " + self.NEXTLINE})
+        self.repo.write("ci.yml", edited)
         self.repo.git("add", "ci.yml")
         self.assertEqual(self.repo.scan("--staged")[0], 1, "staged")
         self.repo.commit("a key in a comment and a pragma elsewhere")
