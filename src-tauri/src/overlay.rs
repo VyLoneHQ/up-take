@@ -3508,9 +3508,12 @@ mod tests {
     /// captioned window on the desktop for about 2.5 s. Windows Graphics
     /// Capture answers for a window there as it does on a monitor.
     ///
-    /// A tool window, so showing it adds no taskbar button either. The overlay
-    /// has none (`skipTaskbar`), and the review of `#141` saw the shell told
-    /// of this window twice per run without the style.
+    /// Not a tool window, although the overlay has no taskbar button either
+    /// (`skipTaskbar`) and showing this one tells the shell about it twice per
+    /// run. With `WS_EX_TOOLWINDOW`, the test failed in 2 of 3 runs on a
+    /// workstation when it was the first in its process to ask Windows Graphics
+    /// Capture, which a normal `cargo test` makes it (second review of `#141`).
+    /// Why is not known.
     #[cfg(windows)]
     struct PlainWindow(windows_sys::Win32::Foundation::HWND);
 
@@ -3518,7 +3521,7 @@ mod tests {
     impl PlainWindow {
         fn new() -> Self {
             use windows_sys::Win32::UI::WindowsAndMessaging::{
-                CreateWindowExW, WS_CAPTION, WS_CLIPSIBLINGS, WS_EX_TOOLWINDOW, WS_SYSMENU,
+                CreateWindowExW, WS_CAPTION, WS_CLIPSIBLINGS, WS_SYSMENU,
             };
             let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
             let title: Vec<u16> = "UP-TAKE test window\0".encode_utf16().collect();
@@ -3526,7 +3529,7 @@ mod tests {
             // handle argument is null, which the call accepts.
             let hwnd = unsafe {
                 CreateWindowExW(
-                    WS_EX_TOOLWINDOW,
+                    0,
                     class.as_ptr(),
                     title.as_ptr(),
                     WS_CAPTION | WS_SYSMENU | WS_CLIPSIBLINGS,
@@ -3678,10 +3681,12 @@ mod tests {
     ///
     /// `stays_hidden` before the first show can only fail on a machine that
     /// draws a hidden window told `WDA_NONE` (the test above). On one that
-    /// does, breaking the rule turns the affinity read before it red first
-    /// (*owed, not written*); with that read taken out, `stays_hidden` goes
-    /// red too. Measured on a workstation on 2026-10-14, with the window off
-    /// every monitor (`I-462`). The rest holds on any machine.
+    /// does, breaking the rule turns the affinity read before it red
+    /// (*owed, not written*), every time it was tried. `stays_hidden` is a
+    /// second net and not a reliable one: with that read taken out, it went red
+    /// in some runs and not in others (2026-10-14, the window off every
+    /// monitor, `I-462` and the second review of `#141`). The rest holds on any
+    /// machine.
     #[cfg(windows)]
     #[test]
     fn the_rule_leaves_a_real_hidden_window_hidden() {
