@@ -163,6 +163,29 @@ class SecretScan(unittest.TestCase):
         code, out = self.repo.scan("--range", f"{base}..HEAD")
         self.assertEqual(code, 0, out)
 
+    def test_a_secret_in_a_yaml_comment_is_refused_in_the_tree(self) -> None:
+        # detect-secrets parses YAML and never reads its comments, so the
+        # tree is also read line by line as written.
+        self.repo.write("ci.yml", "jobs:\n  a:\n    # " + LEAK + "    runs-on: ubuntu-latest\n")
+        self.repo.commit("a key in a comment")
+        code, out = self.repo.scan()
+        self.assertEqual(code, 1, out)
+        self.assertIn("ci.yml:3", out)
+
+    def test_a_finding_only_the_written_line_shows_can_be_listed_for_the_range(self) -> None:
+        # The case found on this check's own pull request: a YAML comment the
+        # keyword pattern matches. Listed from the tree, it passes in the
+        # commit that added it.
+        base = self.repo.git("rev-parse", "HEAD")
+        self.repo.write(".github/ci.yml", "jobs:\n  # Secrets: detect-secrets reads this\n  a: 1\n")
+        self.repo.commit("a comment that is not a secret")
+        code, out = self.repo.scan("--range", f"{base}..HEAD")
+        self.assertEqual(code, 1, "the comment is a finding: " + out)
+        self.assertEqual(self.repo.scan("--write-baseline")[0], 0)
+        self.repo.commit("listed")
+        code, out = self.repo.scan("--range", f"{base}..HEAD")
+        self.assertEqual(code, 0, out)
+
     def test_a_commit_before_the_range_is_not_read(self) -> None:
         self.repo.write("config.py", LEAK)
         self.repo.commit("add a key")

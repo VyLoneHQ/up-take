@@ -8,6 +8,9 @@ this check reads two things.
 
 1. **The tree.** Every tracked file, as it stands in the checkout. On a pull
    request that is the merge result, which is what would land on `main`.
+   Each file is read twice: as detect-secrets parses it, and line by line as
+   written, because the parsed read of a YAML file never sees its comments
+   (`scan_tree` has the details).
 2. **The range** (`--range BASE..HEAD`). The lines each commit in the range
    added, one commit at a time. This is what catches a secret that a branch
    added and then removed: the tree is clean, and the commit is still public.
@@ -81,9 +84,10 @@ class CannotRun(Exception):
     """The check could not run. Exit 2, never a pass."""
 
 
-def git(*args: str) -> str:
+def git(*args: str, stdin: bytes | None = None) -> str:
     result = subprocess.run(
         ["git", "-c", "core.quotepath=off", *args],
+        input=stdin,
         capture_output=True,
         check=False,
     )
@@ -113,32 +117,44 @@ def load_baseline(path: Path) -> SecretsCollection:
     return known
 
 
+DIFF_OPTIONS = ("--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--unified=0")
+
+
+def scan_diff(diff: str) -> SecretsCollection:
+    found = SecretsCollection()
+    if diff.strip():
+        found.scan_diff(diff)
+    return found
+
+
 def scan_tree(files: list[str]) -> SecretsCollection:
-    """Each file under the name git gives it, so the keys are the same on
-    every machine. One process: the whole repository takes seconds."""
+    """Every tracked file, read two ways, under the names git gives them.
+
+    detect-secrets reads a file it can parse (YAML, INI) as parsed values, so
+    a comment there is never read: a key pasted into a comment of a workflow
+    file passes. A commit's diff is read line by line as written, comments
+    included. So the tree is read both ways. One reason is the comment. The
+    other is the baseline: a finding only the line as written shows would
+    turn every commit in a range red, and the baseline, written from the tree,
+    could never list it.
+
+    The second way is the diff of the working tree against the empty tree:
+    every tracked line as an added line, through the same code a commit's
+    diff takes.
+    """
     found = SecretsCollection()
     for name in files:
         for secret in scan.scan_file(name):
             found[name].add(secret)
+    empty_tree = git("hash-object", "-t", "tree", "--stdin", stdin=b"").strip()
+    for filename, secret in scan_diff(git("diff", *DIFF_OPTIONS, empty_tree, "--")):
+        found[filename].add(secret)
     return found
 
 
 def scan_commit(commit: str) -> SecretsCollection:
     """The lines one commit added, against its first parent."""
-    diff = git(
-        "show",
-        "--format=",
-        "--no-color",
-        "--no-ext-diff",
-        "--no-textconv",
-        "--no-renames",
-        "--unified=0",
-        commit,
-    )
-    found = SecretsCollection()
-    if diff.strip():
-        found.scan_diff(diff)
-    return found
+    return scan_diff(git("show", "--format=", *DIFF_OPTIONS, commit))
 
 
 def commits_in(range_spec: str) -> list[str]:
