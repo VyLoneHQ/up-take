@@ -12,7 +12,8 @@ this check reads two things.
    written, because the parsed read of a YAML file never sees its comments
    (`scan_tree` has the details). A UTF-16 file, which neither read can
    decode, is read a third way (`as_text`). Of detect-secrets' filters, only
-   two may drop a finding: the `pragma: allowlist secret` a person writes,
+   two may drop a finding: the `pragma: allowlist secret` a person writes
+   (on the line, or `pragma: allowlist nextline secret` on the line above),
    and the baseline's patterns for three exact line shapes (`KEEP_FILTERS`).
    What is text in neither UTF-8 nor UTF-16 is not read, and the result
    counts it.
@@ -122,8 +123,10 @@ except ImportError:  # pragma: no cover
 
 BASELINE = ".secrets.baseline"
 # The only detect-secrets filters allowed to drop a finding. Each is explicit:
-# the `pragma: allowlist secret` comment a person writes on a line, and the
-# patterns in the baseline that match three exact line shapes (lockfile
+# the `pragma: allowlist secret` comment a person writes on a line (or
+# `pragma: allowlist nextline secret` on the line above it, which commits and
+# the staged change honour only on the real line above: `scan_changes`), and
+# the patterns in the baseline that match three exact line shapes (lockfile
 # hashes and the baseline's own hashes). Every other filter is off, including
 # any a later detect-secrets adds, because each one dropped findings with
 # nobody judging them, and the reviews of `#140` found them one at a time:
@@ -247,10 +250,19 @@ def as_text(data: bytes) -> str | None:
         return None
 
 
+# Characters Python and the diff parser take for a line break and git does not.
+# Replaced by a space, so a line's number here is its number in git.
+NOT_GIT_LINE_BREAKS = str.maketrans({c: " " for c in "\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"})
+
+
 def scan_text(filename: str, text: str) -> SecretsCollection:
     """Every line of `text`, through the same code a commit's diff takes: as a
-    diff that adds the whole file."""
-    lines = text.splitlines()
+    diff that adds the whole file. Lines are split and numbered as git does,
+    on `\n` alone."""
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    lines = [line.removesuffix("\r").translate(NOT_GIT_LINE_BREAKS) for line in lines]
     if not lines:
         return SecretsCollection()
     body = "".join("+" + line + "\n" for line in lines)
@@ -278,6 +290,67 @@ def scan_blobs(revision: str, paths: list[str]) -> SecretsCollection:
         text = as_text(git_bytes("show", f"{revision}:{path}"))
         if text is not None:
             for filename, secret in scan_text(path, text):
+                found[filename].add(secret)
+    return found
+
+
+def unquote(path: str) -> str:
+    """A path as git writes it in a diff header: C-quoted when it holds a
+    double quote, a backslash or a control character, with octal escapes for
+    bytes. Back to the path itself."""
+    if not (len(path) >= 2 and path[0] == path[-1] == '"'):
+        return path
+    body, out, i = path[1:-1], bytearray(), 0
+    simple = {"n": 10, "t": 9, "r": 13, "a": 7, "b": 8, "f": 12, "v": 11, "\\": 92, '"': 34}
+    while i < len(body):
+        if body[i] == "\\" and i + 1 < len(body):
+            if body[i + 1] in "01234567":
+                out.append(int(body[i + 1 : i + 4], 8))
+                i += 4
+                continue
+            out.append(simple.get(body[i + 1], ord(body[i + 1])))
+            i += 2
+            continue
+        out += body[i].encode("utf-8")
+        i += 1
+    name = out.decode("utf-8", errors="replace")
+    return name[2:] if name.startswith(("a/", "b/")) else name
+
+
+def added_lines(diff: str) -> dict[str, set[int]]:
+    """For each file of a diff, the numbers of the lines it adds."""
+    from unidiff import PatchSet
+
+    out: dict[str, set[int]] = {}
+    for patched in PatchSet.from_string(diff):
+        numbers = {
+            line.target_line_no for hunk in patched for line in hunk.target_lines() if line.is_added
+        }
+        if numbers:
+            out[unquote(patched.path)] = numbers
+    return out
+
+
+def scan_changes(diff: str, revision: str) -> SecretsCollection:
+    """The lines a diff adds, each read inside its whole file at `revision`
+    (a commit, or empty for the index), and only the findings on added lines
+    kept.
+
+    Not detect-secrets' own diff reader, which numbers a line's neighbours from
+    the list of added lines only: a `pragma: allowlist nextline secret`
+    anywhere in a commit could then silence a secret on another line (seventh
+    review of `#140`, finding 1). Read in its file, a line's neighbour is the
+    line above it."""
+    found = SecretsCollection()
+    if not diff.strip():
+        return found
+    for path, numbers in added_lines(diff).items():
+        data = git_bytes("show", f"{revision}:{path}")
+        text = as_text(data)
+        if text is None:
+            text = data.decode("utf-8", errors="replace")
+        for filename, secret in scan_text(path, text):
+            if secret.line_number in numbers:
                 found[filename].add(secret)
     return found
 
@@ -347,11 +420,15 @@ def scan_commit(commit: str) -> SecretsCollection:
     `#140`, finding 1)."""
     parents = git("rev-list", "--parents", "-n", "1", commit).split()[1:]
     if len(parents) == 2:
-        found = scan_diff(git("show", "--format=", "--remerge-diff", *DIFF_OPTIONS, commit))
+        found = scan_changes(
+            git("show", "--format=", "--remerge-diff", *DIFF_OPTIONS, commit), commit
+        )
     elif len(parents) > 2:
-        found = scan_diff(git("show", "--format=", "-m", "--first-parent", *DIFF_OPTIONS, commit))
+        found = scan_changes(
+            git("show", "--format=", "-m", "--first-parent", *DIFF_OPTIONS, commit), commit
+        )
     else:
-        found = scan_diff(git("show", "--format=", *DIFF_OPTIONS, commit))
+        found = scan_changes(git("show", "--format=", *DIFF_OPTIONS, commit), commit)
     # What git prints as `Bin` has no lines in the diff: UTF-16 text, and text
     # `.gitattributes` marks binary. Read those whole, from the commit's blob.
     # Against the first parent for a merge: more than the merge wrote, never less.
@@ -377,7 +454,7 @@ def since_main(head: str) -> str:
     resolves a bare `origin/main` to a tag of that name first (review of
     `#140`, finding 4)."""
     git("rev-parse", "--verify", "--quiet", MAIN + "^{commit}")
-    return git("merge-base", MAIN, head).strip() + ".." + head
+    return head + " --not " + MAIN
 
 
 def github_commits() -> tuple[list[str] | None, str]:
@@ -430,8 +507,13 @@ def github_commits() -> tuple[list[str] | None, str]:
         return git(
             "rev-list", "--reverse", after
         ).split(), f"commits of main's whole history ({after[:12]})"
+    # `rev-list <head> --not main`, not `merge-base..head`: a branch that
+    # shares no history with main (a `gh-pages`) has no merge base, and the
+    # run failed with nothing read (seventh review of `#140`, finding 2).
     spec = since_main(after)
-    return commits_in(spec), f"commits since main ({spec})"
+    return git(
+        "rev-list", "--reverse", *spec.split()
+    ).split(), f"commits not on main ({after[:12]})"
 
 
 LISTED: SecretsCollection = SecretsCollection()
@@ -472,7 +554,7 @@ def scan_staged() -> tuple[SecretsCollection, int]:
             continue
         for secret in scan.scan_file(name):
             found[name].add(secret)
-    for filename, secret in scan_diff(git("diff", "--cached", *DIFF_OPTIONS)):
+    for filename, secret in scan_changes(git("diff", "--cached", *DIFF_OPTIONS), ""):
         found[filename].add(secret)
     for filename, secret in scan_blobs("", binary_paths("diff", "--cached")):
         found[filename].add(secret)

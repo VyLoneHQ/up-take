@@ -555,7 +555,7 @@ class SecretScan(unittest.TestCase):
             code, out = self.repo.scan("--github", env=env)
             self.assertEqual(code, 1, f"before={before[:4]}: {out}")
             self.assertIn(f"{added[:12]} src/leak.py:1", out)
-            self.assertIn("commits since main", out)
+            self.assertIn("commits not on main", out)
 
     def test_github_push_to_main_reads_its_whole_history(self) -> None:
         _, added = self._leak_and_delete()
@@ -1021,6 +1021,91 @@ class SixthReview(unittest.TestCase):
         os.chdir(self.repo.root)
         module.load_baseline(Path(".secrets.baseline"))
         self.assertEqual(set(module.get_settings().filters), set(module.KEEP_FILTERS))
+
+
+class SeventhReview(unittest.TestCase):
+    """The seventh review of #140: a nextline pragma anywhere in a commit
+    silenced another line in detect-secrets' diff reader, and a branch with no
+    history in common with main could not be read."""
+
+    NEXTLINE = "# pragma: allowlist nextline secret\n"
+
+    def setUp(self) -> None:
+        self._dir = tempfile.TemporaryDirectory()
+        self.repo = Repo(Path(self._dir.name))
+
+    def tearDown(self) -> None:
+        self._dir.cleanup()
+
+    def _misplaced(self) -> str:
+        """A key at line 3 and, in the same commit, a nextline pragma far below
+        it in the same file. Returns the commit."""
+        filler = "".join(f"x{n} = {n}\n" for n in range(40))
+        self.repo.write("app.py", "import os\n\n" + LEAK + filler + self.NEXTLINE + "y = 1\n")
+        return self.repo.commit("a key and a pragma elsewhere")
+
+    def test_a_misplaced_nextline_pragma_hides_nothing_in_a_commit(self) -> None:
+        self.repo.write("app.py", "import os\n")
+        base = self.repo.commit("a file")
+        added = self._misplaced()
+        self.repo.write("app.py", "import os\n")
+        self.repo.commit("clean it")
+        code, out = self.repo.scan("--range", f"{base}..HEAD")
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"{added[:12]} app.py:3", out)
+
+    def test_a_misplaced_nextline_pragma_hides_nothing_staged_or_unpushed(self) -> None:
+        remote = self.repo.root.parent / (self.repo.root.name + "-remote.git")
+        subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+        self.addCleanup(lambda: __import__("shutil").rmtree(remote, ignore_errors=True))
+        self.repo.git("remote", "add", "origin", str(remote))
+        self.repo.write("ci.yml", "jobs:\n  a: 1\n")
+        self.repo.commit("a yaml file")
+        self.repo.git("push", "-q", "origin", "main")
+        # A YAML comment: only the line-by-line read sees it, so the parsed
+        # read cannot cover for a misread pragma.
+        filler = "".join(f"  k{n}: {n}\n" for n in range(40))
+        self.repo.write("ci.yml", "jobs:\n  # " + LEAK + filler + "  " + self.NEXTLINE + "  z: 1\n")
+        self.repo.git("add", "ci.yml")
+        self.assertEqual(self.repo.scan("--staged")[0], 1, "staged")
+        self.repo.commit("a key in a comment and a pragma elsewhere")
+        self.assertEqual(self.repo.scan("--unpushed")[0], 1, "unpushed")
+
+    def test_a_nextline_pragma_in_its_place_still_passes_its_line(self) -> None:
+        base = self.repo.git("rev-parse", "HEAD")
+        self.repo.write("app.py", "import os\n" + self.NEXTLINE + LEAK)
+        self.repo.commit("a judged line")
+        code, out = self.repo.scan("--range", f"{base}..HEAD")
+        self.assertEqual(code, 0, out)
+
+    def test_an_unusual_line_break_does_not_shift_the_line_numbers(self) -> None:
+        base = self.repo.git("rev-parse", "HEAD")
+        self.repo.write("notes.py", "# a b and a lone \r carriage return\n\n" + LEAK)
+        added = self.repo.commit("odd breaks")
+        self.repo.git("rm", "-q", "notes.py")
+        self.repo.commit("delete it")
+        code, out = self.repo.scan("--range", f"{base}..HEAD")
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"{added[:12]} notes.py:3", out)
+
+    def test_a_branch_with_no_history_in_common_with_main_is_read(self) -> None:
+        self.repo.git("update-ref", MAIN_REF, "HEAD")
+        self.repo.git("checkout", "-q", "--orphan", "gh-pages")
+        self.repo.git("rm", "-q", "-r", "--cached", ".")
+        self.repo.write("index.html", LEAK)
+        self.repo.git("add", "index.html", ".secrets.baseline")
+        added = self.repo.commit("a page")
+        self.repo.git("rm", "-q", "index.html")
+        after = self.repo.commit("delete it")
+        path = self.repo.root.parent / (self.repo.root.name + "-event.json")
+        path.write_text(
+            json.dumps({"ref": "refs/heads/gh-pages", "after": after}), encoding="utf-8"
+        )
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        env = {"GITHUB_EVENT_NAME": "push", "GITHUB_EVENT_PATH": str(path)}
+        code, out = self.repo.scan("--github", env=env)
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"{added[:12]} index.html:1", out)
 
 
 class Pins(unittest.TestCase):
