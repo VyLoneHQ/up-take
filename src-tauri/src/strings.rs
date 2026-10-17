@@ -133,6 +133,10 @@ texts! {
     TrayQuit => "tray.quit",
     /// The settings window's title bar.
     SettingsTitle => "settings.title",
+    /// The title bar of the window showing UP-TAKE's own licence (`I-443`).
+    LicenceOwnTitle => "licence.title.own",
+    /// The title bar of the window showing the third-party notices.
+    LicenceNoticesTitle => "licence.title.notices",
     /// Dialog title when the tray icon could not be created.
     TrayUnavailableTitle => "tray.unavailable.title",
     /// Dialog text when the tray icon could not be created. `{hotkey}`, `{error}`.
