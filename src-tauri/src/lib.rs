@@ -12,6 +12,7 @@ mod diagnostics;
 mod first_run;
 mod freeze;
 mod hotkey;
+mod licence_window;
 mod ocr;
 mod ocr_words;
 mod output;
@@ -181,6 +182,7 @@ pub fn run() -> tauri::Result<()> {
                     settings_window::settings_replay_tour,
                     settings_window::settings_open_save_folder,
                     settings_window::settings_open_licence,
+                    licence_window::licence_text,
                     settings_window::settings_defaults,
                     settings_window::settings_close
                 ]
@@ -214,6 +216,7 @@ pub fn run() -> tauri::Result<()> {
                     settings_window::settings_replay_tour,
                     settings_window::settings_open_save_folder,
                     settings_window::settings_open_licence,
+                    licence_window::licence_text,
                     settings_window::settings_defaults,
                     settings_window::settings_close
                 ]
