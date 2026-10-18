@@ -416,16 +416,20 @@ def unquote(path: str) -> str:
 
 
 def added_lines(diff: str) -> dict[str, set[int]]:
-    """For each file of a diff, the numbers of the lines it adds."""
+    """For each file of a diff that is still there after it, the numbers of
+    the lines it adds; an empty set for a file it only deleted lines from.
+    Those are read too: the parsed read can find a value no single line holds,
+    and deleting a line can join two others into one, as a YAML string does
+    across a trailing backslash (twelfth review of `#140`, finding 2)."""
     from unidiff import PatchSet
 
     out: dict[str, set[int]] = {}
     for patched in PatchSet.from_string(diff):
-        numbers = {
+        if patched.is_removed_file:
+            continue
+        out[unquote(patched.path)] = {
             line.target_line_no for hunk in patched for line in hunk.target_lines() if line.is_added
         }
-        if numbers:
-            out[unquote(patched.path)] = numbers
     return out
 
 
@@ -633,11 +637,13 @@ def github_commits() -> tuple[list[str] | None, str]:
     GitHub still serves it by sha, and only the push hook, before it was
     pushed, reads it (third review of `#140`, finding 4).
 
-    The whole history of main was 124 commits on 2026-10-14. Reading this
-    branch's 134 took 1 min 35 s on a Windows workstation, and 135 took
-    1 min 14 s in a review; the runner was not measured (fourth review of
-    `#140`, finding 4, which corrected "takes seconds", and the fifth,
-    finding 2, which corrected the count).
+    The whole history of main was 124 commits on 2026-10-14. Since each
+    changed file is also parsed as it was before its commit (eleventh review),
+    reading them took 4 min 47 s on a Windows workstation in a review, and
+    this branch's 143 took 6 min 5 s; before that it was about 1 min 15 s to
+    1 min 35 s. The runner was not measured (fourth review of `#140`, finding
+    4, which corrected "takes seconds"; the fifth, finding 2, which corrected
+    the count; the twelfth, finding 3, which corrected the time).
     Findings in it that are not secrets are listed in the baseline, which
     `--write-baseline` writes from the history too."""
     name = os.environ.get("GITHUB_EVENT_NAME", "")
@@ -854,7 +860,10 @@ def main(argv: list[str] | None = None) -> int:
     # process and not `os.execv`, whose exit code on Windows is the parent's.
     if os.name == "nt" and not sys.flags.utf8_mode:
         args = sys.argv[1:] if argv is None else argv
-        child = [sys.executable, "-X", "utf8", str(Path(__file__).resolve()), *args]
+        # `-I` is passed on when it was given, as the hooks give it (twelfth
+        # review of `#140`, a note).
+        isolated = ["-I"] if sys.flags.isolated else []
+        child = [sys.executable, *isolated, "-X", "utf8", str(Path(__file__).resolve()), *args]
         return subprocess.run(child, check=False).returncode
 
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])

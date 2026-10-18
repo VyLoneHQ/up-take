@@ -1357,6 +1357,54 @@ class EleventhReview(unittest.TestCase):
         self.assertIn("ci.yml:3", out)
 
 
+class TwelfthReview(unittest.TestCase):
+    """The twelfth review of #140: a commit that only deleted lines was never
+    parsed, and the install step ran a `pip` a pull request could add."""
+
+    HALF_A = "Zq3x9KfP0wLm7Tn2Rv"  # pragma: allowlist secret
+    HALF_B = "8sJ4dHq3x9KfP0wLm7"  # pragma: allowlist secret
+
+    def setUp(self) -> None:
+        self._dir = tempfile.TemporaryDirectory()
+        self.repo = Repo(Path(self._dir.name))
+
+    def tearDown(self) -> None:
+        self._dir.cleanup()
+
+    def test_a_deletion_that_joins_a_token_is_read(self) -> None:
+        # A YAML double-quoted string joins lines across a trailing backslash.
+        # With the middle line it holds a space; without it, a token's shape.
+        head = 'url: "ghp_' + self.HALF_A + "\\\n"
+        tail = self.HALF_B + '"\n'
+        base = self.repo.git("rev-parse", "HEAD")
+        self.repo.write("svc.yml", head + "a b\\\n" + tail)
+        self.repo.commit("a string with a space in it")
+        self.assertEqual(self.repo.scan("--range", f"{base}..HEAD")[0], 0, "nothing to find yet")
+        self.repo.write("svc.yml", head + tail)
+        joined = self.repo.commit("only a deletion")
+        self.repo.write("svc.yml", head + "a b\\\n" + tail)
+        self.repo.commit("the line back")
+        code, out = self.repo.scan("--range", f"{base}..HEAD")
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"{joined[:12]} svc.yml:", out)
+
+    def test_every_python_step_up_to_the_scan_is_isolated(self) -> None:
+        # `python -m` puts the checkout first on the import path, and so does
+        # running a script from it without `-I`.
+        workflow = (HERE.parent / ".github" / "workflows" / "secrets.yml").read_text(
+            encoding="utf-8"
+        )
+        runs = [
+            line.split("run:", 1)[1].strip()
+            for line in workflow.splitlines()
+            if line.strip().startswith("run:")
+        ]
+        scan = next(i for i, run in enumerate(runs) if "secret-scan.py" in run)
+        for run in runs[: scan + 1]:
+            if run.startswith("python"):
+                self.assertTrue(run.startswith("python -I "), run)
+
+
 class Pins(unittest.TestCase):
     def test_every_copy_of_the_versions_agrees_with_what_is_installed(self) -> None:
         # Dependabot does not bump pip pins here, so a one-sided bump would
