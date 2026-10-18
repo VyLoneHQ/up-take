@@ -1433,9 +1433,15 @@ class TwelfthReview(unittest.TestCase):
         # to nineteenth reviews of #140). A change to what runs before the
         # scan changes this test, in review.
         self.assertEqual(sorted(workflow, key=str), sorted(["name", True, "permissions", "jobs"], key=str))
+        self.assertEqual(workflow["permissions"], {"contents": "read"})
         self.assertEqual(list(workflow["jobs"]), ["secrets"])
         job = workflow["jobs"]["secrets"]
-        self.assertEqual(sorted(job), ["name", "runs-on", "steps"])
+        # The values too, not only the keys: a self-hosted runner or a write
+        # token passed a check of key names (twentieth review of #140).
+        self.assertEqual(
+            {key: value for key, value in job.items() if key != "steps"},
+            {"name": "Secrets (detect-secrets)", "runs-on": "ubuntu-latest"},
+        )
         scan = next(i for i, step in enumerate(job["steps"]) if "secret-scan.py" in str(step))
         self.assertEqual(
             job["steps"][: scan + 1],
@@ -1763,6 +1769,54 @@ class NineteenthReview(unittest.TestCase):
         # allowlisted there too.
         text = f"[s]\n# pragma: allowlist nextline secret\nconn = {self.HEX}\n"
         (self.repo.root / "ok.ini").write_bytes(text.encode())
+        self.repo.commit("an allowlisted value")
+        code, out = self.repo.scan()
+        self.assertEqual(code, 0, out)
+
+
+class TwentiethReview(unittest.TestCase):
+    """The twentieth review of #140: the lenient read missed a value with a
+    trailing comment, a list item and a value on the next line."""
+
+    VALUE = "ZXhhbXBsZWhpZ2hlbnRyb3B5c3RyaW5nMTIzNDU2Nzg5MA"  # pragma: allowlist secret
+    # One line PyYAML refuses, so only the lenient read can see the value.
+    REFUSED = "bad: [unclosed\n"
+
+    def setUp(self) -> None:
+        self._dir = tempfile.TemporaryDirectory()
+        self.repo = Repo(Path(self._dir.name))
+
+    def tearDown(self) -> None:
+        self._dir.cleanup()
+
+    def _refused_everywhere(self, name: str, text: str) -> None:
+        base = self.repo.git("rev-parse", "HEAD")
+        (self.repo.root / name).write_bytes(text.encode())
+        self.repo.git("add", name)
+        self.assertEqual(self.repo.scan("--staged")[0], 1, "staged")
+        added = self.repo.commit(f"a value in {name}")
+        self.assertEqual(self.repo.scan()[0], 1, "the tree")
+        self.repo.git("rm", "-q", name)
+        self.repo.commit("delete it")
+        code, out = self.repo.scan("--range", f"{base}..HEAD")
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"{added[:12]} {name}:", out)
+
+    def test_a_value_with_a_trailing_comment_is_read(self) -> None:
+        self._refused_everywhere("trail.yml", f"token: {self.VALUE}  # prod\n" + self.REFUSED)
+
+    def test_a_list_item_value_is_read(self) -> None:
+        self._refused_everywhere("item.yml", f"- token: {self.VALUE}\n" + self.REFUSED)
+
+    def test_a_value_on_the_next_line_is_read(self) -> None:
+        self._refused_everywhere("next.yml", f"token:\n  {self.VALUE}\n" + self.REFUSED)
+
+    def test_an_env_example_value_with_a_trailing_comment_is_read(self) -> None:
+        self._refused_everywhere(".env.example", f"API_TOKEN={self.VALUE}  # prod\n")
+
+    def test_a_pragma_after_a_value_still_holds_in_the_lenient_read(self) -> None:
+        text = f"token: {self.VALUE}  # pragma: allowlist secret\n" + self.REFUSED
+        (self.repo.root / "ok.yml").write_bytes(text.encode())
         self.repo.commit("an allowlisted value")
         code, out = self.repo.scan()
         self.assertEqual(code, 0, out)

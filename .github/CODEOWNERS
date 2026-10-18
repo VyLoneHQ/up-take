@@ -9,3 +9,6 @@
 # local action under .github/actions/ would run code before the scan.
 /.github/ @VyLoneReaz
 /scripts/secret-scan.py @VyLoneReaz
+# The tests run after the scan and cannot open it, but weakening them
+# hides the next regression.
+/scripts/test_secret_scan.py @VyLoneReaz

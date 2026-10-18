@@ -362,19 +362,38 @@ def scan_text(filename: str, text: str) -> SecretsCollection:
     return found
 
 
-# `key = value`, `key: value`, `key=value` or `export key=value`, the key one
-# word: the line shape INI, .env, .properties, TOML and YAML share.
-PAIR = re.compile(r"^\s*(?:export\s+)?([A-Za-z0-9_.\-]+)\s*[=:]\s*(.*?)\s*$")
+# `key = value`, `key: value`, `key=value` or `export key=value`, in a YAML
+# list item or not, the key one word: the line shape INI, .env, .properties,
+# TOML and YAML share. Groups: the indent, the key, the rest of the line.
+PAIR = re.compile(r"^(\s*)(?:-\s+)?(?:export\s+)?([A-Za-z0-9_.\-]+)\s*[=:]\s*(.*?)\s*$")
 # A YAML block scalar's key: `key: |` or `key: >`, in a list item or not.
 BLOCK = re.compile(r"^(\s*)(?:-\s+)?([A-Za-z0-9_.\-]+)\s*:\s*[|>][-+0-9]*\s*(?:#.*)?$")
+
+
+def _value_and_comment(rest: str) -> tuple[str, str]:
+    """A value without its quotes, and the comment after it, kept to be
+    written back after the quoted value, so a `pragma: allowlist secret` on
+    the line still holds. A comment starts at whitespace and `#` or `;`
+    (twentieth review of `#140`, finding 1: `token: V  # prod` was handed on
+    as one value, which no detector's quoted-string pattern takes)."""
+    if rest[:1] in ("'", '"'):
+        close = rest.find(rest[0], 1)
+        if close > 0:
+            return rest[1:close], rest[close + 1 :]
+        return rest[1:], ""
+    parts = re.split(r"(?=\s+[#;])", rest, maxsplit=1)
+    return parts[0], parts[1] if len(parts) > 1 else ""
 
 
 def lenient(lines: list[str]) -> list[str]:
     """The lines as a parser would hand them to the detectors, without needing
     the parser to accept the file. Each `key = value` line becomes
-    `key = "value"`, each line of a YAML block scalar becomes `key: "line"`,
-    each comment stays as written (a `pragma: allowlist nextline secret` keeps
-    its next line), and every other line is empty, so each keeps its number.
+    `key = "value"` (a trailing comment written back after it, a list item's
+    `- ` dropped), each line of a YAML block scalar becomes `key: "line"`, and
+    so does each indented line after a `key:` with no value of its own, which
+    YAML reads as that key's value. Each comment stays as written (a `pragma:
+    allowlist nextline secret` keeps its next line), and every other line is
+    empty, so each keeps its number.
 
     detect-secrets quotes a value only through its YAML or INI parse, and
     falls back to the raw lines when that parse refuses the file: a `%` in a
@@ -383,31 +402,41 @@ def lenient(lines: list[str]) -> list[str]:
     extension such as `.env.example`. An unquoted value or a block scalar's
     value then reached no detector. Rounds 14 to 18 closed such triggers one
     at a time; this read does not depend on any of them (nineteenth review of
-    `#140`, findings 1 and 2)."""
+    `#140`, findings 1 and 2). The shapes of a value it reads are its limit:
+    a value it does not recognise as one is read only as written (the
+    twentieth review found three, now read)."""
     out = [""] * len(lines)
-    block: tuple[int, str] | None = None
+    # (indent, key, literal): a block scalar (literal: every deeper line is
+    # its value, `#` included), or a key whose value is on the deeper lines.
+    block: tuple[int, str, bool] | None = None
     for i, line in enumerate(lines):
         stripped = line.strip()
-        if block is not None:
-            if not stripped:
-                continue
-            if len(line) - len(line.lstrip()) > block[0]:
-                out[i] = f'{block[1]}: "{stripped}"'
-                continue
+        indent = len(line) - len(line.lstrip())
+        if block is not None and stripped and indent <= block[0]:
             block = None
+        if block is not None and block[2]:
+            if stripped:
+                out[i] = f'{block[1]}: "{stripped}"'
+            continue
         if stripped.startswith(("#", ";", "//")):
             out[i] = line
             continue
         head = BLOCK.match(line)
         if head:
-            block = (len(head[1]), head[2])
+            block = (len(head[1]), head[2], True)
             continue
         pair = PAIR.match(line)
-        if pair and pair[2]:
-            value = pair[2]
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
-                value = value[1:-1]
-            out[i] = f'{pair[1]} = "{value}"'
+        if pair:
+            value, comment = _value_and_comment(pair[3])
+            if value:
+                out[i] = f'{pair[2]} = "{value}"{comment}'
+            elif not pair[3]:
+                block = (len(pair[1]), pair[2], False)
+            continue
+        if block is not None and stripped:
+            value, comment = _value_and_comment(stripped)
+            if value:
+                out[i] = f'{block[1]}: "{value}"{comment}'
     return out
 
 
@@ -797,11 +826,11 @@ def github_commits() -> tuple[list[str] | None, str]:
     GitHub still serves it by sha, and only the push hook, before it was
     pushed, reads it (third review of `#140`, finding 4).
 
-    The whole history of main was 124 commits on 2026-10-14. Reading 124 took
-    4 min 47 s on a Windows workstation on 2026-10-18, and reading 150 took
-    5 min 51 s there the same day, since each changed file is also parsed as
-    it was before its commit (eleventh review); before that it was about 1 min
-    15 s to 1 min 35 s. The runner was not measured (fourth review of `#140`,
+    The whole history of main was 124 commits on 2026-10-14. With each
+    changed file also parsed as it was before its commit (eleventh review)
+    and every text also read leniently (nineteenth), reading 152 commits
+    took 8 min 3 s on a Windows workstation on 2026-10-18 (twentieth review,
+    finding 2); before those it was about 1 min 15 s to 1 min 35 s. The runner was not measured (fourth review of `#140`,
     finding 4, which corrected "takes seconds"; the fifth, finding 2, which
     corrected the count; the twelfth and nineteenth, which corrected the
     time).
