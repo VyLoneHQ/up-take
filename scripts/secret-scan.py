@@ -45,7 +45,8 @@ commit. **Never the value.** The log of a public repository's CI run is public
 too, and a check that printed what it found would publish it a second time.
 
 Exit codes: `0` nothing new; `1` at least one finding the baseline does not
-pass; `2` the check could not run (no baseline, a git error, nothing to scan).
+pass; `2` the check could not run (no baseline, a git error, nothing to scan,
+or any other error, whose traceback is printed).
 `2` is not a pass, and a CI step treats it as a failure like `1`.
 
 CI can only find a secret that is already public. The same check runs before
@@ -117,6 +118,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import traceback
 from pathlib import Path, PurePosixPath
 
 # Python puts this script's own folder first on the import path, so a file a
@@ -292,16 +294,27 @@ def decodings(data: bytes) -> list[str]:
 def scan_text(filename: str, text: str) -> SecretsCollection:
     """Every line of `text`, through the same code a commit's diff takes: as a
     diff that adds the whole file. Lines are split and numbered as git does,
-    on `\n` alone."""
+    on `\n` alone.
+
+    The diff names the file `file` and its extension, which is all detect-
+    secrets reads of a name, and each finding takes the real name after. The
+    real name in the header broke unidiff's split of it: a name holding
+    ` b/`, a quoted name with a space, or a newline crashed the run
+    (thirteenth review of `#140`, finding 1)."""
     lines = text.split("\n")
     if lines and lines[-1] == "":
         lines.pop()
     lines = [line.removesuffix("\r") for line in lines]
+    found = SecretsCollection()
     if not lines:
-        return SecretsCollection()
+        return found
     body = "".join("+" + line + "\n" for line in lines)
-    header = f"diff --git a/{filename} b/{filename}\n--- /dev/null\n+++ b/{filename}\n"
-    return scan_diff(f"{header}@@ -0,0 +1,{len(lines)} @@\n{body}")
+    neutral = copy_name(filename)
+    header = f"diff --git a/{neutral} b/{neutral}\n--- /dev/null\n+++ b/{neutral}\n"
+    for _, secret in scan_diff(f"{header}@@ -0,0 +1,{len(lines)} @@\n{body}"):
+        secret.filename = filename
+        found[filename].add(secret)
+    return found
 
 
 def binary_paths(*diff_args: str) -> list[str]:
@@ -420,17 +433,40 @@ def added_lines(diff: str) -> dict[str, set[int]]:
     the lines it adds; an empty set for a file it only deleted lines from.
     Those are read too: the parsed read can find a value no single line holds,
     and deleting a line can join two others into one, as a YAML string does
-    across a trailing backslash (twelfth review of `#140`, finding 2)."""
-    from unidiff import PatchSet
+    across a trailing backslash (twelfth review of `#140`, finding 2).
 
+    Read here and not by unidiff, which takes the name from the `diff --git
+    a/X b/X` line and split it in the wrong place for a name holding ` b/` or
+    a quoted name with a space (thirteenth review of `#140`, finding 1). The
+    name is taken from the `+++` line, which holds it alone, and the added
+    lines from each hunk's `+start,count`: with no context lines (`DIFF_OPTIONS`)
+    every line a hunk shows on the new side is an added one. Only the header,
+    before a file's first hunk, is read for `+++`: an added line whose text
+    starts `++ ` is printed as `+++ ` too."""
     out: dict[str, set[int]] = {}
-    for patched in PatchSet.from_string(diff):
-        if patched.is_removed_file:
-            continue
-        out[unquote(patched.path)] = {
-            line.target_line_no for hunk in patched for line in hunk.target_lines() if line.is_added
-        }
+    path, header = None, False
+    for line in diff.split("\n"):
+        if line.startswith("diff --git "):
+            path, header = None, True
+        elif header and line.startswith("+++ "):
+            # git ends a name holding a space with a tab, for `patch`.
+            name = line[4:].removesuffix("\t")
+            if name != "/dev/null":
+                path = unquote(name) if name.startswith('"') else name.removeprefix("b/")
+                out.setdefault(path, set())
+        elif line.startswith("@@"):
+            header = False
+            if path is None:
+                continue
+            hunk = HUNK.match(line)
+            if hunk is None:
+                raise CannotRun(f"a hunk header git printed could not be read: {line!r}")
+            start, count = int(hunk[1]), 1 if hunk[2] is None else int(hunk[2])
+            out[path].update(range(start, start + count))
     return out
+
+
+HUNK = re.compile(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 
 
 def parsed(filename: str) -> list:
@@ -521,31 +557,30 @@ def scan_tree(files: list[str]) -> SecretsCollection:
     turn every commit in a range red, and the baseline, written from the tree,
     could never list it.
 
-    The second way is the diff of the working tree against the empty tree:
-    every tracked line as an added line, through the same code a commit's
-    diff takes.
+    The second way is each file's lines as written, through the same code a
+    commit's lines take (`scan_text`): a file git calls text as git would
+    print it, and every file in every way it decodes (`decodings`) when it has
+    a NUL or a byte-order mark or git calls it binary, so a YAML file
+    `.gitattributes` marks binary has its comments read (eleventh review of
+    `#140`, finding 3). One file at a time and not as one diff of the tree,
+    whose file names unidiff split in the wrong place (thirteenth review,
+    finding 1).
     """
     found = SecretsCollection()
+    empty_tree = git("hash-object", "-t", "tree", "--stdin", stdin=b"").strip()
+    binary = set(binary_paths("diff", empty_tree))
     for name in files:
         if not Path(name).is_file():
             continue
         for secret in parsed(name):
             found[name].add(secret)
-    empty_tree = git("hash-object", "-t", "tree", "--stdin", stdin=b"").strip()
-    for filename, secret in scan_diff(git("diff", *DIFF_OPTIONS, empty_tree, "--")):
-        found[filename].add(secret)
-    # A third read for what the first two may not decode: bytes with a NUL or
-    # a byte-order mark, read in every way they read as text (`decodings`),
-    # and every file git calls binary, which the diff above printed no line
-    # of: a YAML file `.gitattributes` marks binary had its comments read by
-    # nothing (eleventh review of `#140`, finding 3).
-    binary = set(binary_paths("diff", empty_tree))
-    for name in files:
-        data = Path(name).read_bytes() if Path(name).is_file() else b""
+        data = Path(name).read_bytes()
+        texts = [] if name in binary else [data.decode("utf-8", errors="replace")]
         if name in binary or b"\x00" in data or data.startswith((b"\xff\xfe", b"\xfe\xff")):
-            for text in decodings(data):
-                for filename, secret in scan_text(name, text):
-                    found[filename].add(secret)
+            texts += decodings(data)
+        for text in texts:
+            for filename, secret in scan_text(name, text):
+                found[filename].add(secret)
     return found
 
 
@@ -897,6 +932,13 @@ def main(argv: list[str] | None = None) -> int:
         return check(path, commits, label, staged=args.staged, unpushed=args.unpushed)
     except CannotRun as error:
         print(f"secret-scan: could not run: {error}", file=sys.stderr)
+        return 2
+    except Exception:  # noqa: BLE001
+        # Anything else is a run that did not finish, not a finding: exit 2,
+        # as the docstring promises, where a traceback exited 1 (thirteenth
+        # review of `#140`, finding 1).
+        traceback.print_exc()
+        print("secret-scan: could not run: an unexpected error, above", file=sys.stderr)
         return 2
 
 

@@ -792,9 +792,15 @@ class ThirdReview(unittest.TestCase):
         # so the name is no file on disk. It is refused under that name.
         self.repo.write('we"ird.yml', "jobs:\n  a:\n    # " + LEAK + "    runs-on: x\n")
         self.repo.git("add", "-A")
-        self.assertEqual(self.repo.scan("--staged")[0], 1)
-        self.repo.commit("a quoted name")
-        self.assertEqual(self.repo.scan()[0], 1)
+        for args in (["--staged"], []):
+            if not args:
+                self.repo.commit("a quoted name")
+            code, out = self.repo.scan(*args)
+            # A crash exits 1 too, so the finding itself is asserted
+            # (thirteenth review of #140, A3).
+            self.assertEqual(code, 1, out)
+            self.assertIn('we"ird.yml:3', out)
+            self.assertNotIn("Traceback", out)
 
 
 class FourthReview(unittest.TestCase):
@@ -1403,6 +1409,84 @@ class TwelfthReview(unittest.TestCase):
         for run in runs[: scan + 1]:
             if run.startswith("python"):
                 self.assertTrue(run.startswith("python -I "), run)
+
+
+class ThirteenthReview(unittest.TestCase):
+    """The thirteenth review of #140: file names that unidiff split in the
+    wrong place crashed every read, or made a modified file unreadable."""
+
+    def setUp(self) -> None:
+        self._dir = tempfile.TemporaryDirectory()
+        self.repo = Repo(Path(self._dir.name))
+
+    def tearDown(self) -> None:
+        self._dir.cleanup()
+
+    def _refused(self, code: int, out: str, where: str) -> None:
+        self.assertEqual(code, 1, out)
+        self.assertIn(where, out)
+        self.assertNotIn("Traceback", out)
+
+    def test_a_name_holding_space_b_slash_is_read_in_the_tree_staged_and_a_range(self) -> None:
+        name = "plan b/notes.md"
+        self.repo.write(name, "nothing here\n")
+        base = self.repo.commit("a name holding ' b/'")
+        code, out = self.repo.scan()
+        self.assertEqual(code, 0, "a clean file under that name: " + out)
+        self.repo.write(name, "nothing here\n" + LEAK)
+        self.repo.git("add", "-A")
+        self._refused(*self.repo.scan("--staged"), f"{name}:2")
+        added = self.repo.commit("a key in it")
+        self._refused(*self.repo.scan(), f"{name}:2")
+        self.repo.write(name, "nothing here\n")
+        self.repo.commit("the key removed")
+        self._refused(*self.repo.scan("--range", f"{base}..HEAD"), f"{added[:12]} {name}:2")
+
+    def _commit_named(self, name: bytes, data: bytes) -> str:
+        """A commit on main adding `name`, built with `mktree`: Windows cannot
+        put a double quote or a newline in a file name."""
+
+        def run(*args: str, stdin: bytes | None = None) -> bytes:
+            return subprocess.run(
+                ["git", *args], cwd=self.repo.root, input=stdin, capture_output=True, check=True
+            ).stdout.strip()
+
+        blob = run("hash-object", "-w", "--stdin", stdin=data)
+        listing = subprocess.run(
+            ["git", "ls-tree", "-z", "HEAD"], cwd=self.repo.root, capture_output=True, check=True
+        ).stdout
+        tree = run("mktree", "-z", stdin=listing + b"100644 blob " + blob + b"\t" + name + b"\0")
+        commit = run("commit-tree", tree.decode(), "-p", "HEAD", "-m", "a name").decode()
+        self.repo.git("update-ref", "refs/heads/main", commit)
+        return commit
+
+    def test_a_quoted_name_with_a_space_is_read_in_a_range(self) -> None:
+        base = self.repo.git("rev-parse", "HEAD")
+        added = self._commit_named(b'say "hi" now.md', LEAK.encode())
+        self._refused(
+            *self.repo.scan("--range", f"{base}..HEAD"), f'{added[:12]} say "hi" now.md:1'
+        )
+
+    def test_a_name_with_a_newline_is_read_in_a_range(self) -> None:
+        base = self.repo.git("rev-parse", "HEAD")
+        added = self._commit_named(b"nl\nname.md", LEAK.encode())
+        code, out = self.repo.scan("--range", f"{base}..HEAD")
+        self._refused(code, out, f"{added[:12]} nl")
+
+    def test_an_added_line_that_starts_with_two_pluses_is_not_a_file_name(self) -> None:
+        # In a diff it reads `+++ ...`, the shape of a header line.
+        base = self.repo.git("rev-parse", "HEAD")
+        self.repo.write("notes.txt", "++ b/elsewhere.txt\n" + LEAK)
+        added = self.repo.commit("a line that starts with ++")
+        self._refused(*self.repo.scan("--range", f"{base}..HEAD"), f"{added[:12]} notes.txt:2")
+
+    def test_an_unexpected_error_exits_2_not_1(self) -> None:
+        # `1` means a finding. A baseline that is not JSON raises in the JSON
+        # reader, not as CannotRun, and its traceback exited 1.
+        self.repo.write(".secrets.baseline", "{ not json\n")
+        code, out = self.repo.scan()
+        self.assertEqual(code, 2, out)
+        self.assertIn("could not run", out)
 
 
 class Pins(unittest.TestCase):
