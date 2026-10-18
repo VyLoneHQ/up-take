@@ -16,7 +16,7 @@ repos:
     hooks:
       - id: secret-scan-staged
         name: secret scan (the commit being made)
-        entry: python scripts/secret-scan.py --staged
+        entry: python -I scripts/secret-scan.py --staged
         language: python
         additional_dependencies: [detect-secrets==1.5.0, unidiff==0.7.5]
         pass_filenames: false
@@ -24,7 +24,7 @@ repos:
 
       - id: secret-scan-unpushed
         name: secret scan (commits no remote has)
-        entry: python scripts/secret-scan.py --unpushed
+        entry: python -I scripts/secret-scan.py --unpushed
         language: python
         additional_dependencies: [detect-secrets==1.5.0, unidiff==0.7.5]
         pass_filenames: false

@@ -1289,6 +1289,74 @@ class TenthReview(unittest.TestCase):
         self.assertIn(f"{added[:12]} deploy.yml:", out)
 
 
+class EleventhReview(unittest.TestCase):
+    """The eleventh review of #140: a value written into an existing YAML
+    block scalar, a module beside the script standing in for a library, and
+    the tree's line read skipping a file marked binary."""
+
+    def setUp(self) -> None:
+        self._dir = tempfile.TemporaryDirectory()
+        self.repo = Repo(Path(self._dir.name))
+
+    def tearDown(self) -> None:
+        self._dir.cleanup()
+
+    def test_a_value_written_into_an_existing_block_scalar_is_read(self) -> None:
+        # detect-secrets numbers a block scalar's finding at its key's line,
+        # and this commit adds only the value's line.
+        self.repo.write("config.yml", "db:\n  password: |\n    placeholder\n")
+        self.repo.commit("a placeholder")
+        self.repo.scan("--write-baseline")
+        self.repo.judge()
+        base = self.repo.commit("the placeholder judged")
+        self.repo.write("config.yml", "db:\n  password: |\n    " + KEYWORD_VALUE + "\n")
+        added = self.repo.commit("a key written into the value")
+        self.repo.write("config.yml", "db:\n  password: |\n    placeholder\n")
+        self.repo.commit("back to the placeholder")
+        code, out = self.repo.scan("--range", f"{base}..HEAD")
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"{added[:12]} config.yml:", out)
+
+    def test_a_module_beside_the_script_does_not_stand_in_for_a_library(self) -> None:
+        # A copy of the script in the repository's own scripts/ folder, with a
+        # `unidiff` there whose diff reader finds nothing.
+        scripts = self.repo.root / "scripts"
+        (scripts / "unidiff").mkdir(parents=True)
+        (scripts / "unidiff" / "__init__.py").write_text(
+            "class PatchSet(list):\n"
+            "    @classmethod\n"
+            "    def from_string(cls, text):\n"
+            "        return cls()\n",
+            encoding="utf-8",
+        )
+        copy = scripts / "secret-scan.py"
+        copy.write_bytes(SCRIPT.read_bytes())
+        base = self.repo.git("rev-parse", "HEAD")
+        self.repo.write("src/config.py", LEAK)
+        self.repo.git("add", "src/config.py")
+        self.repo.git("commit", "-q", "-m", "a key")
+        self.repo.git("rm", "-q", "src/config.py")
+        self.repo.git("commit", "-q", "-m", "delete it")
+        done = subprocess.run(
+            [sys.executable, str(copy), "--range", f"{base}..HEAD"],
+            cwd=self.repo.root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+
+    def test_the_tree_reads_the_lines_of_a_yaml_file_marked_binary(self) -> None:
+        # The parsed read never sees a YAML comment; only the line read does.
+        self.repo.write(".gitattributes", "*.yml binary\n")
+        self.repo.write("ci.yml", "steps:\n  - run: make\n# " + LEAK)
+        self.repo.commit("a key in a comment of a binary-marked YAML file")
+        code, out = self.repo.scan()
+        self.assertEqual(code, 1, out)
+        self.assertIn("ci.yml:3", out)
+
+
 class Pins(unittest.TestCase):
     def test_every_copy_of_the_versions_agrees_with_what_is_installed(self) -> None:
         # Dependabot does not bump pip pins here, so a one-sided bump would

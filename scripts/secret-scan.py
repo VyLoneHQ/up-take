@@ -119,6 +119,14 @@ import sys
 import tempfile
 from pathlib import Path, PurePosixPath
 
+# Python puts this script's own folder first on the import path, so a file a
+# pull request adds beside it (`scripts/unidiff/__init__.py`) was imported in
+# place of the installed library, and could make every read find nothing
+# (eleventh review of `#140`, finding 2). The folder holds no module this
+# script needs, so it leaves the path before anything is imported from it.
+_HERE = os.path.normcase(os.path.dirname(os.path.abspath(__file__)))
+sys.path[:] = [p for p in sys.path if os.path.normcase(os.path.abspath(p or os.curdir)) != _HERE]
+
 try:
     from detect_secrets.core import baseline, scan
     from detect_secrets.core.secrets_collection import SecretsCollection
@@ -357,7 +365,7 @@ def parsed_copy(scratch: Path, n: int, path: str, data: bytes) -> list:
     """`parsed` on the bytes of `path`, written to a scratch copy, with each
     finding named `path`."""
     copy = scratch / str(n) / copy_name(path)
-    copy.parent.mkdir()
+    copy.parent.mkdir(parents=True)
     copy.write_bytes(data)
     out = parsed(str(copy))
     for secret in out:
@@ -447,10 +455,27 @@ def is_gitlink(revision: str, path: str) -> bool:
     return entries(revision).get(path, ("",))[0] == "160000"
 
 
-def scan_changes(diff: str, revision: str) -> SecretsCollection:
+def parsed_before(scratch: Path, n: int, path: str, before: list[str]) -> set[tuple[str, str]]:
+    """What the parsed read finds in `path` at each revision in `before` (a
+    commit's parents, or HEAD for the index), as (type, hash) pairs."""
+    seen = set()
+    for k, revision in enumerate(before):
+        if path not in entries(revision) or is_gitlink(revision, path):
+            continue
+        for secret in parsed_copy(scratch / f"before-{n}", k, path, blob(revision, path)):
+            seen.add((secret.type, secret.secret_hash))
+    return seen
+
+
+def scan_changes(diff: str, revision: str, before: list[str]) -> SecretsCollection:
     """The lines a diff adds, each read inside its whole file at `revision`
     (a commit, or empty for the index), and only the findings on added lines
-    kept.
+    kept. For the parsed read, also any finding whose value the file did not
+    hold at `before` (the parents, or HEAD for the index): detect-secrets
+    numbers a YAML block scalar's finding at its key's line, so a commit that
+    changed only the value line had no added line to match, and a secret
+    written into an existing `password: |` passed every commit read (eleventh
+    review of `#140`, finding 1).
 
     Not detect-secrets' own diff reader, which numbers a line's neighbours from
     the list of added lines only: a `pragma: allowlist nextline secret`
@@ -474,8 +499,9 @@ def scan_changes(diff: str, revision: str) -> SecretsCollection:
                 for filename, secret in scan_text(path, text):
                     if secret.line_number in numbers:
                         found[filename].add(secret)
+            old = parsed_before(Path(scratch), n, path, before)
             for secret in parsed_copy(Path(scratch), n, path, data):
-                if secret.line_number in numbers:
+                if secret.line_number in numbers or (secret.type, secret.secret_hash) not in old:
                     found[path].add(secret)
     return found
 
@@ -505,10 +531,14 @@ def scan_tree(files: list[str]) -> SecretsCollection:
     for filename, secret in scan_diff(git("diff", *DIFF_OPTIONS, empty_tree, "--")):
         found[filename].add(secret)
     # A third read for what the first two may not decode: bytes with a NUL or
-    # a byte-order mark, read in every way they read as text (`decodings`).
+    # a byte-order mark, read in every way they read as text (`decodings`),
+    # and every file git calls binary, which the diff above printed no line
+    # of: a YAML file `.gitattributes` marks binary had its comments read by
+    # nothing (eleventh review of `#140`, finding 3).
+    binary = set(binary_paths("diff", empty_tree))
     for name in files:
         data = Path(name).read_bytes() if Path(name).is_file() else b""
-        if b"\x00" in data or data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        if name in binary or b"\x00" in data or data.startswith((b"\xff\xfe", b"\xfe\xff")):
             for text in decodings(data):
                 for filename, secret in scan_text(name, text):
                     found[filename].add(secret)
@@ -546,14 +576,16 @@ def scan_commit(commit: str) -> SecretsCollection:
     parents = git("rev-list", "--parents", "-n", "1", commit).split()[1:]
     if len(parents) == 2:
         found = scan_changes(
-            git_names("show", "--format=", "--remerge-diff", *DIFF_OPTIONS, commit), commit
+            git_names("show", "--format=", "--remerge-diff", *DIFF_OPTIONS, commit), commit, parents
         )
     elif len(parents) > 2:
         found = scan_changes(
-            git_names("show", "--format=", "-m", "--first-parent", *DIFF_OPTIONS, commit), commit
+            git_names("show", "--format=", "-m", "--first-parent", *DIFF_OPTIONS, commit),
+            commit,
+            parents[:1],
         )
     else:
-        found = scan_changes(git_names("show", "--format=", *DIFF_OPTIONS, commit), commit)
+        found = scan_changes(git_names("show", "--format=", *DIFF_OPTIONS, commit), commit, parents)
     # What git prints as `Bin` has no lines in the diff: UTF-16 text, and text
     # `.gitattributes` marks binary. Read those whole, from the commit's blob.
     # Against the first parent for a merge: more than the merge wrote, never less.
@@ -662,6 +694,13 @@ def report(found: SecretsCollection, where: str) -> int:
     return count
 
 
+def has_head() -> bool:
+    """Whether HEAD names a commit; not in a repository with no commit yet."""
+    return subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", "HEAD^{commit}"], capture_output=True, check=False
+    ).returncode == 0
+
+
 def scan_staged() -> tuple[SecretsCollection, int]:
     """What the commit being made would add: the staged files as parsed, and
     the staged lines as written. Under pre-commit the working tree holds the
@@ -679,7 +718,8 @@ def scan_staged() -> tuple[SecretsCollection, int]:
             continue
         for secret in parsed(name):
             found[name].add(secret)
-    for filename, secret in scan_changes(git_names("diff", "--cached", *DIFF_OPTIONS), ""):
+    before = ["HEAD"] if has_head() else []
+    for filename, secret in scan_changes(git_names("diff", "--cached", *DIFF_OPTIONS), "", before):
         found[filename].add(secret)
     for filename, secret in scan_blobs("", binary_paths("diff", "--cached")):
         found[filename].add(secret)
