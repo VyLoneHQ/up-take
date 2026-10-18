@@ -3177,6 +3177,32 @@ mod tests {
         );
     }
 
+    /// The overlay window is created without taking the keyboard.
+    ///
+    /// Tauri's default is `focus: true`, and with it the web view asks for
+    /// the focus the moment it is created. At a hidden start that made a
+    /// window nobody can see the foreground window, about 0.4 s after it was
+    /// created, in 33 of 34 traced starts: whatever the user was typing into
+    /// at login lost the keyboard to it. With `focus: false` no such event
+    /// was seen. A summon does not need the default: [`show`] asks for the
+    /// focus itself, after the window is on screen.
+    #[test]
+    fn the_overlay_window_is_created_without_taking_the_keyboard() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap_or_default();
+        let windows = config["app"]["windows"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let overlay: Vec<_> = windows
+            .iter()
+            .filter(|window| window["label"] == WINDOW_LABEL)
+            .collect();
+        assert_eq!(overlay.len(), 1, "one window is the overlay");
+        assert_eq!(overlay[0]["focus"], false);
+        assert_eq!(overlay[0]["visible"], false, "and it is created hidden");
+    }
+
     /// The termination property of the sync ↔ window-event cycle. Everything
     /// else in this module needs a real window; this one decision does not, and
     /// it is the one whose failure mode is an infinite loop.
