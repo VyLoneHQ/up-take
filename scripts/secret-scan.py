@@ -10,13 +10,17 @@ this check reads two things.
    request that is the merge result, which is what would land on `main`.
    Each file is read twice: as detect-secrets parses it, and line by line as
    written, because the parsed read of a YAML file never sees its comments
-   (`scan_tree` has the details). A UTF-16 file, which neither read can
-   decode, is read a third way (`decodings`). Of detect-secrets' filters, only
+   (`scan_tree` has the details). A file that is not plain UTF-8 text is
+   read more ways (`texts`): as UTF-16 where it looks like UTF-16, as bytes
+   (Latin-1, one character per byte) whenever it is not UTF-8, and with every
+   NUL removed whenever it holds one, so ASCII in it reads as written in any
+   encoding, UTF-16 and UTF-32 included, broken or not. Of detect-secrets'
+   filters, only
    two may drop a finding: the `pragma: allowlist secret` a person writes
    (on the line, or `pragma: allowlist nextline secret` on the line above),
    and the baseline's patterns for three exact line shapes (`KEEP_FILTERS`).
-   What is text in neither UTF-8 nor UTF-16 is read as bytes (Latin-1), so
-   ASCII inside it is read as written, and the result counts it.
+   The result counts the files git calls binary that no text decoding read,
+   which were read as bytes only.
 2. **The range** (`--range BASE..HEAD`). The lines each commit in the range
    added, one commit at a time. Its files only: commit and tag messages are
    as public and are not read (fourteenth review of `#140`, finding 4).
@@ -315,7 +319,15 @@ def texts(data: bytes) -> tuple[list[str], bool]:
     as_bytes = not found
     if b"\x00" in data:
         found.append(data.replace(b"\x00", b"").decode("latin-1"))
-    if as_bytes:
+    # And whenever the bytes are not UTF-8, whatever else decoded them: a file
+    # that opens with a UTF-16 byte-order mark and has no NUL decodes as
+    # UTF-16 into CJK, so its ASCII reached no detector (sixteenth review of
+    # `#140`, finding 1). With this and the NUL-stripped read, ASCII anywhere
+    # in a file is read as written, as one byte per character or with NULs
+    # between, whatever the file's encoding claims.
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
         found.append(data.decode("latin-1"))
     return found, as_bytes
 

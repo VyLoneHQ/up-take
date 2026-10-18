@@ -981,6 +981,16 @@ class NoNetwork(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertIn("(0 of them binary", out)
 
+    def test_a_binary_marked_file_that_decodes_as_text_is_not_counted(self) -> None:
+        # The count is of files read as bytes only, not of every file marked
+        # binary (sixteenth review of #140, a note).
+        self.repo.write(".gitattributes", "*.svg binary\n")
+        self.repo.write("logo.svg", "<svg><title>logo</title></svg>\n")
+        self.repo.commit("an SVG in UTF-8, marked binary")
+        code, out = self.repo.scan()
+        self.assertEqual(code, 0, out)
+        self.assertIn("(0 of them binary, read as bytes)", out)
+
     def test_the_real_baseline_does_not_turn_verification_on(self) -> None:
         names = [
             f["path"] for f in json.loads(REAL_BASELINE.read_text(encoding="utf-8"))["filters_used"]
@@ -1401,30 +1411,29 @@ class TwelfthReview(unittest.TestCase):
     def test_every_python_step_up_to_the_scan_is_isolated(self) -> None:
         # `python -m` puts the checkout first on the import path, and so does
         # running a script from it without `-I`.
-        workflow = (HERE.parent / ".github" / "workflows" / "secrets.yml").read_text(
-            encoding="utf-8"
+        # The workflow as YAML parses it, every step's `run` in order, each of
+        # its lines a command: a reading of text lines missed a `run: |`
+        # block, then a `- run:` step and a quoted value (fifteenth and
+        # sixteenth reviews of #140, finding 3 and finding 2). PyYAML comes
+        # with detect-secrets.
+        import re
+
+        import yaml
+
+        workflow = yaml.safe_load(
+            (HERE.parent / ".github" / "workflows" / "secrets.yml").read_text(encoding="utf-8")
         )
-        # Each command, from a one-line `run:` and from every line of a `run: |`
-        # or `run: >` block, which a one-line read took as `|` and never
-        # checked (fifteenth review of #140, finding 3).
-        runs, block = [], None
-        for line in workflow.splitlines():
-            indent = len(line) - len(line.lstrip())
-            if block is not None:
-                if line.strip() and indent > block:
-                    runs.append(line.strip())
-                    continue
-                block = None
-            if line.strip().startswith("run:"):
-                value = line.split("run:", 1)[1].strip()
-                if value[:1] in ("|", ">"):
-                    block = indent
-                else:
-                    runs.append(value)
-        scan = next(i for i, run in enumerate(runs) if "secret-scan.py" in run)
-        for run in runs[: scan + 1]:
-            if run.startswith("python"):
-                self.assertTrue(run.startswith("python -I "), run)
+        commands = [
+            line.strip()
+            for job in workflow["jobs"].values()
+            for step in job.get("steps", [])
+            for line in str(step.get("run", "")).splitlines()
+            if line.strip()
+        ]
+        scan = next(i for i, command in enumerate(commands) if "secret-scan.py" in command)
+        for command in commands[: scan + 1]:
+            if re.match(r"python[0-9.]*\b", command):
+                self.assertRegex(command, r"^python[0-9.]*\s+-I\s", command)
 
 
 class ThirteenthReview(unittest.TestCase):
@@ -1576,6 +1585,19 @@ class FifteenthReview(unittest.TestCase):
 
     def test_utf32_is_read(self) -> None:
         self._all_reads_refuse("wide.txt", ("# notes\n" + LEAK).encode("utf-32"))
+
+    def test_a_utf16_mark_on_ascii_with_no_nul_is_read(self) -> None:
+        # It decodes as UTF-16 into CJK, and holds no NUL to strip (sixteenth
+        # review of #140, finding 1). Marked binary too, as `*.bin` is here.
+        self.repo.write(".gitattributes", "*.dat binary\n")
+        self.repo.commit("dat marked binary")
+        # An even length, so the whole file decodes as UTF-16 without error:
+        # an odd one fails that decode and was read as bytes already.
+        data = b"\xff\xfe# x\n" + LEAK.encode()
+        if len(data) % 2:
+            data = data[:-1] + b" \n"
+        self.assertEqual(len(data) % 2, 0)
+        self._all_reads_refuse("mark.dat", data)
 
     def test_mostly_cjk_utf16_without_a_bom_is_read(self) -> None:
         text = "\u6f22\u5b57" * 40 + "\n" + LEAK
