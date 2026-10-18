@@ -76,7 +76,9 @@ still serves it by sha; the push hook is what reads it (`github_commits`).
 A push whose last commit carries a skip marker starts no run, so its commits
 are read by the next run that reaches them: a push to the same branch, a pull
 request, or a push to main. A daily run over every branch is not part of
-this check yet.
+this check yet. GitHub's documentation also describes no `pull_request`
+run while a pull request has a merge conflict, and no push event when more
+than three tags are pushed at once; neither is probed here.
 
 Usage:
     python3 scripts/secret-scan.py                      # the tree
@@ -417,11 +419,22 @@ def copy_name(path: str) -> str:
 
 def parsed_copy(scratch: Path, n: int, path: str, data: bytes) -> list:
     """`parsed` on the bytes of `path`, written to a scratch copy, with each
-    finding named `path`."""
-    copy = scratch / str(n) / copy_name(path)
-    copy.parent.mkdir(parents=True)
-    copy.write_bytes(data)
-    out = parsed(str(copy))
+    finding named `path`. When the bytes are not UTF-8, also on each way they
+    read as text (`texts`), written as UTF-8: detect-secrets opens a file as
+    UTF-8 and reads nothing of one that is not, so a block scalar or an
+    unquoted value in a UTF-16 or Latin-1 YAML or INI file passed every read
+    (seventeenth review of `#140`, finding 1)."""
+    variants = [data]
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        variants += [text.encode("utf-8", errors="replace") for text in texts(data)[0]]
+    out = []
+    for k, variant in enumerate(variants):
+        copy = scratch / str(n) / str(k) / copy_name(path)
+        copy.parent.mkdir(parents=True)
+        copy.write_bytes(variant)
+        out.extend(parsed(str(copy)))
     for secret in out:
         secret.filename = path
     return out
@@ -600,7 +613,7 @@ def scan_tree(files: list[str], as_bytes: list[str] | None = None) -> SecretsCol
 
     The second way is each file's lines as written, through the same code a
     commit's lines take (`scan_text`): a file git calls text as git would
-    print it, and every file in every way it decodes (`decodings`) when it has
+    print it, and every file in every way it reads (`texts`) when it has
     a NUL or a byte-order mark or git calls it binary, so a YAML file
     `.gitattributes` marks binary has its comments read (eleventh review of
     `#140`, finding 3). One file at a time and not as one diff of the tree,
@@ -610,23 +623,26 @@ def scan_tree(files: list[str], as_bytes: list[str] | None = None) -> SecretsCol
     found = SecretsCollection()
     empty_tree = git("hash-object", "-t", "tree", "--stdin", stdin=b"").strip()
     binary = set(binary_paths("diff", empty_tree))
-    for name in files:
-        if not Path(name).is_file():
-            continue
-        for secret in parsed(name):
-            found[name].add(secret)
-        data = Path(name).read_bytes()
-        lines = [] if name in binary else [data.decode("utf-8", errors="replace")]
-        if name in binary or b"\x00" in data or data.startswith((b"\xff\xfe", b"\xfe\xff")):
-            read, only_bytes = texts(data)
-            lines += read
-            # Counted from the read itself, so the figure cannot say a file
-            # was read that was not (fifteenth review of `#140`, A3).
-            if only_bytes and name in binary and as_bytes is not None:
-                as_bytes.append(name)
-        for text in lines:
-            for filename, secret in scan_text(name, text):
-                found[filename].add(secret)
+    with tempfile.TemporaryDirectory() as scratch:
+        for n, name in enumerate(files):
+            if not Path(name).is_file():
+                continue
+            data = Path(name).read_bytes()
+            # From a scratch copy, so a file that is not UTF-8 is parsed in
+            # every way it reads as text too (`parsed_copy`).
+            for secret in parsed_copy(Path(scratch), n, name, data):
+                found[name].add(secret)
+            lines = [] if name in binary else [data.decode("utf-8", errors="replace")]
+            if name in binary or b"\x00" in data or data.startswith((b"\xff\xfe", b"\xfe\xff")):
+                read, only_bytes = texts(data)
+                lines += read
+                # Counted from the read itself, so the figure cannot say a file
+                # was read that was not (fifteenth review of `#140`, A3).
+                if only_bytes and name in binary and as_bytes is not None:
+                    as_bytes.append(name)
+            for text in lines:
+                for filename, secret in scan_text(name, text):
+                    found[filename].add(secret)
     return found
 
 
@@ -784,11 +800,12 @@ def scan_staged() -> tuple[SecretsCollection, int]:
         if n
     ]
     found = SecretsCollection()
-    for name in names:
-        if not Path(name).is_file():
-            continue
-        for secret in parsed(name):
-            found[name].add(secret)
+    with tempfile.TemporaryDirectory() as scratch:
+        for n, name in enumerate(names):
+            if not Path(name).is_file():
+                continue
+            for secret in parsed_copy(Path(scratch), n, name, Path(name).read_bytes()):
+                found[name].add(secret)
     before = ["HEAD"] if has_head() else []
     for filename, secret in scan_changes(git_names("diff", "--cached", *DIFF_OPTIONS), "", before):
         found[filename].add(secret)

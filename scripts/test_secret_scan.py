@@ -1431,9 +1431,13 @@ class TwelfthReview(unittest.TestCase):
             if line.strip()
         ]
         scan = next(i for i, command in enumerate(commands) if "secret-scan.py" in command)
+        # Every python interpreter in a command, not only one that starts it:
+        # `/usr/bin/python3 -m pip` passed a check on the first word
+        # (seventeenth review of #140, finding 2). Each must be followed by -I.
+        interpreter = re.compile(r"(?:^|[\s/=])python[0-9.]*(?=\s|$)")
         for command in commands[: scan + 1]:
-            if re.match(r"python[0-9.]*\b", command):
-                self.assertRegex(command, r"^python[0-9.]*\s+-I\s", command)
+            for found in interpreter.finditer(command):
+                self.assertRegex(command[found.end() :], r"^\s+-I\s", command)
 
 
 class ThirteenthReview(unittest.TestCase):
@@ -1614,6 +1618,41 @@ class FifteenthReview(unittest.TestCase):
         code, out = self.repo.scan()
         self.assertEqual(code, 1, out)
         self.assertIn("cl\\xe9.txt:1", out)
+
+
+class SeventeenthReview(unittest.TestCase):
+    """The seventeenth review of #140: the parsed read saw only raw bytes, so a
+    YAML or INI value in a file that is not UTF-8 passed every read."""
+
+    HEX = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"  # pragma: allowlist secret
+
+    def setUp(self) -> None:
+        self._dir = tempfile.TemporaryDirectory()
+        self.repo = Repo(Path(self._dir.name))
+
+    def tearDown(self) -> None:
+        self._dir.cleanup()
+
+    def _refused_everywhere(self, name: str, data: bytes) -> None:
+        base = self.repo.git("rev-parse", "HEAD")
+        (self.repo.root / name).write_bytes(data)
+        self.repo.git("add", name)
+        self.assertEqual(self.repo.scan("--staged")[0], 1, "staged")
+        added = self.repo.commit(f"a value in {name}")
+        self.assertEqual(self.repo.scan()[0], 1, "the tree")
+        self.repo.git("rm", "-q", name)
+        self.repo.commit("delete it")
+        code, out = self.repo.scan("--range", f"{base}..HEAD")
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"{added[:12]} {name}:", out)
+
+    def test_a_block_scalar_in_utf16_yaml_is_read(self) -> None:
+        text = "db:\n  password: |\n    " + KEYWORD_VALUE + "\n"
+        self._refused_everywhere("conf.yml", text.encode("utf-16"))
+
+    def test_an_unquoted_value_in_latin1_ini_is_read(self) -> None:
+        text = "; caf\xe9\n[svc]\nblob = " + self.HEX + "\n"
+        self._refused_everywhere("svc.ini", text.encode("latin-1"))
 
 
 class Pins(unittest.TestCase):
