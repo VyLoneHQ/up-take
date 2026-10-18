@@ -89,7 +89,7 @@ proptest = "1"
 # own review, not something `cargo update` does. A bare "2.0.0-rc.13" means
 # ^2.0.0-rc.13 in Cargo, which would accept rc.14 and 2.0.0 alike -- the precise
 # drift the decision exists to prevent.
-ort = { version = "=2.0.0-rc.14", default-features = false, features = ["load-dynamic"] }
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["load-dynamic"] }
 
 # ---------------------------------------------------------------------------
 # Lints, applied to every member via `[lints] workspace = true`.
