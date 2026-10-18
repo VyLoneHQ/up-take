@@ -81,12 +81,17 @@ class Repo:
         return self.git("rev-parse", "HEAD")
 
     def scan(self, *args: str, env: dict[str, str] | None = None) -> tuple[int, str]:
-        # Without the runner's own GITHUB_* variables, so only what a test sets
-        # reaches the scan. The script falls back to GITHUB_REF when an event
-        # names no ref, and a run on main inherited `refs/heads/main`: a test of
-        # a manual run with no main then read main's history and passed instead
-        # of refusing, red on every run on main and green on every pull request.
-        inherited = {key: value for key, value in os.environ.items() if not key.startswith("GITHUB_")}
+        # Without any variable the scan reads (every GITHUB_* one, and
+        # PRE_COMMIT_TO_REF), so of those only what a test sets reaches the
+        # scan. The script falls back to GITHUB_REF when an event names no ref,
+        # and a run on main inherited `refs/heads/main`: a test of a manual run
+        # with no main then read main's history and passed instead of refusing,
+        # red on every run on main and green on every pull request.
+        inherited = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("GITHUB_") and key != "PRE_COMMIT_TO_REF"
+        }
         done = subprocess.run(
             [sys.executable, str(SCRIPT), *args],
             cwd=self.root,
@@ -608,6 +613,27 @@ class SecretScan(unittest.TestCase):
         ):
             code, out = self.repo.scan("--github", env=self._event("workflow_dispatch", {}))
         self.assertEqual(code, 2, out)
+
+    def test_the_callers_pre_commit_to_ref_does_not_reach_a_scan(self) -> None:
+        # The other variable the scan reads: a value left in the caller's
+        # environment named a ref no repository here has, and the push read
+        # failed (review of #146, finding 1).
+        from unittest import mock
+
+        with mock.patch.dict(os.environ, {"PRE_COMMIT_TO_REF": "refs/heads/not-here"}):
+            code, out = self.repo.scan("--unpushed")
+        self.assertEqual(code, 0, out)
+
+    def test_a_manual_run_on_main_reads_mains_whole_history(self) -> None:
+        # The GITHUB_REF fallback, set by the test this time: an event that
+        # names no ref, on main, reads all of main, so a key added and deleted
+        # there is found (review of #146, a note: nothing else reached it).
+        _, added = self._leak_and_delete()
+        env = {**self._event("workflow_dispatch", {}), "GITHUB_REF": "refs/heads/main"}
+        code, out = self.repo.scan("--github", env=env)
+        self.assertEqual(code, 1, out)
+        self.assertIn(added[:12], out)
+        self.assertIn("main's whole history", out)
 
     def test_github_deleted_branch_reads_the_tree_only(self) -> None:
         env = self._event("push", {"deleted": True, "before": "1" * 40, "after": "0" * 40})
