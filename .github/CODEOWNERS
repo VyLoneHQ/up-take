@@ -1,0 +1,9 @@
+# The secret check, and the list of what it lets pass, need the maintainer's
+# review. A pull request's check runs that pull request's own copy of these
+# files, so without a reviewer a pull request could widen what passes or switch
+# its own check off and still show green. GitHub enforces this only while
+# "Require review from Code Owners" is on for main.
+/.secrets.baseline @VyLoneReaz
+/.github/workflows/secrets.yml @VyLoneReaz
+/scripts/secret-scan.py @VyLoneReaz
+/.github/CODEOWNERS @VyLoneReaz

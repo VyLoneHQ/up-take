@@ -66,8 +66,10 @@ any other branch or tag, and for a manual run, everything since it left
 push GitHub ran nothing for would then be in no range. A commit that has left
 every branch (a force push, a deleted branch) is read by no run, though GitHub
 still serves it by sha; the push hook is what reads it (`github_commits`).
-Once a day a scheduled run reads every commit of every branch, tag and pull
-request head, for the branch whose last push started no run at all.
+A push whose last commit carries a skip marker starts no run, so its commits
+are read by the next run that reaches them: a push to the same branch, a pull
+request, or a push to main. A daily run over every branch is not part of
+this check yet.
 
 Usage:
     python3 scripts/secret-scan.py                      # the tree
@@ -89,7 +91,11 @@ after its line is gone, because the commit that added it is still read.
 
 **If CI found a secret, it is already public.** Revoke it first, then remove
 it. Removing it from GitHub does not remove it from copies already taken,
-mirrors included; revoking is the step that works everywhere.
+mirrors included; revoking is the step that works everywhere. The commit that
+added it stays in the history, and a push to main reads all of it, so once it
+is revoked, run `--write-baseline` and set `"is_secret": false` on its entry:
+a revoked value opens nothing, and that is the judgement the entry records
+(tenth review of `#140`, finding 3).
 
 Why a script and not `detect-secrets-hook`
 ------------------------------------------
@@ -104,12 +110,14 @@ the names `git ls-files` prints, so the baseline is the same on every machine.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 try:
     from detect_secrets.core import baseline, scan
@@ -176,6 +184,21 @@ def git(*args: str, stdin: bytes | None = None) -> str:
     return git_bytes(*args, stdin=stdin).decode("utf-8", errors="replace")
 
 
+def git_names(*args: str) -> str:
+    """Output that names paths, decoded so each byte comes back: a name that
+    is not UTF-8 keeps its bytes as surrogates instead of turning into U+FFFD,
+    which named no file, so reading it failed and the run exited 2 (tenth
+    review of `#140`, finding 2). Only `entries` turns a name back into a
+    file; nothing passes one to git as an argument."""
+    return git_bytes(*args).decode("utf-8", errors="surrogateescape")
+
+
+def shown(name: str) -> str:
+    """A name as printed: a byte that is not UTF-8 as `\\xNN`, since a
+    surrogate cannot be written to a strict stdout."""
+    return name.encode("utf-8", errors="surrogateescape").decode("utf-8", errors="backslashreplace")
+
+
 def tracked_files() -> list[str]:
     return [name for name in git("ls-files", "-z").split("\0") if name]
 
@@ -186,7 +209,7 @@ def load_baseline(path: Path) -> SecretsCollection:
         raise CannotRun(f"no baseline at {path}")
     loaded = baseline.load(baseline.load_from_file(str(path)), filename=str(path))
     # Every filter but the two KEEP_FILTERS is off (the reason is there).
-    # `scan_file` is only given files that exist.
+    # `parsed` is only given files that exist.
     settings = get_settings()
     settings.disable_filters(*[f for f in list(settings.filters) if f not in KEEP_FILTERS])
     # detect-secrets turns each name into the local form as it loads, so on
@@ -276,7 +299,7 @@ def scan_text(filename: str, text: str) -> SecretsCollection:
 def binary_paths(*diff_args: str) -> list[str]:
     """The added or changed paths a diff prints as binary (`-` for its line
     counts in `--numstat`)."""
-    out = git(*diff_args, "--numstat", "-z", "--no-renames", "--diff-filter=AMT")
+    out = git_names(*diff_args, "--numstat", "-z", "--no-renames", "--diff-filter=AMT")
     paths = []
     for record in out.split("\0"):
         parts = record.split("\t", 2)
@@ -285,22 +308,79 @@ def binary_paths(*diff_args: str) -> list[str]:
     return paths
 
 
+@functools.lru_cache(maxsize=8)
+def entries(revision: str) -> dict[str, tuple[str, str]]:
+    """Every path at `revision` (a commit, or empty for the index's stage 0),
+    with its mode and object id, from one listing and no pathspec.
+
+    A path is never handed back to git to name a file. `git show <rev>:<path>`
+    failed for a name that is not UTF-8, which cannot survive the round trip
+    through a command line on Windows (tenth review of `#140`, finding 2), and
+    a pathspec is a glob, so `ls-files -- '*x'` also matched a submodule
+    pointer `!x` and a file named `*x.yml` was skipped (finding 4). A file
+    named `0:x` is no longer read as `x` either (eighth review)."""
+    if revision:
+        # <mode> SP <type> SP <object> TAB <path>
+        out, object_field = git_bytes("ls-tree", "-r", "-z", "--full-tree", revision), 2
+    else:
+        # <mode> SP <object> SP <stage> TAB <path>
+        out, object_field = git_bytes("ls-files", "-s", "-z"), 1
+    table = {}
+    for record in out.split(b"\0"):
+        meta, tab, name = record.partition(b"\t")
+        fields = meta.split()
+        if not tab or len(fields) != 3 or (not revision and fields[2] != b"0"):
+            continue
+        path = name.decode("utf-8", errors="surrogateescape")
+        table[path] = (fields[0].decode("ascii"), fields[object_field].decode("ascii"))
+    return table
+
+
 def blob(revision: str, path: str) -> bytes:
-    """The file at `revision`: a commit, or empty for the index. For the index
-    the stage is written out (`:0:<path>`), because git reads `:0:x` as stage
-    0 of `x`, so a file named `0:x` would otherwise be read as `x` (eighth
-    review of `#140`)."""
-    return git_bytes("show", f"{revision}:{path}" if revision else f":0:{path}")
+    """The file at `revision`: a commit, or empty for the index."""
+    entry = entries(revision).get(path)
+    if entry is None:
+        raise CannotRun(f"{shown(path)} is not in {revision or 'the index'}")
+    return git_bytes("cat-file", "blob", entry[1])
+
+
+def copy_name(path: str) -> str:
+    """The name a scratch copy of `path` takes: `file` and the path's own
+    extension, which is all detect-secrets reads to choose how it parses a
+    file (`determine_file_type`). Not the path's own name, which Windows may
+    refuse to create (`*x.yml`, `a:b.yml`)."""
+    suffix = PurePosixPath(path).suffix
+    return "file" + suffix if re.fullmatch(r"\.[A-Za-z0-9_-]{1,16}", suffix) else "file"
+
+
+def parsed_copy(scratch: Path, n: int, path: str, data: bytes) -> list:
+    """`parsed` on the bytes of `path`, written to a scratch copy, with each
+    finding named `path`."""
+    copy = scratch / str(n) / copy_name(path)
+    copy.parent.mkdir()
+    copy.write_bytes(data)
+    out = parsed(str(copy))
+    for secret in out:
+        secret.filename = path
+    return out
 
 
 def scan_blobs(revision: str, paths: list[str]) -> SecretsCollection:
-    """Each path at `revision` (`<commit>` or empty for the index), read in
-    every way it reads as text."""
+    """Each path at `revision` (`<commit>` or empty for the index), whole:
+    in every way it reads as text, and as detect-secrets parses it. The
+    parsed read is what `.gitattributes` marking a YAML or INI file `binary`
+    took away from a commit's read (tenth review of `#140`, finding 5)."""
     found = SecretsCollection()
-    for path in paths:
-        for text in decodings(blob(revision, path)):
-            for filename, secret in scan_text(path, text):
-                found[filename].add(secret)
+    with tempfile.TemporaryDirectory() as scratch:
+        for n, path in enumerate(paths):
+            if is_gitlink(revision, path):
+                continue
+            data = blob(revision, path)
+            for text in decodings(data):
+                for filename, secret in scan_text(path, text):
+                    found[filename].add(secret)
+            for secret in parsed_copy(Path(scratch), n, path, data):
+                found[path].add(secret)
     return found
 
 
@@ -321,9 +401,9 @@ def unquote(path: str) -> str:
             out.append(simple.get(body[i + 1], ord(body[i + 1])))
             i += 2
             continue
-        out += body[i].encode("utf-8")
+        out += body[i].encode("utf-8", errors="surrogateescape")
         i += 1
-    name = out.decode("utf-8", errors="replace")
+    name = out.decode("utf-8", errors="surrogateescape")
     return name[2:] if name.startswith(("a/", "b/")) else name
 
 
@@ -363,12 +443,8 @@ def parsed(filename: str) -> list:
 
 def is_gitlink(revision: str, path: str) -> bool:
     """A submodule pointer, whose content is another repository's commit and
-    not a file: `git show` cannot read it (ninth review of `#140`, finding 3)."""
-    if revision:
-        entry = git("ls-tree", "-z", revision, "--", path)
-    else:
-        entry = git("ls-files", "-s", "-z", "--", path)
-    return entry.startswith("160000 ")
+    not a file: there is no blob to read (ninth review of `#140`, finding 3)."""
+    return entries(revision).get(path, ("",))[0] == "160000"
 
 
 def scan_changes(diff: str, revision: str) -> SecretsCollection:
@@ -398,12 +474,8 @@ def scan_changes(diff: str, revision: str) -> SecretsCollection:
                 for filename, secret in scan_text(path, text):
                     if secret.line_number in numbers:
                         found[filename].add(secret)
-            copy = Path(scratch) / str(n) / Path(path).name
-            copy.parent.mkdir()
-            copy.write_bytes(data)
-            for secret in parsed(str(copy)):
+            for secret in parsed_copy(Path(scratch), n, path, data):
                 if secret.line_number in numbers:
-                    secret.filename = path
                     found[path].add(secret)
     return found
 
@@ -474,14 +546,14 @@ def scan_commit(commit: str) -> SecretsCollection:
     parents = git("rev-list", "--parents", "-n", "1", commit).split()[1:]
     if len(parents) == 2:
         found = scan_changes(
-            git("show", "--format=", "--remerge-diff", *DIFF_OPTIONS, commit), commit
+            git_names("show", "--format=", "--remerge-diff", *DIFF_OPTIONS, commit), commit
         )
     elif len(parents) > 2:
         found = scan_changes(
-            git("show", "--format=", "-m", "--first-parent", *DIFF_OPTIONS, commit), commit
+            git_names("show", "--format=", "-m", "--first-parent", *DIFF_OPTIONS, commit), commit
         )
     else:
-        found = scan_changes(git("show", "--format=", *DIFF_OPTIONS, commit), commit)
+        found = scan_changes(git_names("show", "--format=", *DIFF_OPTIONS, commit), commit)
     # What git prints as `Bin` has no lines in the diff: UTF-16 text, and text
     # `.gitattributes` marks binary. Read those whole, from the commit's blob.
     # Against the first parent for a merge: more than the merge wrote, never less.
@@ -544,13 +616,6 @@ def github_commits() -> tuple[list[str] | None, str]:
         event = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
         raise CannotRun(f"the event file {path} could not be read: {error}") from error
-    if name == "schedule":
-        # Every commit of every branch, tag and pull request head the runner
-        # fetched: a branch whose last push carried a skip marker, with no
-        # later push and no pull request, has no other run that reads it
-        # (eighth review of `#140`, finding 2).
-        commits = git("rev-list", "--reverse", "--remotes", "--tags").split()
-        return commits, "commits of every branch, tag and pull request head"
     try:
         if name == "pull_request":
             spec = f"{event['pull_request']['base']['sha']}..{event['pull_request']['head']['sha']}"
@@ -592,7 +657,7 @@ def report(found: SecretsCollection, where: str) -> int:
                     if entry.is_secret
                     else "  (in the baseline, not judged yet)"
                 )
-        print(f"  {where}{filename}:{line}  {secret.type}{note}")
+        print(f"  {where}{shown(filename)}:{line}  {secret.type}{note}")
         count += 1
     return count
 
@@ -603,7 +668,7 @@ def scan_staged() -> tuple[SecretsCollection, int]:
     staged content, because unstaged changes are set aside while hooks run."""
     names = [
         n
-        for n in git(
+        for n in git_names(
             "diff", "--cached", "--name-only", "--no-renames", "--diff-filter=AMT", "-z"
         ).split("\0")
         if n
@@ -614,7 +679,7 @@ def scan_staged() -> tuple[SecretsCollection, int]:
             continue
         for secret in parsed(name):
             found[name].add(secret)
-    for filename, secret in scan_changes(git("diff", "--cached", *DIFF_OPTIONS), ""):
+    for filename, secret in scan_changes(git_names("diff", "--cached", *DIFF_OPTIONS), ""):
         found[filename].add(secret)
     for filename, secret in scan_blobs("", binary_paths("diff", "--cached")):
         found[filename].add(secret)
@@ -657,44 +722,17 @@ def judged_not_secret(listed: SecretsCollection) -> SecretsCollection:
     return judged
 
 
-def judged_on_every_ref() -> SecretsCollection:
-    """The entries judged not secrets in the baseline of every branch, tag and
-    pull request head the run holds. The daily run reads all of them from the
-    default branch, whose baseline does not hold a branch's own judgements
-    until it merges; without these it went red on values a person had judged
-    on their branch, and stayed red for a pull request closed unmerged (ninth
-    review of `#140`, finding 2). It is the same trust each branch's own push
-    run already gives its baseline, no more."""
-    judged = SecretsCollection()
-    refs = git("for-each-ref", "--format=%(refname)", "refs/remotes", "refs/tags").split()
-    for ref in refs:
-        try:
-            data = json.loads(git("show", f"{ref}:{BASELINE}"))
-            loaded = SecretsCollection.load_from_baseline(data)
-        except (CannotRun, ValueError, KeyError, TypeError):
-            continue
-        for filename, secret in loaded:
-            if secret.is_secret is False:
-                secret.filename = filename.replace("\\", "/")
-                judged[secret.filename].add(secret)
-    return judged
-
-
 def check(
     baseline_path: Path,
     commits: list[str] | None,
     label: str = "",
     staged: bool = False,
     unpushed: bool = False,
-    every_ref: bool = False,
 ) -> int:
     listed = load_baseline(baseline_path)
     for filename, secret in listed:
         LISTED[filename].add(secret)
     known = judged_not_secret(listed)
-    if every_ref:
-        for filename, secret in judged_on_every_ref():
-            known[filename].add(secret)
     total = 0
     if staged:
         found, count = scan_staged()
@@ -807,10 +845,7 @@ def main(argv: list[str] | None = None) -> int:
             commits, label = commits_in(args.range_spec), f"commits in {args.range_spec}"
         else:
             commits, label = None, ""
-        every_ref = args.github and os.environ.get("GITHUB_EVENT_NAME") == "schedule"
-        return check(
-            path, commits, label, staged=args.staged, unpushed=args.unpushed, every_ref=every_ref
-        )
+        return check(path, commits, label, staged=args.staged, unpushed=args.unpushed)
     except CannotRun as error:
         print(f"secret-scan: could not run: {error}", file=sys.stderr)
         return 2

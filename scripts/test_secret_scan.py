@@ -1154,26 +1154,6 @@ class EighthReview(unittest.TestCase):
         for sha in added:
             self.assertIn(sha[:12], out)
 
-    def test_the_daily_run_reads_every_branch_tag_and_pull_request_head(self) -> None:
-        main = self.repo.git("rev-parse", "HEAD")
-        self.repo.git("update-ref", MAIN_REF, main)
-        found = {}
-        for ref in ("refs/remotes/origin/feature", "refs/remotes/pull/7", "refs/tags/v1"):
-            self.repo.git("checkout", "-q", "--detach", main)
-            name = ref.rsplit("/", 1)[-1] + ".py"
-            self.repo.write(name, LEAK)
-            found[ref] = self.repo.commit(f"a key reached only by {ref}")
-            self.repo.git("update-ref", ref, "HEAD")
-        self.repo.git("checkout", "-q", "main")
-        path = self.repo.root.parent / (self.repo.root.name + "-event.json")
-        path.write_text("{}", encoding="utf-8")
-        self.addCleanup(lambda: path.unlink(missing_ok=True))
-        env = {"GITHUB_EVENT_NAME": "schedule", "GITHUB_EVENT_PATH": str(path)}
-        code, out = self.repo.scan("--github", env=env)
-        self.assertEqual(code, 1, out)
-        for ref, sha in found.items():
-            self.assertIn(sha[:12], out, ref)
-
     @unittest.skipIf(os.name == "nt", "Git for Windows refuses a path with a colon")
     def test_a_staged_file_named_like_a_stage_is_read_as_itself(self) -> None:
         self.repo.write("x.txt", "nothing here\n")
@@ -1186,8 +1166,8 @@ class EighthReview(unittest.TestCase):
 
 class NinthReview(unittest.TestCase):
     """The ninth review of #140: one judged finding switched off detect-
-    secrets' second parse of a file, the daily run judged every branch by
-    main's baseline, and a submodule pointer stopped the commit read."""
+    secrets' second parse of a file, and a submodule pointer stopped the
+    commit read. (Its finding about the daily run left with the daily run.)"""
 
     # The SHA-256 of "test", unquoted: only the eager parse of `key = value`
     # quotes it, and only then can the hex detector see it.
@@ -1230,37 +1210,6 @@ class NinthReview(unittest.TestCase):
         self.assertIn(f"{env[:12]} deploy.env:1", out)
         self.assertIn(f"{yml[:12]} deploy.yml:", out)
 
-    def _schedule(self) -> tuple[int, str]:
-        path = self.repo.root.parent / (self.repo.root.name + "-event.json")
-        path.write_text("{}", encoding="utf-8")
-        self.addCleanup(lambda: path.unlink(missing_ok=True))
-        return self.repo.scan(
-            "--github", env={"GITHUB_EVENT_NAME": "schedule", "GITHUB_EVENT_PATH": str(path)}
-        )
-
-    def test_the_daily_run_honours_a_branchs_own_judgement_and_nothing_more(self) -> None:
-        main = self.repo.git("rev-parse", "HEAD")
-        self.repo.git("update-ref", MAIN_REF, main)
-        self.repo.git("checkout", "-q", "-b", "feature")
-        self.repo.write("fixture.py", LEAK)
-        self.repo.commit("a value judged on its branch")
-        self.repo.scan("--write-baseline")
-        self.repo.judge()
-        self.repo.commit("judged on the branch")
-        self.repo.git("update-ref", "refs/remotes/origin/feature", "HEAD")
-        self.repo.git("checkout", "-q", "main")
-        code, out = self._schedule()
-        self.assertEqual(code, 0, "judged on its own branch: " + out)
-        self.repo.git("checkout", "-q", "-b", "other", main)
-        other = 'password = "Pq8Lm2Xv7Rt4Ws9Kd3Nb"\n'  # pragma: allowlist secret
-        self.repo.write("other.py", other)
-        added = self.repo.commit("an unjudged value")
-        self.repo.git("update-ref", "refs/remotes/origin/other", "HEAD")
-        self.repo.git("checkout", "-q", "main")
-        code, out = self._schedule()
-        self.assertEqual(code, 1, out)
-        self.assertIn(added[:12], out)
-
     def test_a_submodule_pointer_does_not_stop_the_scan(self) -> None:
         base = self.repo.git("rev-parse", "HEAD")
         sha = "1" * 40
@@ -1269,6 +1218,75 @@ class NinthReview(unittest.TestCase):
         self.repo.git("commit", "-q", "-m", "a submodule pointer")
         code, out = self.repo.scan("--range", f"{base}..HEAD")
         self.assertEqual(code, 0, out)
+
+
+class TenthReview(unittest.TestCase):
+    """The tenth review of #140: a file name that is not UTF-8 stopped every
+    run that read its commit, a pathspec glob hid a staged file behind a
+    submodule pointer, and a YAML file marked binary lost its parsed read."""
+
+    def setUp(self) -> None:
+        self._dir = tempfile.TemporaryDirectory()
+        self.repo = Repo(Path(self._dir.name))
+
+    def tearDown(self) -> None:
+        self._dir.cleanup()
+
+    def _git_bytes(self, *args: str, stdin: bytes | None = None) -> bytes:
+        return subprocess.run(
+            ["git", *args], cwd=self.repo.root, input=stdin, capture_output=True, check=True
+        ).stdout
+
+    def _commit_with(self, name: bytes, data: bytes, message: str) -> str:
+        """A commit on main that adds `name` beside HEAD's files, built with
+        `mktree`, so the name never has to exist on this machine's disk."""
+        blob = self._git_bytes("hash-object", "-w", "--stdin", stdin=data).strip()
+        listing = self._git_bytes("ls-tree", "-z", "HEAD")
+        tree = self._git_bytes(
+            "mktree", "-z", stdin=listing + b"100644 blob " + blob + b"\t" + name + b"\0"
+        ).strip()
+        commit = self._git_bytes(
+            "commit-tree", tree.decode(), "-p", "HEAD", "-m", message
+        ).strip().decode()
+        self.repo.git("update-ref", "refs/heads/main", commit)
+        self.repo.git("reset", "-q", "--mixed", commit)
+        return commit
+
+    def test_a_name_that_is_not_utf8_is_read_and_does_not_stop_the_run(self) -> None:
+        base = self.repo.git("rev-parse", "HEAD")
+        self._commit_with(b"caf\xe9.txt", b"nothing secret here\n", "a Latin-1 name")
+        code, out = self.repo.scan("--range", f"{base}..HEAD")
+        self.assertEqual(code, 0, "a clean file under that name: " + out)
+        added = self._commit_with(b"cl\xe9.txt", LEAK.encode(), "a key under a Latin-1 name")
+        code, out = self.repo.scan("--range", f"{base}..HEAD")
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"{added[:12]} cl\\xe9.txt:1", out)
+
+    def test_a_staged_name_that_globs_a_submodule_pointer_is_read(self) -> None:
+        # `*x.yml` as a pathspec also matches `!x.yml`, a submodule pointer,
+        # which git lists first. Index entries only: Windows has no `*` in names,
+        # and git there refuses one in the index unless told not to.
+        sha = "1" * 40
+        self.repo.git("update-index", "--add", "--cacheinfo", f"160000,{sha},!x.yml")
+        blob = self._git_bytes("hash-object", "-w", "--stdin", stdin=LEAK.encode()).strip()
+        self.repo.git(
+            "-c", "core.protectNTFS=false",
+            "update-index", "--add", "--cacheinfo", f"100644,{blob.decode()},*x.yml",
+        )
+        code, out = self.repo.scan("--staged")
+        self.assertEqual(code, 1, out)
+        self.assertIn("*x.yml:1", out)
+
+    def test_a_yaml_file_marked_binary_gets_the_parsed_read_in_a_commit(self) -> None:
+        self.repo.write(".gitattributes", "*.yml binary\n")
+        base = self.repo.commit("YAML marked binary")
+        self.repo.write("deploy.yml", "deploy:\n  api_key: >-\n    " + KEYWORD_VALUE + "\n")
+        added = self.repo.commit("a block scalar in a binary-marked file")
+        self.repo.git("rm", "-q", "deploy.yml")
+        self.repo.commit("delete it")
+        code, out = self.repo.scan("--range", f"{base}..HEAD")
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"{added[:12]} deploy.yml:", out)
 
 
 class Pins(unittest.TestCase):
