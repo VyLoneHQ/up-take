@@ -200,8 +200,9 @@ def git_names(*args: str) -> str:
     """Output that names paths, decoded so each byte comes back: a name that
     is not UTF-8 keeps its bytes as surrogates instead of turning into U+FFFD,
     which named no file, so reading it failed and the run exited 2 (tenth
-    review of `#140`, finding 2). Only `entries` turns a name back into a
-    file; nothing passes one to git as an argument."""
+    review of `#140`, finding 2). A name goes back to a file through
+    `entries` for a blob, and through the file system for the tree and the
+    staged parse; nothing passes one to git as an argument."""
     return git_bytes(*args).decode("utf-8", errors="surrogateescape")
 
 
@@ -212,7 +213,10 @@ def shown(name: str) -> str:
 
 
 def tracked_files() -> list[str]:
-    return [name for name in git("ls-files", "-z").split("\0") if name]
+    """The tracked names, keeping each byte (`git_names`): a name that is not
+    UTF-8, decoded with U+FFFD, named no file on disk, and the tree read
+    skipped it in silence (fifteenth review of `#140`, finding 2)."""
+    return [name for name in git_names("ls-files", "-z").split("\0") if name]
 
 
 def load_baseline(path: Path) -> SecretsCollection:
@@ -273,12 +277,12 @@ def decodings(data: bytes) -> list[str]:
     that test too, so UTF-8 is always tried as well, and both are read (eighth
     review of `#140`, finding 1: such a file was read as UTF-16 garbage, or
     not at all)."""
+    found = []
     if data.startswith((b"\xff\xfe", b"\xfe\xff")):
         try:
-            return [data.decode("utf-16")]
+            found.append(data.decode("utf-16"))
         except UnicodeDecodeError:
-            return []
-    found = []
+            pass
     if b"\x00" in data:
         for encoding, zeros in (("utf-16-le", data[1::2]), ("utf-16-be", data[0::2])):
             if zeros and zeros.count(0) >= 0.9 * len(zeros):
@@ -293,14 +297,27 @@ def decodings(data: bytes) -> list[str]:
     return found
 
 
-def texts(data: bytes) -> list[str]:
-    """Every way the bytes read as text, and when none does, the bytes
-    themselves as Latin-1, which maps each byte to one character, so an ASCII
-    secret inside an image, a database or Latin-1 text git calls binary is
-    read as written. Without it a `.gitattributes` line marking a Latin-1
-    file binary turned red into green (fourteenth review of `#140`, finding
-    1)."""
-    return decodings(data) or [data.decode("latin-1")]
+def texts(data: bytes) -> tuple[list[str], bool]:
+    """Every way the bytes read as text, and whether none did.
+
+    When none does, the bytes themselves as Latin-1, which maps each byte to
+    one character, so an ASCII secret inside an image, a database or Latin-1
+    text git calls binary is read as written. Without it a `.gitattributes`
+    line marking a Latin-1 file binary turned red into green (fourteenth
+    review of `#140`, finding 1).
+
+    And whenever there is a NUL, the bytes with every NUL removed, as Latin-1:
+    ASCII in UTF-16 or UTF-32 of any shape then reads as written. A UTF-16
+    file cut to an odd length or holding one unpaired surrogate fails the
+    strict decode, and UTF-32 decodes as UTF-16 into letters with NULs between
+    them; both passed every read (fifteenth review of `#140`, finding 1)."""
+    found = decodings(data)
+    as_bytes = not found
+    if b"\x00" in data:
+        found.append(data.replace(b"\x00", b"").decode("latin-1"))
+    if as_bytes:
+        found.append(data.decode("latin-1"))
+    return found, as_bytes
 
 
 def scan_text(filename: str, text: str) -> SecretsCollection:
@@ -409,7 +426,7 @@ def scan_blobs(revision: str, paths: list[str]) -> SecretsCollection:
             if is_gitlink(revision, path):
                 continue
             data = blob(revision, path)
-            for text in texts(data):
+            for text in texts(data)[0]:
                 for filename, secret in scan_text(path, text):
                     found[filename].add(secret)
             for secret in parsed_copy(Path(scratch), n, path, data):
@@ -547,7 +564,7 @@ def scan_changes(diff: str, revision: str, before: list[str]) -> SecretsCollecti
             if is_gitlink(revision, path):
                 continue
             data = blob(revision, path)
-            for text in decodings(data) or [data.decode("utf-8", errors="replace")]:
+            for text in texts(data)[0]:
                 for filename, secret in scan_text(path, text):
                     if secret.line_number in numbers:
                         found[filename].add(secret)
@@ -558,7 +575,7 @@ def scan_changes(diff: str, revision: str, before: list[str]) -> SecretsCollecti
     return found
 
 
-def scan_tree(files: list[str]) -> SecretsCollection:
+def scan_tree(files: list[str], as_bytes: list[str] | None = None) -> SecretsCollection:
     """Every tracked file, read two ways, under the names git gives them.
 
     detect-secrets reads a file it can parse (YAML, INI) as parsed values, so
@@ -589,26 +606,16 @@ def scan_tree(files: list[str]) -> SecretsCollection:
         data = Path(name).read_bytes()
         lines = [] if name in binary else [data.decode("utf-8", errors="replace")]
         if name in binary or b"\x00" in data or data.startswith((b"\xff\xfe", b"\xfe\xff")):
-            lines += texts(data)
+            read, only_bytes = texts(data)
+            lines += read
+            # Counted from the read itself, so the figure cannot say a file
+            # was read that was not (fifteenth review of `#140`, A3).
+            if only_bytes and name in binary and as_bytes is not None:
+                as_bytes.append(name)
         for text in lines:
             for filename, secret in scan_text(name, text):
                 found[filename].add(secret)
     return found
-
-
-def read_as_bytes(files: list[str]) -> list[str]:
-    """The tracked files git calls binary that are text in neither UTF-8 nor
-    UTF-16: images, fonts, archives, Latin-1 text marked binary. They are read
-    as bytes (`texts`) and counted in the result, so "every tracked file" says
-    which were not read as text (fifth review of `#140`, finding 3; the
-    fourteenth, finding 1, which made them read at all)."""
-    empty_tree = git("hash-object", "-t", "tree", "--stdin", stdin=b"").strip()
-    binary = set(binary_paths("diff", empty_tree))
-    return [
-        name
-        for name in files
-        if name in binary and Path(name).is_file() and not decodings(Path(name).read_bytes())
-    ]
 
 
 def scan_commit(commit: str) -> SecretsCollection:
@@ -839,9 +846,9 @@ def check(
         files = tracked_files()
         if not files:
             raise CannotRun("git ls-files printed nothing, so there is nothing to scan")
-        as_bytes = read_as_bytes(files)
+        as_bytes: list[str] = []
+        new = scan_tree(files, as_bytes) - known
         scope = f"{len(files)} tracked files ({len(as_bytes)} of them binary, read as bytes)"
-        new = scan_tree(files) - known
         if new:
             print("Secrets in the tracked files that the baseline does not pass:")
             total += report(new, "")

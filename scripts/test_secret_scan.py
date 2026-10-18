@@ -1404,11 +1404,23 @@ class TwelfthReview(unittest.TestCase):
         workflow = (HERE.parent / ".github" / "workflows" / "secrets.yml").read_text(
             encoding="utf-8"
         )
-        runs = [
-            line.split("run:", 1)[1].strip()
-            for line in workflow.splitlines()
-            if line.strip().startswith("run:")
-        ]
+        # Each command, from a one-line `run:` and from every line of a `run: |`
+        # or `run: >` block, which a one-line read took as `|` and never
+        # checked (fifteenth review of #140, finding 3).
+        runs, block = [], None
+        for line in workflow.splitlines():
+            indent = len(line) - len(line.lstrip())
+            if block is not None:
+                if line.strip() and indent > block:
+                    runs.append(line.strip())
+                    continue
+                block = None
+            if line.strip().startswith("run:"):
+                value = line.split("run:", 1)[1].strip()
+                if value[:1] in ("|", ">"):
+                    block = indent
+                else:
+                    runs.append(value)
         scan = next(i for i, run in enumerate(runs) if "secret-scan.py" in run)
         for run in runs[: scan + 1]:
             if run.startswith("python"):
@@ -1529,6 +1541,57 @@ class FourteenthReview(unittest.TestCase):
         code, out = self.repo.scan("--range", f"{base}..HEAD")
         self.assertEqual(code, 1, out)
         self.assertIn(f"{added[:12]} cache.db:2", out)
+
+
+class FifteenthReview(unittest.TestCase):
+    """The fifteenth review of #140: UTF-16 that does not decode strictly, and
+    UTF-32, passed every read."""
+
+    def setUp(self) -> None:
+        self._dir = tempfile.TemporaryDirectory()
+        self.repo = Repo(Path(self._dir.name))
+
+    def tearDown(self) -> None:
+        self._dir.cleanup()
+
+    def _all_reads_refuse(self, name: str, data: bytes) -> None:
+        base = self.repo.git("rev-parse", "HEAD")
+        (self.repo.root / name).write_bytes(data)
+        self.repo.git("add", name)
+        self.assertEqual(self.repo.scan("--staged")[0], 1, "staged")
+        added = self.repo.commit(f"a key in {name}")
+        self.assertEqual(self.repo.scan()[0], 1, "the tree")
+        self.repo.git("rm", "-q", name)
+        self.repo.commit("delete it")
+        code, out = self.repo.scan("--range", f"{base}..HEAD")
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"{added[:12]} {name}:", out)
+
+    def test_utf16_cut_to_an_odd_length_is_read(self) -> None:
+        self._all_reads_refuse("odd.txt", ("# notes\n" + LEAK).encode("utf-16") + b"\x41")
+
+    def test_utf16_with_an_unpaired_surrogate_is_read(self) -> None:
+        data = ("# notes\n" + LEAK).encode("utf-16-le") + b"\x00\xd8"
+        self._all_reads_refuse("lone.txt", b"\xff\xfe" + data)
+
+    def test_utf32_is_read(self) -> None:
+        self._all_reads_refuse("wide.txt", ("# notes\n" + LEAK).encode("utf-32"))
+
+    def test_mostly_cjk_utf16_without_a_bom_is_read(self) -> None:
+        text = "\u6f22\u5b57" * 40 + "\n" + LEAK
+        self._all_reads_refuse("cjk.txt", text.encode("utf-16-le"))
+
+    @unittest.skipIf(os.name == "nt", "NTFS cannot hold a name that is not UTF-8")
+    def test_the_tree_reads_a_file_whose_name_is_not_utf8(self) -> None:
+        # Finding 2: the name came back with U+FFFD, named no file on disk,
+        # and the tree read skipped it in silence.
+        name = os.fsencode(str(self.repo.root)) + b"/cl\xe9.txt"
+        with open(name, "wb") as handle:
+            handle.write(LEAK.encode())
+        self.repo.commit("a key under a Latin-1 name")
+        code, out = self.repo.scan()
+        self.assertEqual(code, 1, out)
+        self.assertIn("cl\\xe9.txt:1", out)
 
 
 class Pins(unittest.TestCase):
