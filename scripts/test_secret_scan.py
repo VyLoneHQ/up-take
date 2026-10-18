@@ -1416,8 +1416,6 @@ class TwelfthReview(unittest.TestCase):
         # block, then a `- run:` step and a quoted value (fifteenth and
         # sixteenth reviews of #140, finding 3 and finding 2). PyYAML comes
         # with detect-secrets.
-        import re
-
         import yaml
 
         workflow = yaml.safe_load(
@@ -1431,13 +1429,17 @@ class TwelfthReview(unittest.TestCase):
             if line.strip()
         ]
         scan = next(i for i, command in enumerate(commands) if "secret-scan.py" in command)
-        # Every python interpreter in a command, not only one that starts it:
-        # `/usr/bin/python3 -m pip` passed a check on the first word
-        # (seventeenth review of #140, finding 2). Each must be followed by -I.
-        interpreter = re.compile(r"(?:^|[\s/=])python[0-9.]*(?=\s|$)")
-        for command in commands[: scan + 1]:
-            for found in interpreter.finditer(command):
-                self.assertRegex(command[found.end() :], r"^\s+-I\s", command)
+        # The exact commands, not a pattern: each pattern so far was passed by
+        # one more spelling of an interpreter (a path, `env`, then quotes and
+        # `bash -c`; seventeenth and eighteenth reviews of #140). A change to
+        # what runs before the scan changes this list, in review.
+        self.assertEqual(
+            commands[: scan + 1],
+            [
+                "python -I -m pip install detect-secrets==1.5.0 unidiff==0.7.5",
+                "python -I scripts/secret-scan.py --github",
+            ],
+        )
 
 
 class ThirteenthReview(unittest.TestCase):
@@ -1653,6 +1655,51 @@ class SeventeenthReview(unittest.TestCase):
     def test_an_unquoted_value_in_latin1_ini_is_read(self) -> None:
         text = "; caf\xe9\n[svc]\nblob = " + self.HEX + "\n"
         self._refused_everywhere("svc.ini", text.encode("latin-1"))
+
+
+class EighteenthReview(unittest.TestCase):
+    """The eighteenth review of #140: a UTF-8 byte-order mark or a missing
+    section header kept an INI value from the parsed read, and one NUL or a
+    terminal colour code kept a YAML block scalar from it."""
+
+    # A value the hex detector flags in a plain INI file; one it does not
+    # flag would prove nothing.
+    VALUE = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"  # pragma: allowlist secret
+
+    def setUp(self) -> None:
+        self._dir = tempfile.TemporaryDirectory()
+        self.repo = Repo(Path(self._dir.name))
+
+    def tearDown(self) -> None:
+        self._dir.cleanup()
+
+    def _refused_everywhere(self, name: str, data: bytes) -> None:
+        base = self.repo.git("rev-parse", "HEAD")
+        (self.repo.root / name).write_bytes(data)
+        self.repo.git("add", name)
+        self.assertEqual(self.repo.scan("--staged")[0], 1, "staged")
+        added = self.repo.commit(f"a value in {name}")
+        self.assertEqual(self.repo.scan()[0], 1, "the tree")
+        self.repo.git("rm", "-q", name)
+        self.repo.commit("delete it")
+        code, out = self.repo.scan("--range", f"{base}..HEAD")
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"{added[:12]} {name}:", out)
+
+    def test_an_ini_value_after_a_utf8_byte_order_mark_is_read(self) -> None:
+        self._refused_everywhere("conf.ini", b"\xef\xbb\xbf[s]\nconn = " + self.VALUE.encode() + b"\n")
+
+    def test_a_properties_value_with_no_section_header_is_read(self) -> None:
+        self._refused_everywhere("app.properties", b"blob=" + self.VALUE.encode() + b"\n")
+
+    def test_a_block_scalar_beside_a_nul_is_read(self) -> None:
+        text = "db:\n  password: |\n    " + KEYWORD_VALUE + "\n# x\x00y\n"
+        # Not `nul.yml`: Windows takes NUL with any extension for its null device.
+        self._refused_everywhere("zero.yml", text.encode())
+
+    def test_a_block_scalar_beside_a_colour_code_is_read(self) -> None:
+        text = "db:\n  password: |\n    " + KEYWORD_VALUE + "\n# \x1b[31mred\x1b[0m\n"
+        self._refused_everywhere("esc.yml", text.encode())
 
 
 class Pins(unittest.TestCase):

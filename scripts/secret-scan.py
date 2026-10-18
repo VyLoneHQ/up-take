@@ -273,7 +273,9 @@ def decodings(data: bytes) -> list[str]:
     Three kinds of text reach here. UTF-16, which neither read can see: Python
     cannot decode it as UTF-8, so detect-secrets drops the file as binary, and
     git finds NUL bytes in it and prints no lines. Windows PowerShell 5.1
-    writes it by default (`>`, `Out-File`). A text file `.gitattributes` marks
+    writes it by default (`>`, `Out-File`), and UTF-8 with a byte-order mark
+    where its default is set to UTF-8, as on the maintainer's machine
+    (eighteenth review of `#140`). A text file `.gitattributes` marks
     `binary`, such as `*.svg` here, whose diff git prints as `Bin`. And UTF-8
     text with NUL bytes in it, which git also calls binary (third review of
     `#140`, finding 1).
@@ -417,6 +419,14 @@ def copy_name(path: str) -> str:
     return "file" + suffix if re.fullmatch(r"\.[A-Za-z0-9_-]{1,16}", suffix) else "file"
 
 
+# Bytes no text holds: every C0 control but tab, newline and carriage
+# return, and DEL.
+CONTROL = bytes(b for b in range(32) if b not in (9, 10, 13)) + b"\x7f"
+# What detect-secrets parses as INI by its extension (`determine_file_type`):
+# CONFIG, INI and PROPERTIES.
+INI_FAMILY = {".cnf", ".conf", ".cfg", ".cf", ".ini", ".properties"}
+
+
 def parsed_copy(scratch: Path, n: int, path: str, data: bytes) -> list:
     """`parsed` on the bytes of `path`, written to a scratch copy, with each
     finding named `path`. When the bytes are not UTF-8, also on each way they
@@ -424,17 +434,37 @@ def parsed_copy(scratch: Path, n: int, path: str, data: bytes) -> list:
     UTF-8 and reads nothing of one that is not, so a block scalar or an
     unquoted value in a UTF-16 or Latin-1 YAML or INI file passed every read
     (seventeenth review of `#140`, finding 1)."""
-    variants = [data]
+    bases = [data]
     try:
         data.decode("utf-8")
     except UnicodeDecodeError:
-        variants += [text.encode("utf-8", errors="replace") for text in texts(data)[0]]
+        bases += [text.encode("utf-8", errors="replace") for text in texts(data)[0]]
+    # Each also without a UTF-8 byte-order mark and without control bytes
+    # (all but tab, newline and carriage return), which keeps every line where
+    # it was: configparser takes `\ufeff[s]` for no section, and PyYAML refuses
+    # a file holding one NUL or one terminal colour code, and either way the
+    # parsed read found nothing (eighteenth review of `#140`, findings 1 and 2).
+    variants: list[bytes] = []
+    for base in bases:
+        for variant in (base, base.removeprefix(b"\xef\xbb\xbf").translate(None, CONTROL)):
+            if variant not in variants:
+                variants.append(variant)
+    # An INI-family file is also parsed under a name with no extension, which
+    # detect-secrets reads as a file of no known type and parses as INI with a
+    # section header added: under its own name a file whose first line is not
+    # `[section]` is not parsed at all (finding 1).
+    names = [copy_name(path)]
+    if PurePosixPath(path).suffix.lower() in INI_FAMILY:
+        names.append("file")
     out = []
-    for k, variant in enumerate(variants):
-        copy = scratch / str(n) / str(k) / copy_name(path)
-        copy.parent.mkdir(parents=True)
-        copy.write_bytes(variant)
-        out.extend(parsed(str(copy)))
+    k = 0
+    for variant in variants:
+        for name in names:
+            copy = scratch / str(n) / str(k) / name
+            copy.parent.mkdir(parents=True)
+            copy.write_bytes(variant)
+            out.extend(parsed(str(copy)))
+            k += 1
     for secret in out:
         secret.filename = path
     return out
