@@ -15,18 +15,20 @@ this check reads two things.
    two may drop a finding: the `pragma: allowlist secret` a person writes
    (on the line, or `pragma: allowlist nextline secret` on the line above),
    and the baseline's patterns for three exact line shapes (`KEEP_FILTERS`).
-   What is text in neither UTF-8 nor UTF-16 is not read, and the result
-   counts it.
+   What is text in neither UTF-8 nor UTF-16 is read as bytes (Latin-1), so
+   ASCII inside it is read as written, and the result counts it.
 2. **The range** (`--range BASE..HEAD`). The lines each commit in the range
-   added, one commit at a time. This is what catches a secret that a branch
+   added, one commit at a time. Its files only: commit and tag messages are
+   as public and are not read (fourteenth review of `#140`, finding 4).
+   This is what catches a secret that a branch
    added and then removed: the tree is clean, and the commit is still public.
    A merge commit is read for what the merge itself wrote, its conflict
    resolutions and anything added before it was committed (`git show
    --remerge-diff`): the lines it brings in from either side were added by
    commits read on their own. An octopus merge is read against its first
    parent, which reads more than it needs and misses nothing. A file git
-   prints as binary (UTF-16, or text `.gitattributes` marks binary) is read
-   whole from the commit.
+   prints as binary (UTF-16, text `.gitattributes` marks binary, an image) is
+   read whole from the commit, as text or, like the tree, as bytes.
 
 Every read takes each file both ways: line by line as written, and as
 detect-secrets parses it (both of its passes), so a YAML block scalar or an
@@ -291,6 +293,16 @@ def decodings(data: bytes) -> list[str]:
     return found
 
 
+def texts(data: bytes) -> list[str]:
+    """Every way the bytes read as text, and when none does, the bytes
+    themselves as Latin-1, which maps each byte to one character, so an ASCII
+    secret inside an image, a database or Latin-1 text git calls binary is
+    read as written. Without it a `.gitattributes` line marking a Latin-1
+    file binary turned red into green (fourteenth review of `#140`, finding
+    1)."""
+    return decodings(data) or [data.decode("latin-1")]
+
+
 def scan_text(filename: str, text: str) -> SecretsCollection:
     """Every line of `text`, through the same code a commit's diff takes: as a
     diff that adds the whole file. Lines are split and numbered as git does,
@@ -397,7 +409,7 @@ def scan_blobs(revision: str, paths: list[str]) -> SecretsCollection:
             if is_gitlink(revision, path):
                 continue
             data = blob(revision, path)
-            for text in decodings(data):
+            for text in texts(data):
                 for filename, secret in scan_text(path, text):
                     found[filename].add(secret)
             for secret in parsed_copy(Path(scratch), n, path, data):
@@ -575,22 +587,21 @@ def scan_tree(files: list[str]) -> SecretsCollection:
         for secret in parsed(name):
             found[name].add(secret)
         data = Path(name).read_bytes()
-        texts = [] if name in binary else [data.decode("utf-8", errors="replace")]
+        lines = [] if name in binary else [data.decode("utf-8", errors="replace")]
         if name in binary or b"\x00" in data or data.startswith((b"\xff\xfe", b"\xfe\xff")):
-            texts += decodings(data)
-        for text in texts:
+            lines += texts(data)
+        for text in lines:
             for filename, secret in scan_text(name, text):
                 found[filename].add(secret)
     return found
 
 
-def unreadable(files: list[str]) -> list[str]:
-    """The tracked files no read above saw a line of: git calls them binary,
-    so the line-by-line read had none, and they are text in neither UTF-8 nor
-    UTF-16: images, fonts, archives. Counted in the result, so "every tracked
-    file" says what it did not read. A file git shows as text (Latin-1, say)
-    was read line by line and is not counted (fifth review of `#140`,
-    finding 3)."""
+def read_as_bytes(files: list[str]) -> list[str]:
+    """The tracked files git calls binary that are text in neither UTF-8 nor
+    UTF-16: images, fonts, archives, Latin-1 text marked binary. They are read
+    as bytes (`texts`) and counted in the result, so "every tracked file" says
+    which were not read as text (fifth review of `#140`, finding 3; the
+    fourteenth, finding 1, which made them read at all)."""
     empty_tree = git("hash-object", "-t", "tree", "--stdin", stdin=b"").strip()
     binary = set(binary_paths("diff", empty_tree))
     return [
@@ -828,8 +839,8 @@ def check(
         files = tracked_files()
         if not files:
             raise CannotRun("git ls-files printed nothing, so there is nothing to scan")
-        skipped = unreadable(files)
-        scope = f"{len(files)} tracked files ({len(skipped)} of them binary, not text to read)"
+        as_bytes = read_as_bytes(files)
+        scope = f"{len(files)} tracked files ({len(as_bytes)} of them binary, read as bytes)"
         new = scan_tree(files) - known
         if new:
             print("Secrets in the tracked files that the baseline does not pass:")

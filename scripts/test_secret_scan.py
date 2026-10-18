@@ -667,14 +667,14 @@ class SecretScan(unittest.TestCase):
                 self.assertEqual(code, 1, out)
                 self.assertIn(f"{added[:12]} {name}:2", out)
 
-    def test_a_binary_file_is_counted_as_not_read(self) -> None:
+    def test_a_binary_file_is_read_as_bytes_and_counted(self) -> None:
         (self.repo.root / "icon.png").write_bytes(
             b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + bytes(range(256))
         )
         self.repo.commit("an image")
         code, out = self.repo.scan()
         self.assertEqual(code, 0, out)
-        self.assertIn("(1 of them binary, not text to read)", out)
+        self.assertIn("(1 of them binary, read as bytes)", out)
 
     def test_an_entry_nobody_judged_passes_nothing(self) -> None:
         # Otherwise one run of --write-baseline makes a real secret pass.
@@ -788,15 +788,15 @@ class ThirdReview(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", "Windows cannot name a file with a double quote")
     def test_a_name_git_quotes_is_refused_not_dropped(self) -> None:
-        # git C-quotes a path holding `"`, and the diff reader keeps the quotes,
-        # so the name is no file on disk. It is refused under that name.
+        # git C-quotes a path holding `"`; the name is read back unquoted, and
+        # the finding is refused under the file's own name.
         self.repo.write('we"ird.yml', "jobs:\n  a:\n    # " + LEAK + "    runs-on: x\n")
         self.repo.git("add", "-A")
         for args in (["--staged"], []):
             if not args:
                 self.repo.commit("a quoted name")
             code, out = self.repo.scan(*args)
-            # A crash exits 1 too, so the finding itself is asserted
+            # The finding itself is asserted, not only the exit code
             # (thirteenth review of #140, A3).
             self.assertEqual(code, 1, out)
             self.assertIn('we"ird.yml:3', out)
@@ -1337,11 +1337,15 @@ class EleventhReview(unittest.TestCase):
         )
         copy = scripts / "secret-scan.py"
         copy.write_bytes(SCRIPT.read_bytes())
+        # A key in a YAML comment: only the line read sees it, and the line
+        # read is the one the stub would empty. A key the parsed read also
+        # finds left this test green with the guard removed (fourteenth
+        # review of #140, finding 2).
         base = self.repo.git("rev-parse", "HEAD")
-        self.repo.write("src/config.py", LEAK)
-        self.repo.git("add", "src/config.py")
-        self.repo.git("commit", "-q", "-m", "a key")
-        self.repo.git("rm", "-q", "src/config.py")
+        self.repo.write("ci.yml", "name: build\n# " + LEAK)
+        self.repo.git("add", "ci.yml")
+        self.repo.git("commit", "-q", "-m", "a key in a comment")
+        self.repo.git("rm", "-q", "ci.yml")
         self.repo.git("commit", "-q", "-m", "delete it")
         done = subprocess.run(
             [sys.executable, str(copy), "--range", f"{base}..HEAD"],
@@ -1487,6 +1491,44 @@ class ThirteenthReview(unittest.TestCase):
         code, out = self.repo.scan()
         self.assertEqual(code, 2, out)
         self.assertIn("could not run", out)
+
+
+class FourteenthReview(unittest.TestCase):
+    """The fourteenth review of #140: text in neither UTF-8 nor UTF-16 that
+    git calls binary was read by nothing."""
+
+    def setUp(self) -> None:
+        self._dir = tempfile.TemporaryDirectory()
+        self.repo = Repo(Path(self._dir.name))
+
+    def tearDown(self) -> None:
+        self._dir.cleanup()
+
+    def test_latin1_text_marked_binary_is_read_in_the_tree_staged_and_a_range(self) -> None:
+        self.repo.write(".gitattributes", "notes.txt binary\n")
+        base = self.repo.commit("notes marked binary")
+        (self.repo.root / "notes.txt").write_bytes(b"Caf\xe9 notes\n" + LEAK.encode())
+        self.repo.git("add", "notes.txt")
+        self.assertEqual(self.repo.scan("--staged")[0], 1, "staged")
+        added = self.repo.commit("a key in Latin-1 notes")
+        self.assertEqual(self.repo.scan()[0], 1, "the tree")
+        self.repo.git("rm", "-q", "notes.txt")
+        self.repo.commit("delete it")
+        code, out = self.repo.scan("--range", f"{base}..HEAD")
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"{added[:12]} notes.txt:2", out)
+
+    def test_a_key_inside_a_binary_file_is_read(self) -> None:
+        # A database or a build artifact: NULs and bytes no text has, and a
+        # key in plain ASCII among them.
+        data = b"SQLite format 3\x00\xff\xfe\x01\n" + LEAK.encode() + bytes(range(256))
+        (self.repo.root / "cache.db").write_bytes(data)
+        base = self.repo.git("rev-parse", "HEAD")
+        added = self.repo.commit("a database")
+        self.assertEqual(self.repo.scan()[0], 1, "the tree")
+        code, out = self.repo.scan("--range", f"{base}..HEAD")
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"{added[:12]} cache.db:2", out)
 
 
 class Pins(unittest.TestCase):
