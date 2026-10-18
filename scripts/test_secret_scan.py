@@ -81,6 +81,12 @@ class Repo:
         return self.git("rev-parse", "HEAD")
 
     def scan(self, *args: str, env: dict[str, str] | None = None) -> tuple[int, str]:
+        # Without the runner's own GITHUB_* variables, so only what a test sets
+        # reaches the scan. The script falls back to GITHUB_REF when an event
+        # names no ref, and a run on main inherited `refs/heads/main`: a test of
+        # a manual run with no main then read main's history and passed instead
+        # of refusing, red on every run on main and green on every pull request.
+        inherited = {key: value for key, value in os.environ.items() if not key.startswith("GITHUB_")}
         done = subprocess.run(
             [sys.executable, str(SCRIPT), *args],
             cwd=self.root,
@@ -88,7 +94,7 @@ class Repo:
             text=True,
             encoding="utf-8",
             check=False,
-            env=None if env is None else {**os.environ, **env},
+            env={**inherited, **(env or {})},
         )
         return done.returncode, done.stdout + done.stderr
 
@@ -590,6 +596,17 @@ class SecretScan(unittest.TestCase):
 
     def test_github_without_main_cannot_run(self) -> None:
         code, out = self.repo.scan("--github", env=self._event("workflow_dispatch", {}))
+        self.assertEqual(code, 2, out)
+
+    def test_the_runners_github_variables_do_not_reach_a_scan(self) -> None:
+        # As on a run on main: the runner's GITHUB_REF must not stand in for
+        # the ref a test's event leaves out.
+        from unittest import mock
+
+        with mock.patch.dict(
+            os.environ, {"GITHUB_REF": "refs/heads/main", "GITHUB_EVENT_NAME": "push"}
+        ):
+            code, out = self.repo.scan("--github", env=self._event("workflow_dispatch", {}))
         self.assertEqual(code, 2, out)
 
     def test_github_deleted_branch_reads_the_tree_only(self) -> None:
