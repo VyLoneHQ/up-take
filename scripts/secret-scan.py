@@ -273,9 +273,7 @@ def decodings(data: bytes) -> list[str]:
     Three kinds of text reach here. UTF-16, which neither read can see: Python
     cannot decode it as UTF-8, so detect-secrets drops the file as binary, and
     git finds NUL bytes in it and prints no lines. Windows PowerShell 5.1
-    writes it by default (`>`, `Out-File`), and UTF-8 with a byte-order mark
-    where its default is set to UTF-8, as on the maintainer's machine
-    (eighteenth review of `#140`). A text file `.gitattributes` marks
+    writes it by default (`>`, `Out-File`). A text file `.gitattributes` marks
     `binary`, such as `*.svg` here, whose diff git prints as `Bin`. And UTF-8
     text with NUL bytes in it, which git also calls binary (third review of
     `#140`, finding 1).
@@ -353,13 +351,64 @@ def scan_text(filename: str, text: str) -> SecretsCollection:
     found = SecretsCollection()
     if not lines:
         return found
-    body = "".join("+" + line + "\n" for line in lines)
     neutral = copy_name(filename)
     header = f"diff --git a/{neutral} b/{neutral}\n--- /dev/null\n+++ b/{neutral}\n"
-    for _, secret in scan_diff(f"{header}@@ -0,0 +1,{len(lines)} @@\n{body}"):
-        secret.filename = filename
-        found[filename].add(secret)
+    # The lines as written, and the same lines read leniently (`lenient`).
+    for read in (lines, lenient(lines)):
+        body = "".join("+" + line + "\n" for line in read)
+        for _, secret in scan_diff(f"{header}@@ -0,0 +1,{len(read)} @@\n{body}"):
+            secret.filename = filename
+            found[filename].add(secret)
     return found
+
+
+# `key = value`, `key: value`, `key=value` or `export key=value`, the key one
+# word: the line shape INI, .env, .properties, TOML and YAML share.
+PAIR = re.compile(r"^\s*(?:export\s+)?([A-Za-z0-9_.\-]+)\s*[=:]\s*(.*?)\s*$")
+# A YAML block scalar's key: `key: |` or `key: >`, in a list item or not.
+BLOCK = re.compile(r"^(\s*)(?:-\s+)?([A-Za-z0-9_.\-]+)\s*:\s*[|>][-+0-9]*\s*(?:#.*)?$")
+
+
+def lenient(lines: list[str]) -> list[str]:
+    """The lines as a parser would hand them to the detectors, without needing
+    the parser to accept the file. Each `key = value` line becomes
+    `key = "value"`, each line of a YAML block scalar becomes `key: "line"`,
+    each comment stays as written (a `pragma: allowlist nextline secret` keeps
+    its next line), and every other line is empty, so each keeps its number.
+
+    detect-secrets quotes a value only through its YAML or INI parse, and
+    falls back to the raw lines when that parse refuses the file: a `%` in a
+    value, a repeated key or section, a character PyYAML calls non-printable,
+    one syntax error anywhere, or an INI file with no `[section]` under a known
+    extension such as `.env.example`. An unquoted value or a block scalar's
+    value then reached no detector. Rounds 14 to 18 closed such triggers one
+    at a time; this read does not depend on any of them (nineteenth review of
+    `#140`, findings 1 and 2)."""
+    out = [""] * len(lines)
+    block: tuple[int, str] | None = None
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if block is not None:
+            if not stripped:
+                continue
+            if len(line) - len(line.lstrip()) > block[0]:
+                out[i] = f'{block[1]}: "{stripped}"'
+                continue
+            block = None
+        if stripped.startswith(("#", ";", "//")):
+            out[i] = line
+            continue
+        head = BLOCK.match(line)
+        if head:
+            block = (len(head[1]), head[2])
+            continue
+        pair = PAIR.match(line)
+        if pair and pair[2]:
+            value = pair[2]
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+                value = value[1:-1]
+            out[i] = f'{pair[1]} = "{value}"'
+    return out
 
 
 def binary_paths(*diff_args: str) -> list[str]:
@@ -748,13 +797,14 @@ def github_commits() -> tuple[list[str] | None, str]:
     GitHub still serves it by sha, and only the push hook, before it was
     pushed, reads it (third review of `#140`, finding 4).
 
-    The whole history of main was 124 commits on 2026-10-14. Since each
-    changed file is also parsed as it was before its commit (eleventh review),
-    reading them took 4 min 47 s on a Windows workstation in a review, and
-    this branch's 143 took 6 min 5 s; before that it was about 1 min 15 s to
-    1 min 35 s. The runner was not measured (fourth review of `#140`, finding
-    4, which corrected "takes seconds"; the fifth, finding 2, which corrected
-    the count; the twelfth, finding 3, which corrected the time).
+    The whole history of main was 124 commits on 2026-10-14. Reading 124 took
+    4 min 47 s on a Windows workstation on 2026-10-18, and reading 150 took
+    5 min 51 s there the same day, since each changed file is also parsed as
+    it was before its commit (eleventh review); before that it was about 1 min
+    15 s to 1 min 35 s. The runner was not measured (fourth review of `#140`,
+    finding 4, which corrected "takes seconds"; the fifth, finding 2, which
+    corrected the count; the twelfth and nineteenth, which corrected the
+    time).
     Findings in it that are not secrets are listed in the baseline, which
     `--write-baseline` writes from the history too."""
     name = os.environ.get("GITHUB_EVENT_NAME", "")

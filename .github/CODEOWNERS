@@ -4,8 +4,8 @@
 # its own check off and still show green. GitHub enforces this only while
 # "Require review from Code Owners" is on for main.
 /.secrets.baseline @VyLoneReaz
-# Every workflow, not only secrets.yml: a new workflow with a job named
-# like the secret check could stand in for it as a required check.
-/.github/workflows/ @VyLoneReaz
+# All of .github/, not only secrets.yml: a new workflow with a job named
+# like the secret check could stand in for it as a required check, and a
+# local action under .github/actions/ would run code before the scan.
+/.github/ @VyLoneReaz
 /scripts/secret-scan.py @VyLoneReaz
-/.github/CODEOWNERS @VyLoneReaz

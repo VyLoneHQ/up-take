@@ -1381,8 +1381,12 @@ class TwelfthReview(unittest.TestCase):
     """The twelfth review of #140: a commit that only deleted lines was never
     parsed, and the install step ran a `pip` a pull request could add."""
 
-    HALF_A = "Zq3x9KfP0wLm7Tn2Rv"  # pragma: allowlist secret
-    HALF_B = "8sJ4dHq3x9KfP0wLm7"  # pragma: allowlist secret
+    # Halves no detector flags alone, so only the deletion that joins them
+    # makes a finding: the GitHub token pattern needs 36 characters after
+    # `ghp_` and no randomness. Random halves were flagged on their own by the
+    # lenient read (nineteenth review of #140), which proves nothing here.
+    HALF_A = "a" * 18
+    HALF_B = "b" * 18
 
     def setUp(self) -> None:
         self._dir = tempfile.TemporaryDirectory()
@@ -1421,23 +1425,31 @@ class TwelfthReview(unittest.TestCase):
         workflow = yaml.safe_load(
             (HERE.parent / ".github" / "workflows" / "secrets.yml").read_text(encoding="utf-8")
         )
-        commands = [
-            line.strip()
-            for job in workflow["jobs"].values()
-            for step in job.get("steps", [])
-            for line in str(step.get("run", "")).splitlines()
-            if line.strip()
-        ]
-        scan = next(i for i, command in enumerate(commands) if "secret-scan.py" in command)
-        # The exact commands, not a pattern: each pattern so far was passed by
-        # one more spelling of an interpreter (a path, `env`, then quotes and
-        # `bash -c`; seventeenth and eighteenth reviews of #140). A change to
-        # what runs before the scan changes this list, in review.
+        # Every step up to and including the scan, exactly, `uses:` steps
+        # included, and no `env`, `defaults` or other key that changes how a
+        # step runs: a pattern over the commands was passed by one more
+        # spelling of an interpreter each round, and a list of `run` lines
+        # alone did not see a `uses:` step added before the scan (seventeenth
+        # to nineteenth reviews of #140). A change to what runs before the
+        # scan changes this test, in review.
+        self.assertEqual(sorted(workflow, key=str), sorted(["name", True, "permissions", "jobs"], key=str))
+        self.assertEqual(list(workflow["jobs"]), ["secrets"])
+        job = workflow["jobs"]["secrets"]
+        self.assertEqual(sorted(job), ["name", "runs-on", "steps"])
+        scan = next(i for i, step in enumerate(job["steps"]) if "secret-scan.py" in str(step))
         self.assertEqual(
-            commands[: scan + 1],
+            job["steps"][: scan + 1],
             [
-                "python -I -m pip install detect-secrets==1.5.0 unidiff==0.7.5",
-                "python -I scripts/secret-scan.py --github",
+                {"uses": "actions/checkout@v7", "with": {"fetch-depth": 0}},
+                {"uses": "actions/setup-python@v7", "with": {"python-version": "3.12"}},
+                {
+                    "name": "Install detect-secrets",
+                    "run": "python -I -m pip install detect-secrets==1.5.0 unidiff==0.7.5",
+                },
+                {
+                    "name": "Scan the tracked files and the new commits",
+                    "run": "python -I scripts/secret-scan.py --github",
+                },
             ],
         )
 
@@ -1700,6 +1712,60 @@ class EighteenthReview(unittest.TestCase):
     def test_a_block_scalar_beside_a_colour_code_is_read(self) -> None:
         text = "db:\n  password: |\n    " + KEYWORD_VALUE + "\n# \x1b[31mred\x1b[0m\n"
         self._refused_everywhere("esc.yml", text.encode())
+
+
+class NineteenthReview(unittest.TestCase):
+    """The nineteenth review of #140: anything that made detect-secrets'
+    parser refuse a file kept an unquoted value or a block scalar from every
+    read, and `.env.example` was never parsed as INI."""
+
+    HEX = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"  # pragma: allowlist secret
+
+    def setUp(self) -> None:
+        self._dir = tempfile.TemporaryDirectory()
+        self.repo = Repo(Path(self._dir.name))
+
+    def tearDown(self) -> None:
+        self._dir.cleanup()
+
+    def _refused_everywhere(self, name: str, text: str) -> None:
+        base = self.repo.git("rev-parse", "HEAD")
+        (self.repo.root / name).write_bytes(text.encode())
+        self.repo.git("add", name)
+        self.assertEqual(self.repo.scan("--staged")[0], 1, "staged")
+        added = self.repo.commit(f"a value in {name}")
+        self.assertEqual(self.repo.scan()[0], 1, "the tree")
+        self.repo.git("rm", "-q", name)
+        self.repo.commit("delete it")
+        code, out = self.repo.scan("--range", f"{base}..HEAD")
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"{added[:12]} {name}:", out)
+
+    def test_an_ini_value_beside_a_percent_sign_is_read(self) -> None:
+        self._refused_everywhere("pct.ini", f"[s]\nprogress = 50%\nconn = {self.HEX}\n")
+
+    def test_an_ini_value_beside_a_repeated_key_is_read(self) -> None:
+        self._refused_everywhere("dup.ini", f"[s]\nmode = a\nmode = b\nconn = {self.HEX}\n")
+
+    def test_a_block_scalar_in_yaml_with_a_syntax_error_is_read(self) -> None:
+        text = "db:\n  password: |\n    " + KEYWORD_VALUE + "\nnote: 'unterminated\n"
+        self._refused_everywhere("syntax.yml", text)
+
+    def test_a_block_scalar_beside_a_c1_character_is_read(self) -> None:
+        text = "db:\n  password: |\n    " + KEYWORD_VALUE + "\n# \u0080\n"
+        self._refused_everywhere("c1.yml", text)
+
+    def test_a_value_in_env_example_is_read(self) -> None:
+        self._refused_everywhere(".env.example", f"blob={self.HEX}\n")
+
+    def test_a_nextline_pragma_still_holds_in_the_lenient_read(self) -> None:
+        # The comment stays in the lenient read, so the line after it is
+        # allowlisted there too.
+        text = f"[s]\n# pragma: allowlist nextline secret\nconn = {self.HEX}\n"
+        (self.repo.root / "ok.ini").write_bytes(text.encode())
+        self.repo.commit("an allowlisted value")
+        code, out = self.repo.scan()
+        self.assertEqual(code, 0, out)
 
 
 class Pins(unittest.TestCase):
