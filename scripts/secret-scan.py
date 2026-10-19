@@ -72,11 +72,15 @@ any other branch or tag, and for a manual run, everything since it left
 `refs/remotes/origin/main`. Never a push's old head to its new one, because a
 push GitHub ran nothing for would then be in no range. A commit that has left
 every branch (a force push, a deleted branch) is read by no run, though GitHub
-still serves it by sha; the push hook is what reads it (`github_commits`).
+still serves it by sha; the push hook is what reads it (`github_commits`). So
+is a closed pull request's head from a fork that never got a run (`every_ref`).
 A push whose last commit carries a skip marker starts no run, so its commits
 are read by the next run that reaches them: a push to the same branch, a pull
-request, or a push to main. A daily run over every branch is not part of
-this check yet. GitHub's documentation also describes no `pull_request`
+request, a push to main, or the daily run. The daily run (`schedule`) reads
+main as a push to main does, and every other branch and every tag that names a
+commit on the commits it carries that main does not, each judged by main's
+baseline and its own (`check_every_ref`). A tag that names a blob or a tree is
+listed in the log and not read. GitHub's documentation also describes no `pull_request`
 run while a pull request has a merge conflict, and no push event when more
 than three tags are pushed at once; neither is probed here.
 
@@ -105,6 +109,17 @@ added it stays in the history, and a push to main reads all of it, so once it
 is revoked, run `--write-baseline` and set `"is_secret": false` on its entry:
 a revoked value opens nothing, and that is the judgement the entry records
 (tenth review of `#140`, finding 3).
+
+**A finding the daily run reports on another branch or on a tag** is judged
+where its commit is. On a branch: run `--write-baseline` on that branch and
+judge the entry there, since the daily run takes each branch's own
+judgements for its own commits. On a tag, a tag cannot be committed to, and
+an entry written into main's baseline by hand does not last: the next
+`--write-baseline` on main keeps an old entry only where it finds the same
+file, type and value again, in main's tree or history (review of `#149`,
+round 5, finding 2). So revoke the value if it is a secret, then delete the
+tag, move it to a commit without the value, or merge its commit into main,
+whose baseline can then judge it (round 4, finding 1).
 
 Why a script and not `detect-secrets-hook`
 ------------------------------------------
@@ -869,6 +884,153 @@ def github_commits() -> tuple[list[str] | None, str]:
     ).split(), f"commits not on main ({after[:12]})"
 
 
+def every_ref() -> list[tuple[str, str]]:
+    """Every branch and tag GitHub holds, as the scheduled run's checkout has
+    them, as `(name, object id)`: `refs/remotes/origin/*` but main, and
+    `refs/tags/*`. A symbolic ref is passed over, which is how the clone's
+    `origin/HEAD` is written; it is passed over for being symbolic and not for
+    its name, so a real branch called `HEAD` is still read (review of `#149`,
+    round 1).
+    Never `refs/pull/*`: a pull request's head is read by its own runs while
+    it is open (`I-467`, round 10 of `#140`, finding 3: reading closed ones
+    kept the run red on a finding only a closed pull request held, and
+    nothing could make it pass). The cost, stated rather than hidden: a pull
+    request from a fork exists here only as `refs/pull/N/head`, so one whose
+    last head never got a run (a skip marker, or a first-time contributor's
+    run left waiting for approval) is read by nothing once it is closed
+    (review of `#149`, round 7, finding 2; backlog I-465).
+
+    **Everything after this goes to git by object id, and the name is only
+    printed.** A name that is not UTF-8 decoded with U+FFFD named no ref, or
+    another ref: the branch was skipped as naming no commit, or a clean
+    branch spelled with U+FFFD was read in its place, and the run exited 0
+    (review of `#149`, round 3, finding 1). The name keeps its bytes as
+    surrogates (`git_names`) and is printed through `shown`."""
+    lines = git_names(
+        "for-each-ref",
+        "--format=%(objectname)%00%(symref)%00%(refname)",
+        "refs/remotes/origin/",
+        "refs/tags/",
+    ).split("\n")
+    refs = []
+    for line in lines:
+        if not line:
+            continue
+        oid, symref, name = line.split("\0", 2)
+        if not symref and name != MAIN:
+            refs.append((name, oid))
+    return refs
+
+
+def commit_of(oid: str) -> str | None:
+    """The commit a ref's object names, peeling tags; `None` when it names a
+    blob or a tree, which have no commits to read. `^{}` peels every tag, so
+    nothing else is left; an object that cannot be read fails `rev-parse`,
+    which stops the run (exit 2). An earlier version took every failure here
+    for "names no commit", printed that, and read on to exit 0 (review of
+    `#149`, round 3, finding 1)."""
+    target = git("rev-parse", "--verify", oid + "^{}").strip()
+    return target if git("cat-file", "-t", target).strip() == "commit" else None
+
+
+def own_judgements(ref: str) -> SecretsCollection:
+    """The entries `ref`'s own `.secrets.baseline` judged not to be secrets,
+    `ref` being a commit's id.
+
+    Only the entries: its settings are never applied, so a branch cannot turn
+    a detector off or widen an exclusion for itself, let alone for the run.
+    A branch with no baseline, or one that cannot be read for any reason,
+    judges nothing, and its commits are judged by main's alone: stricter,
+    never looser. Any exception, because none of them can make a finding
+    pass here, while one left uncaught stopped the whole run with exit 2 and
+    no ref after it read (a baseline of deeply nested JSON raised
+    `RecursionError`: review of `#149`, round 1, finding 3)."""
+    try:
+        data = json.loads(git_bytes("show", f"{ref}:{BASELINE}").decode("utf-8"))
+        loaded = SecretsCollection.load_from_baseline(data)
+    except Exception:  # noqa: BLE001
+        return SecretsCollection()
+    own = SecretsCollection()
+    for filename, secret in loaded:
+        secret.filename = filename.replace("\\", "/")
+        own[secret.filename].add(secret)
+    return judged_not_secret(own)
+
+
+def check_every_ref(baseline_path: Path) -> int:
+    """The scheduled run: every branch and tag, each judged on its own.
+
+    A push whose last commit carries a skip marker starts no run, so its
+    commits wait for the next run that reaches them, and a branch nobody
+    pushes to again and opens no pull request for is reached by none (`I-467`).
+    This reads all of them once a day:
+
+    - main as a push to main is read: the tree and its whole history, judged
+      by main's baseline;
+    - each other branch and each tag: the commits it carries that main does
+      not (`rev-list <ref> --not main`), judged by main's baseline and by that
+      ref's own judgements, and by no other ref's. The first daily run trusted
+      every pull request head's baseline for every branch, so one pull request
+      could silence a finding on another (round 10 of `#140`, finding 1).
+
+    A commit two refs carry is read once and judged once for each of them.
+    A tag that names a blob or a tree is listed and not read; any other ref
+    this run cannot resolve stops it (exit 2)."""
+    listed = load_baseline(baseline_path)
+    for filename, secret in listed:
+        LISTED[filename].add(secret)
+    known = judged_not_secret(listed)
+    git("rev-parse", "--verify", "--quiet", MAIN + "^{commit}")
+    files = tracked_files()
+    if not files:
+        raise CannotRun("git ls-files printed nothing, so there is nothing to scan")
+    total = 0
+    new = scan_tree(files) - known
+    if new:
+        print("Secrets in main's tracked files that the baseline does not pass:")
+        total += report(new, "")
+
+    read: dict[str, SecretsCollection] = {}
+
+    def judged(commit: str, against: SecretsCollection, where: str) -> int:
+        if commit not in read:
+            read[commit] = scan_commit(commit)
+        new = read[commit] - against
+        if not new:
+            return 0
+        print(f"Secrets added by commit {commit[:12]} {where} that the baseline does not pass:")
+        return report(new, f"{commit[:12]} ")
+
+    for commit in git("rev-list", "--reverse", MAIN).split():
+        total += judged(commit, known, "on main")
+    refs = every_ref()
+    for name, oid in refs:
+        head = commit_of(oid)
+        if head is None:
+            print(f"  {shown(name)} names a blob or a tree, not a commit, and is not read")
+            continue
+        own = own_judgements(head)
+        both = SecretsCollection()
+        for collection in (known, own):
+            for filename, secret in collection:
+                both[filename].add(secret)
+        for commit in git("rev-list", "--reverse", head, "--not", MAIN).split():
+            total += judged(commit, both, f"on {shown(name)}")
+
+    scope = (
+        f"{len(files)} tracked files of main, {len(read)} commits, "
+        f"and {len(refs)} branches and tags"
+    )
+    if total:
+        print(
+            f"\nsecret-scan: {total} finding(s) in {scope}. {ADVICE['ci']} "
+            "If it is not a secret, see the docstring of scripts/secret-scan.py."
+        )
+        return 1
+    print(f"secret-scan: nothing new in {scope}.")
+    return 0
+
+
 LISTED: SecretsCollection = SecretsCollection()
 
 
@@ -1079,6 +1241,8 @@ def main(argv: list[str] | None = None) -> int:
         path = Path(args.baseline)
         if args.write_baseline:
             return write_baseline(path)
+        if args.github and os.environ.get("GITHUB_EVENT_NAME") == "schedule":
+            return check_every_ref(path)
         if args.github:
             commits, label = github_commits()
         elif args.range_spec:
