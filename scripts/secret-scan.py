@@ -72,7 +72,8 @@ any other branch or tag, and for a manual run, everything since it left
 `refs/remotes/origin/main`. Never a push's old head to its new one, because a
 push GitHub ran nothing for would then be in no range. A commit that has left
 every branch (a force push, a deleted branch) is read by no run, though GitHub
-still serves it by sha; the push hook is what reads it (`github_commits`).
+still serves it by sha; the push hook is what reads it (`github_commits`). So
+is a closed pull request's head from a fork that never got a run (`every_ref`).
 A push whose last commit carries a skip marker starts no run, so its commits
 are read by the next run that reaches them: a push to the same branch, a pull
 request, a push to main, or the daily run. The daily run (`schedule`) reads
@@ -890,10 +891,14 @@ def every_ref() -> list[tuple[str, str]]:
     `origin/HEAD` is written; it is passed over for being symbolic and not for
     its name, so a real branch called `HEAD` is still read (review of `#149`,
     round 1).
-    Never `refs/pull/*`: a pull request's head is read while it is open, and
-    a closed one's commits were read then too (`I-467`, round 10 of `#140`,
-    finding 3: a finding only a closed pull request held kept the run red,
-    and nothing could make it pass).
+    Never `refs/pull/*`: a pull request's head is read by its own runs while
+    it is open (`I-467`, round 10 of `#140`, finding 3: reading closed ones
+    kept the run red on a finding only a closed pull request held, and
+    nothing could make it pass). The cost, stated rather than hidden: a pull
+    request from a fork exists here only as `refs/pull/N/head`, so one whose
+    last head never got a run (a skip marker, or a first-time contributor's
+    run left waiting for approval) is read by nothing once it is closed
+    (review of `#149`, round 7, finding 2; backlog I-465).
 
     **Everything after this goes to git by object id, and the name is only
     printed.** A name that is not UTF-8 decoded with U+FFFD named no ref, or
