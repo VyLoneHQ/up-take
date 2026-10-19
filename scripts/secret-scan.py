@@ -112,12 +112,13 @@ a revoked value opens nothing, and that is the judgement the entry records
 **A finding the daily run reports on another branch or on a tag** is judged
 where its commit is. On a branch: run `--write-baseline` on that branch and
 judge the entry there, since the daily run takes each branch's own
-judgements for its own commits. On a tag, no lasting judgement is possible:
-a tag cannot be committed to, and an entry written into main's baseline by
-hand is dropped by the next `--write-baseline` on main, which keeps only
-files it finds in main's tree and history. So revoke the value if it is a
-secret, then delete the tag or move it to a commit without the value
-(review of `#149`, round 4, finding 1).
+judgements for its own commits. On a tag, a tag cannot be committed to, and
+an entry written into main's baseline by hand does not last: the next
+`--write-baseline` on main keeps an old entry only where it finds the same
+file, type and value again, in main's tree or history (review of `#149`,
+round 5, finding 2). So revoke the value if it is a secret, then delete the
+tag, move it to a commit without the value, or merge its commit into main,
+whose baseline can then judge it (round 4, finding 1).
 
 Why a script and not `detect-secrets-hook`
 ------------------------------------------

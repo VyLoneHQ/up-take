@@ -1739,6 +1739,13 @@ class TwelfthReview(unittest.TestCase):
             job["steps"][: scan + 1],
             [
                 {"uses": "actions/checkout@v7", "with": {"fetch-depth": 0}},
+                # Git only, and on the daily run only (I-467, review of #149).
+                {
+                    "name": "Fetch every branch and tag (daily run)",
+                    "if": "github.event_name == 'schedule'",
+                    "run": "git fetch --prune --no-tags origin"
+                    " '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*'",
+                },
                 {"uses": "actions/setup-python@v7", "with": {"python-version": "3.12"}},
                 {
                     "name": "Install detect-secrets",
