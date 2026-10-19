@@ -872,25 +872,58 @@ def github_commits() -> tuple[list[str] | None, str]:
     ).split(), f"commits not on main ({after[:12]})"
 
 
-def every_ref() -> list[str]:
+def every_ref() -> list[tuple[str, str]]:
     """Every branch and tag GitHub holds, as the scheduled run's checkout has
-    them: `refs/remotes/origin/*` but main, and `refs/tags/*`. A symbolic ref
-    is passed over, which is how the clone's `origin/HEAD` is written; it is
-    passed over for being symbolic and not for its name, so a real branch
-    called `HEAD` is still read (review of `#149`, round 1).
+    them, as `(name, object id)`: `refs/remotes/origin/*` but main, and
+    `refs/tags/*`. A symbolic ref is passed over, which is how the clone's
+    `origin/HEAD` is written; it is passed over for being symbolic and not for
+    its name, so a real branch called `HEAD` is still read (review of `#149`,
+    round 1).
     Never `refs/pull/*`: a pull request's head is read while it is open, and
     a closed one's commits were read then too (`I-467`, round 10 of `#140`,
     finding 3: a finding only a closed pull request held kept the run red,
-    and nothing could make it pass)."""
-    lines = git(
-        "for-each-ref", "--format=%(refname)%09%(symref)", "refs/remotes/origin/", "refs/tags/"
-    ).splitlines()
-    pairs = [line.split("\t", 1) for line in lines if line]
-    return [name for name, target in pairs if not target and name != MAIN]
+    and nothing could make it pass).
+
+    **Everything after this goes to git by object id, and the name is only
+    printed.** A name that is not UTF-8 decoded with U+FFFD named no ref, or
+    another ref: the branch was skipped as naming no commit, or a clean
+    branch spelled with U+FFFD was read in its place, and the run exited 0
+    (review of `#149`, round 3, finding 1). The name keeps its bytes as
+    surrogates (`git_names`) and is printed through `shown`."""
+    lines = git_names(
+        "for-each-ref",
+        "--format=%(objectname)%00%(symref)%00%(refname)",
+        "refs/remotes/origin/",
+        "refs/tags/",
+    ).split("\n")
+    refs = []
+    for line in lines:
+        if not line:
+            continue
+        oid, symref, name = line.split("\0", 2)
+        if not symref and name != MAIN:
+            refs.append((name, oid))
+    return refs
+
+
+def commit_of(oid: str) -> str | None:
+    """The commit a ref's object names, peeling tags; `None` when it names a
+    blob or a tree, which have no commits to read. Anything else stops the
+    run (exit 2): an earlier version took every failure here for "names no
+    commit", printed that, and read on to exit 0 (review of `#149`, round 3,
+    finding 1)."""
+    target = git("rev-parse", "--verify", "--quiet", oid + "^{}").strip()
+    kind = git("cat-file", "-t", target).strip()
+    if kind == "commit":
+        return target
+    if kind in ("blob", "tree"):
+        return None
+    raise CannotRun(f"{oid} peels to a {kind!r}, which this run cannot read")
 
 
 def own_judgements(ref: str) -> SecretsCollection:
-    """The entries `ref`'s own `.secrets.baseline` judged not to be secrets.
+    """The entries `ref`'s own `.secrets.baseline` judged not to be secrets,
+    `ref` being a commit's id.
 
     Only the entries: its settings are never applied, so a branch cannot turn
     a detector off or widen an exclusion for itself, let alone for the run.
@@ -901,7 +934,7 @@ def own_judgements(ref: str) -> SecretsCollection:
     no ref after it read (a baseline of deeply nested JSON raised
     `RecursionError`: review of `#149`, round 1, finding 3)."""
     try:
-        data = json.loads(git_bytes("show", f"{ref}^{{commit}}:{BASELINE}").decode("utf-8"))
+        data = json.loads(git_bytes("show", f"{ref}:{BASELINE}").decode("utf-8"))
         loaded = SecretsCollection.load_from_baseline(data)
     except Exception:  # noqa: BLE001
         return SecretsCollection()
@@ -929,7 +962,8 @@ def check_every_ref(baseline_path: Path) -> int:
       could silence a finding on another (round 10 of `#140`, finding 1).
 
     A commit two refs carry is read once and judged once for each of them.
-    A tag that names no commit is listed and not read."""
+    A tag that names a blob or a tree is listed and not read; any other ref
+    this run cannot resolve stops it (exit 2)."""
     listed = load_baseline(baseline_path)
     for filename, secret in listed:
         LISTED[filename].add(secret)
@@ -958,19 +992,18 @@ def check_every_ref(baseline_path: Path) -> int:
     for commit in git("rev-list", "--reverse", MAIN).split():
         total += judged(commit, known, "on main")
     refs = every_ref()
-    for ref in refs:
-        try:
-            git("rev-parse", "--verify", "--quiet", ref + "^{commit}")
-        except CannotRun:
-            print(f"  {ref} names no commit and is not read")
+    for name, oid in refs:
+        head = commit_of(oid)
+        if head is None:
+            print(f"  {shown(name)} names a blob or a tree, not a commit, and is not read")
             continue
-        own = own_judgements(ref)
+        own = own_judgements(head)
         both = SecretsCollection()
         for collection in (known, own):
             for filename, secret in collection:
                 both[filename].add(secret)
-        for commit in git("rev-list", "--reverse", ref + "^{commit}", "--not", MAIN).split():
-            total += judged(commit, both, f"on {ref}")
+        for commit in git("rev-list", "--reverse", head, "--not", MAIN).split():
+            total += judged(commit, both, f"on {shown(name)}")
 
     scope = (
         f"{len(files)} tracked files of main, {len(read)} commits, "

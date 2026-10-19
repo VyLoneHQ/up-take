@@ -710,7 +710,7 @@ class SecretScan(unittest.TestCase):
         self._on("refs/tags/z-leak", lambda: added.append(self._leak_and_delete()[1]))
         code, out = self._daily()
         self.assertEqual(code, 1, out)
-        self.assertIn("refs/tags/a-blob names no commit and is not read", out)
+        self.assertIn("refs/tags/a-blob names a blob or a tree, not a commit, and is not read", out)
         self.assertIn(f"{added[0][:12]} on refs/tags/z-leak", out)
 
     def test_daily_reads_mains_whole_history(self) -> None:
@@ -875,6 +875,29 @@ class SecretScan(unittest.TestCase):
         code, out = self._daily()
         self.assertEqual(code, 1, out)
         self.assertIn(f"{added[0][:12]} on refs/remotes/origin/HEAD", out)
+
+    def test_daily_reads_a_branch_whose_name_is_not_utf8(self) -> None:
+        # Review of #149, round 3, finding 1: the name came back with U+FFFD
+        # for the byte and named no ref, so the branch was skipped and the run
+        # exited 0; with a clean branch spelled with U+FFFD beside it, that one
+        # was read twice and the leak never. Written through packed-refs, as
+        # git refuses no byte there. The name is printed with \xNN.
+        self.repo.git("update-ref", MAIN_REF, "main")
+        self.repo.git("checkout", "-q", "-b", "side")
+        _, added = self._leak_and_delete()
+        leak_head = self.repo.git("rev-parse", "HEAD")
+        self.repo.git("checkout", "-q", "main")
+        clean = self.repo.git("rev-parse", "main")
+        self.repo.git("pack-refs", "--all")
+        packed = self.repo.root / ".git" / "packed-refs"
+        lines = packed.read_bytes()
+        lines += leak_head.encode() + b" refs/remotes/origin/caf\xe9\n"
+        lines += clean.encode() + b" refs/remotes/origin/caf\xef\xbf\xbd\n"
+        packed.write_bytes(lines)
+        code, out = self._daily()
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"{added[:12]} on refs/remotes/origin/caf\\xe9", out)
+        self.assertIn("2 branches and tags", out)
 
     def test_daily_without_main_cannot_run(self) -> None:
         code, out = self._daily()
