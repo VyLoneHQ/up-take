@@ -75,8 +75,10 @@ every branch (a force push, a deleted branch) is read by no run, though GitHub
 still serves it by sha; the push hook is what reads it (`github_commits`).
 A push whose last commit carries a skip marker starts no run, so its commits
 are read by the next run that reaches them: a push to the same branch, a pull
-request, or a push to main. A daily run over every branch is not part of
-this check yet. GitHub's documentation also describes no `pull_request`
+request, a push to main, or the daily run. The daily run (`schedule`) reads
+main as a push to main does, and every other branch and tag on the commits it
+carries that main does not, each judged by main's baseline and its own
+(`check_every_ref`). GitHub's documentation also describes no `pull_request`
 run while a pull request has a merge conflict, and no push event when more
 than three tags are pushed at once; neither is probed here.
 
@@ -869,6 +871,112 @@ def github_commits() -> tuple[list[str] | None, str]:
     ).split(), f"commits not on main ({after[:12]})"
 
 
+def every_ref() -> list[str]:
+    """Every branch and tag GitHub holds, as the scheduled run's checkout has
+    them: `refs/remotes/origin/*` but `HEAD` and main, and `refs/tags/*`.
+    Never `refs/pull/*`: a pull request's head is read while it is open, and
+    a closed one's commits were read then too (`I-467`, round 10 of `#140`,
+    finding 3: a finding only a closed pull request held kept the run red,
+    and nothing could make it pass)."""
+    names = git(
+        "for-each-ref", "--format=%(refname)", "refs/remotes/origin/", "refs/tags/"
+    ).split()
+    return [n for n in names if n not in (MAIN, "refs/remotes/origin/HEAD")]
+
+
+def own_judgements(ref: str) -> SecretsCollection:
+    """The entries `ref`'s own `.secrets.baseline` judged not to be secrets.
+
+    Only the entries: its settings are never applied, so a branch cannot turn
+    a detector off or widen an exclusion for itself, let alone for the run.
+    A branch with no baseline, or one that cannot be read, judges nothing,
+    and its commits are judged by main's alone: stricter, never looser."""
+    try:
+        data = json.loads(git_bytes("show", f"{ref}^{{commit}}:{BASELINE}").decode("utf-8"))
+        loaded = SecretsCollection.load_from_baseline(data)
+    except (CannotRun, ValueError, KeyError, TypeError, AttributeError):
+        return SecretsCollection()
+    own = SecretsCollection()
+    for filename, secret in loaded:
+        secret.filename = filename.replace("\\", "/")
+        own[secret.filename].add(secret)
+    return judged_not_secret(own)
+
+
+def check_every_ref(baseline_path: Path) -> int:
+    """The scheduled run: every branch and tag, each judged on its own.
+
+    A push whose last commit carries a skip marker starts no run, so its
+    commits wait for the next run that reaches them, and a branch nobody
+    pushes to again and opens no pull request for is reached by none (`I-467`).
+    This reads all of them once a day:
+
+    - main as a push to main is read: the tree and its whole history, judged
+      by main's baseline;
+    - each other branch and each tag: the commits it carries that main does
+      not (`rev-list <ref> --not main`), judged by main's baseline and by that
+      ref's own judgements, and by no other ref's. The first daily run trusted
+      every pull request head's baseline for every branch, so one pull request
+      could silence a finding on another (round 10 of `#140`, finding 1).
+
+    A commit two refs carry is read once and judged once for each of them.
+    A tag that names no commit is listed and not read."""
+    listed = load_baseline(baseline_path)
+    for filename, secret in listed:
+        LISTED[filename].add(secret)
+    known = judged_not_secret(listed)
+    git("rev-parse", "--verify", "--quiet", MAIN + "^{commit}")
+    files = tracked_files()
+    if not files:
+        raise CannotRun("git ls-files printed nothing, so there is nothing to scan")
+    total = 0
+    new = scan_tree(files) - known
+    if new:
+        print("Secrets in main's tracked files that the baseline does not pass:")
+        total += report(new, "")
+
+    read: dict[str, SecretsCollection] = {}
+
+    def judged(commit: str, against: SecretsCollection, where: str) -> int:
+        if commit not in read:
+            read[commit] = scan_commit(commit)
+        new = read[commit] - against
+        if not new:
+            return 0
+        print(f"Secrets added by commit {commit[:12]} {where} that the baseline does not pass:")
+        return report(new, f"{commit[:12]} ")
+
+    for commit in git("rev-list", "--reverse", MAIN).split():
+        total += judged(commit, known, "on main")
+    refs = every_ref()
+    for ref in refs:
+        try:
+            git("rev-parse", "--verify", "--quiet", ref + "^{commit}")
+        except CannotRun:
+            print(f"  {ref} names no commit and is not read")
+            continue
+        own = own_judgements(ref)
+        both = SecretsCollection()
+        for collection in (known, own):
+            for filename, secret in collection:
+                both[filename].add(secret)
+        for commit in git("rev-list", "--reverse", ref + "^{commit}", "--not", MAIN).split():
+            total += judged(commit, both, f"on {ref}")
+
+    scope = (
+        f"{len(files)} tracked files of main, {len(read)} commits, "
+        f"and {len(refs)} branches and tags"
+    )
+    if total:
+        print(
+            f"\nsecret-scan: {total} finding(s) in {scope}. {ADVICE['ci']} "
+            "If it is not a secret, see the docstring of scripts/secret-scan.py."
+        )
+        return 1
+    print(f"secret-scan: nothing new in {scope}.")
+    return 0
+
+
 LISTED: SecretsCollection = SecretsCollection()
 
 
@@ -1079,6 +1187,8 @@ def main(argv: list[str] | None = None) -> int:
         path = Path(args.baseline)
         if args.write_baseline:
             return write_baseline(path)
+        if args.github and os.environ.get("GITHUB_EVENT_NAME") == "schedule":
+            return check_every_ref(path)
         if args.github:
             commits, label = github_commits()
         elif args.range_spec:
