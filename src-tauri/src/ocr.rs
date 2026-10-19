@@ -1360,7 +1360,9 @@ mod tests {
     }
 
     /// Held by every test that writes the global `OCR` state's `latest`, for
-    /// the whole test, so two of them never interleave (`I-468`).
+    /// the whole test, so two of them never interleave (`I-468`). Not taken by
+    /// `an_area_holds_text_only_while_its_reading_has_characters`, which calls
+    /// `forget` too: its area's id is 40, which never holds the slot here.
     static CLIPBOARD_SLOT: Mutex<()> = Mutex::new(());
 
     /// [`forget`] releases the clipboard promise, driven at its OWN call site.
@@ -1380,8 +1382,10 @@ mod tests {
     /// test below it: both write `latest`, and both dismiss their store's first
     /// id. The tests here run in parallel, so each holds [`CLIPBOARD_SLOT`] for
     /// its whole body. Without it this test failed once on CI (`up-take` CI run
-    /// `39138054945`, backlog `I-468`): the other test filled the slot between
-    /// this one's write and its `forget`, or dismissed this one's id.
+    /// `39138054945`, backlog `I-468`): the other test filled the slot with its
+    /// own area after this one's write and before this one's assertion. The
+    /// other test fails the mirror way: this one overwrites its promise, and
+    /// its own `forget` of this one's id then empties the slot.
     #[test]
     fn dismissing_an_area_releases_the_clipboard_promise() {
         let _slot = CLIPBOARD_SLOT
