@@ -76,9 +76,10 @@ still serves it by sha; the push hook is what reads it (`github_commits`).
 A push whose last commit carries a skip marker starts no run, so its commits
 are read by the next run that reaches them: a push to the same branch, a pull
 request, a push to main, or the daily run. The daily run (`schedule`) reads
-main as a push to main does, and every other branch and tag on the commits it
-carries that main does not, each judged by main's baseline and its own
-(`check_every_ref`). GitHub's documentation also describes no `pull_request`
+main as a push to main does, and every other branch and every tag that names a
+commit on the commits it carries that main does not, each judged by main's
+baseline and its own (`check_every_ref`). A tag that names a blob or a tree is
+listed in the log and not read. GitHub's documentation also describes no `pull_request`
 run while a pull request has a merge conflict, and no push event when more
 than three tags are pushed at once; neither is probed here.
 

@@ -656,6 +656,20 @@ class SecretScan(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertIn(f"{added[0][:12]} on refs/tags/v9", out)
 
+    def test_daily_lists_a_tag_that_names_no_commit_and_reads_the_rest(self) -> None:
+        # A tag can name a blob or a tree. It has no commits to read, so it is
+        # named in the log and passed over, and the refs after it are still
+        # read (review of #149, round 2, finding 2).
+        self.repo.git("update-ref", MAIN_REF, "main")
+        readme = self.repo.git("rev-parse", "HEAD:README.md")
+        self.repo.git("tag", "a-blob", readme)
+        added: list[str] = []
+        self._on("refs/tags/z-leak", lambda: added.append(self._leak_and_delete()[1]))
+        code, out = self._daily()
+        self.assertEqual(code, 1, out)
+        self.assertIn("refs/tags/a-blob names no commit and is not read", out)
+        self.assertIn(f"{added[0][:12]} on refs/tags/z-leak", out)
+
     def test_daily_reads_mains_whole_history(self) -> None:
         _, added = self._leak_and_delete()
         self.repo.git("update-ref", MAIN_REF, "main")
@@ -692,7 +706,10 @@ class SecretScan(unittest.TestCase):
 
     def test_daily_a_branch_baseline_cannot_change_the_settings(self) -> None:
         # Its judgements only: a branch whose baseline blunts every detector
-        # and passes over every line is still read with main's settings.
+        # and passes over every line is still read with main's settings. The
+        # values are ones detect-secrets accepts, so taking them goes red by
+        # a finding silenced (exit 0), not by a crash (an entropy limit of 99
+        # raised, which exited 2: review of #149, round 2, finding 1).
         # detect-secrets merges a baseline's plugins into the ones it has, so
         # a list without them removes nothing; a setting on each one does.
         def disarmed() -> None:
@@ -700,7 +717,7 @@ class SecretScan(unittest.TestCase):
             data = json.loads(path.read_text(encoding="utf-8"))
             for plugin in data["plugins_used"]:
                 if "limit" in plugin:
-                    plugin["limit"] = 99.0
+                    plugin["limit"] = 8.0
                 if plugin["name"] == "KeywordDetector":
                     plugin["keyword_exclude"] = ".*"
             data["filters_used"].append(
