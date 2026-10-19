@@ -707,11 +707,14 @@ struct FreezeRevealPayload {
 /// The page's confirmation that it has hidden what a freeze asked for, and
 /// painted it.
 ///
-/// **`async`, so it does not run on the main thread.** The freeze waits for
-/// this while holding [`EXCLUDED_FROM_CAPTURE`], and `settings_write`, which
-/// takes that lock's write side, runs on the main thread. A synchronous command
-/// here would queue behind it, and the freeze would time out on a page that
-/// had in fact answered.
+/// **`async`, so it does not run on the main thread.** Two callers wait for
+/// this while holding [`EXCLUDED_FROM_CAPTURE`]'s read side: the freeze and
+/// [`capture_aside`]. Three take its write side: `settings_write`, which runs
+/// on the main thread; [`show`] when a setting is owed to the window; and
+/// startup's [`apply_capture_exclusion`], once, before anything can read. A
+/// synchronous command here would queue on the main thread behind a writer
+/// that is itself waiting for the reader to let go, and the reader would time
+/// out on a page that had in fact answered.
 #[tauri::command]
 pub async fn overlay_freeze_hidden(token: u64) {
     if !crate::freeze::acknowledge_hidden(token) {
@@ -3609,6 +3612,18 @@ mod tests {
 
     /// A plain window with a caption, created hidden, that belongs to no
     /// framework. The overlay's own style bits, so Windows treats it alike.
+    ///
+    /// Placed far off every monitor, so a test that shows it draws nothing on
+    /// anyone's screen (`I-462`): at (200, 200) every local `cargo test` put a
+    /// captioned window on the desktop for about 2.5 s. Windows Graphics
+    /// Capture answers for a window there as it does on a monitor.
+    ///
+    /// Not a tool window, although the overlay has no taskbar button either
+    /// (`skipTaskbar`) and showing this one tells the shell about it twice per
+    /// run. With `WS_EX_TOOLWINDOW`, the test failed in 2 of 3 runs on a
+    /// workstation when it was the first in its process to ask Windows Graphics
+    /// Capture, which a normal `cargo test` makes it (second review of `#141`).
+    /// Why is not known.
     #[cfg(windows)]
     struct PlainWindow(windows_sys::Win32::Foundation::HWND);
 
@@ -3628,8 +3643,8 @@ mod tests {
                     class.as_ptr(),
                     title.as_ptr(),
                     WS_CAPTION | WS_SYSMENU | WS_CLIPSIBLINGS,
-                    200,
-                    200,
+                    30_000,
+                    30_000,
                     320,
                     200,
                     std::ptr::null_mut(),
@@ -3776,7 +3791,12 @@ mod tests {
     ///
     /// `stays_hidden` before the first show can only fail on a machine that
     /// draws a hidden window told `WDA_NONE` (the test above). On one that
-    /// does, breaking the rule turns this red. The rest holds on any machine.
+    /// does, breaking the rule turns the affinity read before it red
+    /// (*owed, not written*), every time it was tried. `stays_hidden` is a
+    /// second net and not a reliable one: with that read taken out, it went red
+    /// in some runs and not in others (2026-10-14, the window off every
+    /// monitor, `I-462` and the second review of `#141`). The rest holds on any
+    /// machine.
     #[cfg(windows)]
     #[test]
     fn the_rule_leaves_a_real_hidden_window_hidden() {
