@@ -873,15 +873,19 @@ def github_commits() -> tuple[list[str] | None, str]:
 
 def every_ref() -> list[str]:
     """Every branch and tag GitHub holds, as the scheduled run's checkout has
-    them: `refs/remotes/origin/*` but `HEAD` and main, and `refs/tags/*`.
+    them: `refs/remotes/origin/*` but main, and `refs/tags/*`. A symbolic ref
+    is passed over, which is how the clone's `origin/HEAD` is written; it is
+    passed over for being symbolic and not for its name, so a real branch
+    called `HEAD` is still read (review of `#149`, round 1).
     Never `refs/pull/*`: a pull request's head is read while it is open, and
     a closed one's commits were read then too (`I-467`, round 10 of `#140`,
     finding 3: a finding only a closed pull request held kept the run red,
     and nothing could make it pass)."""
-    names = git(
-        "for-each-ref", "--format=%(refname)", "refs/remotes/origin/", "refs/tags/"
-    ).split()
-    return [n for n in names if n not in (MAIN, "refs/remotes/origin/HEAD")]
+    lines = git(
+        "for-each-ref", "--format=%(refname)%09%(symref)", "refs/remotes/origin/", "refs/tags/"
+    ).splitlines()
+    pairs = [line.split("\t", 1) for line in lines if line]
+    return [name for name, target in pairs if not target and name != MAIN]
 
 
 def own_judgements(ref: str) -> SecretsCollection:
@@ -889,12 +893,16 @@ def own_judgements(ref: str) -> SecretsCollection:
 
     Only the entries: its settings are never applied, so a branch cannot turn
     a detector off or widen an exclusion for itself, let alone for the run.
-    A branch with no baseline, or one that cannot be read, judges nothing,
-    and its commits are judged by main's alone: stricter, never looser."""
+    A branch with no baseline, or one that cannot be read for any reason,
+    judges nothing, and its commits are judged by main's alone: stricter,
+    never looser. Any exception, because none of them can make a finding
+    pass here, while one left uncaught stopped the whole run with exit 2 and
+    no ref after it read (a baseline of deeply nested JSON raised
+    `RecursionError`: review of `#149`, round 1, finding 3)."""
     try:
         data = json.loads(git_bytes("show", f"{ref}^{{commit}}:{BASELINE}").decode("utf-8"))
         loaded = SecretsCollection.load_from_baseline(data)
-    except (CannotRun, ValueError, KeyError, TypeError, AttributeError):
+    except Exception:  # noqa: BLE001
         return SecretsCollection()
     own = SecretsCollection()
     for filename, secret in loaded:

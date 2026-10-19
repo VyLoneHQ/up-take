@@ -724,33 +724,97 @@ class SecretScan(unittest.TestCase):
         self.assertIn("0 branches and tags", out)
 
     def test_daily_a_branch_with_no_readable_baseline_is_judged_by_mains(self) -> None:
-        # Main judged the value, so a branch that adds it again passes even
-        # with its baseline gone; an unjudged value on a branch whose baseline
-        # is not JSON is a finding, not a run that could not finish.
+        # Main judged the value and then deleted its file; the baseline keeps
+        # the judgement. A branch that adds the value again, in a commit of
+        # its own, passes on main's judgement with its own baseline gone (an
+        # earlier version added only a comment above an unchanged line, so it
+        # could not go red: review of #149, round 1, finding 1). An unjudged
+        # value on a branch whose baseline cannot be read is a finding, not a
+        # run that could not finish, whatever the baseline holds.
         self.repo.write("src/pins.py", LEAK)
         self.repo.commit("a value that is not a secret")
         self.assertEqual(self.repo.scan("--write-baseline")[0], 0)
         self.repo.judge()
         self.repo.commit("judged on main")
+        self.repo.git("rm", "-q", "src/pins.py")
+        self.repo.commit("the file goes; its judgement stays")
 
-        def gone() -> None:
+        def again() -> None:
             self.repo.git("rm", "-q", ".secrets.baseline")
-            self.repo.write("src/pins.py", "# again\n" + LEAK)
-            self.repo.commit("no baseline here")
+            self.repo.write("src/pins.py", LEAK)
+            self.repo.commit("the value again, and no baseline here")
 
-        self._on("refs/remotes/origin/gone", gone)
+        head = self._on("refs/remotes/origin/again", again)
+        self.assertIn("+" + LEAK.strip(), self.repo.git("show", head), "the commit adds the line")
         code, out = self._daily()
         self.assertEqual(code, 0, out)
 
-        def garbled() -> None:
-            self.repo.write(".secrets.baseline", "{not json")
-            self.repo.write("src/leak.py", LEAK)
-            self.repo.commit("a leak, and a baseline nothing can read")
+        unreadable = {
+            "garbled": "{not json",
+            "nested": "[" * 100_000 + "]" * 100_000,
+            "a list": "[]",
+        }
+        for name, text in unreadable.items():
 
-        head = self._on("refs/remotes/origin/garbled", garbled)
+            def broken(text: str = text) -> None:
+                self.repo.write(".secrets.baseline", text)
+                self.repo.write("src/leak.py", LEAK)
+                self.repo.commit("a leak, and a baseline nothing can read")
+
+            head = self._on("refs/remotes/origin/" + name.replace(" ", "-"), broken)
+            code, out = self._daily()
+            self.assertEqual(code, 1, f"{name}: {out}")
+            self.assertIn(f"{head[:12]} src/leak.py:1", out)
+            self.repo.git("update-ref", "-d", "refs/remotes/origin/" + name.replace(" ", "-"))
+
+    def test_daily_a_commit_two_branches_carry_is_judged_for_each(self) -> None:
+        # Review of #149, round 1, finding 1: the one state the run shares
+        # across refs is the read of each commit. Branch a-judges carries the
+        # leak and its own judgement; b-plain points at the leak commit itself
+        # and judges nothing. a-judges is read first, and its judgement must
+        # not travel with the commit.
+        judging = self._on("refs/remotes/origin/a-judges", self._judged_leak)
+        leak = self.repo.git("rev-parse", judging + "~1")
+        self.repo.git("update-ref", "refs/remotes/origin/b-plain", leak)
         code, out = self._daily()
         self.assertEqual(code, 1, out)
-        self.assertIn(f"{head[:12]} src/leak.py:1", out)
+        self.assertIn(f"{leak[:12]} on refs/remotes/origin/b-plain", out)
+        self.assertNotIn("on refs/remotes/origin/a-judges", out)
+
+    def test_daily_a_branch_entry_nobody_judged_passes_nothing(self) -> None:
+        # Round 10 of #140, finding 6, and review of #149, round 1: only
+        # entries judged not secrets pass, on a branch as on main.
+        added: list[str] = []
+
+        def unjudged() -> None:
+            self.repo.write("src/pins.py", LEAK)
+            added.append(self.repo.commit("a value"))
+            self.assertEqual(self.repo.scan("--write-baseline")[0], 0)
+            self.repo.commit("listed, and judged by nobody")
+
+        head = self._on("refs/remotes/origin/listed", unjudged)
+        listed = self.repo.git("show", f"{head}:.secrets.baseline")
+        self.assertIn('"src/pins.py"', listed, "the branch's baseline lists the entry")
+        code, out = self._daily()
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"{added[0][:12]} src/pins.py:1", out)
+
+    def test_daily_reads_a_branch_called_head_and_skips_the_symbolic_one(self) -> None:
+        # A branch named HEAD is fetched to refs/remotes/origin/HEAD, where the
+        # clone's own pointer to main usually is. The pointer is symbolic and
+        # passed over; a real branch there is read (review of #149, round 1).
+        self.repo.git("update-ref", MAIN_REF, "main")
+        self.repo.git("symbolic-ref", "refs/remotes/origin/HEAD", MAIN_REF)
+        code, out = self._daily()
+        self.assertEqual(code, 0, out)
+        self.assertIn("0 branches and tags", out)
+
+        self.repo.git("symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
+        added: list[str] = []
+        self._on("refs/remotes/origin/HEAD", lambda: added.append(self._leak_and_delete()[1]))
+        code, out = self._daily()
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"{added[0][:12]} on refs/remotes/origin/HEAD", out)
 
     def test_daily_without_main_cannot_run(self) -> None:
         code, out = self._daily()
@@ -1327,7 +1391,8 @@ class EighthReview(unittest.TestCase):
 class NinthReview(unittest.TestCase):
     """The ninth review of #140: one judged finding switched off detect-
     secrets' second parse of a file, and a submodule pointer stopped the
-    commit read. (Its finding about the daily run left with the daily run.)"""
+    commit read. Its finding about the daily run left with the daily run and
+    came back with it: `test_daily_a_branch_passes_on_its_own_judgement`."""
 
     # The SHA-256 of "test", unquoted: only the eager parse of `key = value`
     # quotes it, and only then can the hex detector see it.
