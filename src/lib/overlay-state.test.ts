@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   type AreaView,
   areaFramesCss,
+  areaInSight,
   armAreaType,
   armedTypeForKey,
   dismissFocusedArea,
@@ -150,6 +151,7 @@ describe('areaFramesCss', () => {
       layer: 'auto',
       kind: 'default',
       ocr_behaviour: 'in_place',
+      sticky: 'free',
       zoom: 1,
       // 200x150, so it is above `CHROME_INSIDE_SPAN` on both axes: bands
       // inside, and therefore no outside handles. Rust decides this; the
@@ -164,6 +166,7 @@ describe('areaFramesCss', () => {
       layer: 'front',
       kind: 'filter',
       ocr_behaviour: 'rendered',
+      sticky: 'paused',
       zoom: 1,
       bar: [-1000, -218, 300, 18],
       handles: [],
@@ -178,6 +181,31 @@ describe('areaFramesCss', () => {
     expect(frames?.map((frame) => frame.ocrBehaviour)).toEqual([
       'in_place',
       'rendered',
+    ]);
+  });
+
+  it("carries each area's sticky state through to the frame", () => {
+    // Roadmap 1.47: the page marks a sticky area and says "Paused" by THIS
+    // field. Dropping it would leave a paused area looking like any other,
+    // sitting where its window used to be with nothing to say why.
+    const frames = areaFramesCss(areas, [-1080, -1080], 2, null);
+    expect(frames?.map((frame) => frame.sticky)).toEqual(['free', 'paused']);
+  });
+
+  it('draws a paused area in placement and nowhere else', () => {
+    // Roadmap 1.47, decided 2026-10-12: an area whose window is minimised or
+    // closed is out of sight while the user works. Every other pairing is
+    // drawn. Asserted as the whole table, so that hiding a following area, or
+    // drawing a paused one in living, both fail here.
+    const drawn = (['free', 'following', 'paused'] as const).map((sticky) =>
+      (['placement', 'living', 'hidden'] as const).map((state) =>
+        areaInSight(sticky, state),
+      ),
+    );
+    expect(drawn).toEqual([
+      [true, true, true],
+      [true, true, true],
+      [true, false, false],
     ]);
   });
 
@@ -272,12 +300,14 @@ describe('menuFrameCss', () => {
         rect: [400, 305, 176, 28],
         label: 'Area type',
         checked: false,
+        enabled: true,
         parent: true,
       },
       {
         rect: [400, 333, 176, 28],
         label: 'Auto',
         checked: true,
+        enabled: true,
         parent: false,
       },
     ],
@@ -295,12 +325,14 @@ describe('menuFrameCss', () => {
           rect: [576, 305, 176, 28],
           label: 'Type: Default',
           checked: true,
+          enabled: true,
           parent: false,
         },
         {
           rect: [576, 333, 176, 28],
           label: 'Type: Screenshot',
           checked: false,
+          enabled: true,
           parent: false,
         },
       ],
@@ -321,6 +353,25 @@ describe('menuFrameCss', () => {
     });
     expect(frame?.items.map((item) => item.hovered)).toEqual([false, true]);
     expect(frame?.items.map((item) => item.checked)).toEqual([false, true]);
+  });
+
+  it('draws greyed out exactly the rows Rust says do nothing', () => {
+    // Rust ignores a click on such a row, so a row drawn as live here would
+    // be a row that looks clickable and is not.
+    const greyed: MenuView = {
+      ...menu,
+      items: menu.items.map((item, index) => ({
+        ...item,
+        enabled: index !== 1,
+      })),
+    };
+
+    expect(
+      menuFrameCss(greyed, [0, 0], 1)?.items.map((item) => item.disabled),
+    ).toEqual([false, true]);
+    expect(
+      menuFrameCss(menu, [0, 0], 1)?.items.map((item) => item.disabled),
+    ).toEqual([false, false]);
   });
 
   it('marks the row that opens a child list and no other', () => {

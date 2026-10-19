@@ -92,6 +92,14 @@ pub enum Event {
 ///   poll reads an empty region set as its fail-safe "take input everywhere",
 ///   so a `Living` state with no areas would capture every click instead of
 ///   passing it through. There is no such state; it is always `Hidden`.
+///
+///   "No areas" is an empty store. A store whose every area is a sticky one
+///   waiting out of sight is not empty, so the overlay then stays `Living`
+///   and shown with nothing drawn, until a window comes back or the user
+///   frees an area. No click is taken in that state: the region set the
+///   sentence above speaks of was deleted with ADR-0016 (see
+///   `click_through`), and the window is click-through in every visible
+///   state. What that state costs while it lasts has not been measured.
 #[must_use]
 pub fn next(current: OverlayState, event: Event, has_areas: bool) -> OverlayState {
     let target = match (current, event) {
