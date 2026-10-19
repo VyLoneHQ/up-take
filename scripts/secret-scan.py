@@ -919,17 +919,13 @@ def every_ref() -> list[tuple[str, str]]:
 
 def commit_of(oid: str) -> str | None:
     """The commit a ref's object names, peeling tags; `None` when it names a
-    blob or a tree, which have no commits to read. Anything else stops the
-    run (exit 2): an earlier version took every failure here for "names no
-    commit", printed that, and read on to exit 0 (review of `#149`, round 3,
-    finding 1)."""
-    target = git("rev-parse", "--verify", "--quiet", oid + "^{}").strip()
-    kind = git("cat-file", "-t", target).strip()
-    if kind == "commit":
-        return target
-    if kind in ("blob", "tree"):
-        return None
-    raise CannotRun(f"{oid} peels to a {kind!r}, which this run cannot read")
+    blob or a tree, which have no commits to read. `^{}` peels every tag, so
+    nothing else is left; an object that cannot be read fails `rev-parse`,
+    which stops the run (exit 2). An earlier version took every failure here
+    for "names no commit", printed that, and read on to exit 0 (review of
+    `#149`, round 3, finding 1)."""
+    target = git("rev-parse", "--verify", oid + "^{}").strip()
+    return target if git("cat-file", "-t", target).strip() == "commit" else None
 
 
 def own_judgements(ref: str) -> SecretsCollection:

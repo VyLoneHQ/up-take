@@ -1726,6 +1726,10 @@ class TwelfthReview(unittest.TestCase):
         # scan changes this test, in review.
         self.assertEqual(sorted(workflow, key=str), sorted(["name", True, "permissions", "jobs"], key=str))
         self.assertEqual(workflow["permissions"], {"contents": "read"})
+        # The daily run hangs on this one line (I-467): without it every
+        # other test still passed (review of #149, round 6). `on` is True to
+        # a YAML 1.1 reader.
+        self.assertEqual(workflow[True]["schedule"], [{"cron": "17 4 * * *"}])
         self.assertEqual(list(workflow["jobs"]), ["secrets"])
         job = workflow["jobs"]["secrets"]
         # The values too, not only the keys: a self-hosted runner or a write
