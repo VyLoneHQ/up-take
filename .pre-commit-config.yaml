@@ -1,0 +1,32 @@
+# Local hooks. Set them up once per clone:
+#
+#     pip install pre-commit
+#     pre-commit install
+#
+# The secret scan is the check CI runs (scripts/secret-scan.py), moved to the
+# point where a finding is not yet public: before a commit is made, and before
+# a push. The pre-push half reads every commit no remote has, so it also
+# catches a commit made without the first hook.
+#
+# The versions match the CI job's, so a baseline that passes here passes there.
+default_install_hook_types: [pre-commit, pre-push]
+
+repos:
+  - repo: local
+    hooks:
+      - id: secret-scan-staged
+        name: secret scan (the commit being made)
+        entry: python -I scripts/secret-scan.py --staged
+        language: python
+        additional_dependencies: [detect-secrets==1.5.0, unidiff==0.7.5]
+        pass_filenames: false
+        stages: [pre-commit]
+
+      - id: secret-scan-unpushed
+        name: secret scan (commits no remote has)
+        entry: python -I scripts/secret-scan.py --unpushed
+        language: python
+        additional_dependencies: [detect-secrets==1.5.0, unidiff==0.7.5]
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
