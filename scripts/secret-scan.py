@@ -72,8 +72,9 @@ any other branch or tag, and for a manual run, everything since it left
 `refs/remotes/origin/main`. Never a push's old head to its new one, because a
 push GitHub ran nothing for would then be in no range. A commit that has left
 every branch (a force push, a deleted branch) is read by no run, though GitHub
-still serves it by sha; the push hook is what reads it (`github_commits`). So
-is a closed pull request's head from a fork that never got a run (`every_ref`).
+still serves it by sha; the push hook is what reads it (`github_commits`). No
+run reads a closed pull request's head from a fork that never got a run either,
+and no hook of ours ran on it (`every_ref`).
 A push whose last commit carries a skip marker starts no run, so its commits
 are read by the next run that reaches them: a push to the same branch, a pull
 request, a push to main, or the daily run. The daily run (`schedule`) reads

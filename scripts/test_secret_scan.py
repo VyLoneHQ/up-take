@@ -903,6 +903,37 @@ class SecretScan(unittest.TestCase):
         code, out = self._daily()
         self.assertEqual(code, 2, out)
 
+    def test_daily_a_ref_whose_object_cannot_be_read_stops_the_run(self) -> None:
+        # A tag object whose target is missing is listed by for-each-ref, and
+        # peeling it fails. That failure stops the run (exit 2); taking it for
+        # "names no commit" skipped the ref and exited 0 (review of #149,
+        # round 3, finding 1; I-470: no test went red without the guard).
+        self.repo.git("update-ref", MAIN_REF, "main")
+        missing = "1" * 40
+        body = f"object {missing}\ntype commit\ntag ghost\ntagger t <t@example.com> 0 +0000\n\nghost\n"
+        tag = subprocess.run(
+            ["git", "hash-object", "-t", "tag", "-w", "--literally", "--stdin"],
+            cwd=self.repo.root, input=body, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        # update-ref refuses a tag whose target is missing; a fetch does not.
+        self.repo.write(".git/refs/tags/ghost", tag + "\n")
+        self.assertEqual(self.repo.git("for-each-ref", "--format=%(objectname)", "refs/tags/ghost"), tag)
+        code, out = self._daily()
+        self.assertEqual(code, 2, out)
+        self.assertNotIn("refs/tags/ghost names a blob or a tree", out)
+
+    def test_daily_reads_mains_tracked_files(self) -> None:
+        # A leak still in main's tree is reported by the tree read as well as
+        # by the history read (I-470: dropping the tree read left every daily
+        # test green).
+        self.repo.write("src/leak.py", LEAK)
+        self.repo.commit("add a key and keep it")
+        self.repo.git("update-ref", MAIN_REF, "main")
+        code, out = self._daily()
+        self.assertEqual(code, 1, out)
+        self.assertIn("Secrets in main's tracked files that the baseline does not pass:", out)
+        self.assertNotIn(KEYWORD_VALUE, out)
+
     # What neither read could see (second review of #140, finding 1), and
     # entries nobody judged.
 
