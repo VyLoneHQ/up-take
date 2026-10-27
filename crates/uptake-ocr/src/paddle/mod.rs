@@ -30,6 +30,7 @@ pub mod recognise;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use ort::environment::Environment;
 use ort::session::Session;
 use ort::value::TensorRef;
 use uptake_core::bitmap::RgbaBitmap;
@@ -119,8 +120,10 @@ impl PaddleEngine {
     ///
     /// ⚠️ **`ort`'s `load-dynamic` feature PANICS when the library is missing.**
     /// It resolves the dylib lazily, inside a `OnceLock` initialiser, with
-    /// `.expect("Failed to load ONNX Runtime dylib")` -- read at
-    /// `ort-2.0.0-rc.13/src/lib.rs:234` rather than assumed. So the first call
+    /// `load_dynamic::init(&path).unwrap_or_else(|e| panic!("Failed to load
+    /// ONNX Runtime dylib: {e}"))` -- read at `ort-2.0.0-rc.15/src/lib.rs:236`
+    /// rather than assumed (rc.13 had `.expect(...)` at `:234`, where this was
+    /// first read). So the first call
     /// that touches the ONNX API unwinds, and no `Result` anywhere in this
     /// crate ever sees it.
     ///
@@ -451,9 +454,15 @@ const DYLIB_PATH_VAR: &str = "ORT_DYLIB_PATH";
 /// The path ONNX Runtime was first loaded from, and how that went.
 ///
 /// `std`'s `OnceLock`, deliberately, not `ort`'s: see [`load_runtime`] for why
-/// entering `ort`'s a second time is unsound. Holds the outcome so a failure is
-/// remembered rather than retried into that path.
-static RUNTIME_LOAD: OnceLock<(PathBuf, Result<(), String>)> = OnceLock::new();
+/// this crate enters `ort`'s loader once. Holds the outcome so a failure is
+/// remembered rather than retried.
+///
+/// **It also holds the one [`Environment`] a process may have.** Since `ort`
+/// 2.0.0-rc.14 a session is built against an explicit environment, and `ort`
+/// keeps only a weak reference to it, so the environment lives exactly as long
+/// as something holds it. This static is what holds it, for the life of the
+/// process, which is the one-load-per-process rule `load_runtime` already kept.
+static RUNTIME_LOAD: OnceLock<(PathBuf, Result<Environment, String>)> = OnceLock::new();
 
 /// Verifies ONNX Runtime is present and reachable, before `ort` can panic on it.
 ///
@@ -564,8 +573,8 @@ fn resolve_runtime_path(
 ///
 /// # What this replaced
 ///
-/// `ort` resolves its dylib lazily inside a `OnceLock` with
-/// `.expect("Failed to load ONNX Runtime dylib")`, reading `ORT_DYLIB_PATH` and
+/// `ort` resolves its dylib lazily inside a `OnceLock` and panics with
+/// "Failed to load ONNX Runtime dylib" when it cannot, reading `ORT_DYLIB_PATH` and
 /// falling back to a bare library name when it is unset. Neither is acceptable
 /// here: the panic is `UP-TAKE I-330`, and the bare-name fallback loads whatever the
 /// machine happens to offer instead of the file `ADR-0032` had us place and
@@ -578,8 +587,8 @@ fn resolve_runtime_path(
 ///
 /// # ONNX Runtime is loaded once per process, and this caches the first answer
 ///
-/// **`ort`'s own `OnceLock` cannot be entered twice safely, so this makes sure
-/// it is entered once.** Found by the independent review of this change, read
+/// **Why this was written: `ort` 2.0.0-rc.13's own `OnceLock` could not be
+/// entered twice safely.** Found by the independent review of this change, read
 /// out of the vendored crate at `ort-2.0.0-rc.13/src/util/once_lock_std.rs:46`
 /// and reproduced deterministically rather than argued:
 ///
@@ -595,6 +604,13 @@ fn resolve_runtime_path(
 /// read that memory. Caching the first outcome here means a failure stays a
 /// failure and `ort` is never asked twice.
 ///
+/// **rc.15 no longer has that defect**: its loader's lock
+/// (`ort-2.0.0-rc.15/src/util/once_lock.rs`, `try_init_inner`) puts the cell
+/// back to uninitialised when the closure fails, so a second load is a real
+/// retry. The cache stays for two reasons that still hold: `ort` allows one
+/// environment per process (`EnvironmentBuilder::build` refuses a second), and
+/// a second path must be refused rather than given the first library.
+///
 /// A later call naming a DIFFERENT path is refused rather than silently given
 /// the first library, because ONNX Runtime genuinely is per-process and
 /// pretending otherwise is how the caller ends up trusting the wrong file.
@@ -604,17 +620,21 @@ fn resolve_runtime_path(
 fn load_runtime(path: &Path) -> Result<(), EngineError> {
     let (loaded_from, outcome) = RUNTIME_LOAD.get_or_init(|| {
         let outcome = ort::init_from(path)
-            .map(|environment| {
-                // `commit` reports whether THIS call installed the environment
-                // options. Reaching here means the load succeeded, which is the
-                // part that had to.
-                let _ = environment.commit();
-            })
             .map_err(|error| {
                 format!(
                     "ONNX Runtime at {} could not be loaded: {error}",
                     path.display()
                 )
+            })
+            .and_then(|builder| {
+                // `build` refuses a second environment in one process, which
+                // the `OnceLock` around this already makes impossible here.
+                builder.build().map_err(|error| {
+                    format!(
+                        "ONNX Runtime at {} was loaded but its environment could not be created: {error}",
+                        path.display()
+                    )
+                })
             });
         (path.to_path_buf(), outcome)
     });
@@ -626,7 +646,10 @@ fn load_runtime(path: &Path) -> Result<(), EngineError> {
             path.display()
         )));
     }
-    outcome.clone().map_err(EngineError::Unavailable)
+    outcome
+        .as_ref()
+        .map(|_| ())
+        .map_err(|error| EngineError::Unavailable(error.clone()))
 }
 
 /// Opens one ONNX session, naming which model failed.
@@ -637,7 +660,15 @@ fn open_session(path: &Path, role: &str) -> Result<Session, EngineError> {
             path.display()
         )));
     }
-    Session::builder()
+    let environment = match RUNTIME_LOAD.get() {
+        Some((_, Ok(environment))) => environment,
+        _ => {
+            return Err(EngineError::Unavailable(format!(
+                "the {role} model cannot be opened: ONNX Runtime is not loaded"
+            )));
+        }
+    };
+    Session::builder(environment)
         .and_then(|mut builder| builder.commit_from_file(path))
         .map_err(|error| {
             EngineError::Unavailable(format!(
@@ -1076,10 +1107,11 @@ mod tests {
 
     #[test]
     fn a_second_runtime_load_from_a_different_path_is_refused() {
-        // The review's Finding 2, made executable. `ort`'s own OnceLock reports
-        // success on a second entry after a failed first one, so this crate
-        // caches the first outcome and refuses a different path rather than
-        // entering `ort` twice. Driven through `load_runtime` itself.
+        // The review's Finding 2, made executable. `ort` 2.0.0-rc.13's own
+        // OnceLock reported success on a second entry after a failed first one;
+        // rc.15's does not, and one environment per process still holds, so
+        // this crate caches the first outcome and refuses a different path
+        // rather than entering `ort` twice. Driven through `load_runtime`.
         let first = path("C:/ours/onnxruntime.dll");
         let _ = load_runtime(&first);
         let error = load_runtime(&path("C:/theirs/onnxruntime.dll")).unwrap_err();

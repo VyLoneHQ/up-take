@@ -22,8 +22,8 @@
 //! `architecture.md` section 4 treats a model file as arbitrary code while the
 //! runtime is the larger surface of the two.
 //!
-//! Re-probed 2026-08-30 rather than carried over from the decision: `ort` is
-//! still at **2.0.0-rc.13 with no stable release** (`max_stable_version: null`),
+//! Re-probed 2026-10-27 rather than carried over from the decision: `ort` is
+//! at **2.0.0-rc.15 with no stable release** (`max_stable_version: null`),
 //! so the version is pinned **exactly** in the workspace manifest, per that
 //! decision's fourth clause. Nothing in either repository watches crates.io, so
 //! that pin is a dated observation and not a standing truth.

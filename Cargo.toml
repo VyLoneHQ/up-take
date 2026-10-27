@@ -84,12 +84,12 @@ proptest = "1"
 # a file we placed, checked and shipped deliberately.
 #
 # THE `=` IS NOT A TYPO AND MUST NOT BE "TIDIED" TO A CARET. ADR-0032 decision 4:
-# `ort` has no stable release (`max_stable_version: null`, re-probed 2026-08-30),
+# `ort` has no stable release (`max_stable_version: null`, re-probed 2026-10-27),
 # so the version is pinned EXACTLY and moving it is a deliberate change with its
-# own review, not something `cargo update` does. A bare "2.0.0-rc.13" means
-# ^2.0.0-rc.13 in Cargo, which would accept rc.14 and 2.0.0 alike -- the precise
+# own review, not something `cargo update` does. A bare "2.0.0-rc.15" means
+# ^2.0.0-rc.15 in Cargo, which would accept rc.16 and 2.0.0 alike -- the precise
 # drift the decision exists to prevent.
-ort = { version = "=2.0.0-rc.13", default-features = false, features = ["load-dynamic"] }
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["load-dynamic"] }
 
 # ---------------------------------------------------------------------------
 # Lints, applied to every member via `[lints] workspace = true`.
