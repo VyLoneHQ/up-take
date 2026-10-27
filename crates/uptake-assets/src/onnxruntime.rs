@@ -153,7 +153,12 @@ pub const NOTICES_SIZE: u64 = 344_457;
 /// compatibility policy, which is the class `D-29` says to probe rather than
 /// assert. Probed 2026-09-02 by loading both PP-OCRv4 models through this exact
 /// DLL and reading text off a rendered image.
-pub const VERIFIED_AGAINST_ORT: &str = "2.0.0-rc.13";
+///
+/// **Re-probed 2026-10-27 for rc.15 and 1.31.0** (`I-466`): `ocr_accuracy` over
+/// the 192 rendered cards at drop_score 0.5 read every card exactly as `main`
+/// (rc.13 with 1.29.0) did, card for card (overall CER 0.011, exact 86.5 %,
+/// empty 0.0 % on both), at 25 ms a card against 23 ms.
+pub const VERIFIED_AGAINST_ORT: &str = "2.0.0-rc.15";
 
 /// The three files the installer must carry for ONNX Runtime.
 ///
