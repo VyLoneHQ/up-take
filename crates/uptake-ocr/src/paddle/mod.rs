@@ -120,9 +120,10 @@ impl PaddleEngine {
     ///
     /// ⚠️ **`ort`'s `load-dynamic` feature PANICS when the library is missing.**
     /// It resolves the dylib lazily, inside a `OnceLock` initialiser, with
-    /// `.expect("Failed to load ONNX Runtime dylib")` -- read at
-    /// `ort-2.0.0-rc.15/src/lib.rs:236` rather than assumed (`:234` in rc.13,
-    /// where this was first read). So the first call
+    /// `load_dynamic::init(&path).unwrap_or_else(|e| panic!("Failed to load
+    /// ONNX Runtime dylib: {e}"))` -- read at `ort-2.0.0-rc.15/src/lib.rs:236`
+    /// rather than assumed (rc.13 had `.expect(...)` at `:234`, where this was
+    /// first read). So the first call
     /// that touches the ONNX API unwinds, and no `Result` anywhere in this
     /// crate ever sees it.
     ///
@@ -572,8 +573,8 @@ fn resolve_runtime_path(
 ///
 /// # What this replaced
 ///
-/// `ort` resolves its dylib lazily inside a `OnceLock` with
-/// `.expect("Failed to load ONNX Runtime dylib")`, reading `ORT_DYLIB_PATH` and
+/// `ort` resolves its dylib lazily inside a `OnceLock` and panics with
+/// "Failed to load ONNX Runtime dylib" when it cannot, reading `ORT_DYLIB_PATH` and
 /// falling back to a bare library name when it is unset. Neither is acceptable
 /// here: the panic is `UP-TAKE I-330`, and the bare-name fallback loads whatever the
 /// machine happens to offer instead of the file `ADR-0032` had us place and
