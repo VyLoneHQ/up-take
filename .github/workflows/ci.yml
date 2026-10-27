@@ -256,6 +256,31 @@ jobs:
       - name: cargo test (release)
         run: cargo test --release --all-features
 
+      # The one test of the Windows half of sticky areas (roadmap 1.47). It is
+      # marked `ignore` because it needs a desktop session: it creates a real
+      # window, far off every monitor, and listens to the events Windows sends
+      # about it. This runner has such a session, so it runs here.
+      #
+      # Added 2026-10-10 on the first independent review of the feature, which
+      # found that the step above never runs it: with the follower thread, the
+      # hooks or the per-frame poll broken, every other test stays green,
+      # because none of them has a window to follow.
+      #
+      # The test is picked by its exact path. A filter that matches nothing
+      # exits 0 after "running 0 tests", so the step also requires the line
+      # that says one test ran and passed. Renaming the test without renaming
+      # it here fails this step instead of quietly emptying it, and another
+      # test with a similar name cannot stand in for it.
+      - name: cargo test (a sticky area follows a real window)
+        shell: pwsh
+        run: |
+          cargo test --all-features -p up-take --lib sticky::tests::a_real_window_is_followed_by_its_events_and_paused_when_it_closes -- --ignored --exact 2>&1 | Tee-Object -Variable output
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (($output | Out-String) -match 'test result: ok\. 1 passed')) {
+            Write-Error 'The real-window test did not run: no line says that one test passed.'
+            exit 1
+          }
+
   # ---------------------------------------------------------------------------
   # Supply chain: licence policy and security advisories.
   #

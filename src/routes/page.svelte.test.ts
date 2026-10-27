@@ -389,6 +389,7 @@ describe('an area renders the badges its state earns and no others', () => {
       close: [492, 92, 18, 18],
       layer: 'auto',
       kind,
+      sticky: 'free',
       // 2 rather than some larger number because the badge turns on `> 1`; the
       // value only has to be magnified, and inventing a bigger one would imply
       // this file knows a factor Rust no longer defines.
@@ -562,6 +563,110 @@ describe('an area renders the badges its state earns and no others', () => {
 
     await emit('overlay://areas', { areas: [area({ layer: 'auto' })] });
     expect(container.querySelectorAll('.layer-badge')).toHaveLength(0);
+  });
+
+  /**
+   * Roadmap 1.47. Three states, three renderings, and the word is the part
+   * that matters: a paused area sits where its window used to be, and
+   * "Paused" is the only thing on screen that says why. Asserted per state so
+   * that showing the word on a following area, or dropping it from a paused
+   * one, both fail here. The first review of this feature swapped the two in
+   * the template and the whole suite stayed green.
+   */
+  test('a sticky area shows its mark, and says Paused only while paused', async () => {
+    const { container } = await mount();
+    await emit('overlay://state', state());
+
+    await emit('overlay://areas', { areas: [area({ sticky: 'free' })] });
+    expect(container.querySelectorAll('.sticky-badge')).toHaveLength(0);
+
+    await emit('overlay://areas', { areas: [area({ sticky: 'following' })] });
+    const following = container.querySelector('.sticky-badge');
+    expect(following?.textContent?.trim()).toBe('◈');
+    expect(following?.classList.contains('paused')).toBe(false);
+
+    await emit('overlay://areas', { areas: [area({ sticky: 'paused' })] });
+    const paused = container.querySelector('.sticky-badge');
+    expect(paused?.textContent?.trim()).toBe('◈ Paused');
+    expect(paused?.classList.contains('paused')).toBe(true);
+  });
+
+  /**
+   * Decided at the rig on 2026-10-12: a paused area is out of sight while the
+   * user works. In placement it is drawn, dimmed, so it can be freed, moved or
+   * removed. A following area is drawn in both states and is never dimmed.
+   */
+  test('a paused area is drawn dimmed in placement and not at all in living', async () => {
+    const { container } = await mount();
+    await emit('overlay://state', state());
+    await emit('overlay://areas', { areas: [area({ sticky: 'paused' })] });
+    const waiting = container.querySelectorAll('.area');
+    expect(waiting).toHaveLength(1);
+    expect(waiting[0]?.classList.contains('waiting')).toBe(true);
+
+    await emit('overlay://state', state({ state: 'living' }));
+    expect(container.querySelectorAll('.area')).toHaveLength(0);
+    expect(container.querySelectorAll('.sticky-badge')).toHaveLength(0);
+
+    await emit('overlay://areas', { areas: [area({ sticky: 'following' })] });
+    const following = container.querySelectorAll('.area');
+    expect(following).toHaveLength(1);
+    expect(following[0]?.classList.contains('waiting')).toBe(false);
+
+    await emit('overlay://state', state());
+    expect(
+      container.querySelector('.area')?.classList.contains('waiting'),
+    ).toBe(false);
+  });
+
+  /**
+   * Review round 11 read `area.source` as "has captured pixels" and concluded
+   * that a paused Screenshot or Upscale area kept showing its still. `source`
+   * is the dragged-area flag. The still is an `<img>` inside the area's own
+   * element, so it goes with it. Asserted, so that this is a fact and not a
+   * reading: a paused area holding a still draws nothing of it in living.
+   */
+  test('a paused area that holds a still draws no still in living', async () => {
+    const { container } = await mount();
+    await emit('overlay://state', state({ state: 'living' }));
+    await emit('overlay://areas', {
+      areas: [area({ kind: 'screenshot', sticky: 'following' })],
+    });
+    await emit('overlay://pin', { id: 1, url: 'uptake-area://1-7.png' });
+    expect(container.querySelectorAll('.pin')).toHaveLength(1);
+
+    await emit('overlay://areas', {
+      areas: [area({ kind: 'screenshot', sticky: 'paused' })],
+    });
+    expect(container.querySelectorAll('.pin')).toHaveLength(0);
+    expect(container.querySelectorAll('.area')).toHaveLength(0);
+
+    // Back in placement it is drawn again, still and all.
+    await emit('overlay://state', state());
+    expect(container.querySelectorAll('.pin')).toHaveLength(1);
+  });
+
+  test('the sticky mark moves over when the area also shows a tier arrow', async () => {
+    const { container } = await mount();
+    await emit('overlay://state', state());
+    await emit('overlay://areas', {
+      areas: [area({ sticky: 'following', layer: 'front' })],
+    });
+    expect(container.querySelectorAll('.layer-badge')).toHaveLength(1);
+    expect(
+      container
+        .querySelector('.sticky-badge')
+        ?.classList.contains('beside-layer'),
+    ).toBe(true);
+
+    await emit('overlay://areas', {
+      areas: [area({ sticky: 'following', layer: 'auto' })],
+    });
+    expect(
+      container
+        .querySelector('.sticky-badge')
+        ?.classList.contains('beside-layer'),
+    ).toBe(false);
   });
 
   /**
@@ -839,6 +944,34 @@ describe('an area outside chrome appears with its hover and not otherwise', () =
     await emit('overlay://areas', { areas: [smallArea()] });
     await hover(1);
     expect(container.querySelectorAll('.outside-handle')).toHaveLength(4);
+  });
+
+  test('an area that pauses under the pointer loses its chrome with its body', async () => {
+    // Review round 9 of roadmap 1.47. A hovered area whose window is
+    // minimised becomes paused while the page still holds it as hovered. In
+    // living nothing of it may stay: not the close control, not the bar, not
+    // the four handles. In placement all of it is drawn again.
+    const { container } = await mount();
+    await emit('overlay://state', state({ state: 'living' }));
+    await emit('overlay://areas', {
+      areas: [smallArea({ sticky: 'following' })],
+    });
+    await hover(1);
+    const chrome = () => [
+      container.querySelectorAll('.area').length,
+      container.querySelectorAll('.close').length,
+      container.querySelectorAll('.grab-bar').length,
+      container.querySelectorAll('.outside-handle').length,
+    ];
+    expect(chrome()).toEqual([1, 1, 1, 4]);
+
+    // The window is minimised. No hover report follows: the pointer has not
+    // moved.
+    await emit('overlay://areas', { areas: [smallArea({ sticky: 'paused' })] });
+    expect(chrome()).toEqual([0, 0, 0, 0]);
+
+    await emit('overlay://state', state());
+    expect(chrome()).toEqual([1, 1, 1, 4]);
   });
 
   test('the outside handles are placed where Rust put them', async () => {

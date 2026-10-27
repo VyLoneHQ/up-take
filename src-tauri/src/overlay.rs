@@ -20,6 +20,7 @@ use uptake_core::area::{
 };
 use uptake_core::geometry::{Monitor, Point, Rect, Size, virtual_desktop_bounds};
 use uptake_core::interaction;
+use uptake_core::sticky::Sticky;
 
 use crate::click_through;
 use crate::overlay_state::{Event, OverlayState, next};
@@ -52,6 +53,22 @@ pub fn show(app: &AppHandle) -> Result<(), String> {
     window
         .set_ignore_cursor_events(true)
         .map_err(|e| format!("Could not set overlay click-through: {e}"))?;
+    // What the setting owes the window is written on the right side of the
+    // show: an exclusion before the first visible frame (ADR-0019), and a
+    // `WDA_NONE` once the window is on screen. See `affinity_write`.
+    #[cfg(windows)]
+    show_settling(
+        &EXCLUDED_FROM_CAPTURE,
+        &AFFINITY_LEDGER,
+        || {
+            window
+                .show()
+                .map_err(|e| format!("Could not show the overlay: {e}"))
+        },
+        |setting| write_affinity(&window, setting),
+        |error| crate::diagnostics::trouble("overlay", &error),
+    )?;
+    #[cfg(not(windows))]
     window
         .show()
         .map_err(|e| format!("Could not show the overlay: {e}"))?;
@@ -251,9 +268,11 @@ pub(crate) fn overlay_window(app: &AppHandle) -> Result<WebviewWindow, String> {
 ///
 /// ⚠️ **This was `exclude_from_capture`, called once, and its docs said
 /// *permanently*.** ADR-0019 always named a *Show UP-TAKE in screen
-/// recordings* setting; 1.14 ships it, so the affinity is now set at startup
-/// **and** whenever that setting changes. The word is struck rather than
-/// dropped because a reader who remembers *permanent* needs to see it go.
+/// recordings* setting; 1.14 ships it, so the affinity now follows that
+/// setting. It is written at startup **and** whenever the setting changes, or
+/// at the next show when the overlay is hidden at the time (the last section
+/// below). The word is struck rather than dropped because a reader who
+/// remembers *permanent* needs to see it go.
 ///
 /// **Decision 1 is untouched, and it is the one that matters.** It says
 /// `uptake-capture` stays ignorant of the overlay forever, which is what makes
@@ -280,30 +299,258 @@ pub(crate) fn overlay_window(app: &AppHandle) -> Result<WebviewWindow, String> {
 /// `#109`'s review). A freeze that decided *excluded, nothing to hide* and then
 /// had the setting flip to *show* mid-capture would capture the overlay's
 /// drawing. So a change made during a freeze waits for it, at most one
-/// capture, and a freeze never runs across a change.
+/// capture, and a freeze never runs across a change. Every other capture that
+/// asks whether the drawing is in shot holds the same lock for as long
+/// ([`capture_aside`], [`with_exclusion_held`]), and a change waits for one of
+/// those in the same way.
+///
+/// # A hidden overlay is written to in one case only
+///
+/// Excluding a window that has never been shown, which is the startup of a
+/// default install. Every other change that finds the overlay hidden is owed
+/// instead, and [`show`] makes it. [`affinity_write`] has the reason, which
+/// is a stray window on the user's desktop.
 #[cfg(windows)]
 pub fn apply_capture_exclusion(app: &AppHandle, show_in_recordings: bool) -> Result<(), String> {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
-    };
-    let mut excluded = EXCLUDED_FROM_CAPTURE
-        .write()
-        .unwrap_or_else(PoisonError::into_inner);
+    let window = overlay_window(app);
+    apply_setting(
+        &EXCLUDED_FROM_CAPTURE,
+        &AFFINITY_LEDGER,
+        show_in_recordings,
+        || {
+            window
+                .as_ref()
+                .map_err(Clone::clone)?
+                .is_visible()
+                .map_err(|e| format!("Could not read overlay visibility: {e}"))
+        },
+        |setting| write_affinity(window.as_ref().map_err(Clone::clone)?, setting),
+    )
+}
+
+/// [`apply_capture_exclusion`] without the window: the flag, the ledger, and
+/// the decision whether `write` runs now. Split out so the tests can stand in
+/// for the window.
+#[cfg(windows)]
+fn apply_setting(
+    excluded: &RwLock<bool>,
+    ledger: &Mutex<AffinityLedger>,
+    show_in_recordings: bool,
+    visible: impl FnOnce() -> Result<bool, String>,
+    write: impl FnOnce(bool) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut excluded = excluded.write().unwrap_or_else(PoisonError::into_inner);
     // Cleared first, so every early return below leaves it saying "in shot",
-    // which is the answer that costs a frame rather than a dirty still.
+    // which is the answer that costs a frame rather than a dirty still. It
+    // also stays there while a setting is owed: a capture taken before the
+    // show that writes it hides UP-TAKE's drawing first.
     *excluded = false;
-    let window = overlay_window(app)?;
+    let visible = visible()?;
+    if lock(ledger).apply(show_in_recordings, visible) {
+        write(show_in_recordings)?;
+        *excluded = !show_in_recordings;
+    }
+    Ok(())
+}
+
+/// When the affinity the setting asks for is written to the window.
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AffinityWrite {
+    /// In the call that applies the setting.
+    Now,
+    /// By [`show`], just before it puts the window on screen.
+    BeforeShow,
+    /// By [`show`], once the window is on screen.
+    AfterShow,
+}
+
+/// Decides when a setting is written to the window.
+///
+/// # What Windows does to a hidden window
+///
+/// `SetWindowDisplayAffinity` can make Windows draw a window that is hidden.
+/// Its title bar and frame appear on the desktop while `IsWindowVisible` goes
+/// on answering false, so it cannot be moved and clicks fall through it. It
+/// stays until the window is next shown and hidden. Measured on Windows 11
+/// build 26200 by asking Windows Graphics Capture for the window, on this
+/// overlay and on a plain window with a caption that belongs to no framework,
+/// so the behaviour is the system's and not a framework's. Not every system
+/// does it: the test
+/// `windows_draws_a_hidden_window_told_wda_none_and_not_one_told_to_exclude`
+/// asks the machine it runs on, and says where the answer was no.
+///
+/// | The hidden window | told `WDA_NONE` | told `WDA_EXCLUDEFROMCAPTURE` |
+/// | --- | --- | --- |
+/// | has never been shown | is drawn | is not drawn |
+/// | was shown, then hidden | is drawn | answers as a window on screen does |
+///
+/// The top left cell was the stray window titled *UP-TAKE* after a hidden
+/// start with *Show UP-TAKE in screen recordings* on: `setup` made the call
+/// on a window that had never been shown, and nothing showed it until the
+/// first summon.
+///
+/// # The rule
+///
+/// A visible window is written to at once. A hidden one is written to only in
+/// the cell that draws nothing. That cell is also the startup of a default
+/// install, where the exclusion must be in force before the first visible
+/// frame (ADR-0019).
+///
+/// Everything else waits for [`show`]. An exclusion goes on just before the
+/// window appears, for the same ADR-0019 reason. `WDA_NONE` goes on after,
+/// when the window it is written to is a visible one.
+#[cfg(windows)]
+const fn affinity_write(
+    show_in_recordings: bool,
+    visible: bool,
+    shown_before: bool,
+) -> AffinityWrite {
+    match (visible, show_in_recordings, shown_before) {
+        (true, _, _) | (false, false, false) => AffinityWrite::Now,
+        (false, false, true) => AffinityWrite::BeforeShow,
+        (false, true, _) => AffinityWrite::AfterShow,
+    }
+}
+
+/// What [`affinity_write`] has to remember between a setting and a show.
+#[cfg(windows)]
+#[derive(Debug, Default)]
+struct AffinityLedger {
+    /// The setting the next show owes the window, as `show_in_recordings`.
+    owed: Option<bool>,
+    /// Whether the window has ever been on screen.
+    shown_before: bool,
+}
+
+#[cfg(windows)]
+impl AffinityLedger {
+    const fn new() -> Self {
+        Self {
+            owed: None,
+            shown_before: false,
+        }
+    }
+
+    /// Takes a setting. `true` means write it now. Otherwise it is owed to
+    /// the next show, in place of anything owed before it.
+    fn apply(&mut self, show_in_recordings: bool, visible: bool) -> bool {
+        let now =
+            affinity_write(show_in_recordings, visible, self.shown_before) == AffinityWrite::Now;
+        self.owed = (!now).then_some(show_in_recordings);
+        now
+    }
+
+    /// Whether the owed setting waits for this point in a show.
+    fn owes(&self, at: AffinityWrite) -> bool {
+        matches!(
+            (self.owed, at),
+            (Some(false), AffinityWrite::BeforeShow) | (Some(true), AffinityWrite::AfterShow)
+        )
+    }
+
+    /// The setting owed at this point in a show, taken so it is written once.
+    fn take_owed(&mut self, at: AffinityWrite) -> Option<bool> {
+        if self.owes(at) {
+            self.owed.take()
+        } else {
+            None
+        }
+    }
+}
+
+/// The ledger for the overlay window. Changed only under
+/// [`EXCLUDED_FROM_CAPTURE`]'s write lock, apart from the mark that the window
+/// has been shown, so the flag and the ledger cannot disagree about which
+/// setting was applied last.
+#[cfg(windows)]
+static AFFINITY_LEDGER: Mutex<AffinityLedger> = Mutex::new(AffinityLedger::new());
+
+/// Runs `show` with whatever the setting owes the window written on the right
+/// side of it: an exclusion before, `WDA_NONE` after.
+///
+/// A write that fails is handed to `trouble` and the show goes on, as a
+/// failed write at startup does not stop the app. The overlay is then in
+/// captures and the flag says so.
+#[cfg(windows)]
+fn show_settling(
+    excluded: &RwLock<bool>,
+    ledger: &Mutex<AffinityLedger>,
+    show: impl FnOnce() -> Result<(), String>,
+    write: impl Fn(bool) -> Result<(), String>,
+    trouble: impl Fn(&String),
+) -> Result<(), String> {
+    if let Err(error) = settle(excluded, ledger, AffinityWrite::BeforeShow, &write) {
+        trouble(&error);
+    }
+    show()?;
+    lock(ledger).shown_before = true;
+    if let Err(error) = settle(excluded, ledger, AffinityWrite::AfterShow, &write) {
+        trouble(&error);
+    }
+    Ok(())
+}
+
+/// Writes the owed setting if it waits for `at`.
+///
+/// The write lock is taken only when something is owed, which is the first
+/// show after a setting was applied to a hidden overlay. No freeze can be
+/// running then, because a freeze needs Placement. A capture that runs while
+/// the overlay is hidden can be: the whole-screen grab holds the same lock
+/// through [`capture_aside`]. That show then waits until that capture lets go
+/// of the lock, as a change of the setting always has. How long that is with
+/// a setting owed, when the capture first asks the page to hide its drawing,
+/// has not been measured. An ordinary show owes nothing and never takes the
+/// lock.
+#[cfg(windows)]
+fn settle(
+    excluded: &RwLock<bool>,
+    ledger: &Mutex<AffinityLedger>,
+    at: AffinityWrite,
+    write: impl Fn(bool) -> Result<(), String>,
+) -> Result<(), String> {
+    if !lock(ledger).owes(at) {
+        return Ok(());
+    }
+    let mut excluded = excluded.write().unwrap_or_else(PoisonError::into_inner);
+    // Taken under the lock. A change of setting since the look above has
+    // either written its own affinity or owes a different one, and this must
+    // not undo it.
+    let Some(show_in_recordings) = lock(ledger).take_owed(at) else {
+        return Ok(());
+    };
+    write(show_in_recordings)?;
+    *excluded = !show_in_recordings;
+    Ok(())
+}
+
+/// Changes the overlay's display affinity.
+#[cfg(windows)]
+fn write_affinity(window: &WebviewWindow, show_in_recordings: bool) -> Result<(), String> {
     let hwnd = window
         .hwnd()
         .map_err(|e| format!("Could not get the overlay window handle: {e}"))?
         .0;
+    write_affinity_to(hwnd, show_in_recordings)
+}
+
+/// The one call that changes a window's display affinity. Takes a bare handle
+/// so the tests can make the same call on a window of their own.
+#[cfg(windows)]
+fn write_affinity_to(
+    hwnd: windows_sys::Win32::Foundation::HWND,
+    show_in_recordings: bool,
+) -> Result<(), String> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
+    };
     let affinity = if show_in_recordings {
         WDA_NONE
     } else {
         WDA_EXCLUDEFROMCAPTURE
     };
-    // SAFETY: `hwnd` is a live top-level window handle owned by this process,
-    // valid for the duration of this call.
+    // SAFETY: every caller passes a live top-level window handle owned by this
+    // process, valid for the duration of this call.
     let ok = unsafe { SetWindowDisplayAffinity(hwnd, affinity) };
     if ok == 0 {
         return Err(
@@ -312,13 +559,13 @@ pub fn apply_capture_exclusion(app: &AppHandle, show_in_recordings: bool) -> Res
                 .to_string(),
         );
     }
-    *excluded = !show_in_recordings;
     Ok(())
 }
 
 /// Whether the overlay is excluded from capture right now -- see
-/// [`apply_capture_exclusion`]. A lock rather than an atomic because a freeze
-/// reads it and then holds it for its whole capture.
+/// [`apply_capture_exclusion`]. A lock rather than an atomic because a capture
+/// reads it and then holds it until it is done: a freeze, [`capture_aside`]
+/// and [`with_exclusion_held`] all do.
 ///
 /// Starts `false`, the answer that makes a freeze hide the drawing, so a freeze
 /// that could somehow run before startup applies the affinity errs toward a
@@ -460,11 +707,14 @@ struct FreezeRevealPayload {
 /// The page's confirmation that it has hidden what a freeze asked for, and
 /// painted it.
 ///
-/// **`async`, so it does not run on the main thread.** The freeze waits for
-/// this while holding [`EXCLUDED_FROM_CAPTURE`], and `settings_write`, which
-/// takes that lock's write side, runs on the main thread. A synchronous command
-/// here would queue behind it, and the freeze would time out on a page that
-/// had in fact answered.
+/// **`async`, so it does not run on the main thread.** Two callers wait for
+/// this while holding [`EXCLUDED_FROM_CAPTURE`]'s read side: the freeze and
+/// [`capture_aside`]. Three take its write side: `settings_write`, which runs
+/// on the main thread; [`show`] when a setting is owed to the window; and
+/// startup's [`apply_capture_exclusion`], once, before anything can read. A
+/// synchronous command here would queue on the main thread behind a writer
+/// that is itself waiting for the reader to let go, and the reader would time
+/// out on a page that had in fact answered.
 #[tauri::command]
 pub async fn overlay_freeze_hidden(token: u64) {
     if !crate::freeze::acknowledge_hidden(token) {
@@ -992,6 +1242,10 @@ struct AreaPayload {
     /// Before `1.45` the page took it from the settings, for every OCR area at
     /// once.
     ocr_behaviour: OcrBehaviour,
+    /// Whether the area follows a window, and whether it is waiting for one
+    /// (roadmap `1.47`): `free`, `following` or `paused`. The page marks a
+    /// sticky area and says so when it is paused.
+    sticky: Sticky,
     /// The area's magnification (§3.4), `1.0` at natural size.
     ///
     /// **The frontend does not scale anything with this.** The magnified
@@ -1052,8 +1306,37 @@ pub(crate) const fn as_tuple(rect: Rect) -> (i32, i32, u32, u32) {
     )
 }
 
+/// What the page is told about one area.
+///
+/// A function of its own so that a test can ask what an area is sent as. The
+/// first review of sticky areas (roadmap `1.47`) sent every area as `free`
+/// from inside [`emit_areas`] and no test noticed.
+fn payload_of(area: &Area, monitors: &[Rect]) -> AreaPayload {
+    AreaPayload {
+        id: area.id.get(),
+        rect: as_tuple(area.bounds),
+        close: as_tuple(interaction::close_control(area.bounds, monitors)),
+        layer: layer_name(area.layer),
+        kind: type_name(area.kind),
+        ocr_behaviour: area.ocr_behaviour,
+        sticky: area.sticky,
+        zoom: area.zoom.factor(),
+        bar: interaction::grab_bar(area.bounds, monitors).map(as_tuple),
+        handles: interaction::outside_resize_handles(area.bounds)
+            .into_iter()
+            .map(as_tuple)
+            .collect(),
+    }
+}
+
 /// Emits the current area set. Called on entering a visible state, on the
 /// frontend's mount request, and by the placement hook after every change.
+///
+/// Since roadmap `1.47` the thread that follows windows also needs the page
+/// told, each time a sticky area moves or pauses. It does not call this from
+/// its own thread. It runs it on the main thread (`sticky::tell_the_page`),
+/// because a set sent from another thread is queued behind the event loop and
+/// can reach the page after a newer one the main thread sent directly.
 pub(crate) fn emit_areas(app: &AppHandle) -> Result<(), String> {
     // Fetched once, before the store lock: the close control's position depends
     // on the monitors, because on a small area it sits *outside* the area and
@@ -1061,24 +1344,13 @@ pub(crate) fn emit_areas(app: &AppHandle) -> Result<(), String> {
     // same dependence for the same reason (it picks above or below), while the
     // outside handles deliberately do not (see `outside_resize_handles`).
     let monitors = monitor_rects();
-    let store = app.state::<Mutex<AreaStore>>();
-    let areas = lock(&store)
-        .iter()
-        .map(|area| AreaPayload {
-            id: area.id.get(),
-            rect: as_tuple(area.bounds),
-            close: as_tuple(interaction::close_control(area.bounds, &monitors)),
-            layer: layer_name(area.layer),
-            kind: type_name(area.kind),
-            ocr_behaviour: area.ocr_behaviour,
-            zoom: area.zoom.factor(),
-            bar: interaction::grab_bar(area.bounds, &monitors).map(as_tuple),
-            handles: interaction::outside_resize_handles(area.bounds)
-                .into_iter()
-                .map(as_tuple)
-                .collect(),
-        })
-        .collect();
+    let areas = {
+        let store = app.state::<Mutex<AreaStore>>();
+        lock(&store)
+            .iter()
+            .map(|area| payload_of(area, &monitors))
+            .collect()
+    };
     app.emit(AREAS_EVENT, AreasPayload { areas })
         .map_err(|e| format!("Could not emit overlay areas: {e}"))
 }
@@ -1096,6 +1368,9 @@ pub(crate) struct AreaSummary {
     /// How it shows what it read, for an OCR area's Behaviour rows (roadmap
     /// `1.45`).
     pub ocr_behaviour: OcrBehaviour,
+    /// Whether the area follows a window (roadmap `1.47`), for the menu's
+    /// tick.
+    pub sticky: Sticky,
 }
 
 impl AreaSummary {
@@ -1106,6 +1381,7 @@ impl AreaSummary {
             input: area.input,
             kind: area.kind,
             ocr_behaviour: area.ocr_behaviour,
+            sticky: area.sticky,
         }
     }
 }
@@ -1321,13 +1597,26 @@ pub(crate) fn set_area_ocr_behaviour(app: &AppHandle, id: AreaId, behaviour: Ocr
     true
 }
 
-/// Whether `id` is an OCR area that reads in place (`Area::reads_in_place`).
-/// `false` for an area that is gone.
+/// Whether `id` is an OCR area whose text can be selected, copied or read
+/// again (`Area::text_is_live`): it reads in place and it is in sight. `false`
+/// for an area that is gone.
+///
+/// The name is older than the second half. A sticky area whose window is
+/// minimised or closed still reads in place and answers `false` here, so that
+/// no gesture on text reaches an area that is hidden while the user works:
+/// every caller is such a gesture, or the re-read after a move.
 pub(crate) fn area_reads_in_place(app: &AppHandle, id: AreaId) -> bool {
+    let store = app.state::<Mutex<AreaStore>>();
+    lock(&store).get(id).is_some_and(|area| area.text_is_live())
+}
+
+/// Whether `id` waits out of sight (`Area::waits_out_of_sight`). `false` for
+/// an area that is gone.
+pub(crate) fn area_waits_out_of_sight(app: &AppHandle, id: AreaId) -> bool {
     let store = app.state::<Mutex<AreaStore>>();
     lock(&store)
         .get(id)
-        .is_some_and(|area| area.reads_in_place())
+        .is_some_and(|area| area.waits_out_of_sight())
 }
 
 /// Converts an area to another type from its own menu (roadmap task 1.27),
@@ -1710,6 +1999,7 @@ pub(crate) fn dismiss_area(app: &AppHandle, id: AreaId) -> bool {
         // area still exists before announcing anything, so the result itself is
         // discarded there rather than drawn on a dismissed rectangle.
         crate::ocr::forget(id);
+        crate::sticky::forget(id);
         collapse_living_if_empty(app);
     }
     removed
@@ -1760,9 +2050,11 @@ pub(crate) fn set_area_layer(app: &AppHandle, id: AreaId, layer: Layer) -> bool 
 /// Read fresh at the moment Copy/Save is activated rather than carried from
 /// the menu's own opening: the menu can stay open across pump ticks, and a
 /// capture should target where the area is *now*, not where it was when the
-/// menu was drawn (it cannot move while a menu is open today, but this is the
-/// same "read state at the point of action" discipline [`overlay_dismiss_focused`]
-/// already follows).
+/// menu was drawn. Since roadmap `1.47` that is a real case and not only
+/// discipline: a sticky area moves with its window while its menu is open.
+/// (This said "it cannot move while a menu is open today" until then.) It is
+/// the same "read state at the point of action" rule [`overlay_dismiss_focused`]
+/// already follows.
 pub(crate) fn area_bounds(app: &AppHandle, id: AreaId) -> Option<Rect> {
     let store = app.state::<Mutex<AreaStore>>();
     lock(&store).get(id).map(|area| area.bounds)
@@ -2560,6 +2852,12 @@ pub fn overlay_dismiss_focused(app: AppHandle) -> Result<(), String> {
 
 /// The area under the cursor, the one a key like `Delete` acts on.
 ///
+/// While the user places areas that is any area, a paused one too: placing
+/// mode is where a paused area is drawn so that it can be removed. Outside
+/// placing mode it is an area in sight only (roadmap `1.47`). The overlay can
+/// still hold the keyboard there, and `Delete` over a spot where a hidden
+/// area waits would remove something the user cannot see.
+///
 /// Read from the window rather than from the placement hook's last reported
 /// position: the hook only reports while it is installed, so a key pressed
 /// before the mouse has moved since entering Placement would act on a stale
@@ -2573,7 +2871,12 @@ fn area_under_cursor(app: &AppHandle) -> Result<Option<AreaSummary>, String> {
     let Some(point) = Point::from_physical_f64(position.x, position.y) else {
         return Ok(None);
     };
-    Ok(area_at(app, point))
+    if placement::is_placing() {
+        return Ok(area_at(app, point));
+    }
+    let store = app.state::<Mutex<AreaStore>>();
+    let guard = lock(&store);
+    Ok(guard.hit_test_in_sight(point).map(AreaSummary::of))
 }
 
 /// IPC surface and hook route for `Ctrl+C` in Placement (roadmap `1.41`).
@@ -2800,6 +3103,60 @@ mod tests {
     ];
 
     #[test]
+    fn an_area_is_sent_with_the_sticky_state_it_has() {
+        // Roadmap 1.47. The page marks a sticky area and says "Paused" from
+        // this field alone, so an area sent as `free` whatever it is leaves
+        // the menu row ticked and the screen saying nothing.
+        let mut store = AreaStore::new();
+        let Some(id) = store.create(AreaType::Default, Rect::new(10, 20, 300, 200)) else {
+            panic!("an area")
+        };
+        for state in [Sticky::Free, Sticky::Following, Sticky::Paused] {
+            store.set_sticky(id, state);
+            let Some(area) = store.get(id) else {
+                panic!("the area")
+            };
+            let payload = payload_of(area, &[Rect::new(0, 0, 1920, 1080)]);
+            assert_eq!(payload.sticky, state);
+            assert_eq!(payload.id, id.get());
+            assert_eq!(payload.rect, (10, 20, 300, 200));
+            // The menu reads the same field through the summary. A summary
+            // that called every area free would never tick the row, and the
+            // row's action would always be "stick", so nothing could be freed.
+            assert_eq!(AreaSummary::of(area).sticky, state);
+        }
+    }
+
+    #[test]
+    fn the_sticky_state_reaches_the_page_in_the_spelling_the_page_compares() {
+        // The page asks `sticky === 'following'` and `=== 'paused'`. The enum
+        // travelling as `Following` would compare false everywhere, with no
+        // error: no mark, no "Paused", and every test of the enum still green.
+        for (state, word) in [
+            (Sticky::Free, "free"),
+            (Sticky::Following, "following"),
+            (Sticky::Paused, "paused"),
+        ] {
+            let payload = AreaPayload {
+                id: 1,
+                rect: (0, 0, 10, 10),
+                close: (0, 0, 18, 18),
+                layer: "auto",
+                kind: "default",
+                ocr_behaviour: OcrBehaviour::InPlace,
+                sticky: state,
+                zoom: 1.0,
+                bar: None,
+                handles: Vec::new(),
+            };
+            let Ok(json) = serde_json::to_value(&payload) else {
+                panic!("the payload serialises")
+            };
+            assert_eq!(json["sticky"], serde_json::json!(word));
+        }
+    }
+
+    #[test]
     fn every_payload_this_module_emits_keeps_the_keys_the_frontend_reads() {
         assert_keys(
             "StatePayload",
@@ -2821,6 +3178,7 @@ mod tests {
             layer: "auto",
             kind: "default",
             ocr_behaviour: OcrBehaviour::InPlace,
+            sticky: Sticky::Paused,
             zoom: 1.0,
             bar: Some((0, -18, 10, 18)),
             handles: vec![(0, 0, 18, 18)],
@@ -2835,6 +3193,7 @@ mod tests {
                 "layer",
                 "kind",
                 "ocr_behaviour",
+                "sticky",
                 "zoom",
                 "bar",
                 "handles",
@@ -2938,6 +3297,569 @@ mod tests {
     fn matching_bounds_are_never_rewritten() {
         let bounds = Rect::new(-1080, -1080, 5560, 2733);
         assert!(!needs_write(bounds, bounds));
+    }
+
+    /// The stray window of `I-451`: a desktop Windows draws a hidden window
+    /// that is told `WDA_NONE`, whether or not it was ever shown
+    /// (`affinity_write` says where that was measured). So that write always
+    /// waits until the window is on screen.
+    #[cfg(windows)]
+    #[test]
+    fn a_hidden_overlay_is_never_told_to_appear_in_recordings() {
+        for shown_before in [false, true] {
+            assert_eq!(
+                affinity_write(true, false, shown_before),
+                AffinityWrite::AfterShow,
+                "hidden, shown before: {shown_before}"
+            );
+        }
+    }
+
+    /// ADR-0019: the exclusion is in force before the first visible frame. A
+    /// rule that put it on after the show would let one frame of the overlay
+    /// into somebody's recording.
+    #[cfg(windows)]
+    #[test]
+    fn an_exclusion_is_never_written_after_the_overlay_appears() {
+        for visible in [false, true] {
+            for shown_before in [false, true] {
+                assert_ne!(
+                    affinity_write(false, visible, shown_before),
+                    AffinityWrite::AfterShow,
+                    "visible: {visible}, shown before: {shown_before}"
+                );
+            }
+        }
+    }
+
+    /// The startup of a default install: the one write to a hidden window
+    /// that Windows answers by drawing nothing, so it does not wait.
+    #[cfg(windows)]
+    #[test]
+    fn a_window_never_shown_is_excluded_at_once() {
+        assert_eq!(affinity_write(false, false, false), AffinityWrite::Now);
+    }
+
+    /// A window that was shown and hidden again answers a capture as a window
+    /// on screen does once it is told to exclude itself, so that write waits
+    /// for the show too.
+    #[cfg(windows)]
+    #[test]
+    fn an_exclusion_on_a_window_hidden_again_waits_for_the_show() {
+        assert_eq!(
+            affinity_write(false, false, true),
+            AffinityWrite::BeforeShow
+        );
+    }
+
+    /// A visible window has nothing to wait for, whichever way the setting
+    /// goes: the change in the settings window takes effect as it is made.
+    #[cfg(windows)]
+    #[test]
+    fn a_visible_overlay_is_written_to_at_once() {
+        for show_in_recordings in [false, true] {
+            for shown_before in [false, true] {
+                assert_eq!(
+                    affinity_write(show_in_recordings, true, shown_before),
+                    AffinityWrite::Now,
+                    "show in recordings: {show_in_recordings}, shown before: {shown_before}"
+                );
+            }
+        }
+    }
+
+    /// Stands in for the overlay window in the tests below: the two locks the
+    /// real one has, and a record of what was done to the window, in order.
+    #[cfg(windows)]
+    struct FakeOverlay {
+        excluded: RwLock<bool>,
+        ledger: Mutex<AffinityLedger>,
+        done: std::cell::RefCell<Vec<&'static str>>,
+        /// Makes every write fail, as `SetWindowDisplayAffinity` does below
+        /// Windows 10.0.19041.
+        writes_fail: std::cell::Cell<bool>,
+        /// Makes the show itself fail.
+        show_fails: std::cell::Cell<bool>,
+        troubles: std::cell::Cell<u32>,
+    }
+
+    #[cfg(windows)]
+    impl FakeOverlay {
+        fn new() -> Self {
+            Self {
+                excluded: RwLock::new(false),
+                ledger: Mutex::new(AffinityLedger::new()),
+                done: std::cell::RefCell::new(Vec::new()),
+                writes_fail: std::cell::Cell::new(false),
+                show_fails: std::cell::Cell::new(false),
+                troubles: std::cell::Cell::new(0),
+            }
+        }
+
+        fn write(&self, show_in_recordings: bool) -> Result<(), String> {
+            if self.writes_fail.get() {
+                return Err("the write failed".to_string());
+            }
+            self.done.borrow_mut().push(if show_in_recordings {
+                "WDA_NONE"
+            } else {
+                "WDA_EXCLUDEFROMCAPTURE"
+            });
+            Ok(())
+        }
+
+        /// The setting is applied, as at startup or from the settings window.
+        fn set(&self, show_in_recordings: bool, visible: bool) -> Result<(), String> {
+            apply_setting(
+                &self.excluded,
+                &self.ledger,
+                show_in_recordings,
+                || Ok(visible),
+                |setting| self.write(setting),
+            )
+        }
+
+        /// The overlay is shown, as a summon does.
+        fn show(&self) -> Result<(), String> {
+            show_settling(
+                &self.excluded,
+                &self.ledger,
+                || {
+                    if self.show_fails.get() {
+                        return Err("the show failed".to_string());
+                    }
+                    self.done.borrow_mut().push("show");
+                    Ok(())
+                },
+                |setting| self.write(setting),
+                |_| self.troubles.set(self.troubles.get() + 1),
+            )
+        }
+
+        /// What was done to the window since the last look.
+        fn done(&self) -> Vec<&'static str> {
+            self.done.take()
+        }
+
+        fn excluded(&self) -> bool {
+            *self.excluded.read().unwrap_or_else(PoisonError::into_inner)
+        }
+    }
+
+    /// `I-451` as the user met it: a hidden start with *Show UP-TAKE in screen
+    /// recordings* on. Nothing is written to the hidden window. The first
+    /// summon shows it and writes then, and later summons write nothing.
+    #[cfg(windows)]
+    #[test]
+    fn a_hidden_start_with_recordings_on_writes_nothing_until_the_summon() {
+        let overlay = FakeOverlay::new();
+        assert_eq!(overlay.set(true, false), Ok(()));
+        assert_eq!(overlay.done(), Vec::<&str>::new());
+        assert!(
+            !overlay.excluded(),
+            "in shot is the answer while it is owed"
+        );
+
+        assert_eq!(overlay.show(), Ok(()));
+        assert_eq!(overlay.done(), ["show", "WDA_NONE"]);
+        assert!(!overlay.excluded());
+
+        assert_eq!(overlay.show(), Ok(()));
+        assert_eq!(overlay.done(), ["show"], "an owed setting is written once");
+    }
+
+    /// The startup of a default install is unchanged: excluded before any
+    /// show, and a show adds nothing.
+    #[cfg(windows)]
+    #[test]
+    fn a_default_start_is_excluded_before_any_show() {
+        let overlay = FakeOverlay::new();
+        assert_eq!(overlay.set(false, false), Ok(()));
+        assert_eq!(overlay.done(), ["WDA_EXCLUDEFROMCAPTURE"]);
+        assert!(overlay.excluded());
+
+        assert_eq!(overlay.show(), Ok(()));
+        assert_eq!(overlay.done(), ["show"]);
+        assert!(overlay.excluded());
+    }
+
+    /// The setting switched to "exclude" while the overlay is hidden after a
+    /// summon: nothing is written to the hidden window, and at the next
+    /// summon the exclusion goes on before the window does (ADR-0019).
+    #[cfg(windows)]
+    #[test]
+    fn an_exclusion_owed_to_a_window_hidden_again_goes_on_before_it_appears() {
+        let overlay = FakeOverlay::new();
+        assert_eq!(overlay.set(true, false), Ok(()));
+        assert_eq!(overlay.show(), Ok(()));
+        overlay.done();
+
+        assert_eq!(overlay.set(false, false), Ok(()));
+        assert_eq!(overlay.done(), Vec::<&str>::new());
+        assert!(!overlay.excluded(), "not in force until it is written");
+
+        assert_eq!(overlay.show(), Ok(()));
+        assert_eq!(overlay.done(), ["WDA_EXCLUDEFROMCAPTURE", "show"]);
+        assert!(overlay.excluded());
+    }
+
+    /// A setting applied while another is still owed replaces it. The one
+    /// that matters is the first half: an exclusion written at once must not
+    /// be undone by a `WDA_NONE` left over from before it.
+    #[cfg(windows)]
+    #[test]
+    fn a_newer_setting_replaces_the_one_that_was_owed() {
+        let overlay = FakeOverlay::new();
+        assert_eq!(overlay.set(true, false), Ok(()));
+        assert_eq!(overlay.set(false, false), Ok(()));
+        assert_eq!(overlay.done(), ["WDA_EXCLUDEFROMCAPTURE"]);
+        assert_eq!(overlay.show(), Ok(()));
+        assert_eq!(overlay.done(), ["show"]);
+        assert!(overlay.excluded());
+
+        // And the other way, on a window that has now been shown.
+        assert_eq!(overlay.set(false, false), Ok(()));
+        assert_eq!(overlay.set(true, false), Ok(()));
+        assert_eq!(overlay.done(), Vec::<&str>::new());
+        assert_eq!(overlay.show(), Ok(()));
+        assert_eq!(overlay.done(), ["show", "WDA_NONE"]);
+        assert!(!overlay.excluded());
+    }
+
+    /// A change made in the settings window while the overlay is up takes
+    /// effect as it is made, both ways.
+    #[cfg(windows)]
+    #[test]
+    fn a_setting_changed_while_the_overlay_is_up_is_written_at_once() {
+        let overlay = FakeOverlay::new();
+        assert_eq!(overlay.show(), Ok(()));
+        overlay.done();
+
+        assert_eq!(overlay.set(false, true), Ok(()));
+        assert_eq!(overlay.done(), ["WDA_EXCLUDEFROMCAPTURE"]);
+        assert!(overlay.excluded());
+
+        assert_eq!(overlay.set(true, true), Ok(()));
+        assert_eq!(overlay.done(), ["WDA_NONE"]);
+        assert!(!overlay.excluded());
+    }
+
+    /// Below Windows 10.0.19041 the write fails. At a show that is reported
+    /// and the overlay still appears, with the flag saying it is in captures,
+    /// so the freeze hides the drawing itself.
+    #[cfg(windows)]
+    #[test]
+    fn a_write_that_fails_at_the_show_is_reported_and_the_overlay_still_appears() {
+        let overlay = FakeOverlay::new();
+        assert_eq!(overlay.show(), Ok(()));
+        assert_eq!(overlay.set(false, false), Ok(()));
+        overlay.done();
+
+        overlay.writes_fail.set(true);
+        assert_eq!(overlay.show(), Ok(()));
+        assert_eq!(overlay.done(), ["show"]);
+        assert_eq!(overlay.troubles.get(), 1);
+        assert!(!overlay.excluded());
+
+        // The same for a `WDA_NONE` that fails after the show.
+        overlay.writes_fail.set(false);
+        assert_eq!(overlay.set(true, false), Ok(()));
+        overlay.writes_fail.set(true);
+        assert_eq!(overlay.show(), Ok(()));
+        assert_eq!(overlay.done(), ["show"]);
+        assert_eq!(overlay.troubles.get(), 2);
+        assert!(!overlay.excluded());
+    }
+
+    /// A write that fails when the setting is applied is the caller's error,
+    /// and the flag is left at "in shot".
+    #[cfg(windows)]
+    #[test]
+    fn a_write_that_fails_at_once_is_returned_and_leaves_the_overlay_in_shot() {
+        let overlay = FakeOverlay::new();
+        assert_eq!(overlay.set(false, false), Ok(()));
+        assert!(overlay.excluded());
+
+        overlay.writes_fail.set(true);
+        assert!(overlay.set(false, true).is_err());
+        assert!(!overlay.excluded());
+    }
+
+    /// A show that fails is the caller's error, and nothing that waits for a
+    /// visible window is written to one that never appeared. The setting stays
+    /// owed, and the window still counts as never shown.
+    #[cfg(windows)]
+    #[test]
+    fn a_show_that_fails_is_returned_and_writes_nothing_after_it() {
+        let overlay = FakeOverlay::new();
+        assert_eq!(overlay.set(true, false), Ok(()));
+
+        overlay.show_fails.set(true);
+        assert!(overlay.show().is_err());
+        assert_eq!(overlay.done(), Vec::<&str>::new());
+
+        overlay.show_fails.set(false);
+        assert_eq!(overlay.show(), Ok(()));
+        assert_eq!(overlay.done(), ["show", "WDA_NONE"]);
+
+        // Never shown, so an exclusion is still the write that does not wait.
+        let overlay = FakeOverlay::new();
+        overlay.show_fails.set(true);
+        assert!(overlay.show().is_err());
+        assert_eq!(overlay.set(false, false), Ok(()));
+        assert_eq!(overlay.done(), ["WDA_EXCLUDEFROMCAPTURE"]);
+    }
+
+    /// A plain window with a caption, created hidden, that belongs to no
+    /// framework. The overlay's own style bits, so Windows treats it alike.
+    ///
+    /// Placed far off every monitor, so a test that shows it draws nothing on
+    /// anyone's screen (`I-462`): at (200, 200) every local `cargo test` put a
+    /// captioned window on the desktop for about 2.5 s. Windows Graphics
+    /// Capture answers for a window there as it does on a monitor.
+    ///
+    /// Not a tool window, although the overlay has no taskbar button either
+    /// (`skipTaskbar`) and showing this one tells the shell about it twice per
+    /// run. With `WS_EX_TOOLWINDOW`, the test failed in 2 of 3 runs on a
+    /// workstation when it was the first in its process to ask Windows Graphics
+    /// Capture, which a normal `cargo test` makes it (second review of `#141`).
+    /// Why is not known.
+    #[cfg(windows)]
+    struct PlainWindow(windows_sys::Win32::Foundation::HWND);
+
+    #[cfg(windows)]
+    impl PlainWindow {
+        fn new() -> Self {
+            use windows_sys::Win32::UI::WindowsAndMessaging::{
+                CreateWindowExW, WS_CAPTION, WS_CLIPSIBLINGS, WS_SYSMENU,
+            };
+            let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+            let title: Vec<u16> = "UP-TAKE test window\0".encode_utf16().collect();
+            // SAFETY: both strings end in a NUL and outlive the call, and every
+            // handle argument is null, which the call accepts.
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    0,
+                    class.as_ptr(),
+                    title.as_ptr(),
+                    WS_CAPTION | WS_SYSMENU | WS_CLIPSIBLINGS,
+                    30_000,
+                    30_000,
+                    320,
+                    200,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                )
+            };
+            assert!(!hwnd.is_null(), "the test window could not be created");
+            Self(hwnd)
+        }
+
+        fn visible(&self) -> bool {
+            // SAFETY: the handle is this value's own live window.
+            unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible(self.0) != 0 }
+        }
+
+        fn show(&self, show: bool) {
+            use windows_sys::Win32::UI::WindowsAndMessaging::{
+                SW_HIDE, SW_SHOWNOACTIVATE, ShowWindow,
+            };
+            // SAFETY: the handle is this value's own live window.
+            unsafe { ShowWindow(self.0, if show { SW_SHOWNOACTIVATE } else { SW_HIDE }) };
+        }
+
+        /// The display affinity Windows holds for the window, read back.
+        fn affinity(&self) -> Option<u32> {
+            let mut affinity = 0;
+            // SAFETY: the handle is this value's own live window, and
+            // `affinity` is a plain integer the call writes.
+            let read = unsafe {
+                windows_sys::Win32::UI::WindowsAndMessaging::GetWindowDisplayAffinity(
+                    self.0,
+                    &raw mut affinity,
+                )
+            };
+            (read != 0).then_some(affinity)
+        }
+
+        /// Whether the compositor draws the window, asked the one way that
+        /// can see it: Windows Graphics Capture accepts a window that is drawn
+        /// and refuses a hidden one, whatever `IsWindowVisible` answers.
+        fn drawn(&self) -> bool {
+            use windows_capture::settings::GraphicsCaptureItemType;
+            use windows_capture::window::Window;
+            let item: Result<GraphicsCaptureItemType, _> =
+                Window::from_raw_hwnd(self.0.cast()).try_into();
+            item.is_ok()
+        }
+
+        /// Waits up to `within` for [`Self::drawn`] to answer `wanted`, running
+        /// the window's messages meanwhile. `true` if it did.
+        fn becomes(&self, wanted: bool, within: std::time::Duration) -> bool {
+            use windows_sys::Win32::UI::WindowsAndMessaging::{
+                DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage,
+            };
+            let start = std::time::Instant::now();
+            loop {
+                // SAFETY: `message` is a plain struct the calls fill and read,
+                // and it lives for the whole loop body.
+                unsafe {
+                    let mut message: MSG = std::mem::zeroed();
+                    while PeekMessageW(&raw mut message, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0
+                    {
+                        TranslateMessage(&raw const message);
+                        DispatchMessageW(&raw const message);
+                    }
+                }
+                if self.drawn() == wanted {
+                    return true;
+                }
+                if start.elapsed() >= within {
+                    return false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+
+        /// Whether the window is hidden now and for the whole of `during`.
+        fn stays_hidden(&self, during: std::time::Duration) -> bool {
+            !self.becomes(true, during)
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for PlainWindow {
+        fn drop(&mut self) {
+            // SAFETY: the handle is this value's own window, destroyed once.
+            unsafe { windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow(self.0) };
+        }
+    }
+
+    /// The first row of the table in `affinity_write`'s docs, asked of the
+    /// machine it runs on, with a window nobody touched as the control.
+    ///
+    /// **Ignored by default, because the answer depends on the machine.** A
+    /// Windows 11 workstation (build 26200) draws the window told `WDA_NONE`.
+    /// On 2026-10-13 GitHub's `windows-latest` runner, then Windows Server
+    /// 2025, did not: this test failed there at its first assertion while the
+    /// one below it passed, so that runner saw a visible window and drew no
+    /// hidden one. That is one run of a runner GitHub is free to change, and
+    /// nothing asks it again. The rule is written for the machines that do
+    /// draw the window.
+    ///
+    /// Run it on a workstation when the rule is touched, or to learn whether
+    /// a new Windows build still needs it. Nothing makes anyone do that:
+    /// `cargo test -p up-take --lib windows_draws_a_hidden_window -- --ignored`
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "asks this machine's compositor, and not every machine draws the hidden window"]
+    fn windows_draws_a_hidden_window_told_wda_none_and_not_one_told_to_exclude() {
+        let second = std::time::Duration::from_secs(1);
+        let untouched = PlainWindow::new();
+        let told_none = PlainWindow::new();
+        let told_exclude = PlainWindow::new();
+        assert_eq!(write_affinity_to(told_none.0, true), Ok(()));
+        assert_eq!(write_affinity_to(told_exclude.0, false), Ok(()));
+
+        assert!(
+            told_none.becomes(true, 3 * second),
+            "a hidden window told WDA_NONE was not drawn: either this probe cannot see a drawn \
+             window here, or Windows no longer does what `affinity_write` is written around"
+        );
+        assert!(untouched.stays_hidden(second));
+        assert!(told_exclude.stays_hidden(second));
+        for window in [&untouched, &told_none, &told_exclude] {
+            assert!(
+                !window.visible(),
+                "IsWindowVisible answers false throughout"
+            );
+        }
+    }
+
+    /// `I-451` on a real window, from a default start to the setting switched
+    /// both ways: what is applied while the window is hidden draws nothing,
+    /// the next show writes it, and after a hide the window is hidden.
+    ///
+    /// **Each read of the affinity is taken where it can fail.** Windows
+    /// answers 0, which is `WDA_NONE`, for a window that was shown and then
+    /// hidden, whatever was written to it. So the read that looks for
+    /// `WDA_NONE` is taken while the window is on screen, on a window that
+    /// read as excluded a moment before. The first version read it after the
+    /// hide, where it could only pass (review round 1 of `#138`).
+    ///
+    /// `stays_hidden` before the first show can only fail on a machine that
+    /// draws a hidden window told `WDA_NONE` (the test above). On one that
+    /// does, breaking the rule turns the affinity read before it red
+    /// (*owed, not written*), every time it was tried. `stays_hidden` is a
+    /// second net and not a reliable one: with that read taken out, it went red
+    /// in some runs and not in others (2026-10-14, the window off every
+    /// monitor, `I-462` and the second review of `#141`). The rest holds on any
+    /// machine.
+    #[cfg(windows)]
+    #[test]
+    fn the_rule_leaves_a_real_hidden_window_hidden() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{WDA_EXCLUDEFROMCAPTURE, WDA_NONE};
+        let second = std::time::Duration::from_secs(1);
+        let window = PlainWindow::new();
+        let excluded = RwLock::new(false);
+        let ledger = Mutex::new(AffinityLedger::new());
+        let write = |setting| write_affinity_to(window.0, setting);
+        let visible = || Ok(window.visible());
+        let show = || {
+            window.show(true);
+            Ok(())
+        };
+
+        // A default start: excluded at once, on a window never shown.
+        assert_eq!(
+            apply_setting(&excluded, &ledger, false, visible, write),
+            Ok(())
+        );
+        assert_eq!(window.affinity(), Some(WDA_EXCLUDEFROMCAPTURE));
+
+        // The setting switched on while the window is hidden: owed, nothing
+        // written, nothing drawn.
+        assert_eq!(
+            apply_setting(&excluded, &ledger, true, visible, write),
+            Ok(())
+        );
+        assert_eq!(
+            window.affinity(),
+            Some(WDA_EXCLUDEFROMCAPTURE),
+            "owed, not written"
+        );
+        assert!(window.stays_hidden(second));
+
+        // The show writes it. Read while the window is on screen.
+        assert_eq!(
+            show_settling(&excluded, &ledger, show, write, |_| {}),
+            Ok(())
+        );
+        assert!(window.visible());
+        assert_eq!(window.affinity(), Some(WDA_NONE));
+        assert!(window.becomes(true, 3 * second));
+
+        window.show(false);
+        assert!(window.becomes(false, 3 * second));
+        assert!(window.stays_hidden(second));
+
+        // Switched off again, on a window that has now been shown: owed until
+        // the next show, which writes it before the window appears. A hidden
+        // window that is told to exclude itself reads 17 at once, so this
+        // read fails if the exclusion did not wait.
+        assert_eq!(
+            apply_setting(&excluded, &ledger, false, visible, write),
+            Ok(())
+        );
+        assert_eq!(window.affinity(), Some(WDA_NONE), "owed, not written");
+        assert_eq!(
+            show_settling(&excluded, &ledger, show, write, |_| {}),
+            Ok(())
+        );
+        assert_eq!(window.affinity(), Some(WDA_EXCLUDEFROMCAPTURE));
+        window.show(false);
     }
 
     #[test]
