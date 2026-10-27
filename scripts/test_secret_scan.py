@@ -915,11 +915,17 @@ class SecretScan(unittest.TestCase):
             ["git", "hash-object", "-t", "tag", "-w", "--literally", "--stdin"],
             cwd=self.repo.root, input=body, capture_output=True, text=True, check=True,
         ).stdout.strip()
-        # update-ref refuses a tag whose target is missing; a fetch does not.
+        # Written as a ref file, so the test does not rest on what update-ref
+        # checks; the assertion below confirms git lists the ref.
         self.repo.write(".git/refs/tags/ghost", tag + "\n")
         self.assertEqual(self.repo.git("for-each-ref", "--format=%(objectname)", "refs/tags/ghost"), tag)
         code, out = self._daily()
         self.assertEqual(code, 2, out)
+        # The exit 2 must be the peel failing, not any other refusal (review
+        # of #152, round 1, finding 1: without detect-secrets the scan exits
+        # 2 before it reads a ref, and the test passed with the guard gone).
+        self.assertIn(f"{tag}^{{}}", out)
+        self.assertIn("missing object", out)
         self.assertNotIn("refs/tags/ghost names a blob or a tree", out)
 
     def test_daily_reads_mains_tracked_files(self) -> None:
