@@ -1359,6 +1359,12 @@ mod tests {
             .expect("a non-empty rectangle always yields an id")
     }
 
+    /// Held by every test that writes the global `OCR` state's `latest`, for
+    /// the whole test, so two of them never interleave (`I-468`). Not taken by
+    /// `an_area_holds_text_only_while_its_reading_has_characters`, which calls
+    /// `forget` too: its area's id is 40, which never holds the slot here.
+    static CLIPBOARD_SLOT: Mutex<()> = Mutex::new(());
+
     /// [`forget`] releases the clipboard promise, driven at its OWN call site.
     ///
     /// # Why this test exists and what its absence cost
@@ -1372,13 +1378,19 @@ mod tests {
     /// the class this project keeps finding (`UT-F-40`, `UT-F-44`, `UT-F-52`,
     /// `UT-F-75`): a check that cannot go red.
     ///
-    /// ⚠️ **This touches the module's global `OCR` state**, which no other test
-    /// in this file does. Stated rather than left to be discovered: the tests
-    /// here run in parallel, so a second test that took this lock would need to
-    /// be read against this one. The alternative was to leave the call site
-    /// untested, which is what the review found.
+    /// ⚠️ **This touches the module's global `OCR` state**, and so does the
+    /// test below it: both write `latest`, and both dismiss their store's first
+    /// id. The tests here run in parallel, so each holds [`CLIPBOARD_SLOT`] for
+    /// its whole body. Without it this test failed once on CI (`up-take` CI run
+    /// `39138054945`, backlog `I-468`): the other test filled the slot with its
+    /// own area after this one's write and before this one's assertion. The
+    /// other test fails the mirror way: this one overwrites its promise, and
+    /// its own `forget` of this one's id then empties the slot.
     #[test]
     fn dismissing_an_area_releases_the_clipboard_promise() {
+        let _slot = CLIPBOARD_SLOT
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let mut store = AreaStore::new();
         let dismissed = area_id(&mut store);
 
@@ -1400,6 +1412,9 @@ mod tests {
     /// leave B's promise alone.
     #[test]
     fn dismissing_one_area_does_not_release_another_areas_promise() {
+        let _slot = CLIPBOARD_SLOT
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let mut store = AreaStore::new();
         let dismissed = area_id(&mut store);
         let promised = area_id(&mut store);

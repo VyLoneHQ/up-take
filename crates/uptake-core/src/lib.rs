@@ -50,3 +50,4 @@ pub mod first_run;
 pub mod geometry;
 pub mod interaction;
 pub mod sharpen;
+pub mod sticky;

@@ -55,6 +55,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::geometry::{Point, Rect, Size};
 use crate::interaction;
+use crate::sticky::Sticky;
 
 /// A stable identity for an area, unique within the [`AreaStore`] that issued
 /// it.
@@ -678,6 +679,10 @@ pub struct Area {
     /// [`OcrBehaviour::InPlace`] at creation; the host replaces it with the
     /// user's default for new OCR areas.
     pub ocr_behaviour: OcrBehaviour,
+    /// Whether the area follows a window (roadmap `1.47`). [`Sticky::Free`] at
+    /// creation. The host sets it, because only the host can tell whether the
+    /// window is still there.
+    pub sticky: Sticky,
 }
 
 /// The capture an area's own contents are made of: which rectangle of screen to
@@ -731,6 +736,37 @@ impl Area {
     pub fn body_takes_input(self, holds_text: bool) -> bool {
         // Read as: interactive, and not an in-place OCR area still without text.
         self.is_interactive() && (holds_text || !self.reads_in_place())
+    }
+
+    /// True when the area is out of sight while the user works: a sticky area
+    /// whose window is minimised, hidden or closed (roadmap `1.47`, the
+    /// maintainer's decision of 2026-10-12).
+    ///
+    /// Such an area is not drawn in Living and takes no part in any Living
+    /// question: no press, no grab, no chord, no hover and no input region. It
+    /// comes back by itself when its window does. In Placement it is drawn,
+    /// dimmed and marked paused, and every Placement question still finds it
+    /// ([`AreaStore::hit_test_any`]), so it can be freed, moved or removed
+    /// while its window is away.
+    #[must_use]
+    pub fn waits_out_of_sight(self) -> bool {
+        self.sticky == Sticky::Paused
+    }
+
+    /// True when the text this area read can be selected, copied or read
+    /// again: it reads in place and it is in sight.
+    ///
+    /// An area that waits out of sight keeps the words it read, and they are
+    /// no longer what is on the screen: its window is minimised or closed. So
+    /// it takes no selection in Placement either, where it is drawn. Without
+    /// that, a selection made on a paused area while placing was carried into
+    /// Living on an area nobody could see, and took the copy key there (the
+    /// seventh review of roadmap `1.47`). **Every gesture on text asks this**
+    /// and not [`Area::reads_in_place`], which says only how the area shows
+    /// what it read.
+    #[must_use]
+    pub fn text_is_live(self) -> bool {
+        self.reads_in_place() && !self.waits_out_of_sight()
     }
 
     /// True for an OCR area that shows what it read over the screen, in place,
@@ -938,6 +974,7 @@ impl AreaStore {
             // arrive natural through a conversion.
             zoom: kind.default_zoom(),
             ocr_behaviour: OcrBehaviour::default(),
+            sticky: Sticky::default(),
         };
         let index = self.top_of_tier(area.layer);
         self.areas.insert(index, area);
@@ -1044,6 +1081,22 @@ impl AreaStore {
         match self.area_mut(id) {
             Some(area) if area.ocr_behaviour != behaviour => {
                 area.ocr_behaviour = behaviour;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Sets whether an area follows a window (roadmap `1.47`). Returns whether
+    /// it CHANGED, so the caller redraws only on a change; `false` for an
+    /// unknown id as well.
+    ///
+    /// The store does not know which window, or where it is. It holds the
+    /// state so that the menu, the page and the host read one answer.
+    pub fn set_sticky(&mut self, id: AreaId, sticky: Sticky) -> bool {
+        match self.area_mut(id) {
+            Some(area) if area.sticky != sticky => {
+                area.sticky = sticky;
                 true
             }
             _ => false,
@@ -1254,7 +1307,7 @@ impl AreaStore {
         monitors: &[Rect],
         body: impl Fn(&Area) -> bool,
     ) -> Option<&Area> {
-        self.iter_top_down().find(|area| {
+        self.iter_in_sight().find(|area| {
             if body(area) {
                 area.bounds.contains(point)
             } else {
@@ -1292,7 +1345,7 @@ impl AreaStore {
         monitors: &[Rect],
         body: impl Fn(&Area) -> bool,
     ) -> Option<(&Area, interaction::Handle)> {
-        self.iter_top_down().find_map(|area| {
+        self.iter_in_sight().find_map(|area| {
             let handle = interaction::handle_at(area.bounds, point, monitors)?;
             (body(area) || !matches!(handle, interaction::Handle::Body)).then_some((area, handle))
         })
@@ -1344,7 +1397,23 @@ impl AreaStore {
         point: Point,
         body: impl Fn(&Area) -> bool,
     ) -> Option<&Area> {
-        self.hit_test_any(point).filter(|area| !body(area))
+        // The topmost area in sight, and not `hit_test_any`: that one is the
+        // Placement question and finds an area that waits out of sight, which
+        // would then stand between the chord and the area the user sees.
+        self.hit_test_in_sight(point).filter(|area| !body(area))
+    }
+
+    /// The topmost area containing `point` among the areas in sight, whatever
+    /// its [`Input`]: what the user is pointing at while they work.
+    ///
+    /// [`AreaStore::hit_test_any`] with the areas that wait out of sight left
+    /// out. A key that acts on "the area under the cursor" asks this outside
+    /// Placement, so that `Delete` cannot remove an area that is not drawn,
+    /// and reaches the area the user sees beneath one.
+    #[must_use]
+    pub fn hit_test_in_sight(&self, point: Point) -> Option<&Area> {
+        self.iter_in_sight()
+            .find(|area| area.bounds.contains(point))
     }
 
     /// The topmost area containing `point`, **whatever its [`Input`]** — the
@@ -1396,7 +1465,7 @@ impl AreaStore {
     /// still belongs to the application underneath.
     #[must_use]
     pub fn hover_test(&self, point: Point, monitors: &[Rect]) -> Option<&Area> {
-        self.iter_top_down().find(|area| {
+        self.iter_in_sight().find(|area| {
             area.bounds.contains(point)
                 || interaction::close_control(area.bounds, monitors).contains(point)
         })
@@ -1441,7 +1510,7 @@ impl AreaStore {
         monitors: &[Rect],
         body: impl Fn(&Area) -> bool,
     ) -> Vec<Rect> {
-        self.iter_top_down()
+        self.iter_in_sight()
             .flat_map(|area| {
                 if body(area) {
                     vec![area.bounds]
@@ -1469,6 +1538,16 @@ impl AreaStore {
     /// Every area, topmost first. This is hit-test order, tiers included.
     pub fn iter_top_down(&self) -> impl Iterator<Item = &Area> {
         self.areas.iter().rev()
+    }
+
+    /// Every area the user can see while they work, topmost first: all of
+    /// them but the ones that wait out of sight
+    /// ([`Area::waits_out_of_sight`]). **Every Living question walks this**
+    /// and not [`AreaStore::iter_top_down`], so an area that is not drawn can
+    /// never take a press, show chrome or stand in front of one that is.
+    fn iter_in_sight(&self) -> impl Iterator<Item = &Area> {
+        self.iter_top_down()
+            .filter(|area| !area.waits_out_of_sight())
     }
 
     /// How many areas exist.
@@ -2335,6 +2414,7 @@ mod tests {
             layer: Layer::Auto,
             zoom: AreaType::Upscale.default_zoom(),
             ocr_behaviour: OcrBehaviour::InPlace,
+            sticky: Sticky::Free,
         };
         assert_eq!(
             area.retake(),
@@ -2449,6 +2529,7 @@ mod tests {
             layer: Layer::Auto,
             zoom: Zoom::NATURAL.stepped(4),
             ocr_behaviour: OcrBehaviour::InPlace,
+            sticky: Sticky::Free,
         };
         // A hypothetical second zooming type inherits the factor, so both sides
         // answer with the same rectangle and the same treatment: equal, so
@@ -2548,6 +2629,111 @@ mod tests {
             let quiet = *store.get(ids[0]).unwrap();
             assert!(!quiet.body_takes_input(true) && !quiet.body_takes_input(false));
         }
+    }
+
+    #[test]
+    fn each_area_has_its_own_sticky_state_and_reports_only_a_change() {
+        let (mut store, ids) = store_with(&[AreaType::Default, AreaType::Ocr]);
+        assert_eq!(store.get(ids[0]).unwrap().sticky, Sticky::Free);
+        assert!(store.set_sticky(ids[0], Sticky::Following));
+        assert!(!store.set_sticky(ids[0], Sticky::Following), "no change");
+        assert!(store.set_sticky(ids[0], Sticky::Paused));
+        assert_eq!(store.get(ids[0]).unwrap().sticky, Sticky::Paused);
+        assert_eq!(store.get(ids[1]).unwrap().sticky, Sticky::Free);
+        // Following a window moves the area and nothing else: the state
+        // survives a move and a conversion to another type.
+        assert!(store.set_bounds(ids[0], Rect::new(5, 5, 40, 40)));
+        assert!(store.set_kind(ids[0], AreaType::Filter).is_some());
+        assert_eq!(store.get(ids[0]).unwrap().sticky, Sticky::Paused);
+        let gone = ids[1];
+        assert!(store.remove(gone).is_some());
+        assert!(!store.set_sticky(gone, Sticky::Following), "unknown id");
+    }
+
+    #[test]
+    fn only_an_in_place_ocr_area_in_sight_has_text_to_select() {
+        let (mut store, ids) = store_with(&[AreaType::Ocr, AreaType::Default]);
+        let (ocr, plain) = (ids[0], ids[1]);
+        assert!(store.get(ocr).unwrap().text_is_live());
+        assert!(!store.get(plain).unwrap().text_is_live(), "not an OCR area");
+        // Following its window, the text is what is on the screen.
+        assert!(store.set_sticky(ocr, Sticky::Following));
+        assert!(store.get(ocr).unwrap().text_is_live());
+        // Paused, it still reads in place and its text is no longer live.
+        assert!(store.set_sticky(ocr, Sticky::Paused));
+        let paused = *store.get(ocr).unwrap();
+        assert!(paused.reads_in_place());
+        assert!(!paused.text_is_live());
+        // Rendered, it never was.
+        assert!(store.set_sticky(ocr, Sticky::Free));
+        assert!(store.set_ocr_behaviour(ocr, OcrBehaviour::Rendered));
+        assert!(!store.get(ocr).unwrap().text_is_live());
+    }
+
+    #[test]
+    fn an_area_that_waits_out_of_sight_answers_no_living_question() {
+        // Roadmap 1.47, decided 2026-10-12: a sticky area whose window is
+        // minimised or closed is hidden while the user works. Two areas, the
+        // paused one on top. Every Living question must answer as if it were
+        // not there, and the Placement question must still find it.
+        let (mut store, ids) = store_with(&[AreaType::Default, AreaType::Default]);
+        let (under, over) = (ids[0], ids[1]);
+        let inside = Point::new(50, 50);
+        let everything = |area: &Area| area.is_interactive();
+        assert_eq!(store.hit_test_any(inside).unwrap().id, over);
+        assert_eq!(store.hit_test(inside, &screens()).unwrap().id, over);
+
+        assert!(store.set_sticky(over, Sticky::Paused));
+        assert!(store.get(over).unwrap().waits_out_of_sight());
+        assert_eq!(
+            store.hit_test(inside, &screens()).unwrap().id,
+            under,
+            "a press goes to the area the user sees"
+        );
+        assert_eq!(store.grab_test(inside, &screens()).unwrap().0.id, under);
+        assert_eq!(store.hover_test(inside, &screens()).unwrap().id, under);
+        assert_eq!(
+            store.hit_test_in_sight(inside).unwrap().id,
+            under,
+            "a key acts on the area the user sees"
+        );
+        assert_eq!(
+            store.interactive_regions(&screens()).len(),
+            1,
+            "one area takes input, not two"
+        );
+        assert_eq!(
+            store.hit_test_any(inside).unwrap().id,
+            over,
+            "Placement still reaches it, to free, move or remove it"
+        );
+
+        // The chord reaches a pass-through body. A hidden area on top of one
+        // must not stand in its way, and must not answer for itself either.
+        assert!(store.set_input(under, Input::PassThrough));
+        assert_eq!(
+            store.chord_move_test_with(inside, everything).unwrap().id,
+            under
+        );
+        assert!(store.set_input(over, Input::PassThrough));
+        assert!(store.remove(under).is_some());
+        assert!(
+            store.chord_move_test_with(inside, everything).is_none(),
+            "the chord does not grab an area that is not drawn"
+        );
+        assert!(store.hit_test(inside, &screens()).is_none());
+        assert!(store.grab_test(inside, &screens()).is_none());
+        assert!(store.hover_test(inside, &screens()).is_none());
+        assert!(
+            store.hit_test_in_sight(inside).is_none(),
+            "and on nothing where only a hidden area is"
+        );
+        assert!(store.interactive_regions(&screens()).is_empty());
+
+        // Following again, it is in sight again. So is a free area.
+        assert!(store.set_sticky(over, Sticky::Following));
+        assert!(!store.get(over).unwrap().waits_out_of_sight());
+        assert_eq!(store.hover_test(inside, &screens()).unwrap().id, over);
     }
 
     #[test]

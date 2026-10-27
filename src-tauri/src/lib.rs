@@ -31,6 +31,11 @@ mod placement;
 mod precapture;
 mod settings;
 mod settings_window;
+// Test-only: where a block comment ends, for the tests that read this crate's
+// own source. `sticky` and `placement` both strip comments and share it.
+#[cfg(test)]
+mod source_guard;
+mod sticky;
 mod strings;
 mod tray;
 
@@ -327,6 +332,10 @@ pub fn run() -> tauri::Result<()> {
             // can override the cursor, so a panic while placing does not leave
             // every app showing the crosshair. See `placement`.
             placement::install_panic_guard();
+            // Sticky areas (roadmap 1.47). This only remembers the handle:
+            // the thread that follows windows starts with the first area
+            // that is made sticky, and never for a user who has none.
+            sticky::init(app.handle());
             // Clear any cursor override a *previous* run left behind. The system
             // cursor is global and survives a hard kill (ADR-0014 accepts that),
             // so without this the user keeps a crosshair everywhere until they
@@ -359,9 +368,11 @@ pub fn run() -> tauri::Result<()> {
             //
             // ⚠️ **No longer one-time**, and the word is struck rather than
             // quietly dropped: roadmap 1.14 ships the *Show UP-TAKE in screen
-            // recordings* switch ADR-0019 always named, so the affinity is set
-            // again whenever that setting changes. What is unchanged is the
-            // default and the reasoning behind it: off, so the overlay is
+            // recordings* switch ADR-0019 always named, so the affinity follows
+            // that setting. With the setting on, nothing is written here: the
+            // overlay is still hidden, and the write waits for its first show
+            // (`overlay::affinity_write` has the reason). What is unchanged is
+            // the default and the reasoning behind it: off, so the overlay is
             // excluded until the user says otherwise.
             #[cfg(windows)]
             if let Err(error) =
