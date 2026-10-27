@@ -211,7 +211,10 @@ mod tests {
         // Not there: an error naming the file, not a panic and not empty text.
         let missing = read_from(&folder, "notices").expect_err("no notices file");
         assert!(missing.contains("THIRD-PARTY-NOTICES.txt"), "{missing}");
-        // A name that is not a licence file is refused before any path is built.
+        // A name that is not a licence file is refused before any path is built,
+        // even the name of a file that is there (review of #134, finding 1: a
+        // missing path made the old assertion pass with the check removed).
+        assert!(read_from(&folder, "LICENSE.txt").is_err());
         assert!(read_from(&folder, "../LICENSE").is_err());
         let _ = std::fs::remove_dir_all(&folder);
     }
