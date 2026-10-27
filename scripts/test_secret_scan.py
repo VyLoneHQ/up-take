@@ -924,8 +924,8 @@ class SecretScan(unittest.TestCase):
         # The exit 2 must be the peel failing, not any other refusal (review
         # of #152, round 1, finding 1: without detect-secrets the scan exits
         # 2 before it reads a ref, and the test passed with the guard gone).
-        self.assertIn(f"{tag}^{{}}", out)
-        self.assertIn("missing object", out)
+        # git's own wording differs by version, so the script's line is pinned.
+        self.assertIn(f"could not run: git rev-parse --verify {tag}^{{}} failed", out)
         self.assertNotIn("refs/tags/ghost names a blob or a tree", out)
 
     def test_daily_reads_mains_tracked_files(self) -> None:
