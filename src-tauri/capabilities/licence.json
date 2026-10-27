@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "licence",
+  "description": "Capability for the licence windows (I-443): one window per licence file, labelled licence-licence and licence-notices, which the pattern below covers. A second window starts with NOTHING granted (see settings.json for what that looked like on the rig), and this page needs exactly one permission: showing itself once it has painted, since the window is created hidden. It reads the file through UP-TAKE's own licence_text command, not through any file-system permission.",
+  "windows": ["licence-*"],
+  "permissions": [
+    "core:window:allow-show"
+  ]
+}

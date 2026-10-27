@@ -9,12 +9,15 @@
  * for the overlay, which is the only window that existed until now and is
  * always opened at `/`.
  *
- * It is wrong for a second window. Tauri serves `frontendDist` as static files
- * and does not fall back to `index.html` for an unknown path, so a window
- * opened at `settings/` in a release build would get a 404 where its page
- * should be -- and **only** in a release build, because `pnpm dev` is a real
- * dev server and does fall back. That is the worst shape a defect can have
- * here: invisible in the loop this is developed in.
+ * A second window gets a page file of its own instead. When this was written,
+ * the reasoning was that Tauri serves `frontendDist` as static files and does
+ * not fall back to `index.html` for an unknown path, so a window opened at
+ * `settings/` in a release build would get a 404, and only in a release build,
+ * because `pnpm dev` is a real dev server and does fall back. **That is not
+ * true of Tauri 2.12**, which tries `{path}.html`, then `{path}/index.html`,
+ * then `index.html` (`tauri/src/manager/mod.rs`, read by the review of #134).
+ * The prerender is kept so the window loads its own file and nothing rests on
+ * that fallback staying.
  *
  * So this route is prerendered. `adapter-static` honours `prerender` even with
  * a fallback set, and emits this page as a file of its own beside the fallback.

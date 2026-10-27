@@ -107,8 +107,8 @@ async function openLicence(action: 'open-licence' | 'open-notices') {
     });
   } catch (error) {
     // Rust answers this in words when the file is not beside the executable,
-    // which is every development build. Anything else is Windows refusing to
-    // open it, said on the button, which stays enabled for another try.
+    // which is every development build. Anything else is the licence window
+    // failing to open, said on the button, which stays enabled for another try.
     if (String(error).includes('not in this build')) {
       missingLicence = [...missingLicence, action];
     } else {
