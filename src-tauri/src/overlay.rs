@@ -24,6 +24,7 @@ use uptake_core::area::{
 use uptake_core::geometry::{Monitor, Point, Rect, Size, virtual_desktop_bounds};
 use uptake_core::interaction;
 use uptake_core::sticky::Sticky;
+use uptake_core::watch::Watch;
 
 use crate::click_through;
 use crate::overlay_state::{Event, OverlayState, next};
@@ -679,25 +680,25 @@ fn page_aside(
     let page_app = app.clone();
     crate::freeze::PageAside::new(
         move |request| match request {
-            crate::freeze::PageRequest::Hide { token, covers } => page_app
-                .emit(
-                    FREEZE_HIDE_EVENT,
-                    FreezeHidePayload {
-                        token,
-                        rects: covers
-                            .iter()
-                            .map(|rect| {
-                                (
-                                    rect.origin.x,
-                                    rect.origin.y,
-                                    rect.size.width,
-                                    rect.size.height,
-                                )
-                            })
-                            .collect(),
-                    },
-                )
-                .map_err(|error| error.to_string()),
+            crate::freeze::PageRequest::Hide { token, covers } => crate::watch::emit_redraw(
+                &page_app,
+                FREEZE_HIDE_EVENT,
+                FreezeHidePayload {
+                    token,
+                    rects: covers
+                        .iter()
+                        .map(|rect| {
+                            (
+                                rect.origin.x,
+                                rect.origin.y,
+                                rect.size.width,
+                                rect.size.height,
+                            )
+                        })
+                        .collect(),
+                },
+            )
+            .map_err(|error| error.to_string()),
             crate::freeze::PageRequest::Reveal { token } => page_app
                 .emit(FREEZE_REVEAL_EVENT, FreezeRevealPayload { token })
                 .map_err(|error| error.to_string()),
@@ -837,6 +838,7 @@ pub(crate) const fn type_name(kind: AreaType) -> &'static str {
         AreaType::Upscale => "upscale",
         AreaType::Analysis => "analysis",
         AreaType::Filter => "filter",
+        AreaType::Watch => "watch",
     }
 }
 
@@ -1037,7 +1039,8 @@ fn emit_state(app: &AppHandle, state: OverlayState) -> Result<(), String> {
             )
         })
         .collect();
-    app.emit(
+    crate::watch::emit_redraw(
+        app,
         STATE_EVENT,
         StatePayload {
             state: state_name(state),
@@ -1273,6 +1276,13 @@ struct AreaPayload {
     /// (roadmap `1.47`): `free`, `following` or `paused`. The page marks a
     /// sticky area and says so when it is paused.
     sticky: Sticky,
+    /// What a watch area tells the user about (roadmap `1.58`): `off`,
+    /// `changes` or `settles`.
+    watch: Watch,
+    /// Whether the area reads its region now: [`Area::is_watching`], the
+    /// answer the watcher reads by. The page draws the *watching* mark from
+    /// this and from nothing else (`ADR-0048`).
+    watching: bool,
     /// The area's magnification (§3.4), `1.0` at natural size.
     ///
     /// **The frontend does not scale anything with this.** The magnified
@@ -1347,6 +1357,8 @@ fn payload_of(area: &Area, monitors: &[Rect]) -> AreaPayload {
         kind: type_name(area.kind),
         ocr_behaviour: area.ocr_behaviour,
         sticky: area.sticky,
+        watch: area.watch,
+        watching: area.is_watching(),
         zoom: area.zoom.factor(),
         bar: interaction::grab_bar(area.bounds, monitors).map(as_tuple),
         handles: interaction::outside_resize_handles(area.bounds)
@@ -1378,7 +1390,7 @@ pub(crate) fn emit_areas(app: &AppHandle) -> Result<(), String> {
             .map(|area| payload_of(area, &monitors))
             .collect()
     };
-    app.emit(AREAS_EVENT, AreasPayload { areas })
+    crate::watch::emit_redraw(app, AREAS_EVENT, AreasPayload { areas })
         .map_err(|e| format!("Could not emit overlay areas: {e}"))
 }
 
@@ -1398,6 +1410,8 @@ pub(crate) struct AreaSummary {
     /// Whether the area follows a window (roadmap `1.47`), for the menu's
     /// tick.
     pub sticky: Sticky,
+    /// What a watch area watches for (roadmap `1.58`), for its Watch rows.
+    pub watch: Watch,
 }
 
 impl AreaSummary {
@@ -1409,6 +1423,7 @@ impl AreaSummary {
             kind: area.kind,
             ocr_behaviour: area.ocr_behaviour,
             sticky: area.sticky,
+            watch: area.watch,
         }
     }
 }
@@ -1624,6 +1639,20 @@ pub(crate) fn set_area_ocr_behaviour(app: &AppHandle, id: AreaId, behaviour: Ocr
     true
 }
 
+/// Sets what a watch area tells the user about (roadmap `1.58`) and wakes the
+/// watcher, which reads the new choice on its next look. Returns whether it
+/// changed.
+pub(crate) fn set_area_watch(app: &AppHandle, id: AreaId, watch: Watch) -> bool {
+    let changed = {
+        let store = app.state::<Mutex<AreaStore>>();
+        lock(&store).set_watch(id, watch)
+    };
+    if changed {
+        crate::watch::wake(app);
+    }
+    changed
+}
+
 /// Whether `id` is an OCR area whose text can be selected, copied or read
 /// again (`Area::text_is_live`): it reads in place and it is in sight. `false`
 /// for an area that is gone.
@@ -1747,7 +1776,7 @@ pub(crate) fn convert_area(app: &AppHandle, id: AreaId, kind: AreaType) -> bool 
     // `refresh_magnification` rather than a second `magnify_into_area` call,
     // because it already asks the area for its own source rectangle and no-ops
     // at natural size -- so this line is correct for every type without
-    // knowing which ones are magnified, and stays correct when an eighth is.
+    // knowing which ones are magnified, and stays correct when a ninth is.
     // Ordered AFTER the discard above, and THIS is the line the generation
     // orders: `clear_magnification` reaches `Magnify::cancel`, which bumps
     // `next_generation` and stamps it as `id`'s current one. A request issued
@@ -2428,7 +2457,8 @@ struct FlashPayload {
 pub(crate) fn emit_flash(app: &AppHandle, id: AreaId) {
     static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nonce = NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if let Err(error) = app.emit(
+    if let Err(error) = crate::watch::emit_redraw(
+        app,
         FLASH_EVENT,
         FlashPayload {
             id: id.get(),
@@ -2501,7 +2531,8 @@ pub(crate) fn emit_ocr_selection(app: &AppHandle, id: AreaId, range: Option<(usi
             u64::try_from(last).unwrap_or(u64::MAX),
         )
     });
-    if let Err(error) = app.emit(
+    if let Err(error) = crate::watch::emit_redraw(
+        app,
         OCR_SELECTION_EVENT,
         OcrSelectionPayload {
             id: id.get(),
@@ -2533,7 +2564,8 @@ pub(crate) fn emit_ocr(
             outline: unit.outline.map(|corner| [corner.x, corner.y]),
         })
         .collect();
-    if let Err(error) = app.emit(
+    if let Err(error) = crate::watch::emit_redraw(
+        app,
         OCR_EVENT,
         OcrPayload {
             id: id.get(),
@@ -2602,7 +2634,8 @@ struct PinPayload {
 ///
 /// [`FreshPin`]: crate::captures::FreshPin
 pub(crate) fn emit_pin(app: &AppHandle, pin: crate::captures::FreshPin) -> Result<(), String> {
-    app.emit(
+    crate::watch::emit_redraw(
+        app,
         PIN_EVENT,
         PinPayload {
             id: pin.id().get(),
@@ -2615,7 +2648,8 @@ pub(crate) fn emit_pin(app: &AppHandle, pin: crate::captures::FreshPin) -> Resul
 /// Announces that `id` has no pinned capture any more, so the area draws the
 /// screen underneath again (§3.4's floor; see `output::clear_magnification`).
 pub(crate) fn emit_unpin(app: &AppHandle, id: AreaId) -> Result<(), String> {
-    app.emit(
+    crate::watch::emit_redraw(
+        app,
         PIN_EVENT,
         PinPayload {
             id: id.get(),
@@ -2750,6 +2784,49 @@ pub fn overlay_report_scale(app: AppHandle, dpr: f64) {
     crate::dev_harness::log_scale(dpr, &pairs);
 }
 
+/// IPC surface (roadmap `1.58`): the page's word on which watching areas'
+/// marks it can see, each as its id and the physical bounds it drew it at,
+/// in the overlay state it drew in, with the generation it had drawn
+/// ([`crate::watch::emit_redraw`]). See [`crate::watch::confirm`].
+///
+/// An unknown state name confirms nothing, which stops the reading rather
+/// than guessing.
+#[tauri::command]
+pub fn overlay_confirm_marks(state: String, marks: Vec<ConfirmedMark>, generation: u64) {
+    let state = match state.as_str() {
+        "placement" => OverlayState::Placement,
+        "living" => OverlayState::Living,
+        _ => OverlayState::Hidden,
+    };
+    crate::watch::confirm(
+        state,
+        marks
+            .into_iter()
+            .map(|mark| {
+                let [x, y, width, height] = mark.rect;
+                (
+                    mark.id,
+                    Rect::new(
+                        x,
+                        y,
+                        u32::try_from(width).unwrap_or(0),
+                        u32::try_from(height).unwrap_or(0),
+                    ),
+                )
+            })
+            .collect(),
+        generation,
+    );
+}
+
+/// One confirmed mark on the wire: `{ id, rect: [x, y, width, height] }`,
+/// physical pixels, as the page received the area.
+#[derive(serde::Deserialize)]
+pub struct ConfirmedMark {
+    id: u64,
+    rect: [i32; 4],
+}
+
 #[tauri::command]
 pub fn overlay_report_latency(probe: u64) {
     placement::record_latency(probe);
@@ -2810,6 +2887,10 @@ fn armable_type(name: &str) -> Option<AreaType> {
         // draws its recognised text over the region rather than capturing
         // continuously.
         "ocr" => Some(AreaType::Ocr),
+        // Watch is the fifth (roadmap 1.58, key `W`). It is created reading
+        // nothing: watching is switched on from the area's own menu
+        // (`ADR-0048`), so the gesture only places the frame.
+        "watch" => Some(AreaType::Watch),
         _ => None,
     }
 }
@@ -3172,6 +3253,8 @@ mod tests {
                 kind: "default",
                 ocr_behaviour: OcrBehaviour::InPlace,
                 sticky: state,
+                watch: Watch::Off,
+                watching: false,
                 zoom: 1.0,
                 bar: None,
                 handles: Vec::new(),
@@ -3206,6 +3289,8 @@ mod tests {
             kind: "default",
             ocr_behaviour: OcrBehaviour::InPlace,
             sticky: Sticky::Paused,
+            watch: Watch::Off,
+            watching: false,
             zoom: 1.0,
             bar: Some((0, -18, 10, 18)),
             handles: vec![(0, 0, 18, 18)],
@@ -3221,6 +3306,8 @@ mod tests {
                 "kind",
                 "ocr_behaviour",
                 "sticky",
+                "watch",
+                "watching",
                 "zoom",
                 "bar",
                 "handles",
@@ -3959,6 +4046,7 @@ mod tests {
             ("filter", AreaType::Filter),
             ("upscale", AreaType::Upscale),
             ("ocr", AreaType::Ocr),
+            ("watch", AreaType::Watch),
         ] {
             assert_eq!(armable_type(name), Some(kind), "{name} must arm");
             assert_eq!(type_name(kind), name, "{name} must round trip");
@@ -3983,13 +4071,13 @@ mod tests {
         assert_eq!(armable_type(""), None);
     }
 
-    /// All seven wire names, pinned, so a *rename* goes red on this side.
+    /// Every wire name, pinned, so a *rename* goes red on this side.
     ///
     /// **The other direction is covered as well, and it is covered elsewhere.**
     /// This doc said *"nothing checks it from the other side"* and *"this test
     /// cannot close that gap"*, which was true until `src/lib/area-kinds.test.ts`
     /// arrived: that test reads this function out of the source and asserts the
-    /// frontend's `AreaKind` union lists exactly these names, so an eighth
+    /// frontend's `AreaKind` union lists exactly these names, so a ninth
     /// `AreaType` now fails there (`I-55`).
     ///
     /// Kept as two checks rather than folded into one, because they fail
@@ -4005,6 +4093,7 @@ mod tests {
             (AreaType::Upscale, "upscale"),
             (AreaType::Analysis, "analysis"),
             (AreaType::Filter, "filter"),
+            (AreaType::Watch, "watch"),
         ] {
             assert_eq!(type_name(kind), name);
         }

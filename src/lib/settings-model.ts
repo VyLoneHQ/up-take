@@ -491,7 +491,7 @@ export function panes(
               //
               // Filtered rather than removed from `coachCopy`: the tour still
               // wants it. On the tour that line is a REMINDER of the step the
-              // user has just been walked through, with the four types fresh
+              // user has just been walked through, with the types fresh
               // on the screen behind it; here there is no such step, which is
               // exactly why it needed replacing.
               //
@@ -516,7 +516,7 @@ export function panes(
             // So the legend is the TOUR'S OWN step 2, read from `coachCopy`
             // rather than written again here: the same keys, the same product
             // labels from `kindLabels`, the same sentences, the same per-type
-            // colour. A second vocabulary for the same five types is the
+            // colour. A second vocabulary for the same types is the
             // F-22/F-37 failure, and this is the third place ADR-0043
             // decision 5 says that content has to appear.
             //

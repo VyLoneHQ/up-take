@@ -151,7 +151,7 @@ describe('the inventory', () => {
     const does = keys.keys.map((each) => each.does);
 
     expect(does).not.toContain("Set the next area's type");
-    expect(keys.keys.map((each) => each.keys)).not.toContain('S F U O');
+    expect(keys.keys.map((each) => each.keys)).not.toContain('S F U O W');
     // Everything else survives. A filter that matched too much would leave a
     // reference sheet quietly missing keys the app still honours.
     expect(does).toEqual([
@@ -164,7 +164,7 @@ describe('the inventory', () => {
 
   it('keeps the arming row on the TOUR, which is a different question', () => {
     // On the tour that line reminds the user of the step they were just walked
-    // through, with the four types on the screen behind it. Filtering it there
+    // through, with the types on the screen behind it. Filtering it there
     // too would be this fix overreaching.
     const tour = coachCopy('en').REFERENCE.placing.map((each) => each.does);
     expect(tour).toContain("Set the next area's type");
@@ -187,6 +187,7 @@ describe('the inventory', () => {
       'F',
       'U',
       'O',
+      'W',
     ]);
     // Every row says what the type DOES, which is the whole complaint.
     for (const each of legend.types) {

@@ -56,10 +56,12 @@ We believe in quality over quantity, while making sure no important functionalit
 
 ## What works today
 
-Five of seven area types are built.
+Six of eight area types are built.
 <!-- source: STATUS.md Phase 1 (1A merged, 1B partial); ROADMAP.md tasks 1.9b (Screenshot),
-     1.23 (Filter, merged 2026-08-12), 1.24 (Upscale) and 1.26 (OCR); PRODUCT-VISION.md
-     section 3.1 (the seven types).
+     1.23 (Filter, merged 2026-08-12), 1.24 (Upscale), 1.26 (OCR) and 1.58 (Watch); PRODUCT-VISION.md
+     section 3.1. The count is of the types modelled in the code (`AreaType`), eight since 1.58;
+     PRODUCT-VISION.md section 3.1 plans more (Notes among them) that are not modelled yet, and
+     built-type-count.test.ts holds this sentence to the code.
      This line said "Two of seven" until 2026-08-21. Filter shipped on 2026-08-12 and the
      count was never updated, so the front page of a public repository under-reported what
      was built for ten days. Update it in the same change that ships a type. -->
@@ -160,6 +162,27 @@ Five of seven area types are built.
        most: ADR-0031 question 3 makes the founder's eye at the rig the ONLY v1 gate on whether
        the sharpening looks right, because there is no number to hold it to. If a rig pass finds
        it reads as over-sharpened, or as doing nothing, this bullet is what has to change. -->
+<!-- HELD (2026-10-31): the watch area bullet waits for the founder's P-9 approval after he has
+     seen a notification on a real screen. The draft:
+- **A watch area.** Place it over something that changes, such as a download bar, a render or a
+  chat, and it shows a Windows notification when that piece of screen starts changing, or when it
+  stops. It reads nothing until you switch watching on in its right-click menu, and says
+  *watching* on the area for as long as it reads. What it reads stays on your computer: it keeps
+  coarse summaries of its readings, a grid of brightness averages, to compare, and nothing else.
+  NOTES FOR RELEASE, not part of the draft. (1) For an area under 16 px on a side the grid is its
+  greyscale picture (crates/uptake-core/src/watch.rs, review of #154 round 9): say so or drop
+  "coarse". (2) "Nothing else" must also allow for the capture sessions, which hold each watched
+  monitor's newest frame in graphics memory while an area watches (#154 round 12).
+  This block is one HTML comment and must contain no other comment marker: an inner one closes it
+  early and publishes what follows (#154 round 14).
+  Source: ROADMAP.md task 1.58 and ADR-0048 (an area may read its own region repeatedly: the
+       user placed it, it is marked while it reads, reading is per area and off by default, and it
+       stays local). The code is crates/uptake-core/src/watch.rs (the rule and its tests) and
+       src-tauri/src/watch.rs (the readings and the notification).
+       Deliberately NOT claimed here: reading a window that other windows cover (ROADMAP 1.48, not
+       built), watching for a word or a number (later in 1.58), and any cost figure, because the
+       reading route was measured on 2026-10-31 on a still screen only (I-474).
+     END OF HELD DRAFT -->
 
 Around those:
 
@@ -262,7 +285,12 @@ destination and not the current state.
        This bullet said "There is no continuous background recording and no plan for one" until
        2026-10-11. The second half had been false since ADR-0048 admitted the Rewind area on
        2026-09-27, and that record says a page that says "never watches" without the rest would be
-       false. The maintainer caught it and approved this wording on 2026-10-11. -->
+       false. The maintainer caught it and approved this wording on 2026-10-11.
+       NOT EXACT for watch areas (ROADMAP.md 1.58) while the private backlog row I-475 is open: a
+       watch area reads only while the page confirms its mark is drawn and uncovered
+       (src-tauri/src/watch.rs, "The page confirms the mark"), but a window Windows draws above
+       UP-TAKE, and a frame up to a second old, can still be read with the mark not in sight. The
+       visible wording is the maintainer's to change (review of #154, round 25). -->
 - **A sticky area has to recognise its window.** To find the window again after it was closed,
   UP-TAKE remembers its title and the path of its program. While an area is waiting, it checks the
   titles of open windows once a second to spot the window coming back. All of this stays in

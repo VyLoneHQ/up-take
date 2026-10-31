@@ -337,7 +337,7 @@ fn poll_loop(app: &AppHandle) -> ! {
         // **What this covers is the ABANDONMENT path, and NOT the create path.**
         // The first version of this comment said a create gesture ends by
         // deactivating the overlay, and that is false: `AreaType::after_create`
-        // returns `StayInPlacement` for all seven types (ADR-0023), the state
+        // returns `StayInPlacement` for every type (ADR-0023), the state
         // machine keeps `Placement` on `AreaCreated`, and `overlay.rs` reaches
         // `deactivate` from `OverlayState::Hidden` alone. It was false at
         // `3cbeb1e` too — the exact commit of the rig pass it was offered to

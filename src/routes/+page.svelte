@@ -11,6 +11,7 @@ import {
   hiddenClipPath,
   nextAnimationFrame,
 } from '$lib/freeze-mask';
+import { COVERS, markSeen } from '$lib/mark-check';
 import { overflowFade } from '$lib/overflow-fade';
 import {
   type ActiveMonitorPayload,
@@ -25,6 +26,7 @@ import {
   type CoachPayload,
   type CoachView,
   copyFocusedOcr,
+  type DrawnPayload,
   dismissFocusedArea,
   escapeOverlay,
   type FlashPayload,
@@ -464,7 +466,16 @@ onMount(() => {
   // before that races the reply and drops it — which is exactly the startup
   // case, where the overlay is already in Placement (with areas possibly already
   // present) when the webview mounts. Chaining on the promise closes the gap.
+  // The generation of what Rust last sent that changes the drawing. Events
+  // arrive in order, so by now the change has been applied; confirm at once,
+  // echoing it (roadmap 1.58, watch.rs `emit_redraw`).
+  const unlistenDrawn = listen<DrawnPayload>('overlay://drawn', (event) => {
+    // Rust sends them rising; an older one is never a step back.
+    drawnGeneration = Math.max(drawnGeneration, event.payload.generation);
+    void tick().then(confirmMarks);
+  });
   const ready = Promise.all([
+    unlistenDrawn,
     unlistenState,
     unlistenAreas,
     unlistenActiveMonitor,
@@ -574,11 +585,104 @@ onMount(() => {
       // reason not to draw.
     }
   });
+  // The marks are confirmed again every second as well as after each change
+  // (below): an area drawn over another, or a display change, does not always
+  // come with an event this page hears.
+  const confirming = setInterval(confirmMarks, 1000);
   return () => {
+    clearInterval(confirming);
     void ready.then((unlisteners) => {
       for (const unlisten of unlisteners) unlisten();
     });
   };
+});
+
+/**
+ * Tells the host which watching areas' marks can be seen now (roadmap 1.58,
+ * `ADR-0048`'s *Revisit if*: the mark enforced by the reader). The host reads
+ * a watch area only while its latest confirmation names it at the bounds and
+ * in the overlay state it is reading in (`src-tauri/src/watch.rs`).
+ *
+ * The page measures because only it knows where the mark is laid out, at what
+ * size in this scale and language, and what is drawn over it ($lib/mark-check).
+ * Anything drawn after a mark is drawn over it (COVERS), and a freeze's mask
+ * hides whole monitors.
+ */
+let confirmedNone = false;
+/** See `overlay://drawn`. 0 until the first one: Rust's count starts at 1. */
+let drawnGeneration = 0;
+function confirmMarks(): void {
+  const shown =
+    overlayState === 'hidden'
+      ? []
+      : areaFrames.filter(
+          (frame) => !frame.source && areaInSight(frame.sticky, overlayState),
+        );
+  const monitorsCss = physRectsToCss(monitors, origin, dpr);
+  const marks: { id: number; rect: PhysRect }[] = [];
+  for (const frame of shown) {
+    if (!frame.watching) continue;
+    const badge = document.querySelector(
+      `.watch-badge[data-area="${frame.id}"]`,
+    );
+    const dot = badge?.querySelector('.watch-dot');
+    if (!badge || !dot) continue;
+    // Whatever is drawn after the badge is drawn over it: later areas, every
+    // area's outside controls, the menu, the coach (review of #154, round 20,
+    // found menus and controls missing when only areas were counted). And a
+    // freeze's mask hides whole monitors.
+    const above = [
+      ...[
+        ...document.querySelectorAll(
+          COVERS.map((name) => `.${name}`).join(', '),
+        ),
+      ]
+        .filter(
+          (element) =>
+            !badge.contains(element) &&
+            (badge.compareDocumentPosition(element) &
+              Node.DOCUMENT_POSITION_FOLLOWING) !==
+              0,
+        )
+        .map((element) => element.getBoundingClientRect()),
+      ...freezeHidden,
+    ];
+    if (
+      markSeen(
+        dot.getBoundingClientRect(),
+        badge.getBoundingClientRect(),
+        monitorsCss,
+        above,
+      )
+    ) {
+      const view = areas.find((area) => area.id === frame.id);
+      if (view) marks.push({ id: frame.id, rect: view.rect });
+    }
+  }
+  // Nothing to say twice: an empty answer once is enough until one changes.
+  if (marks.length === 0 && confirmedNone) return;
+  confirmedNone = marks.length === 0;
+  void invoke('overlay_confirm_marks', {
+    state: overlayState,
+    marks,
+    generation: drawnGeneration,
+  }).catch(() => {});
+}
+
+// After every change to what is drawn, once it has been laid out.
+$effect(() => {
+  void [
+    areaFrames,
+    overlayState,
+    monitors,
+    origin,
+    dpr,
+    language,
+    freezeHidden,
+  ];
+  // After Svelte has updated the DOM: reading the boxes lays them out, so no
+  // animation frame is needed (and the freeze tests count those).
+  void tick().then(confirmMarks);
 });
 </script>
 
@@ -665,6 +769,7 @@ onMount(() => {
           class:hovered={area.hovered}
           class:pinned={area.layer !== 'auto'}
           class:filter={area.kind === 'filter'}
+          class:watch={area.kind === 'watch'}
           style="transform: translate3d({area.rect.x}px, {area.rect.y}px, 0); width: {area
             .rect.width}px; height: {area.rect.height}px"
         >
@@ -824,6 +929,15 @@ onMount(() => {
               class:beside-layer={area.layer !== 'auto'}
               class:paused={area.sticky === 'paused'}
             >◈{area.sticky === 'paused' ? ` ${text(language, 'area.sticky.paused')}` : ''}</span>
+          {/if}
+          <!-- A watch area that is reading its region says so, in words, for
+               as long as it reads (roadmap 1.58, ADR-0048: "visibly marked
+               while it watches"). Top right, clear of the depth and sticky
+               marks on the left. -->
+          {#if area.watching}
+            <span class="watch-badge" data-area={area.id}
+              ><span class="watch-dot">●</span> {text(language, 'area.watching')}</span
+            >
           {/if}
         </div>
       {/if}
@@ -1074,6 +1188,40 @@ onMount(() => {
   /* 1.5x the resting wash, which is what `0.24` was to `0.16`. */
   background: rgba(255, 170, 80, calc(1.5 * var(--filter-alpha, 0.16)));
   box-shadow: 0 0 10px rgba(255, 170, 80, 0.45);
+}
+
+/* A Watch area (roadmap 1.58, key `W`): green, so it reads as its own type at a
+   glance. Pass-through like a Filter, with no wash: it watches what is under
+   it and must not change how that looks. */
+.area.watch {
+  border-color: rgba(120, 225, 170, 0.85);
+  background: none;
+  box-shadow: 0 0 6px rgba(100, 210, 150, 0.25);
+}
+
+/* Hover survives the type, as for `.area.filter.hovered` above. */
+.area.watch.hovered {
+  border-color: rgba(160, 240, 195, 1);
+  box-shadow: 0 0 10px rgba(100, 210, 150, 0.45);
+}
+
+/* The watching mark: present exactly while the area reads its region. */
+/* Kept inside the area, clipped at its end so the dot shows first. The page
+   tells the host which marks it can see (confirmMarks, $lib/mark-check): a
+   dot cut off by a small area, off the desktop, or under another area is not
+   seen, and the host does not read that area (watch.rs `confirm`, review of
+   #154 rounds 14 to 19). Pinned by watch-badge-css.test.ts. */
+.watch-badge {
+  position: absolute;
+  right: 4px;
+  top: 2px;
+  max-width: calc(100% - 8px);
+  max-height: calc(100% - 4px);
+  overflow: hidden;
+  font: 11px/1 system-ui, sans-serif;
+  color: rgba(140, 235, 180, 0.98);
+  text-shadow: 0 0 3px rgba(0, 0, 0, 0.8);
+  white-space: nowrap;
 }
 
 /* A pinned tier (ADR-0013) is a state the user set and must be able to see; an

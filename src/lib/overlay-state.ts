@@ -97,6 +97,13 @@ export type LayerName = 'front' | 'auto' | 'back';
 export type StickyState = 'free' | 'following' | 'paused';
 
 /**
+ * What a watch area tells the user about (roadmap 1.58): nothing, a change,
+ * or the end of one. Anything but `off` means the area is reading its region,
+ * and the page marks it while it does (ADR-0048).
+ */
+export type WatchState = 'off' | 'changes' | 'settles';
+
+/**
  * Whether an area is drawn at all in this overlay state (roadmap 1.47, the
  * maintainer's decision of 2026-10-12). A paused area's window is minimised,
  * hidden or closed, so while the user works the area is out of sight. It is
@@ -114,7 +121,7 @@ export function areaInSight(
 /**
  * Every area type on the wire, matching `type_name` in `overlay.rs`.
  *
- * All seven are listed because Rust sends all seven, not only the ones a
+ * Every type is listed because Rust sends every type, not only the ones a
  * gesture can create. {@link ArmableType} is the narrower set a key can arm.
  *
  * This union is still hand-written, and it is no longer unchecked. UP-TAKE
@@ -136,7 +143,8 @@ export type AreaKind =
   | 'ocr'
   | 'upscale'
   | 'analysis'
-  | 'filter';
+  | 'filter'
+  | 'watch';
 
 /**
  * One area as Rust sends it. Every rectangle is **physical** and already laid
@@ -160,6 +168,15 @@ export interface AreaView {
   ocr_behaviour: OcrBehaviour;
   /** Whether the area follows a window. See {@link StickyState}. */
   sticky: StickyState;
+  /** What a watch area watches for. See {@link WatchState}. */
+  watch: WatchState;
+  /**
+   * Whether the area reads its region now (roadmap 1.58). Rust's
+   * `Area::is_watching`, the answer the watcher reads by, so the page draws
+   * the mark from that and never works it out for itself (ADR-0048; review
+   * of #154, round 1, found the two disagreeing when it did).
+   */
+  watching: boolean;
   /**
    * Magnification (§3.4), `1` at natural size.
    *
@@ -492,6 +509,16 @@ export interface PinPayload {
  * chose the surviving route — a narrow `SetSystemCursor` override on the Rust
  * side — and deleted this half rather than leave it looking functional.
  */
+/**
+ * The payload of `overlay://drawn` (roadmap 1.58): the generation of what Rust
+ * has just sent that changes the drawing. The page echoes it with its mark
+ * confirmations, and Rust counts only a confirmation that echoes the latest
+ * (`watch.rs`, `emit_redraw`).
+ */
+export interface DrawnPayload {
+  generation: number;
+}
+
 export interface HoverPayload {
   id: number | null;
   /**
@@ -610,6 +637,8 @@ export interface AreaFrame {
   ocrBehaviour: OcrBehaviour;
   /** Whether the area follows a window. See {@link StickyState}. */
   sticky: StickyState;
+  /** The area is reading its region now: draw its watching mark. */
+  watching: boolean;
   /** Magnification (§3.4), `1` at natural size. See {@link AreaView.zoom}. */
   zoom: number;
   /** Draw this area as the one a press would grab: brighter, lit border. */
@@ -638,7 +667,7 @@ export interface AreaFrame {
  *
  * # Why a `Record` and not a `switch`
  *
- * `Record<AreaKind, string>` is exhaustive at COMPILE time: an eighth member of
+ * `Record<AreaKind, string>` is exhaustive at COMPILE time: a ninth member of
  * {@link AreaKind} fails to typecheck here rather than silently drawing a blank
  * bar. That matters more than usual in this repository: `UT-F-76` is the record
  * of five separate enumerations of one type set each coming back short, and
@@ -657,7 +686,7 @@ export interface AreaFrame {
  * tour now reads its type names from here (`coach-copy.ts`, pinned by
  * `coach-copy.test.ts`), so the tour, the bar and the area menu say one word
  * for each type. These match `conversion_label`'s spelling in `placement.rs`
- * for the four types that have behaviour. Whether `ocr` should read "Text" for
+ * for the types that have behaviour. Whether `ocr` should read "Text" for
  * the ordinary user, as the 1.18 mockup had it, is an open naming question and
  * would change all three at once.
  *
@@ -675,6 +704,7 @@ export function kindLabels(language: Language): Record<AreaKind, string> {
     upscale: text(language, 'kind.upscale'),
     analysis: text(language, 'kind.analysis'),
     filter: text(language, 'kind.filter'),
+    watch: text(language, 'kind.watch'),
   };
 }
 
@@ -751,6 +781,7 @@ export function areaFramesCss(
     kind: area.kind,
     ocrBehaviour: area.ocr_behaviour,
     sticky: area.sticky,
+    watching: area.watching,
     zoom: area.zoom,
     // A dragged area is not also "hovered": the hover chrome invites a gesture
     // that is already under way, and its close control would sit at the source
@@ -1059,7 +1090,8 @@ export function isRemoveKey(key: string): boolean {
  *
  * This listed Filter and Upscale among the types that merely *want* an initial
  * until 2026-08-21, 54 lines above the arms that give them one. Roadmap 1.23
- * spent `f` and 1.24 spent `u`; three of the seven are claimed, not one.
+ * spent `f` and 1.24 spent `u`; since 1.26 and 1.58 five letters are claimed
+ * (`S F U O W`), not one.
  *
  * `Space` alone was the better key on ergonomics and was deliberately left
  * unclaimed for a future area-level action (ADR-0026 decision 8).
@@ -1085,7 +1117,7 @@ export function isFreezeKey(
  */
 export type ArmableType = Extract<
   AreaKind,
-  'screenshot' | 'filter' | 'upscale' | 'ocr'
+  'screenshot' | 'filter' | 'upscale' | 'ocr' | 'watch'
 >;
 
 /**
@@ -1123,6 +1155,10 @@ export function armedTypeForKey(
     // the `overlay://ocr` listener are the other half of this key.
     case 'o':
       return 'ocr';
+    // Roadmap 1.58. `W` for Watch. The area is created reading nothing; the
+    // user switches watching on from its menu (ADR-0048).
+    case 'w':
+      return 'watch';
     default:
       return null;
   }

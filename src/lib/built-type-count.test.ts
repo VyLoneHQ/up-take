@@ -40,7 +40,7 @@ import placementRs from '../../src-tauri/src/placement.rs?raw';
  * arm there or it does not appear in the menu, so the number cannot drift away
  * from the product without the menu drifting too.
  *
- * `AreaType::ALL` would be the wrong source: it is all seven, built or not.
+ * `AreaType::ALL` would be the wrong source: it is every modelled type, built or not.
  *
  * ## What it cannot catch
  *
@@ -55,8 +55,8 @@ import placementRs from '../../src-tauri/src/placement.rs?raw';
  * built to end them. The round-3 reviewer re-ran the sweep instead of reading
  * the list and found both misses, one of them wrong at the time:
  *
- *     git grep -n -iE "(zero|one|two|three|four|five|six|seven|[0-9]+)( more)?" \
- *         " (of (the )?seven )?area types" -- '*.md'
+ *     git grep -n -iE "(zero|one|two|three|four|five|six|seven|eight|[0-9]+)( more)?" \
+ *         " (of (the )?(seven|eight) )?area types" -- '*.md'
  *
  * Run that, not this list, when asking whether the coverage is complete.
  *
@@ -75,13 +75,14 @@ const NUMBER_WORDS = [
   'five',
   'six',
   'seven',
+  'eight',
 ] as const;
 
 /**
  * Every public sentence stating a count of area types, and how each phrases it.
  *
  * `complement: true` means the sentence counts the types that are NOT built, so
- * it must equal `7 - builtTypeCount()` and moves in the opposite direction. It
+ * it must equal `TOTAL_TYPES - builtTypeCount()` and moves in the opposite direction. It
  * is the same fact stated from the other end, and it drifts on exactly the same
  * commits, which is why leaving it uncovered was a hole rather than a scope
  * choice.
@@ -90,8 +91,8 @@ const SITES = [
   {
     name: 'README.md "what works today"',
     source: readmeMd,
-    // "Four of seven area types are built."
-    pattern: /\b(\w+) of seven area types are built\b/i,
+    // "Six of eight area types are built."
+    pattern: /\b(\w+) of eight area types are built\b/i,
     complement: false,
   },
   {
@@ -104,8 +105,8 @@ const SITES = [
   {
     name: 'CONTRIBUTING.md',
     source: contributingMd,
-    // "Four of seven area types are built and there is no release yet."
-    pattern: /\b(\w+) of seven area types are built\b/i,
+    // "Six of eight area types are built and there is no release yet."
+    pattern: /\b(\w+) of eight area types are built\b/i,
     complement: false,
   },
   {
@@ -125,7 +126,7 @@ const SITES = [
 ] as const;
 
 /** Every area type there is, which the complement sentences count down from. */
-const TOTAL_TYPES = 7;
+const TOTAL_TYPES = 8;
 
 /**
  * How many area types have behaviour, read out of `conversion_label`.

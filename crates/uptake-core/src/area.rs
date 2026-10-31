@@ -56,6 +56,7 @@ use serde::{Deserialize, Serialize};
 use crate::geometry::{Point, Rect, Size};
 use crate::interaction;
 use crate::sticky::Sticky;
+use crate::watch::Watch;
 
 /// A stable identity for an area, unique within the [`AreaStore`] that issued
 /// it.
@@ -117,6 +118,13 @@ pub enum AreaType {
     Analysis,
     /// A visual treatment — a tint, a dim, a mask — applied over the region.
     Filter,
+    /// Reads its region every few seconds and tells the user when it changes
+    /// or stops changing (roadmap `1.58`, `ADR-0048`). PRODUCT-VISION §3.2's
+    /// Type row lists it among the planned types, several of which (Notes,
+    /// Translate, Rewind) are not modelled here yet; the founder made it a
+    /// type of its own on 2026-09-27 (`Q-40`). It reads nothing until the
+    /// user switches watching on for the area ([`crate::watch::Watch`]).
+    Watch,
 }
 
 impl AreaType {
@@ -131,9 +139,9 @@ impl AreaType {
     /// ⚠️ **Hand-maintained, and the array length is the only thing that says
     /// so.** Adding a variant fails to compile in every exhaustive `match` in
     /// this file and in the host, so the author is stopped and made to decide;
-    /// nothing but the `7` stops them leaving this list short. Kept because the
-    /// alternative is a derive-macro dependency for one list of seven names.
-    pub const ALL: [Self; 7] = [
+    /// nothing but the `8` stops them leaving this list short. Kept because the
+    /// alternative is a derive-macro dependency for one list of eight names.
+    pub const ALL: [Self; 8] = [
         Self::Default,
         Self::Screenshot,
         Self::Record,
@@ -141,6 +149,7 @@ impl AreaType {
         Self::Upscale,
         Self::Analysis,
         Self::Filter,
+        Self::Watch,
     ];
 
     /// The [`Visual`] an area of this type starts with.
@@ -181,7 +190,8 @@ impl AreaType {
             | Self::Ocr
             | Self::Upscale
             | Self::Analysis
-            | Self::Filter => Visual::Passive,
+            | Self::Filter
+            | Self::Watch => Visual::Passive,
         }
     }
 
@@ -195,7 +205,9 @@ impl AreaType {
     #[must_use]
     pub const fn default_input(self) -> Input {
         match self {
-            Self::Filter | Self::Record => Input::PassThrough,
+            // A watch area sits over something the user goes on using: a
+            // chat, a queue, a download. Clicks go to it, as through a Filter.
+            Self::Filter | Self::Record | Self::Watch => Input::PassThrough,
             Self::Default | Self::Screenshot | Self::Ocr | Self::Upscale | Self::Analysis => {
                 Input::Interactive
             }
@@ -241,7 +253,7 @@ impl AreaType {
     pub const fn after_create(self) -> AfterCreate {
         match self {
             // Every type stays in PLACEMENT today (ADR-0023). Written as one
-            // arm rather than seven because there is currently one answer; the
+            // arm rather than eight because there is currently one answer; the
             // *return type* is what keeps a second answer cheap to add, not the
             // shape of this match.
             Self::Default
@@ -250,7 +262,8 @@ impl AreaType {
             | Self::Ocr
             | Self::Upscale
             | Self::Analysis
-            | Self::Filter => AfterCreate::StayInPlacement,
+            | Self::Filter
+            | Self::Watch => AfterCreate::StayInPlacement,
         }
     }
 
@@ -274,7 +287,7 @@ impl AreaType {
     /// refusal stops being a trap in the process: there is no magnification
     /// left to scroll back from.
     ///
-    /// Written as an explicit match rather than `matches!` so an eighth
+    /// Written as an explicit match rather than `matches!` so a ninth
     /// [`AreaType`] has to answer here, the way [`default_visual`] and
     /// [`default_input`] already make it answer.
     ///
@@ -289,7 +302,8 @@ impl AreaType {
             | Self::Ocr
             | Self::Upscale
             | Self::Analysis
-            | Self::Filter => false,
+            | Self::Filter
+            | Self::Watch => false,
         }
     }
 
@@ -303,7 +317,7 @@ impl AreaType {
     /// instead is [`AreaType::sharpens`].
     ///
     /// **Why it survives with one answer.** The same reason
-    /// [`after_create`](Self::after_create) is one arm for seven types: the
+    /// [`after_create`](Self::after_create) is one arm for eight types: the
     /// *return type* is what keeps a second answer cheap, not the shape of the
     /// match. A literal at the create site is invisible to `set_kind`, so a
     /// type born magnified in the future would silently arrive at natural size
@@ -311,7 +325,7 @@ impl AreaType {
     /// added to fix for `Screenshot`, and the one this function was extracted
     /// to prevent.
     ///
-    /// Exhaustive rather than a `_` arm, so an eighth [`AreaType`] answers here
+    /// Exhaustive rather than a `_` arm, so a ninth [`AreaType`] answers here
     /// the way it already answers [`default_visual`] and [`supports_zoom`].
     ///
     /// [`default_visual`]: Self::default_visual
@@ -326,7 +340,8 @@ impl AreaType {
             | Self::Ocr
             | Self::Upscale
             | Self::Analysis
-            | Self::Filter => Zoom::NATURAL,
+            | Self::Filter
+            | Self::Watch => Zoom::NATURAL,
         }
     }
 
@@ -350,7 +365,7 @@ impl AreaType {
     /// `Default`. [`Area::retake`] is where the two reasons are put back
     /// together, and it exists so no caller has to know there are two.
     ///
-    /// Exhaustive rather than `matches!`, so an eighth [`AreaType`] answers
+    /// Exhaustive rather than `matches!`, so a ninth [`AreaType`] answers
     /// here instead of defaulting to "does not sharpen".
     ///
     /// [ADR-0031]: the private planning repo's
@@ -364,7 +379,8 @@ impl AreaType {
             | Self::Record
             | Self::Ocr
             | Self::Analysis
-            | Self::Filter => false,
+            | Self::Filter
+            | Self::Watch => false,
         }
     }
 }
@@ -660,7 +676,7 @@ pub struct Area {
     pub layer: Layer,
     /// How far its contents are magnified (§3.4). Whatever
     /// [`AreaType::default_zoom`] the creating type chose, which since roadmap
-    /// 1.29 is [`Zoom::NATURAL`] for all seven.
+    /// 1.29 is [`Zoom::NATURAL`] for every type.
     ///
     /// **This doc has been through 1.24 and back and is left showing both
     /// legs.** It said "[`Zoom::NATURAL`] on every area of every type, including
@@ -683,6 +699,10 @@ pub struct Area {
     /// creation. The host sets it, because only the host can tell whether the
     /// window is still there.
     pub sticky: Sticky,
+    /// What a watch area tells the user about (roadmap `1.58`).
+    /// [`Watch::Off`] at creation and after every conversion: watching is
+    /// switched on by the user, for one area, from its menu (`ADR-0048`).
+    pub watch: Watch,
 }
 
 /// The capture an area's own contents are made of: which rectangle of screen to
@@ -707,6 +727,29 @@ pub struct Retake {
 }
 
 impl Area {
+    /// Whether this area reads its region now (roadmap `1.58`): a watch area,
+    /// switched on, and drawn. A paused sticky area is drawn only in
+    /// Placement, so it does not read even there.
+    ///
+    /// **The one answer to this question.** The host reads exactly these
+    /// areas, and the page draws the *watching* mark from this same answer,
+    /// sent in the area payload, so the two cannot disagree about WHICH areas
+    /// read (`ADR-0048`). Round 1 of the review of `#154` found them
+    /// disagreeing when the page derived the mark for itself. That they agree
+    /// about WHEN is the host's to wait for: it reads only areas whose mark
+    /// the page has since confirmed (the host's `watch.rs`, `confirm`).
+    ///
+    /// Whether its mark can actually be **seen** is not this answer's to
+    /// give: only the page knows, so the host also waits for the page's word
+    /// (`src-tauri/src/watch.rs`, `confirm`). A size threshold here, round 17
+    /// of the review of `#154`, was wrong at some scale whatever its value.
+    #[must_use]
+    pub fn is_watching(&self) -> bool {
+        self.kind == AreaType::Watch
+            && self.watch.is_on()
+            && self.sticky != crate::sticky::Sticky::Paused
+    }
+
     /// True when this area takes mouse events.
     #[must_use]
     pub fn is_interactive(self) -> bool {
@@ -967,7 +1010,7 @@ impl AreaStore {
             input: kind.default_input(),
             layer: Layer::default(),
             // Per type rather than a constant, and it answers `NATURAL` for
-            // all seven again since roadmap 1.29 deleted `Upscale`'s
+            // every type again since roadmap 1.29 deleted `Upscale`'s
             // magnification (ADR-0031). Kept as a call for the reason
             // `default_zoom`'s own doc gives: a literal here is invisible to
             // `set_kind`, so a type born magnified in future would silently
@@ -975,6 +1018,7 @@ impl AreaStore {
             zoom: kind.default_zoom(),
             ocr_behaviour: OcrBehaviour::default(),
             sticky: Sticky::default(),
+            watch: Watch::Off,
         };
         let index = self.top_of_tier(area.layer);
         self.areas.insert(index, area);
@@ -1103,6 +1147,19 @@ impl AreaStore {
         }
     }
 
+    /// Sets what a watch area tells the user about (roadmap `1.58`). Returns
+    /// whether it CHANGED; `false` for an unknown id as well, and for any
+    /// area that is not a watch area, which has nothing to watch with.
+    pub fn set_watch(&mut self, id: AreaId, watch: Watch) -> bool {
+        match self.area_mut(id) {
+            Some(area) if area.kind == AreaType::Watch && area.watch != watch => {
+                area.watch = watch;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Converts an area to another [`AreaType`] (roadmap task 1.27). `None` for
     /// an unknown id; otherwise a [`Conversion`] saying what the caller still
     /// owes.
@@ -1127,7 +1184,7 @@ impl AreaStore {
     ///   difference. `default_zoom` rather than [`Zoom::NATURAL`] is what would
     ///   let a conversion *into* a born-magnified type arrive magnified. ⚠️ **No
     ///   such type exists as of roadmap 1.29**. `Upscale` was the one and
-    ///   ADR-0031 removed it, so the two readings agree for all seven again
+    ///   ADR-0031 removed it, so the two readings agree for every type again
     ///   and the distinction is once more a guard rather than a behaviour. It
     ///   is stated because that is precisely the condition under which the
     ///   wrong word survived roadmap 1.27.
@@ -1160,6 +1217,10 @@ impl AreaStore {
         area.kind = kind;
         area.visual = kind.default_visual();
         area.input = kind.default_input();
+        // Whatever it was, and whichever way the conversion goes: an area
+        // converted back to Watch must not resume reading its region on a
+        // choice made before, out of sight of the menu that made it.
+        area.watch = Watch::Off;
         // THE NEW TYPE'S DEFAULT, not `NATURAL`, and the difference only shows
         // on a type that is born magnified. ⚠️ **There is none as of roadmap
         // 1.29**, so today this is exactly `NATURAL` for every type and the
@@ -1612,6 +1673,50 @@ mod tests {
     /// exist.
     fn screens() -> Vec<Rect> {
         vec![Rect::new(-3000, -3000, 6000, 6000)]
+    }
+
+    /// Roadmap 1.58: an area is born not watching, only a watch area can be set
+    /// watching, and a conversion in either direction switches it off.
+    #[test]
+    fn watching_is_off_at_birth_only_for_watch_areas_and_off_after_a_conversion() {
+        use crate::watch::Watch;
+        let (mut store, ids) = store_with(&[AreaType::Watch, AreaType::Default]);
+        let (watch, plain) = (ids[0], ids[1]);
+        assert_eq!(store.get(watch).map(|area| area.watch), Some(Watch::Off));
+        assert!(
+            !store.set_watch(plain, Watch::Changes),
+            "a Default area has nothing to watch with"
+        );
+        assert_eq!(store.get(plain).map(|area| area.watch), Some(Watch::Off));
+        assert!(store.set_watch(watch, Watch::Changes));
+        assert!(
+            !store.set_watch(watch, Watch::Changes),
+            "no change, so false"
+        );
+        assert!(store.set_kind(watch, AreaType::Default).is_some());
+        assert_eq!(store.get(watch).map(|area| area.watch), Some(Watch::Off));
+        assert!(store.set_kind(watch, AreaType::Watch).is_some());
+        assert_eq!(
+            store.get(watch).map(|area| area.watch),
+            Some(Watch::Off),
+            "converted back, it does not resume an old choice"
+        );
+        // A paused sticky watch area does not read, and reads again when it
+        // follows its window again.
+        let Some(area) = store.area_mut(watch) else {
+            panic!("the area is there")
+        };
+        area.kind = AreaType::Watch;
+        area.watch = Watch::Changes;
+        assert!(area.is_watching());
+        area.sticky = crate::sticky::Sticky::Paused;
+        assert!(!area.is_watching());
+        area.sticky = crate::sticky::Sticky::Following;
+        assert!(area.is_watching());
+        area.watch = Watch::Off;
+        assert!(!area.is_watching());
+        // A watch area lets clicks through to what it watches.
+        assert_eq!(AreaType::Watch.default_input(), Input::PassThrough);
     }
 
     fn store_with(kinds: &[AreaType]) -> (AreaStore, Vec<AreaId>) {
@@ -2252,7 +2357,7 @@ mod tests {
     #[test]
     fn no_type_is_born_magnified() {
         // The set pinned WHOLE, the way `live_is_opt_in_...` pins the live set,
-        // so an eighth type has to answer here rather than inheriting whatever
+        // so a ninth type has to answer here rather than inheriting whatever
         // the last one did.
         //
         // **This test asserted the opposite for four days.** It was
@@ -2415,6 +2520,7 @@ mod tests {
             zoom: AreaType::Upscale.default_zoom(),
             ocr_behaviour: OcrBehaviour::InPlace,
             sticky: Sticky::Free,
+            watch: crate::watch::Watch::Off,
         };
         assert_eq!(
             area.retake(),
@@ -2429,7 +2535,7 @@ mod tests {
     #[test]
     fn every_conversion_leaves_an_area_whose_zoom_its_type_allows() {
         // The invariant stated over the whole matrix rather than on one pair, so
-        // an eighth type cannot arrive with a hole in it. Seven by seven, with
+        // a ninth type cannot arrive with a hole in it. Eight by eight, with
         // each source area magnified as far as its own type permits first.
         for from in AreaType::ALL {
             for to in AreaType::ALL {
@@ -2530,6 +2636,7 @@ mod tests {
             zoom: Zoom::NATURAL.stepped(4),
             ocr_behaviour: OcrBehaviour::InPlace,
             sticky: Sticky::Free,
+            watch: crate::watch::Watch::Off,
         };
         // A hypothetical second zooming type inherits the factor, so both sides
         // answer with the same rectangle and the same treatment: equal, so

@@ -45,7 +45,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 use uptake_core::area::AreaType;
 use uptake_core::first_run::{Tour, TourEvent};
 use uptake_core::geometry::{Point, Rect};
@@ -259,7 +259,7 @@ pub fn emit(app: &AppHandle) {
             coach: guard.as_mut().and_then(|live| view(app, live)),
         }
     };
-    let _ = app.emit(COACH_EVENT, payload);
+    let _ = crate::watch::emit_redraw(app, COACH_EVENT, payload);
 }
 
 /// Applies whatever `event_for` returns to the tour, ends the tour if that

@@ -610,6 +610,24 @@ fn capture_bitmap(app: &AppHandle, bounds: Rect, split: &mut Split) -> Result<Rg
     Ok(captured.bitmap)
 }
 
+/// One reading for a watch area (roadmap `1.58`) by a capture of its own:
+/// `bounds` captured live. **The fallback, not the usual route**: a reading
+/// comes from the watch areas' held sessions (`watch.rs`, `AppHost::capture`),
+/// and this runs only while a session warms up or on a monitor WGC cannot
+/// hold. Never the frozen still or the frame held since a press: a watch area
+/// compares the screen with itself over time.
+///
+/// ⚠️ **The one capture here that does NOT step UP-TAKE's drawing aside**
+/// ([`crate::overlay::capture_aside`]). With *Show UP-TAKE in screen
+/// recordings* on, stepping aside hides the area's border and its *watching*
+/// mark for the length of every reading, every two seconds: the mark would
+/// blink out exactly while the area reads, which `ADR-0048`'s *Revisit if*
+/// names (review of `#154`, round 1). So the drawing stays in the picture and
+/// the watcher leaves it out of the comparison (`uptake_core::watch::leave_out`).
+pub(crate) fn capture_for_watch(bounds: Rect) -> Result<uptake_capture::CapturedRegion, String> {
+    uptake_capture::capture_region(bounds).map_err(|error| error.to_string())
+}
+
 /// Captures `bounds` and encodes it as PNG, returning both the raw bitmap
 /// (needed for the DIB clipboard format, which is not decoded back out of the
 /// PNG) and the encoded bytes, and recording each stage's cost in `split`.

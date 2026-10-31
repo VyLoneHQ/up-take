@@ -237,7 +237,7 @@ beforeEach(() => {
  * So the scraper itself can be put under test. Reading only the real `area.rs`
  * would leave it with **no positive case**: every arm there says
  * `Zoom::NATURAL`, so nothing could tell a working scraper from one hardwired
- * to `false`, and a sweep asserting `false` for all seven kinds passes either
+ * to `false`, and a sweep asserting `false` for every kind passes either
  * way. That is `UT-F-83` in miniature -- an assertion whose fixture cannot
  * distinguish the two hypotheses -- and it is caught here rather than shipped
  * because this file's own history is what the row is about.
@@ -271,7 +271,7 @@ function bornMagnified(kind: AreaKind, source: string = areaRs): boolean {
 
   // One arm: its `|`-separated variants on the left, its value on the right.
   // Written as one regex over the whole match rather than as a hand-rolled
-  // splitter, because the arms ARE `|`-grouped today (all seven variants share a
+  // splitter, because the arms ARE `|`-grouped today (all the variants share a
   // single `=> Zoom::NATURAL`) and a per-line reading would find no variant on
   // the line that carries the value.
   const arms = body.matchAll(/((?:\s*\|?\s*Self::\w+)+)\s*=>\s*([^,\n]+)/g);
@@ -299,6 +299,7 @@ const KINDS = [
   'upscale',
   'analysis',
   'filter',
+  'watch',
 ] as const satisfies readonly AreaKind[];
 
 describe('the overlay renders what Rust tells it and nothing more', () => {
@@ -390,6 +391,8 @@ describe('an area renders the badges its state earns and no others', () => {
       layer: 'auto',
       kind,
       sticky: 'free',
+      watch: 'off',
+      watching: false,
       // 2 rather than some larger number because the badge turns on `> 1`; the
       // value only has to be magnified, and inventing a bigger one would imply
       // this file knows a factor Rust no longer defines.
@@ -504,7 +507,7 @@ describe('an area renders the badges its state earns and no others', () => {
 
   test('the scraper can actually SEE a magnified arm, not just report false', () => {
     // 🔴 **THE POSITIVE CONTROL, and without it everything above is unearned.**
-    // The sweep asserts `false` for all seven kinds, so a `bornMagnified`
+    // The sweep asserts `false` for every kind, so a `bornMagnified`
     // hardwired to `return false` passes it, passes the Upscale badge test, and
     // guards nothing -- while reading as two green tests about magnification.
     //
@@ -563,6 +566,155 @@ describe('an area renders the badges its state earns and no others', () => {
 
     await emit('overlay://areas', { areas: [area({ layer: 'auto' })] });
     expect(container.querySelectorAll('.layer-badge')).toHaveLength(0);
+  });
+
+  /**
+   * Roadmap 1.58, ADR-0048: the watching mark follows Rust's `watching` and
+   * nothing else. A watch area switched on but not reading (a paused sticky
+   * area, drawn in placement) carries no mark, which is the case round 1 of
+   * the review of #154 found the page getting wrong when it decided for itself.
+   */
+  test('a watch area says watching exactly when Rust says it reads', async () => {
+    const { container } = await mount();
+    await emit('overlay://state', state());
+
+    await emit('overlay://areas', {
+      areas: [area({ kind: 'watch', watch: 'off', watching: false })],
+    });
+    expect(container.querySelector('.area')?.classList).toContain('watch');
+    expect(container.querySelectorAll('.watch-badge')).toHaveLength(0);
+
+    await emit('overlay://areas', {
+      areas: [area({ kind: 'watch', watch: 'changes', watching: true })],
+    });
+    expect(container.querySelector('.watch-badge')?.textContent?.trim()).toBe(
+      '● watching',
+    );
+
+    await emit('overlay://areas', {
+      areas: [
+        area({
+          kind: 'watch',
+          watch: 'changes',
+          sticky: 'paused',
+          watching: false,
+        }),
+      ],
+    });
+    expect(container.querySelectorAll('.watch-badge')).toHaveLength(0);
+  });
+
+  /**
+   * Roadmap 1.58: the page tells Rust which watching marks it can see, by id
+   * and the bounds it drew them at, and Rust reads only those (watch.rs
+   * `confirm`). jsdom lays nothing out, so the dot's and the badge's boxes are
+   * given here; the rule itself is $lib/mark-check's and tested there.
+   */
+  test('the page confirms a watching mark only while its dot can be seen', async () => {
+    const box = (x: number, y: number, width: number, height: number) =>
+      ({ x, y, width, height }) as DOMRect;
+    const boxes = new Map<string, DOMRect>([
+      ['watch-dot', box(490, 102, 8, 11)],
+      ['watch-badge', box(490, 102, 60, 11)],
+    ]);
+    const measured = vi
+      .spyOn(Element.prototype, 'getBoundingClientRect')
+      .mockImplementation(function (this: Element) {
+        for (const [name, rect] of boxes) {
+          // A watch area's own div never covers its own dot.
+          if (name === 'area' && this.querySelector('.watch-badge')) continue;
+          if (this.classList.contains(name)) return rect;
+        }
+        return box(0, 0, 0, 0);
+      });
+    try {
+      const { container } = await mount();
+      await emit('overlay://state', state());
+      // The generation Rust last sent; every confirmation echoes it.
+      await emit('overlay://drawn', { generation: 5 });
+      vi.mocked(invoke).mockClear();
+      await emit('overlay://areas', {
+        areas: [area({ kind: 'watch', watch: 'changes', watching: true })],
+      });
+      await tick();
+      expect(container.querySelector('.watch-badge .watch-dot')).not.toBeNull();
+      expect(vi.mocked(invoke)).toHaveBeenLastCalledWith(
+        'overlay_confirm_marks',
+        {
+          state: 'placement',
+          marks: [{ id: 1, rect: [100, 100, 400, 300] }],
+          generation: 5,
+        },
+      );
+
+      // The badge clipped smaller than the dot: not seen, and said so.
+      boxes.set('watch-badge', box(490, 102, 4, 11));
+      await emit('overlay://areas', {
+        areas: [
+          area({
+            kind: 'watch',
+            watch: 'changes',
+            watching: true,
+            rect: [100, 100, 401, 300],
+          }),
+        ],
+      });
+      await tick();
+      expect(vi.mocked(invoke)).toHaveBeenLastCalledWith(
+        'overlay_confirm_marks',
+        {
+          state: 'placement',
+          marks: [],
+          generation: 5,
+        },
+      );
+
+      // Round 20: the badge whole again, and another area drawn after this
+      // one over the dot. Anything drawn later covers it.
+      boxes.set('watch-badge', box(490, 102, 60, 11));
+      boxes.set('area', box(480, 95, 40, 40));
+      await emit('overlay://areas', {
+        areas: [
+          area({ kind: 'watch', watch: 'changes', watching: true }),
+          area({ id: 2, rect: [600, 600, 100, 100] }),
+        ],
+      });
+      await tick();
+      expect(vi.mocked(invoke)).toHaveBeenLastCalledWith(
+        'overlay_confirm_marks',
+        { state: 'placement', marks: [], generation: 5 },
+      );
+
+      // Round 20: no other area now, so the mark is seen again; then a
+      // freeze hides its monitor, and it is not.
+      boxes.delete('area');
+      await emit('overlay://areas', {
+        areas: [area({ kind: 'watch', watch: 'changes', watching: true })],
+      });
+      await tick();
+      expect(vi.mocked(invoke)).toHaveBeenLastCalledWith(
+        'overlay_confirm_marks',
+        {
+          state: 'placement',
+          marks: [{ id: 1, rect: [100, 100, 400, 300] }],
+          generation: 5,
+        },
+      );
+      await emit('overlay://freeze-hide', { token: 3, rects: [PRIMARY] });
+      await tick();
+      // The page answers a hide on its own animation frames; let them run
+      // here rather than inside the next test.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const confirmations = vi
+        .mocked(invoke)
+        .mock.calls.filter(([command]) => command === 'overlay_confirm_marks');
+      expect(confirmations.at(-1)).toEqual([
+        'overlay_confirm_marks',
+        { state: 'placement', marks: [], generation: 5 },
+      ]);
+    } finally {
+      measured.mockRestore();
+    }
   });
 
   /**

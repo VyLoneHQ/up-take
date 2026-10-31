@@ -106,6 +106,22 @@ texts! {
     MenuTypeUpscale => "menu.type.upscale",
     /// Type list: convert to an OCR area.
     MenuTypeOcr => "menu.type.ocr",
+    /// Type list: convert to a Watch area (roadmap `1.58`).
+    MenuTypeWatch => "menu.type.watch",
+    /// Area menu: a watch area's list of what to watch for.
+    MenuWatch => "menu.watch",
+    /// That list: not watching. The default.
+    MenuWatchOff => "menu.watch.off",
+    /// That list: notify when the region changes.
+    MenuWatchChanges => "menu.watch.changes",
+    /// That list: notify when the region stops changing.
+    MenuWatchSettles => "menu.watch.settles",
+    /// A watch area's notification: its title.
+    WatchTitle => "watch.notify.title",
+    /// A watch area's notification: the region started changing.
+    WatchChanged => "watch.notify.changed",
+    /// A watch area's notification: the region stopped changing.
+    WatchSettled => "watch.notify.settled",
     /// Area menu: an OCR area's Behaviour list (roadmap `1.45`). The settings
     /// pane's own label, so the menu and the pane name the choice alike.
     MenuOcrBehaviour => "settings.ocr_behaviour.name",

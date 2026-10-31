@@ -779,6 +779,7 @@ mod tests {
                 "placement.rs",
                 "settings.rs",
                 "settings_window.rs",
+                "watch.rs",
             ],
             "a module declares a Serialize type and no `assert_payload_coverage` \
              call names it. `I-67`: a payload key is reachable by no other guard \

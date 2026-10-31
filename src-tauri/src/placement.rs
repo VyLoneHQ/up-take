@@ -121,7 +121,7 @@ use std::sync::atomic::{
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 use uptake_core::area::{AreaId, AreaType, Input, Layer, OcrBehaviour};
 use uptake_core::geometry::{Point, Rect};
 use uptake_core::interaction::{self, Handle, Resize};
@@ -227,11 +227,12 @@ static KEY_UNHOOK_PENDING: AtomicBool = AtomicBool::new(false);
 /// it with `armedTypeForKey` for every letter, so the two cannot drift apart
 /// silently. That test parses the block from `const ARM_KEYS` to its `];`,
 /// so keep each entry in the `(b'X', "name")` shape.
-const ARM_KEYS: [(u8, &str); 4] = [
+const ARM_KEYS: [(u8, &str); 5] = [
     (b'S', "screenshot"),
     (b'F', "filter"),
     (b'U', "upscale"),
     (b'O', "ocr"),
+    (b'W', "watch"),
 ];
 
 /// Which overlay state the hook is serving (ADR-0016). Decides what a fresh
@@ -523,6 +524,9 @@ enum MenuAction {
     /// `1.47`). Radio rows like [`MenuAction::SetType`], so the action carries
     /// the answer the row names.
     SetOnResize(uptake_core::sticky::OnResize),
+    /// Choose what a watch area tells the user about, or switch it off
+    /// (roadmap `1.58`). Radio rows like [`MenuAction::SetType`].
+    SetWatch(uptake_core::watch::Watch),
     /// Remove the area.
     Dismiss,
     /// Capture the area and publish it to the clipboard alone (task 1.9,
@@ -1356,7 +1360,8 @@ fn pump_gesture(app: &AppHandle, state: &mut PumpState) {
                     .then(|| u64::try_from(EPOCH.elapsed().as_nanos()).unwrap_or(u64::MAX))
             })
             .flatten();
-        let _ = app.emit(
+        let _ = crate::watch::emit_redraw(
+            app,
             SELECTION_EVENT,
             SelectionPayload {
                 rect: Some(rect),
@@ -1370,7 +1375,8 @@ fn pump_gesture(app: &AppHandle, state: &mut PumpState) {
         // appearance, so a cancelled or interrupted drag needs no separate undo
         // path: the styling was never stored, only derived from the live
         // gesture.
-        let _ = app.emit(
+        let _ = crate::watch::emit_redraw(
+            app,
             SELECTION_EVENT,
             SelectionPayload {
                 rect: None,
@@ -1843,7 +1849,8 @@ fn pump_hover(app: &AppHandle, state: &mut PumpState) {
         // out per field is one a later edit can drop half of silently.
         if (state.hovered_area, state.hovered_chrome_only) != hover {
             (state.hovered_area, state.hovered_chrome_only) = hover;
-            let _ = app.emit(
+            let _ = crate::watch::emit_redraw(
+                app,
                 HOVER_EVENT,
                 HoverPayload {
                     id: hover.0,
@@ -1948,7 +1955,8 @@ fn pump_hover(app: &AppHandle, state: &mut PumpState) {
     // the id has not moved, or the frontend keeps drawing the control alone.
     if (state.hovered_area, state.hovered_chrome_only) != (hovered_area, false) {
         (state.hovered_area, state.hovered_chrome_only) = (hovered_area, false);
-        let _ = app.emit(
+        let _ = crate::watch::emit_redraw(
+            app,
             HOVER_EVENT,
             HoverPayload {
                 id: hovered_area,
@@ -3860,7 +3868,7 @@ fn capture_on_create(app: &AppHandle, kind: AreaType, id: AreaId, bounds: Rect) 
     // no-ops at natural size -- so on any given area exactly one of these two
     // lines does work, and neither can observe the other.
     //
-    // **What would actually matter for an eighth type that is both**, so the
+    // **What would actually matter for a type that is both**, so the
     // next reader does not re-derive the wrong constraint: both dispatch to
     // background threads, so the order of the *statements* would not decide the
     // order of the *completions*. The two would race through
@@ -3928,7 +3936,8 @@ pub(crate) const fn recognises_on_create(kind: AreaType) -> bool {
         | AreaType::Record
         | AreaType::Upscale
         | AreaType::Analysis
-        | AreaType::Filter => false,
+        | AreaType::Filter
+        | AreaType::Watch => false,
     }
 }
 
@@ -3977,18 +3986,20 @@ pub(crate) const fn captures_on_create(kind: AreaType) -> bool {
         | AreaType::Ocr
         | AreaType::Upscale
         | AreaType::Analysis
-        | AreaType::Filter => false,
+        | AreaType::Filter
+        | AreaType::Watch => false,
     }
 }
 
 /// The menu label for converting an area *to* this type, or `None` when the
 /// menu does not offer it (roadmap task 1.27).
 ///
-/// # Why only five of the seven
+/// # Why only six of the eight
 ///
 /// A conversion has to leave the user with an area that does something.
 /// `Default`, `Screenshot`, `Filter`, `Upscale` (roadmap 1.24) and -- since
-/// roadmap 1.26 -- `Ocr` have behaviour on the screen today; `Record` and
+/// roadmap 1.26 -- `Ocr`, and `Watch` (roadmap 1.58) have behaviour on the
+/// screen today; `Record` and
 /// `Analysis` are modelled and have none, so offering them would ship two rows
 /// that turn a working area into a rectangle indistinguishable from a bug.
 /// `Record` and `Analysis` are unbuilt and, since 2026-09-08, planned: roadmap
@@ -4014,7 +4025,7 @@ pub(crate) const fn captures_on_create(kind: AreaType) -> bool {
 /// avoiding. One exhaustive match answers both questions, so a type cannot be
 /// offered without a name or named without being offered.
 ///
-/// Exhaustive rather than a `_` arm, so an eighth `AreaType` fails to compile
+/// Exhaustive rather than a `_` arm, so a ninth `AreaType` fails to compile
 /// here instead of defaulting to either answer.
 fn conversion_label(kind: AreaType) -> Option<&'static str> {
     use crate::strings::{Text, text};
@@ -4036,6 +4047,9 @@ fn conversion_label(kind: AreaType) -> Option<&'static str> {
         // recognises its region and renders the text in place, so a conversion
         // into it leaves the user with an area that does something.
         AreaType::Ocr => Some(text(Text::MenuTypeOcr)),
+        // Roadmap 1.58. A conversion into it leaves an area reading nothing
+        // until the user switches watching on, which is `ADR-0048`'s rule.
+        AreaType::Watch => Some(text(Text::MenuTypeWatch)),
         AreaType::Record | AreaType::Analysis => None,
     }
 }
@@ -4566,6 +4580,33 @@ fn menu_rows(area: &overlay::AreaSummary) -> Vec<MenuRow> {
             ],
         });
     }
+    // Roadmap 1.58: a watch area chooses what it tells the user about, here,
+    // and Off is a row of the same list rather than a separate toggle, so the
+    // list says in one place whether the area is reading. Only on a watch
+    // area, the one type it means anything for.
+    if area.kind == AreaType::Watch {
+        use uptake_core::watch::Watch;
+        rows.push(MenuRow {
+            action: MenuAction::OpenSubmenu,
+            label: text(Text::MenuWatch),
+            checked: false,
+            enabled: true,
+            children: [
+                (Watch::Off, Text::MenuWatchOff),
+                (Watch::Changes, Text::MenuWatchChanges),
+                (Watch::Settles, Text::MenuWatchSettles),
+            ]
+            .into_iter()
+            .map(|(watch, label)| {
+                leaf(
+                    MenuAction::SetWatch(watch),
+                    text(label),
+                    area.watch == watch,
+                )
+            })
+            .collect(),
+        });
+    }
     // The three Layer rows live in a child list of their own, the same shape
     // roadmap 1.28 gave the type rows. Founder's call at the 2026-08-25 rig
     // sitting: they are one axis with one answer, and three flat siblings of the
@@ -4756,6 +4797,7 @@ fn activate_menu_item(app: &AppHandle, hit: MenuHit, release: Point) {
         }
         MenuAction::SetSticky(sticky) => crate::sticky::set(app, area, sticky),
         MenuAction::SetOnResize(on_resize) => crate::sticky::set_on_resize(area, on_resize),
+        MenuAction::SetWatch(watch) => overlay::set_area_watch(app, area, watch),
         MenuAction::Dismiss => overlay::dismiss_area(app, area),
         // Returned above, before the menu was closed.
         MenuAction::OpenSubmenu => false,
@@ -4836,7 +4878,21 @@ fn emit_menu(app: &AppHandle) {
         let guard = lock(&MENU);
         menu_payload(guard.as_ref())
     };
-    let _ = app.emit(MENU_EVENT, payload);
+    let _ = crate::watch::emit_redraw(app, MENU_EVENT, payload);
+}
+
+/// The area a move or resize is under way on, if any (roadmap `1.58`).
+///
+/// While one is, the page draws that area as a preview with none of its
+/// marks, so a watch area must not read: `ADR-0048` asks for the mark
+/// whenever it reads (review of `#154`, round 2). Answers from the press,
+/// which is earlier than the page stops drawing the mark, so it errs on the
+/// side of reading less.
+pub(crate) fn area_in_gesture() -> Option<AreaId> {
+    match *lock(&GESTURE) {
+        Some(Gesture::Move { id, .. } | Gesture::Resize { id, .. }) => Some(id),
+        _ => None,
+    }
 }
 
 /// Locks a mutex, treating poisoning as recoverable: everything under these
@@ -5175,6 +5231,7 @@ mod tests {
             kind,
             ocr_behaviour: uptake_core::area::OcrBehaviour::InPlace,
             sticky: uptake_core::sticky::Sticky::Free,
+            watch: uptake_core::watch::Watch::Off,
         }
     }
 
@@ -5446,12 +5503,13 @@ mod tests {
         };
         assert_eq!(opened.0, parent);
         assert_eq!(opened.1, expected, "the child list is not where it belongs");
-        // FIVE type rows since roadmap 1.26 added `Type: OCR`; this was 4 after
+        // SIX type rows since roadmap 1.58 added `Type: Watch`, FIVE after
+        // roadmap 1.26 added `Type: OCR`; this was 4 after
         // 1.24's `Type: Upscale` and 3 before it. Asserted as a count rather
         // than a set because the set is pinned whole by
-        // `the_type_list_offers_the_five_types_that_do_something`; what this one
+        // `the_type_list_offers_the_six_types_that_do_something`; what this one
         // is for is that the CHILD LIST holds them, not the top level.
-        assert_eq!(opened.2, 5);
+        assert_eq!(opened.2, 6);
         // The three properties the geometry buys, asserted here rather than
         // trusted: flush against the parent row, top-aligned with it, and
         // anchored to that row rather than to the menu or the cursor.
@@ -6393,6 +6451,54 @@ mod tests {
         }
     }
 
+    /// Roadmap 1.58: a watch area offers what to watch for, Off first and
+    /// ticked by default, and no other type offers it.
+    #[test]
+    fn a_watch_area_offers_off_changes_and_settles_and_ticks_the_one_it_has() {
+        use uptake_core::watch::Watch;
+        let list = |rows: &[super::MenuRow]| -> Option<Vec<(&'static str, MenuAction, bool)>> {
+            let parent = rows.iter().find(|row| row.label == "Watch")?;
+            assert_eq!(parent.action, MenuAction::OpenSubmenu);
+            Some(
+                parent
+                    .children
+                    .iter()
+                    .map(|child| (child.label, child.action, child.checked))
+                    .collect(),
+            )
+        };
+        for kind in AreaType::ALL {
+            let rows = menu_rows(&summary(kind, Layer::Auto, Input::Interactive));
+            assert_eq!(list(&rows).is_some(), kind == AreaType::Watch, "{kind:?}");
+        }
+        for watch in [Watch::Off, Watch::Changes, Watch::Settles] {
+            let area = crate::overlay::AreaSummary {
+                watch,
+                ..summary(AreaType::Watch, Layer::Auto, Input::PassThrough)
+            };
+            let Some(rows) = list(&menu_rows(&area)) else {
+                panic!("a watch area has the list")
+            };
+            assert_eq!(
+                rows,
+                vec![
+                    ("Off", MenuAction::SetWatch(Watch::Off), watch == Watch::Off),
+                    (
+                        "Notify when it changes",
+                        MenuAction::SetWatch(Watch::Changes),
+                        watch == Watch::Changes
+                    ),
+                    (
+                        "Notify when it stops changing",
+                        MenuAction::SetWatch(Watch::Settles),
+                        watch == Watch::Settles
+                    ),
+                ],
+                "{watch:?}"
+            );
+        }
+    }
+
     /// What a resize does is offered on a sticky area and on no other, as one
     /// list of four with the default first, and exactly one of them is ticked
     /// once the menu has asked which the area has.
@@ -6670,7 +6776,7 @@ mod tests {
     }
 
     #[test]
-    fn the_type_list_offers_the_five_types_that_do_something() {
+    fn the_type_list_offers_the_six_types_that_do_something() {
         // The other two are modelled and have no behaviour, so a row for them
         // would convert a working area into one indistinguishable from a bug.
         //
@@ -6679,6 +6785,10 @@ mod tests {
         // `conversion_label`'s own doc had promised each row would arrive with
         // its task. The list is asserted WHOLE and ordered, so a sixth row
         // cannot appear without this going red.
+        //
+        // **SIX on 2026-10-31**: roadmap 1.58 added `Watch`, a type the founder
+        // made on 2026-09-27, which arrives with its behaviour, so a seventh
+        // row cannot appear without this going red.
         let rows = menu_rows(&summary(AreaType::Default, Layer::Auto, Input::Interactive));
         assert_eq!(
             labels(type_rows(&rows)),
@@ -6691,7 +6801,8 @@ mod tests {
                 "Type: Screenshot",
                 "Type: OCR",
                 "Type: Upscale",
-                "Type: Filter"
+                "Type: Filter",
+                "Type: Watch"
             ]
         );
     }
@@ -6713,9 +6824,13 @@ mod tests {
             let rows = menu_rows(&summary(kind, Layer::Auto, Input::Interactive));
             let parents: Vec<&super::MenuRow> =
                 rows.iter().filter(|row| !row.children.is_empty()).collect();
-            // Type and Depth for every area, and Behaviour for an OCR area
-            // (roadmap 1.45).
-            let expected = if kind == AreaType::Ocr { 3 } else { 2 };
+            // Type and Depth for every area, Behaviour for an OCR area
+            // (roadmap 1.45) and Watch for a watch area (roadmap 1.58).
+            let expected = if matches!(kind, AreaType::Ocr | AreaType::Watch) {
+                3
+            } else {
+                2
+            };
             assert_eq!(parents.len(), expected, "{kind:?}");
             for parent in parents {
                 for child in &parent.children {

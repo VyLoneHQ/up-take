@@ -62,7 +62,7 @@ describe('the reference sheet names the keys the app actually binds', () => {
     const armed = TYPES.rows.map((row) =>
       armedTypeForKey(press(row.key.toLowerCase())),
     );
-    expect(armed).toEqual(['screenshot', 'filter', 'upscale', 'ocr']);
+    expect(armed).toEqual(['screenshot', 'filter', 'upscale', 'ocr', 'watch']);
   });
 
   it('lists every letter that arms a type, and no other', () => {
