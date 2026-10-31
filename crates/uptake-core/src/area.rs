@@ -733,9 +733,11 @@ impl Area {
     ///
     /// **The one answer to this question.** The host reads exactly these
     /// areas, and the page draws the *watching* mark from this same answer,
-    /// sent in the area payload, so the mark and the reading cannot disagree
-    /// while the overlay is up (`ADR-0048`). Round 1 of the review of `#154`
-    /// found them disagreeing when the page derived the mark for itself.
+    /// sent in the area payload, so the two cannot disagree about WHICH areas
+    /// read (`ADR-0048`). Round 1 of the review of `#154` found them
+    /// disagreeing when the page derived the mark for itself. They can still
+    /// disagree about WHEN: the host learns an answer before the page draws it
+    /// (UP-TAKE backlog `I-475`, and the host's `watch.rs`).
     #[must_use]
     pub fn is_watching(&self) -> bool {
         self.kind == AreaType::Watch

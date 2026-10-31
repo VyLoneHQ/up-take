@@ -676,7 +676,7 @@ export interface AreaFrame {
  * tour now reads its type names from here (`coach-copy.ts`, pinned by
  * `coach-copy.test.ts`), so the tour, the bar and the area menu say one word
  * for each type. These match `conversion_label`'s spelling in `placement.rs`
- * for the four types that have behaviour. Whether `ocr` should read "Text" for
+ * for the types that have behaviour. Whether `ocr` should read "Text" for
  * the ordinary user, as the 1.18 mockup had it, is an open naming question and
  * would change all three at once.
  *

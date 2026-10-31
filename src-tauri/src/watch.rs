@@ -45,15 +45,24 @@
 //! it as a preview without its mark, and its readings start again from a
 //! fresh baseline when the gesture ends.
 //!
-//! ⚠️ **Known gap, left to its own change on the founder's decision
-//! (2026-10-31, `I-475`).** With *Show UP-TAKE in screen recordings* on, a
-//! freeze or another area's capture steps UP-TAKE's drawing aside for a
-//! few hundred milliseconds (`freeze::STEP_ASIDE`), and a reading can land
-//! inside that gap while the mark is hidden (review of `#154`, round 5).
-//! Each check above closes one route by asking the page's state; rounds 2
-//! to 5 each found another. `ADR-0048`'s *Revisit if* names the fix that
+//! ⚠️ **Known gaps, left to their own change on the founder's decision
+//! (2026-10-31, UP-TAKE backlog `I-475`).** Both are moments when the host
+//! may read while the page is not showing the mark:
+//!
+//! - With *Show UP-TAKE in screen recordings* on, a freeze or another
+//!   area's capture steps UP-TAKE's drawing aside for a few hundred
+//!   milliseconds (`freeze::STEP_ASIDE`), and a reading can land inside
+//!   that gap (review of `#154`, round 5).
+//! - The host is ahead of the page. Switching watching on wakes this thread
+//!   before the payload carrying `watching` reaches the page, so the first
+//!   reading can start before the mark is painted; a sticky area resuming
+//!   and a move or resize ending reach the next look the same way (round 7).
+//!   This one happens with the setting off, which is the default.
+//!
+//! Each check above closes one route by asking the host's state; rounds 2
+//! to 7 each found another. `ADR-0048`'s *Revisit if* names the fix that
 //! closes the class: the reader enforces the mark itself rather than
-//! trusting what the page should be drawing. That is `I-475`, not this
+//! trusting what the page should be drawing. That is UP-TAKE `I-475`, not this
 //! module's checks.
 //!
 //! ⚠️ **With *Show UP-TAKE in screen recordings* on, UP-TAKE's own drawing

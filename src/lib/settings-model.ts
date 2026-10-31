@@ -491,7 +491,7 @@ export function panes(
               //
               // Filtered rather than removed from `coachCopy`: the tour still
               // wants it. On the tour that line is a REMINDER of the step the
-              // user has just been walked through, with the four types fresh
+              // user has just been walked through, with the types fresh
               // on the screen behind it; here there is no such step, which is
               // exactly why it needed replacing.
               //
