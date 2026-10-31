@@ -470,7 +470,8 @@ onMount(() => {
   // arrive in order, so by now the change has been applied; confirm at once,
   // echoing it (roadmap 1.58, watch.rs `emit_redraw`).
   const unlistenDrawn = listen<DrawnPayload>('overlay://drawn', (event) => {
-    drawnGeneration = event.payload.generation;
+    // Rust sends them rising; an older one is never a step back.
+    drawnGeneration = Math.max(drawnGeneration, event.payload.generation);
     void tick().then(confirmMarks);
   });
   const ready = Promise.all([

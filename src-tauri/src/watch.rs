@@ -314,8 +314,10 @@ struct DrawnPayload {
 /// an older number and stops counting at once. The page learns the new number
 /// only from [`DRAWN_EVENT`], sent after the event; Tauri delivers one
 /// window's events in order, so the page has handled the change, and Svelte
-/// has applied it, before it can echo the number. A word that echoes the
-/// current generation therefore describes the page after the latest change.
+/// has applied it, before it can echo the number. Redraws from different
+/// threads are sent one whole redraw at a time ([`in_order`]), so the numbers
+/// reach the page in order too (round 22). A word that echoes the current
+/// generation therefore describes the page after the latest change.
 pub fn emit_redraw<R: tauri::Runtime, M: tauri::Emitter<R>, S: serde::Serialize + Clone>(
     emitter: &M,
     event: &str,
@@ -329,9 +331,20 @@ pub fn emit_redraw<R: tauri::Runtime, M: tauri::Emitter<R>, S: serde::Serialize 
     )
 }
 
+/// Held across a whole [`in_order`], so the generations reach the page in the
+/// order they were taken. `emit_redraw` runs on the placement pump, the main
+/// thread, IPC commands and worker threads; without this, two redraws could
+/// interleave and leave the page on an older number than the host's, which
+/// stops every reading until some later redraw happens to land last (review
+/// of `#154`, round 22). No Rust code listens to these events, so nothing
+/// sent under it calls back into it.
+static REDRAWING: Mutex<()> = Mutex::new(());
+
 /// [`emit_redraw`]'s order, apart so it is tested without a window: the
-/// generation moves, then the event is sent, then the new generation is.
+/// generation moves, then the event is sent, then the new generation is, all
+/// under [`REDRAWING`].
 fn in_order<T>(event: impl FnOnce() -> T, drawn: impl FnOnce(u64)) -> T {
+    let _one_at_a_time = REDRAWING.lock().unwrap_or_else(PoisonError::into_inner);
     let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     let sent = event();
     drawn(generation);
@@ -1098,6 +1111,10 @@ mod tests {
             );
         }
 
+        /// Serialises the tests that move the process-wide generation, so one
+        /// cannot move it under another's assertions.
+        static GENERATION_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
         /// Round 21: the generation moves before the event, so a word measured
         /// before it no longer counts, and is announced only after it, so the
         /// page cannot echo it before it has the change.
@@ -1105,6 +1122,9 @@ mod tests {
         fn the_generation_moves_before_the_event_and_is_told_after() {
             use super::super::{GENERATION, in_order};
             use std::sync::atomic::Ordering;
+            let _serial = GENERATION_TESTS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let before = GENERATION.load(Ordering::SeqCst);
             let mut steps = Vec::new();
             let during = in_order(
@@ -1113,6 +1133,69 @@ mod tests {
             );
             assert!(during > before, "moved before the event was sent");
             assert_eq!(steps, vec![during], "told after, the same number");
+        }
+
+        /// Round 22: redraws from several threads at once still reach the
+        /// page as event, then its number, one redraw at a time, with numbers
+        /// rising, and the last number the page hears is the host's.
+        #[test]
+        fn redraws_from_many_threads_reach_the_page_in_order() {
+            use super::super::{GENERATION, in_order};
+            use std::sync::atomic::Ordering;
+            use std::sync::{Arc, Mutex};
+            #[derive(Debug, PartialEq)]
+            enum Sent {
+                Event(u64),
+                Drawn(u64),
+            }
+            let _serial = GENERATION_TESTS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let window = Arc::new(Mutex::new(Vec::new()));
+            let threads: Vec<_> = (0..8)
+                .map(|_| {
+                    let window = Arc::clone(&window);
+                    std::thread::spawn(move || {
+                        for _ in 0..500 {
+                            in_order(
+                                || {
+                                    let now = GENERATION.load(Ordering::SeqCst);
+                                    window
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .push(Sent::Event(now));
+                                },
+                                |told| {
+                                    window
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .push(Sent::Drawn(told));
+                                },
+                            );
+                        }
+                    })
+                })
+                .collect();
+            for thread in threads {
+                assert!(thread.join().is_ok());
+            }
+            let sent = window
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut last = 0;
+            for pair in sent.chunks(2) {
+                let [Sent::Event(during), Sent::Drawn(told)] = pair else {
+                    panic!("a redraw was split by another: {pair:?}");
+                };
+                assert_eq!(during, told, "the event and its number belong together");
+                assert!(*told > last, "numbers reach the page rising");
+                last = *told;
+            }
+            assert_eq!(
+                last,
+                GENERATION.load(Ordering::SeqCst),
+                "the page ends on the host's"
+            );
         }
 
         /// The page reads `generation` from the drawn event (`DrawnPayload` in
