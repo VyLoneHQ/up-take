@@ -45,6 +45,17 @@
 //! it as a preview without its mark, and its readings start again from a
 //! fresh baseline when the gesture ends.
 //!
+//! ⚠️ **Known gap, left to its own change on the founder's decision
+//! (2026-10-31, `I-475`).** With *Show UP-TAKE in screen recordings* on, a
+//! freeze or another area's capture steps UP-TAKE's drawing aside for a
+//! few hundred milliseconds (`freeze::STEP_ASIDE`), and a reading can land
+//! inside that gap while the mark is hidden (review of `#154`, round 5).
+//! Each check above closes one route by asking the page's state; rounds 2
+//! to 5 each found another. `ADR-0048`'s *Revisit if* names the fix that
+//! closes the class: the reader enforces the mark itself rather than
+//! trusting what the page should be drawing. That is `I-475`, not this
+//! module's checks.
+//!
 //! ⚠️ **With *Show UP-TAKE in screen recordings* on, UP-TAKE's own drawing
 //! is in every reading, and only the border and the mark are left out.**
 //! The largest other part, Placement's darkened edges, comes and goes with

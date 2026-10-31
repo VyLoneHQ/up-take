@@ -162,6 +162,8 @@ Six of eight area types are built.
        most: ADR-0031 question 3 makes the founder's eye at the rig the ONLY v1 gate on whether
        the sharpening looks right, because there is no number to hold it to. If a rig pass finds
        it reads as over-sharpened, or as doing nothing, this bullet is what has to change. -->
+<!-- HELD (2026-10-31): the watch area bullet waits for the founder's P-9 approval after he has
+     seen a notification on a real screen. The draft:
 - **A watch area.** Place it over something that changes, such as a download bar, a render or a
   chat, and it shows a Windows notification when that piece of screen starts changing, or when it
   stops. It reads nothing until you switch watching on in its right-click menu, and says
@@ -173,7 +175,8 @@ Six of eight area types are built.
        src-tauri/src/watch.rs (the readings and the notification).
        Deliberately NOT claimed here: reading a window that other windows cover (ROADMAP 1.48, not
        built), watching for a word or a number (later in 1.58), and any cost figure, because the
-       reading rate is a first value whose cost has not been measured yet. -->
+       reading rate is a first value whose cost has not been measured yet.
+     END OF HELD DRAFT -->
 
 Around those:
 
