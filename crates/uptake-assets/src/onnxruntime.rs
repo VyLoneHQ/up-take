@@ -42,15 +42,16 @@ use crate::manifest::{Asset, AssetKind, AssetManifest, ManifestError, Sha256Dige
 /// discipline `ADR-0032` decision 4 applies to the `ort` pin: every digest
 /// below moves with it, and so does the compatibility claim in
 /// [`VERIFIED_AGAINST_ORT`].
-pub const VERSION: &str = "1.29.0";
+pub const VERSION: &str = "1.31.0";
 
 /// Where the official Windows x64 release is published.
 ///
 /// HTTPS, and GitHub's own release host rather than a mirror. `Asset::validate`
 /// enforces the scheme; this constant is what makes the *origin* auditable.
-pub const ARCHIVE_URL: &str = "https://github.com/microsoft/onnxruntime/releases/download/v1.29.0/onnxruntime-win-x64-1.29.0.zip";
+pub const ARCHIVE_URL: &str = "https://github.com/microsoft/onnxruntime/releases/download/v1.31.0/onnxruntime-win-x64-1.31.0.zip";
 
-/// The archive's SHA-256, probed on 2026-09-02 by downloading it.
+/// The archive's SHA-256, probed on 2026-10-27 by downloading it, and equal to
+/// the digest GitHub publishes for the release asset.
 ///
 /// ⚠️ **Nothing polls this URL, and that is intended behaviour rather than a
 /// fault.** `scripts/write-model-notice.py` says the same about its own
@@ -65,20 +66,20 @@ pub const ARCHIVE_URL: &str = "https://github.com/microsoft/onnxruntime/releases
 /// it under the same tag. `ADR-0034`'s PaddleOCR archives sit on
 /// `paddleocr.bj.bcebos.com`, an ordinary object store with no such property,
 /// which is why those needed a workspace probe (`CL-32`) and this does not.
-pub const ARCHIVE_SHA256: &str = "c9b4b7086b529ad814f428c1bad028e20a25d7dc0699836775faace4ab5b78b2";
+pub const ARCHIVE_SHA256: &str = "3958d8a44984160692c1b4ffd0de3cb48f8c39f9d34bb31e433db06e30b82195";
 
 /// The archive's length in bytes, from the same download.
-pub const ARCHIVE_SIZE: u64 = 79_645_520;
+pub const ARCHIVE_SIZE: u64 = 82_887_349;
 
 /// The DLL's name once installed, beside the executable.
 pub const RUNTIME_FILE_NAME: &str = "onnxruntime.dll";
 
 /// The DLL's SHA-256, as extracted from the pinned archive.
-pub const RUNTIME_SHA256: &str = "69d8e6d3879a3b4001cdc74c8ed9ccc7e7f799a5b847059738323404519ec471";
+pub const RUNTIME_SHA256: &str = "0c42dc4e278f0968fdf9ebf1b1e54a74c657a9942e70803e453c91993451cf4c";
 
 /// The DLL's length in bytes.
 ///
-/// **16.1 MB, and that number has a consequence.** `ADR-0035` set the installer
+/// **17.3 MB (16.1 MB at 1.29.0), and that number has a consequence.** `ADR-0035` set the installer
 /// target at `< 35 MB` with a 40 MB hard fail, against a measured 29.2 MB that
 /// predates this pin.
 ///
@@ -99,7 +100,7 @@ pub const RUNTIME_SHA256: &str = "69d8e6d3879a3b4001cdc74c8ed9ccc7e7f799a5b84705
 ///
 /// [`installer_payload_bytes`] is the answer. It sums the pins, a unit test
 /// asserts it equals them, and no prose here restates which ones.
-pub const RUNTIME_SIZE: u64 = 16_149_344;
+pub const RUNTIME_SIZE: u64 = 17_253_176;
 
 /// The bytes this crate's pins put in the installer, before compression.
 ///
@@ -139,10 +140,10 @@ pub const LICENCE_SIZE: u64 = 1_094;
 pub const NOTICES_FILE_NAME: &str = "ThirdPartyNotices-onnxruntime.txt";
 
 /// The notices file's SHA-256.
-pub const NOTICES_SHA256: &str = "4c5b864d8974c94b37461f38163facef79a1bb5dea461667ee9e5be6a8e73f83";
+pub const NOTICES_SHA256: &str = "c53a76501ef60db6f865f20599f220761201ac4057683acefdab37d861b86622";
 
 /// The notices file's length in bytes.
-pub const NOTICES_SIZE: u64 = 343_249;
+pub const NOTICES_SIZE: u64 = 344_457;
 
 /// The `ort` release this runtime was observed to work with.
 ///
@@ -152,7 +153,12 @@ pub const NOTICES_SIZE: u64 = 343_249;
 /// compatibility policy, which is the class `D-29` says to probe rather than
 /// assert. Probed 2026-09-02 by loading both PP-OCRv4 models through this exact
 /// DLL and reading text off a rendered image.
-pub const VERIFIED_AGAINST_ORT: &str = "2.0.0-rc.13";
+///
+/// **Re-probed 2026-10-27 for rc.15 and 1.31.0** (`I-466`): `ocr_accuracy` over
+/// the 192 rendered cards at drop_score 0.5 read every card exactly as `main`
+/// (rc.13 with 1.29.0) did, card for card (overall CER 0.011, exact 86.5 %,
+/// empty 0.0 % on both), at 25 ms a card against 23 ms.
+pub const VERIFIED_AGAINST_ORT: &str = "2.0.0-rc.15";
 
 /// The three files the installer must carry for ONNX Runtime.
 ///
