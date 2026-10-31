@@ -1103,7 +1103,8 @@ onMount(() => {
 /* Kept inside the area, clipped at its end so the dot shows first: the host
    checks that the area's own top right corner (at most 240 by 40 physical
    pixels) is on a monitor before it reads, which says the mark is on screen
-   only while the mark cannot leave that corner (watch.rs `mark`, review of
+   only while the mark stays within that corner, true up to about 230 %
+   scaling (watch.rs MARK) (watch.rs `mark`, review of
    #154 rounds 15 and 16), and an area too small to show the dot does not
    watch (area.rs WATCH_MIN, round 17). Pinned by watch-badge-css.test.ts. */
 .watch-badge {

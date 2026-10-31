@@ -55,7 +55,7 @@
 //! fresh baseline when the gesture ends.
 //!
 //! ⚠️ **Known gaps, left to their own change on the founder's decision
-//! (2026-10-31, UP-TAKE backlog `I-475`).** All five are moments when the host
+//! (2026-10-31, UP-TAKE backlog `I-475`).** All six are moments when the host
 //! may read while the page is not showing the mark:
 //!
 //! - With *Show UP-TAKE in screen recordings* on, a freeze or another
@@ -81,9 +81,13 @@
 //! - Above about 300 % scaling, an area near the smallest size that watches
 //!   (`uptake_core::area::WATCH_MIN`, in physical pixels) can have its mark
 //!   clipped away by the page, which draws in CSS pixels (round 18).
+//! - Above about 230 % scaling the German mark is wider than the corner
+//!   [`MARK`] that [`mark_on_screen`] checks, so on a wide area hanging off a
+//!   monitor's left edge the dot can be off screen while the corner is on it
+//!   (round 19). Part of the word stays in sight.
 //!
 //! Each check above closes one route by asking the host's state; rounds 2
-//! to 18 each found another. `ADR-0048`'s *Revisit if* names the fix that
+//! to 19 each found another. `ADR-0048`'s *Revisit if* names the fix that
 //! closes the class: the reader enforces the mark itself rather than
 //! trusting what the page should be drawing. That is UP-TAKE `I-475`, not this
 //! module's checks.
@@ -151,10 +155,13 @@ pub const INTERVAL: Duration = Duration::from_secs(2);
 const EDGE: u32 = 4;
 
 /// The corner left out for the *watching* mark, in physical pixels: the
-/// mark's text at 11 CSS pixels, in either language, at up to 200 % scaling,
-/// with room to spare. Above 200 % the mark can be taller than the corner,
-/// which only weakens [`mark_on_screen`] by a few pixels: a known limit,
-/// measured nowhere yet.
+/// mark's text at 11 CSS pixels, in either language, at up to about 230 %
+/// scaling. ⚠️ **Width binds first**: the German mark is about 99 to 114
+/// CSS pixels wide (Windows font engines, not WebView2), so from about 230 %
+/// it is wider than 240, and from about 300 % taller than 40. The page clips
+/// the mark to the area, not to this corner, so on a wide area the dot can
+/// then lie outside the corner [`mark_on_screen`] checks (review of `#154`,
+/// round 19). Named among `I-475`'s routes in the module docs.
 const MARK: (u32, u32) = (240, 40);
 
 /// Whether the thread exists, and whether it has been woken since it last
@@ -387,7 +394,8 @@ fn left_out(bounds: Rect, taken: Rect, overlay_in_captures: bool) -> Vec<Rect> {
 /// a narrow area's left edge, off the desktop, while this corner said it was
 /// on screen; round 16 found that sizing the corner at [`MARK`] whatever the
 /// area stopped small areas near a monitor's left edge from reading while
-/// their mark showed. Clipping the badge makes the clamped corner true.
+/// their mark showed. Clipping the badge makes the clamped corner true up to
+/// about 230 % scaling; above it, see [`MARK`].
 fn mark(bounds: Rect) -> Rect {
     let width = MARK.0.min(bounds.size.width);
     let right = bounds.origin.x + i32::try_from(bounds.size.width).unwrap_or(i32::MAX);
