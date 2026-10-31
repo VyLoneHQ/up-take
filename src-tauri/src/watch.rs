@@ -137,7 +137,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use uptake_core::area::{AreaId, AreaStore, AreaType};
 use uptake_core::geometry::Rect;
 use uptake_core::watch::{Detector, Event, Fingerprint, Watch, leave_out};
@@ -312,32 +312,46 @@ struct DrawnPayload {
 /// 250 ms settle assumed a word in flight arrives within it). The generation
 /// moves before the event, so every word the page measured before it echoes
 /// an older number and stops counting at once. The page learns the new number
-/// only from [`DRAWN_EVENT`], sent after the event; Tauri delivers one
-/// window's events in order, so the page has handled the change, and Svelte
-/// has applied it, before it can echo the number. Redraws from different
-/// threads are sent one whole redraw at a time ([`in_order`]), so the numbers
-/// reach the page in order too (round 22). A word that echoes the current
-/// generation therefore describes the page after the latest change.
-pub fn emit_redraw<R: tauri::Runtime, M: tauri::Emitter<R>, S: serde::Serialize + Clone>(
-    emitter: &M,
-    event: &str,
+/// only from [`DRAWN_EVENT`], sent after the event, so the page has handled
+/// the change, and Svelte has applied it, before it can echo the number.
+///
+/// **On the main thread, always** (round 23). An emit made on the main thread
+/// reaches the page at once; one made on any other thread is queued behind
+/// the event loop (`tauri-runtime-wry`'s `send_user_message`, and this
+/// repository's `overlay::emit_areas` doc), so a worker's earlier redraw
+/// could reach the page after the main thread's later one, under any lock. So
+/// the whole redraw, generation included, runs on the main thread:
+/// `run_on_main_thread` runs it there at once when called there, and queues
+/// it otherwise. Redraws then take their numbers in the order the page
+/// receives them, and a word that echoes the current generation describes
+/// the page after the latest change.
+///
+/// From another thread this returns before the event is sent, and an emit
+/// that fails there is not reported to the caller: a page left one
+/// generation behind reads nothing, which errs on the side of reading less.
+pub fn emit_redraw<S: serde::Serialize + Clone + Send + 'static>(
+    app: &AppHandle,
+    event: &'static str,
     payload: S,
 ) -> tauri::Result<()> {
-    in_order(
-        || emitter.emit(event, payload),
-        |generation| {
-            let _ = emitter.emit(DRAWN_EVENT, DrawnPayload { generation });
-        },
-    )
+    let on_main = app.clone();
+    app.run_on_main_thread(move || {
+        in_order(
+            || {
+                let _ = on_main.emit(event, payload);
+            },
+            |generation| {
+                let _ = on_main.emit(DRAWN_EVENT, DrawnPayload { generation });
+            },
+        );
+    })
 }
 
-/// Held across a whole [`in_order`], so the generations reach the page in the
-/// order they were taken. `emit_redraw` runs on the placement pump, the main
-/// thread, IPC commands and worker threads; without this, two redraws could
-/// interleave and leave the page on an older number than the host's, which
-/// stops every reading until some later redraw happens to land last (review
-/// of `#154`, round 22). No Rust code listens to these events, so nothing
-/// sent under it calls back into it.
+/// Held across a whole [`in_order`], so two redraws cannot interleave (round
+/// 22). Every redraw runs on the main thread ([`emit_redraw`]), which already
+/// serialises them; this keeps [`in_order`] correct for any caller, and its
+/// test. No Rust code listens to these events, so nothing sent under it calls
+/// back into it.
 static REDRAWING: Mutex<()> = Mutex::new(());
 
 /// [`emit_redraw`]'s order, apart so it is tested without a window: the
@@ -1109,6 +1123,28 @@ mod tests {
                 through >= 14,
                 "found {through}; the scan has stopped seeing them"
             );
+        }
+
+        /// Round 23: a redraw's order is the page's only if every redraw runs
+        /// on the main thread, where an emit reaches the page at once; one
+        /// made elsewhere is queued and can arrive after a later one. No
+        /// window here to run it on, so the source is held instead.
+        #[test]
+        fn a_redraw_runs_on_the_main_thread() {
+            let source = include_str!("watch.rs");
+            let Some(start) = source.find("pub fn emit_redraw<") else {
+                panic!("emit_redraw is where it was");
+            };
+            let Some(length) = source[start..].find(
+                "
+}
+",
+            ) else {
+                panic!("emit_redraw ends");
+            };
+            let body = &source[start..start + length];
+            assert!(body.contains("app.run_on_main_thread(move ||"), "{body}");
+            assert!(body.contains("in_order("), "{body}");
         }
 
         /// Serialises the tests that move the process-wide generation, so one
