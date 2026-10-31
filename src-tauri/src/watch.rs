@@ -37,6 +37,10 @@
 //! round 3). Checked against the corner left out for the mark, which is
 //! larger than the mark, so it errs on the side of reading less.
 //!
+//! **Each of these is asked again right before each capture**, not once a
+//! pass, so an overlay hidden or a move started partway through a pass stops
+//! the readings that follow it.
+//!
 //! **An area being moved or resized does not read**, because the page draws
 //! it as a preview without its mark, and its readings start again from a
 //! fresh baseline when the gesture ends.
@@ -182,6 +186,16 @@ fn look(app: &AppHandle) -> (Vec<Target>, bool) {
     (targets, switched_on)
 }
 
+/// Whether `target` is still what the store holds and still reads: switched
+/// on, unmoved, not paused. Checked right before its capture.
+fn still_watching(app: &AppHandle, target: Target) -> bool {
+    let store = app.state::<Mutex<AreaStore>>();
+    let store = store.lock().unwrap_or_else(PoisonError::into_inner);
+    store.get(target.id).is_some_and(|area| {
+        area.is_watching() && area.bounds == target.bounds && area.watch == target.watch
+    })
+}
+
 fn overlay_state(app: &AppHandle) -> OverlayState {
     let state = app.state::<Mutex<OverlayState>>();
     *state.lock().unwrap_or_else(PoisonError::into_inner)
@@ -308,7 +322,20 @@ fn run(app: &AppHandle) {
             .retain(|id, _| Some(*id) != moving && targets.iter().any(|target| target.id == *id));
         let monitors = crate::overlay::monitor_rects();
         for target in targets {
-            if Some(target.id) == moving || !mark_on_screen(mark(target.bounds), &monitors) {
+            // Asked again right before each capture, not only once a pass: a
+            // pass reads its areas one after another, each capture taking up
+            // to a few hundred milliseconds, and the overlay can be hidden, a
+            // move started or watching switched off between two of them
+            // (review of `#154`, round 4). A capture already under way cannot
+            // be stopped; this keeps the window to that one.
+            if overlay_state(app) != state {
+                break;
+            }
+            let moving = moving.or_else(crate::placement::area_in_gesture);
+            if Some(target.id) == moving
+                || !still_watching(app, target)
+                || !mark_on_screen(mark(target.bounds), &monitors)
+            {
                 // Not read, and read again from a fresh baseline.
                 watchers.remove(&target.id);
                 continue;
