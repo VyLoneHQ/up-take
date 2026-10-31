@@ -347,103 +347,172 @@ fn mark_on_screen(mark: Rect, monitors: &[Rect]) -> bool {
         .any(|monitor| mark.intersection(*monitor) == Some(mark))
 }
 
-fn run(app: &AppHandle) {
-    // Each area's watcher, with the target it was made for: an area that
-    // moved, was resized or was given another choice starts again from a fresh
-    // baseline rather than reporting its own move as a change.
-    let mut watchers: HashMap<AreaId, Watcher> = HashMap::new();
-    let mut last_state = None;
-    loop {
-        let (targets, switched_on) = look(app);
-        // What UP-TAKE draws over the screen, and whether a reading sees it
-        // and leaves it out: a change of either changes every reading
-        // without the screen changing, so every watcher starts again
-        // (the overlay state, round 2; the setting, round 9).
-        let state = (overlay_state(app), in_captures());
-        if last_state != Some(state) {
-            watchers.clear();
-            last_state = Some(state);
-        }
-        match next(
-            switched_on,
-            !targets.is_empty(),
-            state.0 != OverlayState::Hidden,
-        ) {
-            Next::Sleep => {
-                watchers.clear();
-                wait(None);
-                continue;
-            }
-            Next::Look => {
-                watchers.clear();
-                wait(Some(INTERVAL));
-                continue;
-            }
-            Next::Read => {}
-        }
-        let moving: Option<AreaId> = crate::placement::area_in_gesture();
-        watchers
-            .retain(|id, _| Some(*id) != moving && targets.iter().any(|target| target.id == *id));
-        let monitors = crate::overlay::monitor_rects();
-        for target in targets {
-            // Asked again right before each capture, not only once a pass: a
-            // pass reads its areas one after another, each capture taking up
-            // to a few hundred milliseconds, and the overlay can be hidden, a
-            // move started or watching switched off between two of them
-            // (review of `#154`, round 4). A capture already under way cannot
-            // be stopped; this keeps the window to that one.
-            match gate(
-                target.id,
-                (overlay_state(app), in_captures()) == state,
-                [moving, crate::placement::area_in_gesture()],
-                still_watching(app, target),
-                mark_on_screen(mark(target.bounds), &monitors),
-            ) {
-                Gate::Stop => break,
-                Gate::Skip => {
-                    // Not read, and read again from a fresh baseline.
-                    watchers.remove(&target.id);
-                    continue;
-                }
-                Gate::Read => {}
-            }
-            let watcher = watchers.entry(target.id).or_insert_with(|| Watcher {
-                target,
-                detector: Detector::new(),
-                failing: false,
-            });
-            if watcher.target != target {
-                watcher.target = target;
-                watcher.detector = Detector::new();
-            }
-            let reading = match crate::output::capture_for_watch(target.bounds) {
-                Ok(mut captured) => {
-                    watcher.failing = false;
-                    leave_out(
-                        &mut captured.bitmap,
-                        &left_out(target.bounds, captured.rect, state.1),
-                    );
-                    Fingerprint::of(&captured.bitmap)
-                }
-                Err(error) => {
-                    if !watcher.failing {
-                        crate::diagnostics::trouble(
-                            "watch: a reading could not be taken (said once until one is)",
-                            &error,
-                        );
-                    }
-                    watcher.failing = true;
-                    None
-                }
-            };
-            if let Some(event) = reading.and_then(|reading| watcher.detector.observe(reading))
-                && target.watch.notifies(event)
-            {
-                notify(app, event);
-            }
-        }
-        wait(Some(INTERVAL));
+/// What the reading loop asks of the app, apart so the loop itself can be
+/// tested with a stand-in (UP-TAKE backlog `I-473`: rounds 6 to 10 of the
+/// review of `#154` each found a defect in this loop's glue, which no test
+/// held).
+trait Host {
+    /// The areas to read, and whether any watch area is switched on.
+    fn look(&mut self) -> (Vec<Target>, bool);
+    /// The overlay state, and whether UP-TAKE's drawing is in captures.
+    fn state(&mut self) -> (OverlayState, bool);
+    /// The area a move or resize is under way on, if any.
+    fn in_gesture(&mut self) -> Option<AreaId>;
+    /// Whether `target` is still what the store holds and still reads.
+    fn still_watching(&mut self, target: Target) -> bool;
+    /// Every monitor's rectangle.
+    fn monitors(&mut self) -> Vec<Rect>;
+    /// One reading of `bounds`.
+    fn capture(&mut self, bounds: Rect) -> Result<uptake_capture::CapturedRegion, String>;
+    /// A reading failed; logged once until one succeeds.
+    fn trouble(&mut self, error: &str);
+    /// Raises the notification for `event`.
+    fn notify(&mut self, event: Event);
+}
+
+/// The app itself.
+struct AppHost<'a>(&'a AppHandle);
+
+impl Host for AppHost<'_> {
+    fn look(&mut self) -> (Vec<Target>, bool) {
+        look(self.0)
     }
+    fn state(&mut self) -> (OverlayState, bool) {
+        (overlay_state(self.0), in_captures())
+    }
+    fn in_gesture(&mut self) -> Option<AreaId> {
+        crate::placement::area_in_gesture()
+    }
+    fn still_watching(&mut self, target: Target) -> bool {
+        still_watching(self.0, target)
+    }
+    fn monitors(&mut self) -> Vec<Rect> {
+        crate::overlay::monitor_rects()
+    }
+    fn capture(&mut self, bounds: Rect) -> Result<uptake_capture::CapturedRegion, String> {
+        crate::output::capture_for_watch(bounds)
+    }
+    fn trouble(&mut self, error: &str) {
+        crate::diagnostics::trouble(
+            "watch: a reading could not be taken (said once until one is)",
+            &error,
+        );
+    }
+    fn notify(&mut self, event: Event) {
+        notify(self.0, event);
+    }
+}
+
+/// What the loop remembers between passes.
+#[derive(Default)]
+struct Memory {
+    /// Each area's watcher, with the target it was made for: an area that
+    /// moved, was resized or was given another choice starts again from a
+    /// fresh baseline rather than reporting its own move as a change.
+    watchers: HashMap<AreaId, Watcher>,
+    /// The overlay state and the setting at the last pass.
+    last_state: Option<(OverlayState, bool)>,
+}
+
+fn run(app: &AppHandle) {
+    let mut host = AppHost(app);
+    let mut memory = Memory::default();
+    loop {
+        let timeout = pass(&mut host, &mut memory);
+        wait(timeout);
+    }
+}
+
+/// One pass over the watching areas. Returns how long to wait before the
+/// next: `None` means until [`wake`] rings.
+fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
+    let watchers = &mut memory.watchers;
+    let (targets, switched_on) = host.look();
+    // What UP-TAKE draws over the screen, and whether a reading sees it
+    // and leaves it out: a change of either changes every reading
+    // without the screen changing, so every watcher starts again
+    // (the overlay state, round 2; the setting, round 9).
+    let state = host.state();
+    if memory.last_state != Some(state) {
+        watchers.clear();
+        memory.last_state = Some(state);
+    }
+    match next(
+        switched_on,
+        !targets.is_empty(),
+        state.0 != OverlayState::Hidden,
+    ) {
+        Next::Sleep => {
+            watchers.clear();
+            return None;
+        }
+        Next::Look => {
+            watchers.clear();
+            return Some(INTERVAL);
+        }
+        Next::Read => {}
+    }
+    let moving: Option<AreaId> = host.in_gesture();
+    watchers.retain(|id, _| Some(*id) != moving && targets.iter().any(|target| target.id == *id));
+    let monitors = host.monitors();
+    for target in targets {
+        // Asked again right before each capture, not only once a pass: a
+        // pass reads its areas one after another, each capture taking up
+        // to a few hundred milliseconds, and the overlay can be hidden, a
+        // move started or watching switched off between two of them
+        // (review of `#154`, round 4). A capture already under way cannot
+        // be stopped; this keeps the window to that one.
+        let now = host.state();
+        let gesture_now = host.in_gesture();
+        let still = host.still_watching(target);
+        match gate(
+            target.id,
+            now == state,
+            [moving, gesture_now],
+            still,
+            mark_on_screen(mark(target.bounds), &monitors),
+        ) {
+            Gate::Stop => break,
+            Gate::Skip => {
+                // Not read, and read again from a fresh baseline.
+                watchers.remove(&target.id);
+                continue;
+            }
+            Gate::Read => {}
+        }
+        let watcher = watchers.entry(target.id).or_insert_with(|| Watcher {
+            target,
+            detector: Detector::new(),
+            failing: false,
+        });
+        if watcher.target != target {
+            watcher.target = target;
+            watcher.detector = Detector::new();
+        }
+        let reading = match host.capture(target.bounds) {
+            Ok(mut captured) => {
+                watcher.failing = false;
+                leave_out(
+                    &mut captured.bitmap,
+                    &left_out(target.bounds, captured.rect, state.1),
+                );
+                Fingerprint::of(&captured.bitmap)
+            }
+            Err(error) => {
+                if !watcher.failing {
+                    host.trouble(&error);
+                }
+                watcher.failing = true;
+                None
+            }
+        };
+        if let Some(event) = reading.and_then(|reading| watcher.detector.observe(reading))
+            && target.watch.notifies(event)
+        {
+            host.notify(event);
+        }
+    }
+    Some(INTERVAL)
 }
 
 /// What the loop does with one area right before its capture.
@@ -500,6 +569,189 @@ fn notify(app: &AppHandle, event: Event) {
 #[cfg(test)]
 mod tests {
     use super::{EDGE, Gate, MARK, Next, gate, left_out, mark, mark_on_screen, next, own_drawing};
+
+    /// The reading loop itself, against a stand-in for the app
+    /// (UP-TAKE backlog `I-473`). Each test is one route a review of `#154`
+    /// found; each goes red if its line in [`pass`] is undone.
+    mod the_loop {
+        use super::super::{Host, Memory, Target, pass};
+        use crate::overlay_state::OverlayState;
+        use std::collections::VecDeque;
+        use uptake_capture::CapturedRegion;
+        use uptake_core::area::{AreaId, AreaStore, AreaType};
+        use uptake_core::bitmap::RgbaBitmap;
+        use uptake_core::geometry::{Rect, Size};
+        use uptake_core::watch::{Event, Watch};
+
+        struct Fake {
+            targets: Vec<Target>,
+            state: (OverlayState, bool),
+            /// Applied to `state` right after the first capture of a pass.
+            state_after_capture: Option<(OverlayState, bool)>,
+            /// What `in_gesture` answers, in order; then `None`.
+            gestures: VecDeque<Option<AreaId>>,
+            still: bool,
+            monitor: Rect,
+            /// The grey level the screen shows.
+            level: u8,
+            captured: Vec<Rect>,
+            notified: Vec<Event>,
+        }
+
+        impl Fake {
+            fn new(targets: Vec<Target>) -> Self {
+                Self {
+                    targets,
+                    state: (OverlayState::Living, false),
+                    state_after_capture: None,
+                    gestures: VecDeque::new(),
+                    still: true,
+                    monitor: Rect::new(0, 0, 1920, 1080),
+                    level: 200,
+                    captured: Vec::new(),
+                    notified: Vec::new(),
+                }
+            }
+        }
+
+        impl Host for Fake {
+            fn look(&mut self) -> (Vec<Target>, bool) {
+                (self.targets.clone(), !self.targets.is_empty())
+            }
+            fn state(&mut self) -> (OverlayState, bool) {
+                self.state
+            }
+            fn in_gesture(&mut self) -> Option<AreaId> {
+                self.gestures.pop_front().flatten()
+            }
+            fn still_watching(&mut self, _target: Target) -> bool {
+                self.still
+            }
+            fn monitors(&mut self) -> Vec<Rect> {
+                vec![self.monitor]
+            }
+            fn capture(&mut self, bounds: Rect) -> Result<CapturedRegion, String> {
+                self.captured.push(bounds);
+                if let Some(state) = self.state_after_capture.take() {
+                    self.state = state;
+                }
+                let rect = bounds
+                    .intersection(self.monitor)
+                    .ok_or_else(|| "off screen".to_owned())?;
+                let pixels = [self.level, self.level, self.level, 255]
+                    .repeat(usize::try_from(rect.size.width * rect.size.height).unwrap_or(0));
+                let bitmap =
+                    RgbaBitmap::from_pixels(Size::new(rect.size.width, rect.size.height), pixels)
+                        .ok_or_else(|| "bitmap".to_owned())?;
+                Ok(CapturedRegion { rect, bitmap })
+            }
+            fn trouble(&mut self, _error: &str) {}
+            fn notify(&mut self, event: Event) {
+                self.notified.push(event);
+            }
+        }
+
+        fn targets(bounds: &[Rect]) -> Vec<Target> {
+            let mut store = AreaStore::new();
+            bounds
+                .iter()
+                .filter_map(|bounds| {
+                    store.create(AreaType::Watch, *bounds).map(|id| Target {
+                        id,
+                        bounds: *bounds,
+                        watch: Watch::Changes,
+                    })
+                })
+                .collect()
+        }
+
+        fn run(fake: &mut Fake, memory: &mut Memory, passes: usize) {
+            for _ in 0..passes {
+                let _ = pass(fake, memory);
+            }
+        }
+
+        /// The working case: a baseline, then a change of the screen notifies.
+        #[test]
+        fn a_change_of_the_screen_notifies() {
+            let mut fake = Fake::new(targets(&[Rect::new(100, 100, 600, 400)]));
+            let mut memory = Memory::default();
+            run(&mut fake, &mut memory, 2);
+            assert!(fake.notified.is_empty(), "still screen");
+            fake.level = 20;
+            run(&mut fake, &mut memory, 1);
+            assert_eq!(fake.notified, vec![Event::Changed]);
+        }
+
+        /// Nothing switched on: the loop sleeps until woken.
+        #[test]
+        fn nothing_switched_on_sleeps_until_woken() {
+            let mut fake = Fake::new(Vec::new());
+            assert_eq!(pass(&mut fake, &mut Memory::default()), None);
+            assert!(fake.captured.is_empty());
+        }
+
+        /// Round 6: one area moving when the pass began, another pressed
+        /// during it. The second is asked about fresh and not read.
+        #[test]
+        fn an_area_pressed_during_a_pass_is_not_read() {
+            let list = targets(&[Rect::new(100, 100, 600, 400), Rect::new(800, 100, 600, 400)]);
+            let (first, second) = (list[0].id, list[1].id);
+            let mut fake = Fake::new(list);
+            // At the start of the pass `first` is moving; before the first
+            // area, still `first`; before the second, `second` is pressed.
+            fake.gestures = VecDeque::from([Some(first), Some(first), Some(second)]);
+            let _ = pass(&mut fake, &mut Memory::default());
+            assert!(fake.captured.is_empty(), "{:?}", fake.captured);
+        }
+
+        /// Round 4: the overlay hidden partway through a pass stops the
+        /// readings after it.
+        #[test]
+        fn a_state_change_during_a_pass_stops_it() {
+            let mut fake = Fake::new(targets(&[
+                Rect::new(100, 100, 600, 400),
+                Rect::new(800, 100, 600, 400),
+            ]));
+            fake.state_after_capture = Some((OverlayState::Hidden, false));
+            let _ = pass(&mut fake, &mut Memory::default());
+            assert_eq!(fake.captured.len(), 1);
+        }
+
+        /// An area the store no longer has watching is not read.
+        #[test]
+        fn an_area_no_longer_watching_is_not_read() {
+            let mut fake = Fake::new(targets(&[Rect::new(100, 100, 600, 400)]));
+            fake.still = false;
+            let _ = pass(&mut fake, &mut Memory::default());
+            assert!(fake.captured.is_empty());
+        }
+
+        /// Round 9: flipping *Show UP-TAKE in screen recordings* changes what
+        /// a reading leaves out, which is not a change of the screen.
+        #[test]
+        fn flipping_show_in_recordings_is_not_a_change() {
+            let mut fake = Fake::new(targets(&[Rect::new(100, 100, 600, 400)]));
+            let mut memory = Memory::default();
+            run(&mut fake, &mut memory, 2);
+            fake.state = (OverlayState::Living, true);
+            run(&mut fake, &mut memory, 5);
+            assert!(fake.notified.is_empty(), "{:?}", fake.notified);
+        }
+
+        /// Round 10: an area hanging off the bottom of the desktop, with the
+        /// overlay in captures, still sees a change.
+        #[test]
+        fn an_area_off_the_edge_still_notifies() {
+            let mut fake = Fake::new(targets(&[Rect::new(100, 1040, 200, 100)]));
+            fake.state = (OverlayState::Living, true);
+            let mut memory = Memory::default();
+            run(&mut fake, &mut memory, 2);
+            fake.level = 20;
+            run(&mut fake, &mut memory, 1);
+            assert_eq!(fake.notified, vec![Event::Changed]);
+        }
+    }
 
     /// Nothing is left out while UP-TAKE is kept out of captures; with it in
     /// them, a small area keeps something to read.
