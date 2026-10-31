@@ -119,8 +119,9 @@ pub enum AreaType {
     /// A visual treatment — a tint, a dim, a mask — applied over the region.
     Filter,
     /// Reads its region every few seconds and tells the user when it changes
-    /// or stops changing (roadmap `1.58`, `ADR-0048`). The eighth type, and
-    /// the first not in PRODUCT-VISION §3.2's Type row: the founder made it a
+    /// or stops changing (roadmap `1.58`, `ADR-0048`). PRODUCT-VISION §3.2's
+    /// Type row lists it among the planned types, several of which (Notes,
+    /// Translate, Rewind) are not modelled here yet; the founder made it a
     /// type of its own on 2026-09-27 (`Q-40`). It reads nothing until the
     /// user switches watching on for the area ([`crate::watch::Watch`]).
     Watch,
@@ -726,6 +727,22 @@ pub struct Retake {
 }
 
 impl Area {
+    /// Whether this area reads its region now (roadmap `1.58`): a watch area,
+    /// switched on, and drawn. A paused sticky area is drawn only in
+    /// Placement, so it does not read even there.
+    ///
+    /// **The one answer to this question.** The host reads exactly these
+    /// areas, and the page draws the *watching* mark from this same answer,
+    /// sent in the area payload, so the mark and the reading cannot disagree
+    /// while the overlay is up (`ADR-0048`). Round 1 of the review of `#154`
+    /// found them disagreeing when the page derived the mark for itself.
+    #[must_use]
+    pub fn is_watching(&self) -> bool {
+        self.kind == AreaType::Watch
+            && self.watch.is_on()
+            && self.sticky != crate::sticky::Sticky::Paused
+    }
+
     /// True when this area takes mouse events.
     #[must_use]
     pub fn is_interactive(self) -> bool {
@@ -1677,6 +1694,20 @@ mod tests {
             Some(Watch::Off),
             "converted back, it does not resume an old choice"
         );
+        // A paused sticky watch area does not read, and reads again when it
+        // follows its window again.
+        let Some(area) = store.area_mut(watch) else {
+            panic!("the area is there")
+        };
+        area.kind = AreaType::Watch;
+        area.watch = Watch::Changes;
+        assert!(area.is_watching());
+        area.sticky = crate::sticky::Sticky::Paused;
+        assert!(!area.is_watching());
+        area.sticky = crate::sticky::Sticky::Following;
+        assert!(area.is_watching());
+        area.watch = Watch::Off;
+        assert!(!area.is_watching());
         // A watch area lets clicks through to what it watches.
         assert_eq!(AreaType::Watch.default_input(), Input::PassThrough);
     }

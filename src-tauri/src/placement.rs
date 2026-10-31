@@ -6433,9 +6433,6 @@ mod tests {
         }
     }
 
-    /// What a resize does is offered on a sticky area and on no other, as one
-    /// list of four with the default first, and exactly one of them is ticked
-    /// once the menu has asked which the area has.
     /// Roadmap 1.58: a watch area offers what to watch for, Off first and
     /// ticked by default, and no other type offers it.
     #[test]
@@ -6484,6 +6481,9 @@ mod tests {
         }
     }
 
+    /// What a resize does is offered on a sticky area and on no other, as one
+    /// list of four with the default first, and exactly one of them is ticked
+    /// once the menu has asked which the area has.
     #[test]
     fn a_sticky_area_offers_what_a_resize_does_and_ticks_the_one_it_has() {
         use uptake_core::sticky::{OnResize, Sticky};

@@ -610,12 +610,19 @@ fn capture_bitmap(app: &AppHandle, bounds: Rect, split: &mut Split) -> Result<Rg
     Ok(captured.bitmap)
 }
 
-/// One reading for a watch area (roadmap `1.58`): `bounds` captured live, with
-/// UP-TAKE's own drawing out of the picture as for every capture here, so the
-/// area's mark is never read as a change. Never the frozen still or the frame
-/// held since a press: a watch area compares the screen with itself over time.
-pub(crate) fn capture_for_watch(app: &AppHandle, bounds: Rect) -> Result<RgbaBitmap, String> {
-    capture_bitmap(app, bounds, &mut Split::default())
+/// One reading for a watch area (roadmap `1.58`): `bounds` captured live.
+/// Never the frozen still or the frame held since a press: a watch area
+/// compares the screen with itself over time.
+///
+/// ⚠️ **The one capture here that does NOT step UP-TAKE's drawing aside**
+/// ([`crate::overlay::capture_aside`]). With *Show UP-TAKE in screen
+/// recordings* on, stepping aside hides the area's border and its *watching*
+/// mark for the length of every reading, every two seconds: the mark would
+/// blink out exactly while the area reads, which `ADR-0048`'s *Revisit if*
+/// names (review of `#154`, round 1). So the drawing stays in the picture and
+/// the watcher leaves it out of the comparison (`uptake_core::watch::leave_out`).
+pub(crate) fn capture_for_watch(bounds: Rect) -> Result<uptake_capture::CapturedRegion, String> {
+    uptake_capture::capture_region(bounds).map_err(|error| error.to_string())
 }
 
 /// Captures `bounds` and encodes it as PNG, returning both the raw bitmap

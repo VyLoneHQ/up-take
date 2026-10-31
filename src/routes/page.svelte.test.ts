@@ -237,7 +237,7 @@ beforeEach(() => {
  * So the scraper itself can be put under test. Reading only the real `area.rs`
  * would leave it with **no positive case**: every arm there says
  * `Zoom::NATURAL`, so nothing could tell a working scraper from one hardwired
- * to `false`, and a sweep asserting `false` for all seven kinds passes either
+ * to `false`, and a sweep asserting `false` for every kind passes either
  * way. That is `UT-F-83` in miniature -- an assertion whose fixture cannot
  * distinguish the two hypotheses -- and it is caught here rather than shipped
  * because this file's own history is what the row is about.
@@ -271,7 +271,7 @@ function bornMagnified(kind: AreaKind, source: string = areaRs): boolean {
 
   // One arm: its `|`-separated variants on the left, its value on the right.
   // Written as one regex over the whole match rather than as a hand-rolled
-  // splitter, because the arms ARE `|`-grouped today (all seven variants share a
+  // splitter, because the arms ARE `|`-grouped today (all the variants share a
   // single `=> Zoom::NATURAL`) and a per-line reading would find no variant on
   // the line that carries the value.
   const arms = body.matchAll(/((?:\s*\|?\s*Self::\w+)+)\s*=>\s*([^,\n]+)/g);
@@ -392,6 +392,7 @@ describe('an area renders the badges its state earns and no others', () => {
       kind,
       sticky: 'free',
       watch: 'off',
+      watching: false,
       // 2 rather than some larger number because the badge turns on `> 1`; the
       // value only has to be magnified, and inventing a bigger one would imply
       // this file knows a factor Rust no longer defines.
@@ -506,7 +507,7 @@ describe('an area renders the badges its state earns and no others', () => {
 
   test('the scraper can actually SEE a magnified arm, not just report false', () => {
     // 🔴 **THE POSITIVE CONTROL, and without it everything above is unearned.**
-    // The sweep asserts `false` for all seven kinds, so a `bornMagnified`
+    // The sweep asserts `false` for every kind, so a `bornMagnified`
     // hardwired to `return false` passes it, passes the Upscale badge test, and
     // guards nothing -- while reading as two green tests about magnification.
     //
@@ -568,6 +569,42 @@ describe('an area renders the badges its state earns and no others', () => {
   });
 
   /**
+   * Roadmap 1.58, ADR-0048: the watching mark follows Rust's `watching` and
+   * nothing else. A watch area switched on but not reading (a paused sticky
+   * area, drawn in placement) carries no mark, which is the case round 1 of
+   * the review of #154 found the page getting wrong when it decided for itself.
+   */
+  test('a watch area says watching exactly when Rust says it reads', async () => {
+    const { container } = await mount();
+    await emit('overlay://state', state());
+
+    await emit('overlay://areas', {
+      areas: [area({ kind: 'watch', watch: 'off', watching: false })],
+    });
+    expect(container.querySelector('.area')?.classList).toContain('watch');
+    expect(container.querySelectorAll('.watch-badge')).toHaveLength(0);
+
+    await emit('overlay://areas', {
+      areas: [area({ kind: 'watch', watch: 'changes', watching: true })],
+    });
+    expect(container.querySelector('.watch-badge')?.textContent?.trim()).toBe(
+      '● watching',
+    );
+
+    await emit('overlay://areas', {
+      areas: [
+        area({
+          kind: 'watch',
+          watch: 'changes',
+          sticky: 'paused',
+          watching: false,
+        }),
+      ],
+    });
+    expect(container.querySelectorAll('.watch-badge')).toHaveLength(0);
+  });
+
+  /**
    * Roadmap 1.47. Three states, three renderings, and the word is the part
    * that matters: a paused area sits where its window used to be, and
    * "Paused" is the only thing on screen that says why. Asserted per state so
@@ -575,35 +612,6 @@ describe('an area renders the badges its state earns and no others', () => {
    * one, both fail here. The first review of this feature swapped the two in
    * the template and the whole suite stayed green.
    */
-  /**
-   * Roadmap 1.58, ADR-0048: a watch area is marked exactly while it reads, and
-   * an area of another type never is, whatever its `watch` field says.
-   */
-  test('a watch area says watching exactly while it watches', async () => {
-    const { container } = await mount();
-    await emit('overlay://state', state());
-
-    await emit('overlay://areas', {
-      areas: [area({ kind: 'watch', watch: 'off' })],
-    });
-    expect(container.querySelector('.area')?.classList).toContain('watch');
-    expect(container.querySelectorAll('.watch-badge')).toHaveLength(0);
-
-    for (const watch of ['changes', 'settles'] as const) {
-      await emit('overlay://areas', {
-        areas: [area({ kind: 'watch', watch })],
-      });
-      expect(container.querySelector('.watch-badge')?.textContent?.trim()).toBe(
-        '● watching',
-      );
-    }
-
-    await emit('overlay://areas', {
-      areas: [area({ kind: 'default', watch: 'changes' })],
-    });
-    expect(container.querySelectorAll('.watch-badge')).toHaveLength(0);
-  });
-
   test('a sticky area shows its mark, and says Paused only while paused', async () => {
     const { container } = await mount();
     await emit('overlay://state', state());

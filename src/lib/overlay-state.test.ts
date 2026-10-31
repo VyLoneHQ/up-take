@@ -153,6 +153,7 @@ describe('areaFramesCss', () => {
       ocr_behaviour: 'in_place',
       sticky: 'free',
       watch: 'off',
+      watching: false,
       zoom: 1,
       // 200x150, so it is above `CHROME_INSIDE_SPAN` on both axes: bands
       // inside, and therefore no outside handles. Rust decides this; the
@@ -169,6 +170,7 @@ describe('areaFramesCss', () => {
       ocr_behaviour: 'rendered',
       sticky: 'paused',
       watch: 'off',
+      watching: false,
       zoom: 1,
       bar: [-1000, -218, 300, 18],
       handles: [],

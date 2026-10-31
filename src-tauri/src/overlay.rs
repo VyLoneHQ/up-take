@@ -1249,9 +1249,12 @@ struct AreaPayload {
     /// sticky area and says so when it is paused.
     sticky: Sticky,
     /// What a watch area tells the user about (roadmap `1.58`): `off`,
-    /// `changes` or `settles`. The page marks an area that is watching, from
-    /// this field, so the mark and the reading cannot disagree (`ADR-0048`).
+    /// `changes` or `settles`.
     watch: Watch,
+    /// Whether the area reads its region now: [`Area::is_watching`], the
+    /// answer the watcher reads by. The page draws the *watching* mark from
+    /// this and from nothing else (`ADR-0048`).
+    watching: bool,
     /// The area's magnification (§3.4), `1.0` at natural size.
     ///
     /// **The frontend does not scale anything with this.** The magnified
@@ -1327,6 +1330,7 @@ fn payload_of(area: &Area, monitors: &[Rect]) -> AreaPayload {
         ocr_behaviour: area.ocr_behaviour,
         sticky: area.sticky,
         watch: area.watch,
+        watching: area.is_watching(),
         zoom: area.zoom.factor(),
         bar: interaction::grab_bar(area.bounds, monitors).map(as_tuple),
         handles: interaction::outside_resize_handles(area.bounds)
@@ -3174,6 +3178,7 @@ mod tests {
                 ocr_behaviour: OcrBehaviour::InPlace,
                 sticky: state,
                 watch: Watch::Off,
+                watching: false,
                 zoom: 1.0,
                 bar: None,
                 handles: Vec::new(),
@@ -3209,6 +3214,7 @@ mod tests {
             ocr_behaviour: OcrBehaviour::InPlace,
             sticky: Sticky::Paused,
             watch: Watch::Off,
+            watching: false,
             zoom: 1.0,
             bar: Some((0, -18, 10, 18)),
             handles: vec![(0, 0, 18, 18)],
@@ -3225,6 +3231,7 @@ mod tests {
                 "ocr_behaviour",
                 "sticky",
                 "watch",
+                "watching",
                 "zoom",
                 "bar",
                 "handles",

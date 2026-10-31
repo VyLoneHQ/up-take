@@ -59,8 +59,9 @@ We believe in quality over quantity, while making sure no important functionalit
 Six of eight area types are built.
 <!-- source: STATUS.md Phase 1 (1A merged, 1B partial); ROADMAP.md tasks 1.9b (Screenshot),
      1.23 (Filter, merged 2026-08-12), 1.24 (Upscale), 1.26 (OCR) and 1.58 (Watch); PRODUCT-VISION.md
-     section 3.1 (the seven types), and ROADMAP.md 1.58 for the eighth, decided as a type of its own
-     on 2026-09-27 (Q-40).
+     section 3.1. The count is of the types modelled in the code (`AreaType`), eight since 1.58;
+     PRODUCT-VISION.md section 3.1 plans more (Notes among them) that are not modelled yet, and
+     built-type-count.test.ts holds this sentence to the code.
      This line said "Two of seven" until 2026-08-21. Filter shipped on 2026-08-12 and the
      count was never updated, so the front page of a public repository under-reported what
      was built for ten days. Update it in the same change that ships a type. -->

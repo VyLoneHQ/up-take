@@ -121,7 +121,7 @@ export function areaInSight(
 /**
  * Every area type on the wire, matching `type_name` in `overlay.rs`.
  *
- * All seven are listed because Rust sends all seven, not only the ones a
+ * Every type is listed because Rust sends every type, not only the ones a
  * gesture can create. {@link ArmableType} is the narrower set a key can arm.
  *
  * This union is still hand-written, and it is no longer unchecked. UP-TAKE
@@ -170,6 +170,13 @@ export interface AreaView {
   sticky: StickyState;
   /** What a watch area watches for. See {@link WatchState}. */
   watch: WatchState;
+  /**
+   * Whether the area reads its region now (roadmap 1.58). Rust's
+   * `Area::is_watching`, the answer the watcher reads by, so the page draws
+   * the mark from that and never works it out for itself (ADR-0048; review
+   * of #154, round 1, found the two disagreeing when it did).
+   */
+  watching: boolean;
   /**
    * Magnification (§3.4), `1` at natural size.
    *
@@ -764,9 +771,7 @@ export function areaFramesCss(
     kind: area.kind,
     ocrBehaviour: area.ocr_behaviour,
     sticky: area.sticky,
-    // The same rule the host reads by: a watch area whose choice is not
-    // `off`. Taken from the one payload, so the mark and the reading agree.
-    watching: area.kind === 'watch' && area.watch !== 'off',
+    watching: area.watching,
     zoom: area.zoom,
     // A dragged area is not also "hovered": the hover chrome invites a gesture
     // that is already under way, and its close control would sit at the source

@@ -40,7 +40,7 @@ import placementRs from '../../src-tauri/src/placement.rs?raw';
  * arm there or it does not appear in the menu, so the number cannot drift away
  * from the product without the menu drifting too.
  *
- * `AreaType::ALL` would be the wrong source: it is all seven, built or not.
+ * `AreaType::ALL` would be the wrong source: it is every modelled type, built or not.
  *
  * ## What it cannot catch
  *

@@ -10,19 +10,23 @@
 //! `ADR-0048` admits an area that reads its own region repeatedly on four
 //! conditions, and three of them are held here:
 //!
-//! - **Switched on per area, off by default.** Only an area of type
-//!   [`AreaType::Watch`] whose [`Watch`] is not [`Watch::Off`] is read, and
-//!   every area starts `Off` (`uptake_core::area`).
-//! - **Visibly marked while it reads.** The page draws the mark from the same
-//!   area payload this module reads the choice from, so the two cannot
-//!   disagree. Nothing is read while the overlay is hidden, because the mark
-//!   is hidden with it, nor while the area is a paused sticky area, which the
-//!   page draws only in Placement.
+//! - **Switched on per area, off by default.** An area is read only when
+//!   `Area::is_watching` says so: a watch area, switched on, and drawn. Every
+//!   area starts `Off` (`uptake_core::area`).
+//! - **Visibly marked while it reads.** The page draws the *watching* mark
+//!   from the same `Area::is_watching`, sent in the area payload, so the two
+//!   answer one question once. Nothing is read while the overlay is hidden,
+//!   because the mark is hidden with it.
 //! - **Local.** A reading is reduced to a few hundred brightness averages,
 //!   compared and dropped. Nothing is written, logged or sent; the
 //!   notification says which moment it was, never what was read.
 //!
 //! The fourth, *the user placed it*, is true of every area.
+//!
+//! **The mark stays on screen while a reading is taken.** The capture does not
+//! step UP-TAKE's drawing aside, unlike every other capture (`output.rs`,
+//! `capture_for_watch`): the area's border and mark are left in the picture
+//! and left out of the comparison ([`own_drawing`]).
 //!
 //! # Cost
 //!
@@ -36,9 +40,12 @@
 //! # The thread
 //!
 //! One thread, started the first time any area is switched to watching and
-//! never stopped. With nothing to watch it waits on a condition variable and
-//! costs nothing; [`wake`] is what moves it. While something is watched but
-//! the overlay is hidden, it looks once per [`INTERVAL`] whether that changed.
+//! never stopped. While no watch area is switched on it waits on a condition
+//! variable and costs nothing; [`wake`] is what moves it. While one is
+//! switched on, it looks once per [`INTERVAL`], whether or not that area can
+//! be read now: a paused sticky area follows its window again, or the overlay
+//! comes back, with nothing to wake the thread, so it has to look. Round 1 of
+//! the review of `#154` found it asleep for good after a pause.
 
 use std::collections::HashMap;
 use std::sync::{Condvar, Mutex, PoisonError};
@@ -47,8 +54,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Manager};
 use uptake_core::area::{AreaId, AreaStore, AreaType};
 use uptake_core::geometry::Rect;
-use uptake_core::sticky::Sticky;
-use uptake_core::watch::{Detector, Event, Fingerprint, Watch};
+use uptake_core::watch::{Detector, Event, Fingerprint, Watch, leave_out};
 
 use crate::overlay_state::OverlayState;
 use crate::strings::{Text, text};
@@ -56,6 +62,15 @@ use crate::strings::{Text, text};
 /// How often a watching area reads its region. A first value; see the module
 /// docs' *Cost*.
 pub const INTERVAL: Duration = Duration::from_secs(2);
+
+/// How wide a band along each edge of the area is left out of a reading, in
+/// physical pixels: the border, 1.5 CSS pixels, at up to 250 % scaling.
+const EDGE: u32 = 4;
+
+/// The corner left out for the *watching* mark, in physical pixels: the
+/// mark's text at 11 CSS pixels, in either language, at up to 200 % scaling,
+/// with room to spare.
+const MARK: (u32, u32) = (240, 40);
 
 /// Whether the thread exists, and whether it has been woken since it last
 /// looked.
@@ -123,22 +138,25 @@ struct Target {
     watch: Watch,
 }
 
-/// Every area that is switched to watching and in sight now. Takes the store
-/// lock for the copy and nothing else.
-fn targets(app: &AppHandle) -> Vec<Target> {
+/// What the store says now: the areas to read, and whether any watch area is
+/// switched on at all, readable or not. Takes the store lock for the copy and
+/// nothing else.
+fn look(app: &AppHandle) -> (Vec<Target>, bool) {
     let store = app.state::<Mutex<AreaStore>>();
     let store = store.lock().unwrap_or_else(PoisonError::into_inner);
-    store
+    let switched_on = store
         .iter()
-        .filter(|area| {
-            area.kind == AreaType::Watch && area.watch.is_on() && area.sticky != Sticky::Paused
-        })
+        .any(|area| area.kind == AreaType::Watch && area.watch.is_on());
+    let targets = store
+        .iter()
+        .filter(|area| area.is_watching())
         .map(|area| Target {
             id: area.id,
             bounds: area.bounds,
             watch: area.watch,
         })
-        .collect()
+        .collect();
+    (targets, switched_on)
 }
 
 fn overlay_showing(app: &AppHandle) -> bool {
@@ -147,39 +165,93 @@ fn overlay_showing(app: &AppHandle) -> bool {
     state != OverlayState::Hidden
 }
 
+/// What one area's watcher remembers between readings.
+struct Watcher {
+    target: Target,
+    detector: Detector,
+    /// Whether the last reading failed, so a failure that lasts (an area left
+    /// on a monitor that was unplugged) is logged once and not every
+    /// [`INTERVAL`].
+    failing: bool,
+}
+
+/// The parts of a reading that are UP-TAKE's own drawing, in the reading's
+/// pixels: a band along each edge for the border, and the top right corner
+/// for the *watching* mark. `bounds` is the area, `taken` the rectangle the
+/// capture returned, which is `bounds` clamped to the desktop.
+fn own_drawing(bounds: Rect, taken: Rect) -> [Rect; 5] {
+    let (dx, dy) = (
+        bounds.origin.x - taken.origin.x,
+        bounds.origin.y - taken.origin.y,
+    );
+    let (width, height) = (bounds.size.width, bounds.size.height);
+    let right = dx + i32::try_from(width).unwrap_or(i32::MAX);
+    let bottom = dy + i32::try_from(height).unwrap_or(i32::MAX);
+    let edge = i32::try_from(EDGE).unwrap_or(0);
+    let mark_width = i32::try_from(MARK.0.min(width)).unwrap_or(0);
+    [
+        Rect::new(dx, dy, width, EDGE),
+        Rect::new(dx, bottom - edge, width, EDGE),
+        Rect::new(dx, dy, EDGE, height),
+        Rect::new(right - edge, dy, EDGE, height),
+        Rect::new(
+            right - mark_width,
+            dy,
+            MARK.0.min(width),
+            MARK.1.min(height),
+        ),
+    ]
+}
+
 fn run(app: &AppHandle) {
-    // Each area's detector, with the target it was made for: an area that
+    // Each area's watcher, with the target it was made for: an area that
     // moved, was resized or was given another choice starts again from a fresh
     // baseline rather than reporting its own move as a change.
-    let mut detectors: HashMap<AreaId, (Target, Detector)> = HashMap::new();
+    let mut watchers: HashMap<AreaId, Watcher> = HashMap::new();
     loop {
-        let targets = targets(app);
-        if targets.is_empty() {
-            detectors.clear();
+        let (targets, switched_on) = look(app);
+        if !switched_on {
+            watchers.clear();
             wait(None);
             continue;
         }
-        if !overlay_showing(app) {
-            detectors.clear();
+        if targets.is_empty() || !overlay_showing(app) {
+            watchers.clear();
             wait(Some(INTERVAL));
             continue;
         }
-        detectors.retain(|id, _| targets.iter().any(|target| target.id == *id));
+        watchers.retain(|id, _| targets.iter().any(|target| target.id == *id));
         for target in targets {
-            let entry = detectors
-                .entry(target.id)
-                .or_insert_with(|| (target, Detector::new()));
-            if entry.0 != target {
-                *entry = (target, Detector::new());
+            let watcher = watchers.entry(target.id).or_insert_with(|| Watcher {
+                target,
+                detector: Detector::new(),
+                failing: false,
+            });
+            if watcher.target != target {
+                watcher.target = target;
+                watcher.detector = Detector::new();
             }
-            let reading = match crate::output::capture_for_watch(app, target.bounds) {
-                Ok(bitmap) => Fingerprint::of(&bitmap),
+            let reading = match crate::output::capture_for_watch(target.bounds) {
+                Ok(mut captured) => {
+                    watcher.failing = false;
+                    leave_out(
+                        &mut captured.bitmap,
+                        &own_drawing(target.bounds, captured.rect),
+                    );
+                    Fingerprint::of(&captured.bitmap)
+                }
                 Err(error) => {
-                    crate::diagnostics::trouble("watch: a reading could not be taken", &error);
+                    if !watcher.failing {
+                        crate::diagnostics::trouble(
+                            "watch: a reading could not be taken (said once until one is)",
+                            &error,
+                        );
+                    }
+                    watcher.failing = true;
                     None
                 }
             };
-            if let Some(event) = reading.and_then(|reading| entry.1.observe(reading))
+            if let Some(event) = reading.and_then(|reading| watcher.detector.observe(reading))
                 && target.watch.notifies(event)
             {
                 notify(app, event);
@@ -205,5 +277,42 @@ fn notify(app: &AppHandle, event: Event) {
         .show()
     {
         crate::diagnostics::trouble("watch: the notification could not be shown", &error);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EDGE, MARK, own_drawing};
+    use uptake_core::geometry::Rect;
+
+    /// The parts left out sit on the area's own edges and its top right
+    /// corner, in the reading's pixels.
+    #[test]
+    fn own_drawing_is_the_border_and_the_marks_corner() {
+        let bounds = Rect::new(100, 50, 600, 400);
+        let parts = own_drawing(bounds, bounds);
+        assert_eq!(parts[0], Rect::new(0, 0, 600, EDGE));
+        assert_eq!(parts[1], Rect::new(0, 400 - 4, 600, EDGE));
+        assert_eq!(parts[2], Rect::new(0, 0, EDGE, 400));
+        assert_eq!(parts[3], Rect::new(600 - 4, 0, EDGE, 400));
+        assert_eq!(parts[4], Rect::new(600 - 240, 0, MARK.0, MARK.1));
+    }
+
+    /// An area hanging off the desktop's left edge: the capture starts 30
+    /// pixels into it, so every part moves left by 30.
+    #[test]
+    fn own_drawing_follows_a_clamped_capture() {
+        let bounds = Rect::new(-30, 0, 300, 200);
+        let taken = Rect::new(0, 0, 270, 200);
+        let parts = own_drawing(bounds, taken);
+        assert_eq!(parts[0], Rect::new(-30, 0, 300, EDGE));
+        assert_eq!(parts[4], Rect::new(270 - 240, 0, MARK.0, MARK.1));
+    }
+
+    /// An area smaller than the mark's corner leaves out what it has.
+    #[test]
+    fn a_small_area_leaves_out_no_more_than_itself() {
+        let bounds = Rect::new(0, 0, 100, 30);
+        assert_eq!(own_drawing(bounds, bounds)[4], Rect::new(0, 0, 100, 30));
     }
 }

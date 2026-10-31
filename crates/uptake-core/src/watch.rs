@@ -90,6 +90,22 @@ pub const GRID: u32 = 16;
 /// blinking in it does count as a change. A known limit of this first value.
 pub const CELL_DELTA: u8 = 12;
 
+/// How far a cell may move between two CONSECUTIVE readings and the region
+/// still count as still, once it has started changing.
+///
+/// Much finer than [`CELL_DELTA`], and that difference is the point. A change
+/// is found against the reading from before it started, so a slow one adds up
+/// until it crosses [`CELL_DELTA`]; its end is found between neighbouring
+/// readings, where a bar growing by a few pixels a reading moves a cell by a
+/// few levels and must not read as stopped. Round 1 of the review of `#154`
+/// measured the alternative: with one threshold for both, a bar growing 4 px a
+/// reading was reported changed and finished sixteen times in one fill.
+///
+/// ⚠️ **A change slower than this reads as still.** A cell moving by two levels
+/// or less per reading, which is under a pixel row of a dark bar on a 40-pixel
+/// cell, settles while it moves. A known limit of this first value.
+pub const STILL_DELTA: u8 = 2;
+
 /// How many readings in a row must match before a region that was changing
 /// counts as settled. With the host's reading every two seconds, three is six
 /// seconds of stillness: long enough that a progress bar pausing between
@@ -146,18 +162,58 @@ impl Fingerprint {
         })
     }
 
-    /// Whether `other` shows a different region: a different grid (the area
-    /// was resized), or any cell whose average moved by more than
-    /// [`CELL_DELTA`].
+    /// How far the cell that moved most between `self` and `other` moved, in
+    /// levels of 255. [`u8::MAX`] when the grids differ (the area was resized),
+    /// which is as different as two readings get.
     #[must_use]
-    pub fn differs(&self, other: &Self) -> bool {
+    pub fn moved(&self, other: &Self) -> u8 {
         if (self.columns, self.rows) != (other.columns, other.rows) {
-            return true;
+            return u8::MAX;
         }
         self.cells
             .iter()
             .zip(&other.cells)
-            .any(|(&a, &b)| a.abs_diff(b) > CELL_DELTA)
+            .map(|(&a, &b)| a.abs_diff(b))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Whether `other` shows a different region: some cell moved by more than
+    /// [`CELL_DELTA`], or the grid changed.
+    #[must_use]
+    pub fn differs(&self, other: &Self) -> bool {
+        self.moved(other) > CELL_DELTA
+    }
+}
+
+/// Paints `parts` of `bitmap` black, so they take no part in a comparison.
+/// `parts` are in the bitmap's own pixels, top left at `0, 0`; whatever falls
+/// outside the bitmap is ignored.
+///
+/// For UP-TAKE's own drawing inside a watch area. With *Show UP-TAKE in
+/// screen recordings* on, the area's border and its *watching* mark are in
+/// every reading, and hiding them while the reading is taken would make the
+/// mark blink out exactly while the area reads, which `ADR-0048` names as the
+/// case to revisit. So they are left in the picture and left out of the
+/// comparison instead: the same black in every reading never differs.
+pub fn leave_out(bitmap: &mut RgbaBitmap, parts: &[crate::geometry::Rect]) {
+    let whole = crate::geometry::Rect::new(0, 0, bitmap.width(), bitmap.height());
+    let width = bitmap.width();
+    let pixels = bitmap.pixels_mut();
+    for part in parts {
+        let Some(part) = part.intersection(whole) else {
+            continue;
+        };
+        let (x0, y0) = (part.origin.x.max(0) as u32, part.origin.y.max(0) as u32);
+        for y in y0..y0 + part.size.height {
+            let start = ((y * width + x0) * 4) as usize;
+            let end = start + (part.size.width * 4) as usize;
+            if let Some(row) = pixels.get_mut(start..end) {
+                for pixel in row.chunks_exact_mut(4) {
+                    pixel.copy_from_slice(&[0, 0, 0, 255]);
+                }
+            }
+        }
     }
 }
 
@@ -179,15 +235,18 @@ pub enum Event {
 
 /// Turns a run of readings into [`Event`]s, one area's worth.
 ///
-/// Each reading is compared with the one before it, not with the first: a
-/// progress bar moving by a few pixels each reading is *changing* for as long
-/// as it moves, and settles when it stops, wherever it stopped. A change is
-/// reported once when it starts, not at every reading while it goes on, so a
-/// video under a watch area raises one notification and not one every two
-/// seconds.
+/// Two comparisons, one for each moment. **A change starts** when a reading
+/// differs by more than [`CELL_DELTA`] from the *baseline*, the reading the
+/// region was last still at, so a slow change adds up until it counts. **A
+/// change ends** when [`SETTLE_READINGS`] readings in a row each differ from
+/// the reading just before by no more than [`STILL_DELTA`]; that reading
+/// becomes the new baseline, wherever the region stopped. Each is reported
+/// once, so a video under a watch area raises one notification and not one
+/// every two seconds.
 #[derive(Debug, Clone, Default)]
 pub struct Detector {
-    last: Option<Fingerprint>,
+    baseline: Option<Fingerprint>,
+    previous: Option<Fingerprint>,
     changing: bool,
     still: u32,
 }
@@ -203,36 +262,44 @@ impl Detector {
 
     /// Takes one reading and says whether it is a moment worth reporting.
     pub fn observe(&mut self, reading: Fingerprint) -> Option<Event> {
-        let Some(last) = &self.last else {
-            self.last = Some(reading);
+        let (Some(baseline), Some(previous)) = (&self.baseline, &self.previous) else {
+            self.baseline = Some(reading.clone());
+            self.previous = Some(reading);
             return None;
         };
-        if last.differs(&reading) {
-            self.last = Some(reading);
-            self.still = 0;
-            if self.changing {
+        if !self.changing {
+            let started = baseline.differs(&reading);
+            self.previous = Some(reading);
+            if !started {
                 return None;
             }
             self.changing = true;
+            self.still = 0;
             return Some(Event::Changed);
         }
-        if !self.changing {
-            return None;
+        if previous.moved(&reading) > STILL_DELTA {
+            self.still = 0;
+        } else {
+            self.still += 1;
         }
-        self.still += 1;
+        self.previous = Some(reading.clone());
         if self.still < SETTLE_READINGS {
             return None;
         }
         self.changing = false;
         self.still = 0;
+        self.baseline = Some(reading);
         Some(Event::Settled)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CELL_DELTA, Detector, Event, Fingerprint, GRID, SETTLE_READINGS, Watch};
+    use super::{
+        CELL_DELTA, Detector, Event, Fingerprint, GRID, SETTLE_READINGS, Watch, leave_out,
+    };
     use crate::bitmap::RgbaBitmap;
+    use crate::geometry::Rect;
     use crate::geometry::Size;
 
     /// A `width` by `height` bitmap of one grey level.
@@ -383,6 +450,47 @@ mod tests {
         assert_eq!(
             detector.observe(print(&grey(64, 64, 110))),
             Some(Event::Settled)
+        );
+    }
+
+    /// A bar growing slowly across a 960 by 640 region, stopping at reading 80:
+    /// one `Changed` near the start and one `Settled` after it stops, at every
+    /// rate from 4 to 20 pixels a reading. Round 1 of the review of `#154`
+    /// found 16 of each at 4 px with one threshold for both moments.
+    #[test]
+    fn a_slow_bar_is_one_change_and_one_end() {
+        for step in [4_u32, 10, 20] {
+            let mut detector = Detector::new();
+            let mut reported = Vec::new();
+            for reading in 0..90_u32 {
+                let filled = (reading.min(80) * step).min(940);
+                let picture = with_patch(grey(960, 640, 240), (10, 300, filled.max(1), 8), 20);
+                if let Some(event) = detector.observe(print(&picture)) {
+                    reported.push(event);
+                }
+            }
+            assert_eq!(
+                reported,
+                vec![Event::Changed, Event::Settled],
+                "{step} px a reading"
+            );
+        }
+    }
+
+    /// What is left out never differs, whatever was drawn there.
+    #[test]
+    fn what_is_left_out_takes_no_part() {
+        let mut before = grey(320, 200, 250);
+        let mut after = with_patch(before.clone(), (0, 0, 100, 20), 0);
+        let mark = [Rect::new(0, 0, 100, 20), Rect::new(300, 190, 50, 50)];
+        leave_out(&mut before, &mark);
+        leave_out(&mut after, &mark);
+        assert!(!print(&before).differs(&print(&after)));
+        let mut elsewhere = with_patch(grey(320, 200, 250), (100, 100, 200, 60), 0);
+        leave_out(&mut elsewhere, &mark);
+        assert!(
+            print(&before).differs(&print(&elsewhere)),
+            "the rest still counts"
         );
     }
 
