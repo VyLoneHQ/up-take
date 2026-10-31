@@ -1748,7 +1748,7 @@ pub(crate) fn convert_area(app: &AppHandle, id: AreaId, kind: AreaType) -> bool 
     // `refresh_magnification` rather than a second `magnify_into_area` call,
     // because it already asks the area for its own source rectangle and no-ops
     // at natural size -- so this line is correct for every type without
-    // knowing which ones are magnified, and stays correct when an eighth is.
+    // knowing which ones are magnified, and stays correct when a ninth is.
     // Ordered AFTER the discard above, and THIS is the line the generation
     // orders: `clear_magnification` reaches `Magnify::cancel`, which bumps
     // `next_generation` and stamps it as `id`'s current one. A request issued
@@ -3974,7 +3974,7 @@ mod tests {
     /// This doc said *"nothing checks it from the other side"* and *"this test
     /// cannot close that gap"*, which was true until `src/lib/area-kinds.test.ts`
     /// arrived: that test reads this function out of the source and asserts the
-    /// frontend's `AreaKind` union lists exactly these names, so an eighth
+    /// frontend's `AreaKind` union lists exactly these names, so a ninth
     /// `AreaType` now fails there (`I-55`).
     ///
     /// Kept as two checks rather than folded into one, because they fail

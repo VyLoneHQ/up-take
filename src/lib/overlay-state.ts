@@ -657,7 +657,7 @@ export interface AreaFrame {
  *
  * # Why a `Record` and not a `switch`
  *
- * `Record<AreaKind, string>` is exhaustive at COMPILE time: an eighth member of
+ * `Record<AreaKind, string>` is exhaustive at COMPILE time: a ninth member of
  * {@link AreaKind} fails to typecheck here rather than silently drawing a blank
  * bar. That matters more than usual in this repository: `UT-F-76` is the record
  * of five separate enumerations of one type set each coming back short, and

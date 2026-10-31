@@ -4021,7 +4021,7 @@ pub(crate) const fn captures_on_create(kind: AreaType) -> bool {
 /// avoiding. One exhaustive match answers both questions, so a type cannot be
 /// offered without a name or named without being offered.
 ///
-/// Exhaustive rather than a `_` arm, so an eighth `AreaType` fails to compile
+/// Exhaustive rather than a `_` arm, so a ninth `AreaType` fails to compile
 /// here instead of defaulting to either answer.
 fn conversion_label(kind: AreaType) -> Option<&'static str> {
     use crate::strings::{Text, text};

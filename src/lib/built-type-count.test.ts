@@ -82,7 +82,7 @@ const NUMBER_WORDS = [
  * Every public sentence stating a count of area types, and how each phrases it.
  *
  * `complement: true` means the sentence counts the types that are NOT built, so
- * it must equal `7 - builtTypeCount()` and moves in the opposite direction. It
+ * it must equal `TOTAL_TYPES - builtTypeCount()` and moves in the opposite direction. It
  * is the same fact stated from the other end, and it drifts on exactly the same
  * commits, which is why leaving it uncovered was a hole rather than a scope
  * choice.

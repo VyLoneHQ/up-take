@@ -116,7 +116,9 @@ const EDGE: u32 = 4;
 
 /// The corner left out for the *watching* mark, in physical pixels: the
 /// mark's text at 11 CSS pixels, in either language, at up to 200 % scaling,
-/// with room to spare.
+/// with room to spare. Above 200 % the mark can be taller than the corner,
+/// which only weakens [`mark_on_screen`] by a few pixels: a known limit,
+/// measured nowhere yet.
 const MARK: (u32, u32) = (240, 40);
 
 /// Whether the thread exists, and whether it has been woken since it last
@@ -285,6 +287,29 @@ fn own_drawing(bounds: Rect, taken: Rect) -> [Rect; 5] {
     ]
 }
 
+/// What a reading leaves out. Nothing while UP-TAKE is kept out of captures,
+/// which is the default (`ADR-0019`): its drawing is not in the reading, and
+/// leaving the corner out anyway cost every area its top right corner.
+/// With *Show UP-TAKE in screen recordings* on, [`own_drawing`], except the
+/// mark's corner when that would leave nothing to read: an area no wider
+/// than the corner and no taller than it read solid black and could never
+/// notify while it said *watching* (review of `#154`, round 8). The mark is
+/// still, so leaving it in costs no false change.
+fn left_out(bounds: Rect, taken: Rect, overlay_in_captures: bool) -> Vec<Rect> {
+    if !overlay_in_captures {
+        return Vec::new();
+    }
+    let parts = own_drawing(bounds, taken);
+    let (width, height) = (bounds.size.width, bounds.size.height);
+    let beside_the_mark = width > MARK.0 + EDGE;
+    let below_the_mark = height > MARK.1 + EDGE;
+    if beside_the_mark || below_the_mark {
+        parts.to_vec()
+    } else {
+        parts[..4].to_vec()
+    }
+}
+
 /// Where the *watching* mark can be, in desktop pixels: the top right corner
 /// of `bounds` that [`own_drawing`] leaves out.
 fn mark(bounds: Rect) -> Rect {
@@ -377,7 +402,11 @@ fn run(app: &AppHandle) {
                     watcher.failing = false;
                     leave_out(
                         &mut captured.bitmap,
-                        &own_drawing(target.bounds, captured.rect),
+                        &left_out(
+                            target.bounds,
+                            captured.rect,
+                            crate::settings::current().show_in_screen_recordings,
+                        ),
                     );
                     Fingerprint::of(&captured.bitmap)
                 }
@@ -455,7 +484,30 @@ fn notify(app: &AppHandle, event: Event) {
 
 #[cfg(test)]
 mod tests {
-    use super::{EDGE, Gate, MARK, Next, gate, mark, mark_on_screen, next, own_drawing};
+    use super::{EDGE, Gate, MARK, Next, gate, left_out, mark, mark_on_screen, next, own_drawing};
+
+    /// Nothing is left out while UP-TAKE is kept out of captures; with it in
+    /// them, a small area keeps something to read.
+    #[test]
+    fn a_reading_always_keeps_something_to_compare() {
+        let small = Rect::new(0, 0, 200, 30);
+        assert!(left_out(small, small, false).is_empty(), "the default");
+        let parts = left_out(small, small, true);
+        assert_eq!(parts.len(), 4, "the border only, not the corner");
+        let Some(mut bitmap) = uptake_core::bitmap::RgbaBitmap::from_pixels(
+            uptake_core::geometry::Size::new(200, 30),
+            [255_u8; 4].repeat(200 * 30),
+        ) else {
+            panic!("a 200 by 30 bitmap");
+        };
+        uptake_core::watch::leave_out(&mut bitmap, &parts);
+        assert!(
+            bitmap.pixels().chunks(4).any(|pixel| pixel[0] != 0),
+            "something is left"
+        );
+        let large = Rect::new(0, 0, 600, 400);
+        assert_eq!(left_out(large, large, true).len(), 5);
+    }
 
     /// An area is read right before its capture only while the overlay state
     /// is the pass's, no move or resize is on it (at the start of the pass or

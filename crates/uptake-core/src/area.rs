@@ -287,7 +287,7 @@ impl AreaType {
     /// refusal stops being a trap in the process: there is no magnification
     /// left to scroll back from.
     ///
-    /// Written as an explicit match rather than `matches!` so an eighth
+    /// Written as an explicit match rather than `matches!` so a ninth
     /// [`AreaType`] has to answer here, the way [`default_visual`] and
     /// [`default_input`] already make it answer.
     ///
@@ -325,7 +325,7 @@ impl AreaType {
     /// added to fix for `Screenshot`, and the one this function was extracted
     /// to prevent.
     ///
-    /// Exhaustive rather than a `_` arm, so an eighth [`AreaType`] answers here
+    /// Exhaustive rather than a `_` arm, so a ninth [`AreaType`] answers here
     /// the way it already answers [`default_visual`] and [`supports_zoom`].
     ///
     /// [`default_visual`]: Self::default_visual
@@ -365,7 +365,7 @@ impl AreaType {
     /// `Default`. [`Area::retake`] is where the two reasons are put back
     /// together, and it exists so no caller has to know there are two.
     ///
-    /// Exhaustive rather than `matches!`, so an eighth [`AreaType`] answers
+    /// Exhaustive rather than `matches!`, so a ninth [`AreaType`] answers
     /// here instead of defaulting to "does not sharpen".
     ///
     /// [ADR-0031]: the private planning repo's
