@@ -43,9 +43,8 @@
 //! area may hang off the desktop or into a gap between monitors; the capture
 //! would still read the part that is on screen while the mark is drawn
 //! nowhere, which is `ADR-0048`'s first *Revisit if* (review of `#154`,
-//! round 3). Checked against a corner larger than the mark, at that size even
-//! when the area is smaller (round 15), so it errs on the side of reading
-//! less.
+//! round 3). Checked against the area's top right corner, which holds the
+//! mark because the page clips the mark to the area (rounds 15 and 16).
 //!
 //! **Each of these is asked again right before each capture**, not once a
 //! pass, so an overlay hidden or a move started partway through a pass stops
@@ -375,20 +374,24 @@ fn left_out(bounds: Rect, taken: Rect, overlay_in_captures: bool) -> Vec<Rect> {
     }
 }
 
-/// Where the *watching* mark can be, in desktop pixels: a [`MARK`]-sized
-/// corner whose top right is the area's, **whatever the area's size**. The
-/// page anchors the mark to the area's right edge and lets it run left and
-/// down past a narrow or short area (it does not clip), so a corner clamped
-/// to the area would let a narrow area at the desktop's edge read with its
-/// mark off screen (review of `#154`, round 15). [`own_drawing`] clamps,
-/// because it works in the area's own pixels.
+/// Where the *watching* mark can be, in desktop pixels: the area's top right
+/// corner, [`MARK`] in size or the area's own size when that is smaller.
+///
+/// **Correct only because the page keeps the mark inside the area**: the
+/// badge is clipped to the area (`+page.svelte`, `.watch-badge`, pinned by
+/// `page.svelte.test.ts`). Round 15 of the review of `#154` found it ran past
+/// a narrow area's left edge, off the desktop, while this corner said it was
+/// on screen; round 16 found that sizing the corner at [`MARK`] whatever the
+/// area stopped small areas near a monitor's left edge from reading while
+/// their mark showed. Clipping the badge makes the clamped corner true.
 fn mark(bounds: Rect) -> Rect {
+    let width = MARK.0.min(bounds.size.width);
     let right = bounds.origin.x + i32::try_from(bounds.size.width).unwrap_or(i32::MAX);
     Rect::new(
-        right - i32::try_from(MARK.0).unwrap_or(0),
+        right - i32::try_from(width).unwrap_or(0),
         bounds.origin.y,
-        MARK.0,
-        MARK.1,
+        width,
+        MARK.1.min(bounds.size.height),
     )
 }
 
@@ -1047,9 +1050,17 @@ mod tests {
         let monitors = [left, right];
         let inside = Rect::new(100, 100, 600, 400);
         assert_eq!(mark(inside), Rect::new(700 - 240, 100, MARK.0, MARK.1));
-        // Round 15: a narrow area at the desktop's left edge, whose mark
-        // runs left past it and off the desktop.
-        assert!(!mark_on_screen(mark(Rect::new(0, 100, 40, 400)), &monitors));
+        // Rounds 15 and 16: small areas near a monitor's left edge, whose
+        // mark (clipped to the area by the page) is on screen, do read.
+        assert!(mark_on_screen(mark(Rect::new(0, 100, 40, 400)), &monitors));
+        assert!(mark_on_screen(
+            mark(Rect::new(20, 100, 200, 100)),
+            &monitors
+        ));
+        assert!(mark_on_screen(
+            mark(Rect::new(1930, 100, 200, 100)),
+            &monitors
+        ));
         assert!(mark_on_screen(mark(inside), &monitors));
         // Past the right edge of the rightmost monitor.
         assert!(!mark_on_screen(

@@ -1100,10 +1100,18 @@ onMount(() => {
 }
 
 /* The watching mark: present exactly while the area reads its region. */
+/* Kept inside the area, clipped at its end so the dot shows first: the host
+   checks that the area's own top right corner (at most 240 by 40 physical
+   pixels) is on a monitor before it reads, which says the mark is on screen
+   only while the mark cannot leave that corner (watch.rs `mark`, review of
+   #154 rounds 15 and 16). Pinned by page.svelte.test.ts. */
 .watch-badge {
   position: absolute;
   right: 4px;
   top: 2px;
+  max-width: calc(100% - 8px);
+  max-height: calc(100% - 4px);
+  overflow: hidden;
   font: 11px/1 system-ui, sans-serif;
   color: rgba(140, 235, 180, 0.98);
   text-shadow: 0 0 3px rgba(0, 0, 0, 0.8);
