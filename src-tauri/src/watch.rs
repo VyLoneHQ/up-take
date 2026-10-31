@@ -91,6 +91,12 @@
 //!   ([`Watcher`]), which keeps such a frame out of a baseline, not out of
 //!   every reading.
 //!
+//! ⚠️ **And what the page cannot see**, also `I-475`'s: a window Windows draws
+//! above UP-TAKE's overlay (a notification toast, this feature's own among
+//! them; the Start menu; another always-on-top program) can cover the mark
+//! while the page, which measures only its own drawing, still says it is
+//! seen (review of `#154`, round 24). Not probed on a real screen.
+//!
 //! ⚠️ **With *Show UP-TAKE in screen recordings* on, UP-TAKE's own drawing
 //! is in every reading, and only the border and the mark are left out.**
 //! The largest other part, Placement's darkened edges, comes and goes with
@@ -1080,45 +1086,74 @@ mod tests {
             );
         }
 
-        /// Rounds 20 and 21: every host message that can change what the page
-        /// draws goes through `emit_redraw`, which moves the generation, so an
-        /// emit added later that bypasses it goes red here.
+        /// Rounds 20, 21 and 24: every host message that can change what the
+        /// page draws goes through `emit_redraw`, which moves the generation.
+        /// Scanned over every source file of this crate but this one, for
+        /// every way of emitting (`.emit(`, `emit_to(`, `emit_filter(`,
+        /// `Emitter::emit(`), naming the event by its constant or by its
+        /// text. Round 24 found the first version read three files and one
+        /// spelling.
         #[test]
         fn every_message_that_redraws_the_page_moves_the_generation() {
-            const EVENTS: [&str; 11] = [
-                "FREEZE_HIDE_EVENT",
-                "STATE_EVENT",
-                "AREAS_EVENT",
-                "FLASH_EVENT",
-                "OCR_SELECTION_EVENT",
-                "OCR_EVENT",
-                "PIN_EVENT",
-                "SELECTION_EVENT",
-                "HOVER_EVENT",
-                "MENU_EVENT",
-                "COACH_EVENT",
+            const EVENTS: [(&str, &str); 11] = [
+                ("FREEZE_HIDE_EVENT", "\"overlay://freeze-hide\""),
+                ("STATE_EVENT", "\"overlay://state\""),
+                ("AREAS_EVENT", "\"overlay://areas\""),
+                ("FLASH_EVENT", "\"overlay://flash\""),
+                ("OCR_SELECTION_EVENT", "\"overlay://ocr-selection\""),
+                ("OCR_EVENT", "\"overlay://ocr\""),
+                ("PIN_EVENT", "\"overlay://pin\""),
+                ("SELECTION_EVENT", "\"placement://selection\""),
+                ("HOVER_EVENT", "\"overlay://hover\""),
+                ("MENU_EVENT", "\"overlay://menu\""),
+                ("COACH_EVENT", "\"overlay://coach\""),
             ];
+            const SENDS: [&str; 4] = [".emit(", "emit_to(", "emit_filter(", "Emitter::emit("];
             let floor = |text: &str, mut at: usize| {
                 while !text.is_char_boundary(at) {
                     at -= 1;
                 }
                 at
             };
+            let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                panic!("{} is readable", dir.display())
+            };
             let mut through = 0;
-            for (name, source) in [
-                ("overlay.rs", include_str!("overlay.rs")),
-                ("placement.rs", include_str!("placement.rs")),
-                ("first_run.rs", include_str!("first_run.rs")),
-            ] {
-                for (at, _) in source.match_indices(".emit(") {
-                    let end = floor(source, (at + 120).min(source.len()));
-                    assert!(
-                        !EVENTS.iter().any(|event| source[at..end].contains(event)),
-                        "{name}: an emit at byte {at} sends a redrawing event past emit_redraw"
-                    );
+            let mut files = 0;
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default()
+                    .to_owned();
+                if path.extension().is_none_or(|ext| ext != "rs") || name == "watch.rs" {
+                    continue;
+                }
+                let Ok(source) = std::fs::read_to_string(&path) else {
+                    panic!("{} is readable", path.display())
+                };
+                files += 1;
+                for send in SENDS {
+                    for (at, _) in source.match_indices(send) {
+                        let end = floor(&source, (at + 200).min(source.len()));
+                        let after = &source[at..end];
+                        assert!(
+                            !EVENTS
+                                .iter()
+                                .any(|(constant, text)| after.contains(constant)
+                                    || after.contains(text)),
+                            "{name}: `{send}` at byte {at} sends a redrawing event past emit_redraw"
+                        );
+                    }
                 }
                 through += source.matches("crate::watch::emit_redraw(").count();
             }
+            assert!(
+                files > 10,
+                "read {files} files; the scan has stopped seeing the crate"
+            );
             assert!(
                 through >= 14,
                 "found {through}; the scan has stopped seeing them"
