@@ -1080,7 +1080,8 @@ export function isRemoveKey(key: string): boolean {
  *
  * This listed Filter and Upscale among the types that merely *want* an initial
  * until 2026-08-21, 54 lines above the arms that give them one. Roadmap 1.23
- * spent `f` and 1.24 spent `u`; three of the seven are claimed, not one.
+ * spent `f` and 1.24 spent `u`; since 1.26 and 1.58 five letters are claimed
+ * (`S F U O W`), not one.
  *
  * `Space` alone was the better key on ergonomics and was deliberately left
  * unclaimed for a future area-level action (ADR-0026 decision 8).

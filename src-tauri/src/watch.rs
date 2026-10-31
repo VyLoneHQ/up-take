@@ -17,9 +17,10 @@
 //!   from the same `Area::is_watching`, sent in the area payload, so the two
 //!   answer one question once. Nothing is read while the overlay is hidden,
 //!   because the mark is hidden with it.
-//! - **Local.** A reading is reduced to a few hundred brightness averages,
-//!   compared and dropped. Nothing is written, logged or sent; the
-//!   notification says which moment it was, never what was read.
+//! - **Local.** A reading is reduced to a few hundred brightness averages
+//!   and the picture dropped; the detector keeps two such summaries, the
+//!   last still one and the last one. Nothing is written, logged or sent;
+//!   the notification says which moment it was, never what was read.
 //!
 //! The fourth, *the user placed it*, is true of every area.
 //!
@@ -27,6 +28,19 @@
 //! step UP-TAKE's drawing aside, unlike every other capture (`output.rs`,
 //! `capture_for_watch`): the area's border and mark are left in the picture
 //! and left out of the comparison ([`own_drawing`]).
+//!
+//! **An area being moved or resized does not read**, because the page draws
+//! it as a preview without its mark, and its readings start again from a
+//! fresh baseline when the gesture ends.
+//!
+//! ⚠️ **With *Show UP-TAKE in screen recordings* on, UP-TAKE's own drawing
+//! is in every reading, and only the border and the mark are left out.**
+//! The largest other part, Placement's darkened edges, comes and goes with
+//! the overlay state, so every watcher starts again from a fresh baseline
+//! when the state changes (review of `#154`, round 2). What is left: a
+//! menu, a selection box or another area's flash drawn over a watched
+//! region while the user works there can count as a change. The setting
+//! is off by default.
 //!
 //! # Cost
 //!
@@ -57,6 +71,7 @@ use uptake_core::geometry::Rect;
 use uptake_core::watch::{Detector, Event, Fingerprint, Watch, leave_out};
 
 use crate::overlay_state::OverlayState;
+
 use crate::strings::{Text, text};
 
 /// How often a watching area reads its region. A first value; see the module
@@ -159,10 +174,35 @@ fn look(app: &AppHandle) -> (Vec<Target>, bool) {
     (targets, switched_on)
 }
 
-fn overlay_showing(app: &AppHandle) -> bool {
+fn overlay_state(app: &AppHandle) -> OverlayState {
     let state = app.state::<Mutex<OverlayState>>();
-    let state = *state.lock().unwrap_or_else(PoisonError::into_inner);
-    state != OverlayState::Hidden
+    *state.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// What the thread does next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Next {
+    /// No watch area is switched on: wait for [`wake`], however long.
+    Sleep,
+    /// One is switched on and none can be read now (paused, or the overlay
+    /// is hidden): look again in [`INTERVAL`], because nothing wakes the
+    /// thread when that changes.
+    Look,
+    /// Read the readable ones.
+    Read,
+}
+
+/// The thread's one decision, apart so it can be tested. Round 1 of the
+/// review of `#154` found the thread asleep for good after a pause, and
+/// round 2 found the fix held by no test.
+const fn next(switched_on: bool, readable: bool, showing: bool) -> Next {
+    if !switched_on {
+        Next::Sleep
+    } else if readable && showing {
+        Next::Read
+    } else {
+        Next::Look
+    }
 }
 
 /// What one area's watcher remembers between readings.
@@ -208,20 +248,40 @@ fn run(app: &AppHandle) {
     // moved, was resized or was given another choice starts again from a fresh
     // baseline rather than reporting its own move as a change.
     let mut watchers: HashMap<AreaId, Watcher> = HashMap::new();
+    let mut last_state = None;
     loop {
         let (targets, switched_on) = look(app);
-        if !switched_on {
+        let state = overlay_state(app);
+        // A change of overlay state changes what UP-TAKE draws over the
+        // screen, which a reading sees when the overlay is in captures.
+        if last_state != Some(state) {
             watchers.clear();
-            wait(None);
-            continue;
+            last_state = Some(state);
         }
-        if targets.is_empty() || !overlay_showing(app) {
-            watchers.clear();
-            wait(Some(INTERVAL));
-            continue;
+        match next(
+            switched_on,
+            !targets.is_empty(),
+            state != OverlayState::Hidden,
+        ) {
+            Next::Sleep => {
+                watchers.clear();
+                wait(None);
+                continue;
+            }
+            Next::Look => {
+                watchers.clear();
+                wait(Some(INTERVAL));
+                continue;
+            }
+            Next::Read => {}
         }
-        watchers.retain(|id, _| targets.iter().any(|target| target.id == *id));
+        let moving: Option<AreaId> = crate::placement::area_in_gesture();
+        watchers
+            .retain(|id, _| Some(*id) != moving && targets.iter().any(|target| target.id == *id));
         for target in targets {
+            if Some(target.id) == moving {
+                continue;
+            }
             let watcher = watchers.entry(target.id).or_insert_with(|| Watcher {
                 target,
                 detector: Detector::new(),
@@ -282,7 +342,22 @@ fn notify(app: &AppHandle, event: Event) {
 
 #[cfg(test)]
 mod tests {
-    use super::{EDGE, MARK, own_drawing};
+    use super::{EDGE, MARK, Next, next, own_drawing};
+
+    /// The thread sleeps without a timeout only while no watch area is
+    /// switched on; a switched-on area it cannot read now is looked at again.
+    #[test]
+    fn it_sleeps_only_when_nothing_is_switched_on() {
+        for readable in [false, true] {
+            for showing in [false, true] {
+                assert_eq!(next(false, readable, showing), Next::Sleep);
+            }
+        }
+        assert_eq!(next(true, false, true), Next::Look, "a paused sticky area");
+        assert_eq!(next(true, true, false), Next::Look, "the overlay hidden");
+        assert_eq!(next(true, false, false), Next::Look);
+        assert_eq!(next(true, true, true), Next::Read);
+    }
     use uptake_core::geometry::Rect;
 
     /// The parts left out sit on the area's own edges and its top right

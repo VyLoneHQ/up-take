@@ -2350,7 +2350,7 @@ mod tests {
     #[test]
     fn no_type_is_born_magnified() {
         // The set pinned WHOLE, the way `live_is_opt_in_...` pins the live set,
-        // so an eighth type has to answer here rather than inheriting whatever
+        // so a ninth type has to answer here rather than inheriting whatever
         // the last one did.
         //
         // **This test asserted the opposite for four days.** It was
@@ -2528,7 +2528,7 @@ mod tests {
     #[test]
     fn every_conversion_leaves_an_area_whose_zoom_its_type_allows() {
         // The invariant stated over the whole matrix rather than on one pair, so
-        // an eighth type cannot arrive with a hole in it. Seven by seven, with
+        // a ninth type cannot arrive with a hole in it. Eight by eight, with
         // each source area magnified as far as its own type permits first.
         for from in AreaType::ALL {
             for to in AreaType::ALL {

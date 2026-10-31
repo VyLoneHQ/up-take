@@ -3864,7 +3864,7 @@ fn capture_on_create(app: &AppHandle, kind: AreaType, id: AreaId, bounds: Rect) 
     // no-ops at natural size -- so on any given area exactly one of these two
     // lines does work, and neither can observe the other.
     //
-    // **What would actually matter for an eighth type that is both**, so the
+    // **What would actually matter for a type that is both**, so the
     // next reader does not re-derive the wrong constraint: both dispatch to
     // background threads, so the order of the *statements* would not decide the
     // order of the *completions*. The two would race through
@@ -4880,6 +4880,20 @@ fn emit_menu(app: &AppHandle) {
 /// Locks a mutex, treating poisoning as recoverable: everything under these
 /// locks is plain data that stays valid after a panic, and architecture §5
 /// forbids `unwrap`.
+/// The area a move or resize is under way on, if any (roadmap `1.58`).
+///
+/// While one is, the page draws that area as a preview with none of its
+/// marks, so a watch area must not read: `ADR-0048` asks for the mark
+/// whenever it reads (review of `#154`, round 2). Answers from the press,
+/// which is earlier than the page stops drawing the mark, so it errs on the
+/// side of reading less.
+pub(crate) fn area_in_gesture() -> Option<AreaId> {
+    match *lock(&GESTURE) {
+        Some(Gesture::Move { id, .. } | Gesture::Resize { id, .. }) => Some(id),
+        _ => None,
+    }
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }

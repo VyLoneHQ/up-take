@@ -165,8 +165,8 @@ Six of eight area types are built.
 - **A watch area.** Place it over something that changes, such as a download bar, a render or a
   chat, and it shows a Windows notification when that piece of screen starts changing, or when it
   stops. It reads nothing until you switch watching on in its right-click menu, and says
-  *watching* on the area for as long as it reads. What it reads stays on your computer: it keeps a
-  coarse summary of the last reading to compare with the next, and nothing else.
+  *watching* on the area for as long as it reads. What it reads stays on your computer: it keeps
+  coarse summaries of its readings, a grid of brightness averages, to compare, and nothing else.
   <!-- source: ROADMAP.md task 1.58 and ADR-0048 (an area may read its own region repeatedly: the
        user placed it, it is marked while it reads, reading is per area and off by default, and it
        stays local). The code is crates/uptake-core/src/watch.rs (the rule and its tests) and
