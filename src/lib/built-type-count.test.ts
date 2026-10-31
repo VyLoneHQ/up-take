@@ -55,8 +55,8 @@ import placementRs from '../../src-tauri/src/placement.rs?raw';
  * built to end them. The round-3 reviewer re-ran the sweep instead of reading
  * the list and found both misses, one of them wrong at the time:
  *
- *     git grep -n -iE "(zero|one|two|three|four|five|six|seven|[0-9]+)( more)?" \
- *         " (of (the )?seven )?area types" -- '*.md'
+ *     git grep -n -iE "(zero|one|two|three|four|five|six|seven|eight|[0-9]+)( more)?" \
+ *         " (of (the )?(seven|eight) )?area types" -- '*.md'
  *
  * Run that, not this list, when asking whether the coverage is complete.
  *
@@ -91,7 +91,7 @@ const SITES = [
   {
     name: 'README.md "what works today"',
     source: readmeMd,
-    // "Four of seven area types are built."
+    // "Six of eight area types are built."
     pattern: /\b(\w+) of eight area types are built\b/i,
     complement: false,
   },
@@ -105,7 +105,7 @@ const SITES = [
   {
     name: 'CONTRIBUTING.md',
     source: contributingMd,
-    // "Four of seven area types are built and there is no release yet."
+    // "Six of eight area types are built and there is no release yet."
     pattern: /\b(\w+) of eight area types are built\b/i,
     complement: false,
   },

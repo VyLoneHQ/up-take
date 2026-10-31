@@ -339,17 +339,20 @@ fn run(app: &AppHandle) {
             // move started or watching switched off between two of them
             // (review of `#154`, round 4). A capture already under way cannot
             // be stopped; this keeps the window to that one.
-            if overlay_state(app) != state {
-                break;
-            }
-            let moving = moving.or_else(crate::placement::area_in_gesture);
-            if Some(target.id) == moving
-                || !still_watching(app, target)
-                || !mark_on_screen(mark(target.bounds), &monitors)
-            {
-                // Not read, and read again from a fresh baseline.
-                watchers.remove(&target.id);
-                continue;
+            match gate(
+                target.id,
+                overlay_state(app) == state,
+                [moving, crate::placement::area_in_gesture()],
+                still_watching(app, target),
+                mark_on_screen(mark(target.bounds), &monitors),
+            ) {
+                Gate::Stop => break,
+                Gate::Skip => {
+                    // Not read, and read again from a fresh baseline.
+                    watchers.remove(&target.id);
+                    continue;
+                }
+                Gate::Read => {}
             }
             let watcher = watchers.entry(target.id).or_insert_with(|| Watcher {
                 target,
@@ -390,6 +393,38 @@ fn run(app: &AppHandle) {
     }
 }
 
+/// What the loop does with one area right before its capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Gate {
+    /// The overlay state changed: end the pass.
+    Stop,
+    /// Leave this area unread and start it again from a fresh baseline.
+    Skip,
+    /// Take the reading.
+    Read,
+}
+
+/// The decision before each capture, apart so it can be tested. `gestures`
+/// holds the area under a move or resize at the start of the pass and the
+/// one under a move or resize now; both are asked, because one user can
+/// release one area and press another within a pass. Round 6 of the review
+/// of `#154` found the second never asked once the first was set.
+fn gate<Id: PartialEq + Copy>(
+    id: Id,
+    state_unchanged: bool,
+    gestures: [Option<Id>; 2],
+    still_watching: bool,
+    mark_on_screen: bool,
+) -> Gate {
+    if !state_unchanged {
+        Gate::Stop
+    } else if gestures.contains(&Some(id)) || !still_watching || !mark_on_screen {
+        Gate::Skip
+    } else {
+        Gate::Read
+    }
+}
+
 /// Raises the Windows notification for `event`. Says which moment it was and
 /// never what the area read.
 fn notify(app: &AppHandle, event: Event) {
@@ -411,7 +446,24 @@ fn notify(app: &AppHandle, event: Event) {
 
 #[cfg(test)]
 mod tests {
-    use super::{EDGE, MARK, Next, mark, mark_on_screen, next, own_drawing};
+    use super::{EDGE, Gate, MARK, Next, gate, mark, mark_on_screen, next, own_drawing};
+
+    /// An area is read right before its capture only while the overlay state
+    /// is the pass's, no move or resize is on it (at the start of the pass or
+    /// now), it is still watching and its mark is on screen.
+    #[test]
+    fn each_capture_is_gated_on_every_condition() {
+        let (a, b) = (1_u64, 2_u64);
+        assert_eq!(gate(a, true, [None, None], true, true), Gate::Read);
+        assert_eq!(gate(a, false, [None, None], true, true), Gate::Stop);
+        assert_eq!(gate(a, true, [Some(a), None], true, true), Gate::Skip);
+        // Round 6: another area was moving when the pass began, and this one
+        // is pressed now.
+        assert_eq!(gate(a, true, [Some(b), Some(a)], true, true), Gate::Skip);
+        assert_eq!(gate(a, true, [Some(b), Some(b)], true, true), Gate::Read);
+        assert_eq!(gate(a, true, [None, None], false, true), Gate::Skip);
+        assert_eq!(gate(a, true, [None, None], true, false), Gate::Skip);
+    }
 
     /// The mark is on screen only when its whole corner is on one monitor:
     /// not past the desktop's right edge, not above its top, not across the

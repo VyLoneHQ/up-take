@@ -6783,7 +6783,8 @@ mod tests {
         // cannot appear without this going red.
         //
         // **SIX on 2026-10-31**: roadmap 1.58 added `Watch`, a type the founder
-        // made on 2026-09-27, which arrives with its behaviour.
+        // made on 2026-09-27, which arrives with its behaviour, so a seventh
+        // row cannot appear without this going red.
         let rows = menu_rows(&summary(AreaType::Default, Layer::Auto, Input::Interactive));
         assert_eq!(
             labels(type_rows(&rows)),

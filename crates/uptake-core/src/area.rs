@@ -139,7 +139,7 @@ impl AreaType {
     /// ⚠️ **Hand-maintained, and the array length is the only thing that says
     /// so.** Adding a variant fails to compile in every exhaustive `match` in
     /// this file and in the host, so the author is stopped and made to decide;
-    /// nothing but the `7` stops them leaving this list short. Kept because the
+    /// nothing but the `8` stops them leaving this list short. Kept because the
     /// alternative is a derive-macro dependency for one list of eight names.
     pub const ALL: [Self; 8] = [
         Self::Default,
