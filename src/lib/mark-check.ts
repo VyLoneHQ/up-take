@@ -16,6 +16,29 @@ import type { CssRect as Box } from './regions';
  */
 export type { Box };
 
+/**
+ * What the page draws over a watching mark: every kind of element it draws
+ * from the areas onwards, so anything of these that comes after a mark in the
+ * document is drawn above it (the page sets no `z-index`). Kept complete by
+ * `mark-covers.test.ts`, which reads the page's markup: a class drawn there
+ * is either here or exempt with a reason (review of #154, rounds 20 and 25).
+ */
+export const COVERS: readonly string[] = [
+  'area',
+  'close',
+  'grab-bar',
+  'outside-handle',
+  'layer-badge',
+  'sticky-badge',
+  'zoom-badge',
+  'flash',
+  'ocr',
+  'ocr-status',
+  'selection',
+  'menu',
+  'coach',
+];
+
 const contains = (outer: Box, inner: Box): boolean =>
   inner.x >= outer.x &&
   inner.y >= outer.y &&

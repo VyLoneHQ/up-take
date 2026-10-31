@@ -1086,27 +1086,29 @@ mod tests {
             );
         }
 
-        /// Rounds 20, 21 and 24: every host message that can change what the
-        /// page draws goes through `emit_redraw`, which moves the generation.
-        /// Scanned over every source file of this crate but this one, for
-        /// every way of emitting (`.emit(`, `emit_to(`, `emit_filter(`,
-        /// `Emitter::emit(`), naming the event by its constant or by its
-        /// text. Round 24 found the first version read three files and one
-        /// spelling.
+        /// Rounds 20, 21, 24 and 25: every host message that can change what
+        /// the page draws goes through `emit_redraw`, which moves the
+        /// generation. The events are every `*_EVENT` constant in the crate
+        /// but those named as not redrawing, each with its reason, so a new
+        /// event is held here until someone says why it does not redraw. The
+        /// scan reads every source file but this one, for every way of
+        /// emitting, naming an event by its constant or by its text.
         #[test]
         fn every_message_that_redraws_the_page_moves_the_generation() {
-            const EVENTS: [(&str, &str); 11] = [
-                ("FREEZE_HIDE_EVENT", "\"overlay://freeze-hide\""),
-                ("STATE_EVENT", "\"overlay://state\""),
-                ("AREAS_EVENT", "\"overlay://areas\""),
-                ("FLASH_EVENT", "\"overlay://flash\""),
-                ("OCR_SELECTION_EVENT", "\"overlay://ocr-selection\""),
-                ("OCR_EVENT", "\"overlay://ocr\""),
-                ("PIN_EVENT", "\"overlay://pin\""),
-                ("SELECTION_EVENT", "\"placement://selection\""),
-                ("HOVER_EVENT", "\"overlay://hover\""),
-                ("MENU_EVENT", "\"overlay://menu\""),
-                ("COACH_EVENT", "\"overlay://coach\""),
+            const NOT_REDRAWING: [(&str, &str); 4] = [
+                (
+                    "FREEZE_REVEAL_EVENT",
+                    "only shows more; a mark it reveals is confirmed after",
+                ),
+                (
+                    "ACTIVE_MONITOR_EVENT",
+                    "moves the armed badge, drawn before every area",
+                ),
+                (
+                    "CHANGED_EVENT",
+                    "settings: area border and wash alpha, never the mark",
+                ),
+                ("DRAWN_EVENT", "the generation itself, sent by emit_redraw"),
             ];
             const SENDS: [&str; 4] = [".emit(", "emit_to(", "emit_filter(", "Emitter::emit("];
             let floor = |text: &str, mut at: usize| {
@@ -1116,44 +1118,76 @@ mod tests {
                 at
             };
             let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-            let Ok(entries) = std::fs::read_dir(&dir) else {
+            let Ok(listing) = std::fs::read_dir(&dir) else {
                 panic!("{} is readable", dir.display())
             };
-            let mut through = 0;
-            let mut files = 0;
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or_default()
-                    .to_owned();
-                if path.extension().is_none_or(|ext| ext != "rs") || name == "watch.rs" {
+            let mut sources: Vec<(String, String)> = Vec::new();
+            for path in listing.flatten().map(|entry| entry.path()) {
+                if path.extension().is_none_or(|ext| ext != "rs") {
                     continue;
                 }
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default()
+                    .to_owned();
                 let Ok(source) = std::fs::read_to_string(&path) else {
                     panic!("{} is readable", path.display())
                 };
-                files += 1;
+                sources.push((name, source));
+            }
+            assert!(
+                sources.len() > 10,
+                "read {} files; the scan has stopped seeing the crate",
+                sources.len()
+            );
+            // Every `const NAME_EVENT: &str = "text";` in the crate.
+            let mut declared: Vec<(String, String)> = Vec::new();
+            for (_, source) in &sources {
+                for line in source.lines() {
+                    let line = line.trim_start().trim_start_matches("pub ");
+                    let Some(rest) = line.strip_prefix("const ") else {
+                        continue;
+                    };
+                    let Some((name, value)) = rest.split_once(": &str = ") else {
+                        continue;
+                    };
+                    if name.ends_with("_EVENT") {
+                        declared.push((name.to_owned(), value.trim_end_matches(';').to_owned()));
+                    }
+                }
+            }
+            for (exempt, _) in NOT_REDRAWING {
+                assert!(
+                    declared.iter().any(|(name, _)| name == exempt),
+                    "{exempt} is exempt and no longer declared"
+                );
+            }
+            let events: Vec<(String, String)> = declared
+                .into_iter()
+                .filter(|(name, _)| !NOT_REDRAWING.iter().any(|(exempt, _)| exempt == name))
+                .collect();
+            assert!(
+                events.len() >= 11,
+                "found {} redrawing events",
+                events.len()
+            );
+            let mut through = 0;
+            for (name, source) in sources.iter().filter(|(name, _)| name != "watch.rs") {
                 for send in SENDS {
                     for (at, _) in source.match_indices(send) {
-                        let end = floor(&source, (at + 200).min(source.len()));
+                        let end = floor(source, (at + 200).min(source.len()));
                         let after = &source[at..end];
                         assert!(
-                            !EVENTS
-                                .iter()
-                                .any(|(constant, text)| after.contains(constant)
-                                    || after.contains(text)),
+                            !events.iter().any(|(constant, text)| {
+                                after.contains(constant.as_str()) || after.contains(text.as_str())
+                            }),
                             "{name}: `{send}` at byte {at} sends a redrawing event past emit_redraw"
                         );
                     }
                 }
                 through += source.matches("crate::watch::emit_redraw(").count();
             }
-            assert!(
-                files > 10,
-                "read {files} files; the scan has stopped seeing the crate"
-            );
             assert!(
                 through >= 14,
                 "found {through}; the scan has stopped seeing them"

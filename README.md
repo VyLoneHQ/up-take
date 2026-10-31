@@ -285,7 +285,12 @@ destination and not the current state.
        This bullet said "There is no continuous background recording and no plan for one" until
        2026-10-11. The second half had been false since ADR-0048 admitted the Rewind area on
        2026-09-27, and that record says a page that says "never watches" without the rest would be
-       false. The maintainer caught it and approved this wording on 2026-10-11. -->
+       false. The maintainer caught it and approved this wording on 2026-10-11.
+       NOT EXACT for watch areas (ROADMAP.md 1.58) while the private backlog row I-475 is open: a
+       watch area reads only while the page confirms its mark is drawn and uncovered
+       (src-tauri/src/watch.rs, "The page confirms the mark"), but a window Windows draws above
+       UP-TAKE, and a frame up to a second old, can still be read with the mark not in sight. The
+       visible wording is the maintainer's to change (review of #154, round 25). -->
 - **A sticky area has to recognise its window.** To find the window again after it was closed,
   UP-TAKE remembers its title and the path of its program. While an area is waiting, it checks the
   titles of open windows once a second to spot the window coming back. All of this stays in

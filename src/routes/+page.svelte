@@ -11,7 +11,7 @@ import {
   hiddenClipPath,
   nextAnimationFrame,
 } from '$lib/freeze-mask';
-import { markSeen } from '$lib/mark-check';
+import { COVERS, markSeen } from '$lib/mark-check';
 import { overflowFade } from '$lib/overflow-fade';
 import {
   type ActiveMonitorPayload,
@@ -611,24 +611,6 @@ onMount(() => {
 let confirmedNone = false;
 /** See `overlay://drawn`. 0 until the first one: Rust's count starts at 1. */
 let drawnGeneration = 0;
-/** What the page can draw over a watching mark. See `confirmMarks`. */
-const COVERS = [
-  '.area',
-  '.close',
-  '.grab-bar',
-  '.outside-handle',
-  '.layer-badge',
-  '.sticky-badge',
-  '.zoom-badge',
-  '.flash',
-  '.ocr',
-  '.ocr-status',
-  '.selection',
-  '.armed-badge',
-  '.frozen-badge',
-  '.menu',
-  '.coach',
-].join(', ');
 function confirmMarks(): void {
   const shown =
     overlayState === 'hidden'
@@ -650,7 +632,11 @@ function confirmMarks(): void {
     // found menus and controls missing when only areas were counted). And a
     // freeze's mask hides whole monitors.
     const above = [
-      ...[...document.querySelectorAll(COVERS)]
+      ...[
+        ...document.querySelectorAll(
+          COVERS.map((name) => `.${name}`).join(', '),
+        ),
+      ]
         .filter(
           (element) =>
             !badge.contains(element) &&
