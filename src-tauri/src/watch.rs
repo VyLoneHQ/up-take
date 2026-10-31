@@ -54,43 +54,34 @@
 //! it as a preview without its mark, and its readings start again from a
 //! fresh baseline when the gesture ends.
 //!
-//! ⚠️ **Known gaps, left to their own change on the founder's decision
-//! (2026-10-31, UP-TAKE backlog `I-475`).** All six are moments when the host
-//! may read while the page is not showing the mark:
+//! **The page confirms the mark** ([`confirm`], the founder's choice of
+//! 2026-10-31). Every check above asks the host's own state, and rounds 2 to
+//! 19 of the review of `#154` each found another way for the mark to be
+//! unseen while those checks passed (UP-TAKE backlog `I-475`). `ADR-0048`'s
+//! *Revisit if* names the fix for the class: the reader enforces the mark.
+//! The page measures each watching mark once it is laid out and painted, and
+//! an area is read only while the page's latest word, at most
+//! [`CONFIRMATION_LIFETIME`] old, says its mark is seen at the bounds and in
+//! the overlay state being read. That closes:
+//!
+//! - the host ahead of the page: switching watching on, a sticky area
+//!   resuming, a move or resize ending (round 7);
+//! - another area drawn over the mark (round 14);
+//! - the mark clipped away on a small area, at any scaling (rounds 17, 18);
+//! - the mark reaching past the host's corner in a long language (round 19).
+//!
+//! ⚠️ **Two routes stay open**, and remain `I-475`'s:
 //!
 //! - With *Show UP-TAKE in screen recordings* on, a freeze or another
 //!   area's capture steps UP-TAKE's drawing aside for a few hundred
-//!   milliseconds (`freeze::STEP_ASIDE`), and a reading can land inside
-//!   that gap (review of `#154`, round 5).
-//! - The host is ahead of the page. Switching watching on wakes this thread
-//!   before the payload carrying `watching` reaches the page, so the first
-//!   reading can start before the mark is painted; a sticky area resuming
-//!   and a move or resize ending reach the next look the same way (round 7).
-//!   This one happens with the setting off, which is the default.
+//!   milliseconds (`freeze::STEP_ASIDE`), after the page's word and without
+//!   the page's knowledge; a reading can land inside that gap (round 5).
 //! - A reading uses a held session's newest frame, which can be up to
-//!   `warm::WATCH_FRAME_INTERVAL` (one second) older than the checks before
-//!   it; a frame taken while a move was under way, or before the mark was
-//!   painted, can be the one read (round 12). A watcher made or started again
-//!   waits one pass before its first reading ([`Watcher`]), which keeps such a
-//!   frame out of a baseline, not out of every reading.
-//! - Another area drawn over this one's top right corner covers the mark,
-//!   and the host asks whether the mark is on a monitor, not whether it is
-//!   in sight. A screenshot area's still is opaque, so one placed over the
-//!   corner hides the mark while this area keeps reading (round 14). With
-//!   the setting off, the still is not in the reading either.
-//! - Above about 300 % scaling, an area near the smallest size that watches
-//!   (`uptake_core::area::WATCH_MIN`, in physical pixels) can have its mark
-//!   clipped away by the page, which draws in CSS pixels (round 18).
-//! - Above about 230 % scaling the German mark is wider than the corner
-//!   [`MARK`] that [`mark_on_screen`] checks, so on a wide area hanging off a
-//!   monitor's left edge the dot can be off screen while the corner is on it
-//!   (round 19). Part of the word stays in sight.
-//!
-//! Each check above closes one route by asking the host's state; rounds 2
-//! to 19 each found another. `ADR-0048`'s *Revisit if* names the fix that
-//! closes the class: the reader enforces the mark itself rather than
-//! trusting what the page should be drawing. That is UP-TAKE `I-475`, not this
-//! module's checks.
+//!   `warm::WATCH_FRAME_INTERVAL` (one second) older than the page's word; a
+//!   frame from just before the mark was painted can be the one read (round
+//!   12). A watcher made or started again waits one pass before its first
+//!   reading ([`Watcher`]), which keeps such a frame out of a baseline, not
+//!   out of every reading.
 //!
 //! ⚠️ **With *Show UP-TAKE in screen recordings* on, UP-TAKE's own drawing
 //! is in every reading, and only the border and the mark are left out.**
@@ -135,7 +126,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Condvar, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Manager};
 use uptake_core::area::{AreaId, AreaStore, AreaType};
@@ -266,6 +257,63 @@ fn overlay_state(app: &AppHandle) -> OverlayState {
     *state.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// The page's latest word on which watching marks it can see (roadmap
+/// `1.58`, `ADR-0048`'s *Revisit if*: the mark enforced by the reader).
+///
+/// The page measures each watching area's mark once laid out and painted: its
+/// dot wholly inside the badge, on a monitor, under no other area
+/// (`src/lib/mark-check.ts`). It sends the areas whose mark is seen, with the
+/// bounds it drew them at and the overlay state it drew in, after every change
+/// and every second. An area is read only while the latest word names it at
+/// its present bounds, in the present state, and is no older than
+/// [`CONFIRMATION_LIFETIME`]: a page that stopped answering stops the reading.
+///
+/// **What it closes** (UP-TAKE backlog `I-475`): the host ahead of the page
+/// (round 7), the mark covered by another area (round 14), the mark clipped
+/// away on a small area or at high scaling (rounds 17 and 18), and a mark
+/// wider than the host's corner (round 19), since the page measures the mark
+/// it drew. **What it does not**: a freeze stepping the drawing aside after
+/// the page's word (round 5), and a held frame older than the word (round 12).
+struct Confirmation {
+    state: OverlayState,
+    marks: Vec<(u64, Rect)>,
+    at: Instant,
+}
+
+static CONFIRMED: Mutex<Option<Confirmation>> = Mutex::new(None);
+
+/// How long a confirmation stands. The page sends one every second while any
+/// mark is seen, so three missed in a row stop the reading.
+pub const CONFIRMATION_LIFETIME: Duration = Duration::from_secs(3);
+
+/// Records the page's latest confirmation ([`Confirmation`]).
+pub fn confirm(state: OverlayState, marks: Vec<(u64, Rect)>) {
+    *CONFIRMED.lock().unwrap_or_else(PoisonError::into_inner) = Some(Confirmation {
+        state,
+        marks,
+        at: Instant::now(),
+    });
+}
+
+/// Whether the latest confirmation, as of `now`, says `target`'s mark is seen.
+fn mark_seen(target: Target, state: OverlayState, now: Instant) -> bool {
+    CONFIRMED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .is_some_and(|word| seen_by(word, target, state, now))
+}
+
+/// [`mark_seen`]'s rule, apart so it is tested without the shared store.
+fn seen_by(word: &Confirmation, target: Target, state: OverlayState, now: Instant) -> bool {
+    word.state == state
+        && now.saturating_duration_since(word.at) <= CONFIRMATION_LIFETIME
+        && word
+            .marks
+            .iter()
+            .any(|&(id, bounds)| id == target.id.get() && bounds == target.bounds)
+}
+
 /// What the thread does next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Next {
@@ -387,15 +435,11 @@ fn left_out(bounds: Rect, taken: Rect, overlay_in_captures: bool) -> Vec<Rect> {
 /// Where the *watching* mark can be, in desktop pixels: the area's top right
 /// corner, [`MARK`] in size or the area's own size when that is smaller.
 ///
-/// **Correct only because the page keeps the mark inside the area**: the
-/// badge is clipped to the area (`+page.svelte`, `.watch-badge`, pinned by
-/// `watch-badge-css.test.ts`), and an area too small to show it does not
-/// watch (`uptake_core::area::WATCH_MIN`, round 17). Round 15 of the review of `#154` found it ran past
-/// a narrow area's left edge, off the desktop, while this corner said it was
-/// on screen; round 16 found that sizing the corner at [`MARK`] whatever the
-/// area stopped small areas near a monitor's left edge from reading while
-/// their mark showed. Clipping the badge makes the clamped corner true up to
-/// about 230 % scaling; above it, see [`MARK`].
+/// The host's own first check, before the page's word ([`confirm`]): an area
+/// whose corner is off every monitor is not read, whatever the page says. It
+/// is not the whole of the check, and cannot be (rounds 15, 16 and 19): the
+/// page clips the mark to the area (`+page.svelte`, `.watch-badge`, pinned by
+/// `watch-badge-css.test.ts`) and measures the mark it drew.
 fn mark(bounds: Rect) -> Rect {
     let width = MARK.0.min(bounds.size.width);
     let right = bounds.origin.x + i32::try_from(bounds.size.width).unwrap_or(i32::MAX);
@@ -427,6 +471,9 @@ trait Host {
     fn in_gesture(&mut self) -> Option<AreaId>;
     /// Whether `target` is still what the store holds and still reads.
     fn still_watching(&mut self, target: Target) -> bool;
+    /// Whether the page's latest confirmation says `target`'s mark is seen,
+    /// at these bounds and in `state` ([`confirm`]).
+    fn mark_seen(&mut self, target: Target, state: OverlayState) -> bool;
     /// Every monitor's rectangle.
     fn monitors(&mut self) -> Vec<Rect>;
     /// Keeps capture sessions held on the monitors under `regions`, and
@@ -474,6 +521,9 @@ impl Host for AppHost<'_> {
     }
     fn still_watching(&mut self, target: Target) -> bool {
         still_watching(self.app, target)
+    }
+    fn mark_seen(&mut self, target: Target, state: OverlayState) -> bool {
+        mark_seen(target, state, Instant::now())
     }
     fn monitors(&mut self) -> Vec<Rect> {
         crate::overlay::monitor_rects()
@@ -584,13 +634,11 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
         let gesture_now = host.in_gesture();
         let still = host.still_watching(target);
         let monitors = host.monitors();
-        match gate(
-            target.id,
-            now == state,
-            [moving, gesture_now],
-            still,
-            mark_on_screen(mark(target.bounds), &monitors),
-        ) {
+        // The mark on a monitor by the host's geometry, AND seen by the page's
+        // latest confirmation for these bounds in this overlay state.
+        let shown =
+            mark_on_screen(mark(target.bounds), &monitors) && host.mark_seen(target, state.0);
+        match gate(target.id, now == state, [moving, gesture_now], still, shown) {
             Gate::Stop => break,
             Gate::Skip => {
                 // Not read, and read again from a fresh baseline.
@@ -700,9 +748,12 @@ mod tests {
     /// (UP-TAKE backlog `I-473`). Each test is one route a review of `#154`
     /// found; each goes red if its line in [`pass`] is undone.
     mod the_loop {
-        use super::super::{Host, Memory, Target, pass};
+        use super::super::{
+            CONFIRMATION_LIFETIME, Confirmation, Host, Memory, Target, pass, seen_by,
+        };
         use crate::overlay_state::OverlayState;
         use std::collections::VecDeque;
+        use std::time::{Duration, Instant};
         use uptake_capture::CapturedRegion;
         use uptake_core::area::{AreaId, AreaStore, AreaType};
         use uptake_core::bitmap::RgbaBitmap;
@@ -717,6 +768,8 @@ mod tests {
             /// What `in_gesture` answers, in order; then `None`.
             gestures: VecDeque<Option<AreaId>>,
             still: bool,
+            /// What the page's confirmation says.
+            seen: bool,
             monitor: Rect,
             /// The grey level the screen shows.
             level: u8,
@@ -736,6 +789,7 @@ mod tests {
                     state_after_capture: None,
                     gestures: VecDeque::new(),
                     still: true,
+                    seen: true,
                     monitor: Rect::new(0, 0, 1920, 1080),
                     level: 200,
                     captured: Vec::new(),
@@ -758,6 +812,9 @@ mod tests {
             }
             fn still_watching(&mut self, _target: Target) -> bool {
                 self.still
+            }
+            fn mark_seen(&mut self, _target: Target, _state: OverlayState) -> bool {
+                self.seen
             }
             fn monitors(&mut self) -> Vec<Rect> {
                 vec![self.monitor]
@@ -879,6 +936,56 @@ mod tests {
             // And it reads again: a watcher that never forgot the old place
             // would start again every pass and never read (round 15).
             assert!(fake.captured.len() > 1, "{:?}", fake.captured);
+        }
+
+        /// The page's word names the area at its bounds, in the state being
+        /// read, and is fresh; otherwise the mark is not seen.
+        #[test]
+        fn the_pages_word_must_match_and_be_fresh() {
+            let list = targets(&[Rect::new(100, 100, 600, 400), Rect::new(800, 100, 600, 400)]);
+            let (one, other) = (list[0], list[1]);
+            let at = Instant::now();
+            let word = Confirmation {
+                state: OverlayState::Living,
+                marks: vec![(one.id.get(), one.bounds)],
+                at,
+            };
+            assert!(seen_by(&word, one, OverlayState::Living, at));
+            assert!(
+                !seen_by(&word, other, OverlayState::Living, at),
+                "not named"
+            );
+            assert!(
+                !seen_by(&word, one, OverlayState::Placement, at),
+                "another state"
+            );
+            let moved = Target {
+                bounds: Rect::new(110, 100, 600, 400),
+                ..one
+            };
+            assert!(
+                !seen_by(&word, moved, OverlayState::Living, at),
+                "other bounds"
+            );
+            let late = at + CONFIRMATION_LIFETIME + Duration::from_millis(1);
+            assert!(!seen_by(&word, one, OverlayState::Living, late), "too old");
+            assert!(seen_by(
+                &word,
+                one,
+                OverlayState::Living,
+                at + CONFIRMATION_LIFETIME
+            ));
+        }
+
+        /// An area whose mark the page has not confirmed is not read.
+        #[test]
+        fn an_area_whose_mark_is_not_seen_is_not_read() {
+            let mut fake = Fake::new(targets(&[Rect::new(100, 100, 600, 400)]));
+            let mut memory = Memory::default();
+            let _ = pass(&mut fake, &mut memory);
+            fake.seen = false;
+            run(&mut fake, &mut memory, 3);
+            assert_eq!(fake.captured.len(), 0);
         }
 
         /// Nothing switched on: the loop sleeps until woken.

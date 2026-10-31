@@ -605,6 +605,69 @@ describe('an area renders the badges its state earns and no others', () => {
   });
 
   /**
+   * Roadmap 1.58: the page tells Rust which watching marks it can see, by id
+   * and the bounds it drew them at, and Rust reads only those (watch.rs
+   * `confirm`). jsdom lays nothing out, so the dot's and the badge's boxes are
+   * given here; the rule itself is $lib/mark-check's and tested there.
+   */
+  test('the page confirms a watching mark only while its dot can be seen', async () => {
+    const box = (x: number, y: number, width: number, height: number) =>
+      ({ x, y, width, height }) as DOMRect;
+    const boxes = new Map<string, DOMRect>([
+      ['watch-dot', box(490, 102, 8, 11)],
+      ['watch-badge', box(490, 102, 60, 11)],
+    ]);
+    const measured = vi
+      .spyOn(Element.prototype, 'getBoundingClientRect')
+      .mockImplementation(function (this: Element) {
+        for (const [name, rect] of boxes) {
+          if (this.classList.contains(name)) return rect;
+        }
+        return box(0, 0, 0, 0);
+      });
+    try {
+      const { container } = await mount();
+      await emit('overlay://state', state());
+      vi.mocked(invoke).mockClear();
+      await emit('overlay://areas', {
+        areas: [area({ kind: 'watch', watch: 'changes', watching: true })],
+      });
+      await tick();
+      expect(container.querySelector('.watch-badge .watch-dot')).not.toBeNull();
+      expect(vi.mocked(invoke)).toHaveBeenLastCalledWith(
+        'overlay_confirm_marks',
+        {
+          state: 'placement',
+          marks: [{ id: 1, rect: [100, 100, 400, 300] }],
+        },
+      );
+
+      // The badge clipped smaller than the dot: not seen, and said so.
+      boxes.set('watch-badge', box(490, 102, 4, 11));
+      await emit('overlay://areas', {
+        areas: [
+          area({
+            kind: 'watch',
+            watch: 'changes',
+            watching: true,
+            rect: [100, 100, 401, 300],
+          }),
+        ],
+      });
+      await tick();
+      expect(vi.mocked(invoke)).toHaveBeenLastCalledWith(
+        'overlay_confirm_marks',
+        {
+          state: 'placement',
+          marks: [],
+        },
+      );
+    } finally {
+      measured.mockRestore();
+    }
+  });
+
+  /**
    * Roadmap 1.47. Three states, three renderings, and the word is the part
    * that matters: a paused area sits where its window used to be, and
    * "Paused" is the only thing on screen that says why. Asserted per state so

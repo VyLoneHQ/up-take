@@ -2751,6 +2751,47 @@ pub fn overlay_report_scale(app: AppHandle, dpr: f64) {
     crate::dev_harness::log_scale(dpr, &pairs);
 }
 
+/// IPC surface (roadmap `1.58`): the page's word on which watching areas'
+/// marks it can see, each as its id and the physical bounds it drew it at,
+/// in the overlay state it drew in. See [`crate::watch::confirm`].
+///
+/// An unknown state name confirms nothing, which stops the reading rather
+/// than guessing.
+#[tauri::command]
+pub fn overlay_confirm_marks(state: String, marks: Vec<ConfirmedMark>) {
+    let state = match state.as_str() {
+        "placement" => OverlayState::Placement,
+        "living" => OverlayState::Living,
+        _ => OverlayState::Hidden,
+    };
+    crate::watch::confirm(
+        state,
+        marks
+            .into_iter()
+            .map(|mark| {
+                let [x, y, width, height] = mark.rect;
+                (
+                    mark.id,
+                    Rect::new(
+                        x,
+                        y,
+                        u32::try_from(width).unwrap_or(0),
+                        u32::try_from(height).unwrap_or(0),
+                    ),
+                )
+            })
+            .collect(),
+    );
+}
+
+/// One confirmed mark on the wire: `{ id, rect: [x, y, width, height] }`,
+/// physical pixels, as the page received the area.
+#[derive(serde::Deserialize)]
+pub struct ConfirmedMark {
+    id: u64,
+    rect: [i32; 4],
+}
+
 #[tauri::command]
 pub fn overlay_report_latency(probe: u64) {
     placement::record_latency(probe);

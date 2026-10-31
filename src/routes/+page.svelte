@@ -11,6 +11,7 @@ import {
   hiddenClipPath,
   nextAnimationFrame,
 } from '$lib/freeze-mask';
+import { markSeen } from '$lib/mark-check';
 import { overflowFade } from '$lib/overflow-fade';
 import {
   type ActiveMonitorPayload,
@@ -574,11 +575,72 @@ onMount(() => {
       // reason not to draw.
     }
   });
+  // The marks are confirmed again every second as well as after each change
+  // (below): an area drawn over another, or a display change, does not always
+  // come with an event this page hears.
+  const confirming = setInterval(confirmMarks, 1000);
   return () => {
+    clearInterval(confirming);
     void ready.then((unlisteners) => {
       for (const unlisten of unlisteners) unlisten();
     });
   };
+});
+
+/**
+ * Tells the host which watching areas' marks can be seen now (roadmap 1.58,
+ * `ADR-0048`'s *Revisit if*: the mark enforced by the reader). The host reads
+ * a watch area only while its latest confirmation names it at the bounds and
+ * in the overlay state it is reading in (`src-tauri/src/watch.rs`).
+ *
+ * The page measures because only it knows where the mark is laid out, at what
+ * size in this scale and language, and what is drawn over it ($lib/mark-check).
+ * An area drawn later is drawn above (`areaFrames` is bottom-first).
+ */
+let confirmedNone = false;
+function confirmMarks(): void {
+  const shown =
+    overlayState === 'hidden'
+      ? []
+      : areaFrames.filter(
+          (frame) => !frame.source && areaInSight(frame.sticky, overlayState),
+        );
+  const monitorsCss = physRectsToCss(monitors, origin, dpr);
+  const marks: { id: number; rect: PhysRect }[] = [];
+  shown.forEach((frame, index) => {
+    if (!frame.watching) return;
+    const badge = document.querySelector(
+      `.watch-badge[data-area="${frame.id}"]`,
+    );
+    const dot = badge?.querySelector('.watch-dot');
+    if (!badge || !dot) return;
+    const above = shown.slice(index + 1).map((other) => other.rect);
+    if (
+      markSeen(
+        dot.getBoundingClientRect(),
+        badge.getBoundingClientRect(),
+        monitorsCss,
+        above,
+      )
+    ) {
+      const view = areas.find((area) => area.id === frame.id);
+      if (view) marks.push({ id: frame.id, rect: view.rect });
+    }
+  });
+  // Nothing to say twice: an empty answer once is enough until one changes.
+  if (marks.length === 0 && confirmedNone) return;
+  confirmedNone = marks.length === 0;
+  void invoke('overlay_confirm_marks', { state: overlayState, marks }).catch(
+    () => {},
+  );
+}
+
+// After every change to what is drawn, once it has been laid out and painted.
+$effect(() => {
+  void [areaFrames, overlayState, monitors, origin, dpr, language];
+  // After Svelte has updated the DOM: reading the boxes lays them out, so no
+  // animation frame is needed (and the freeze tests count those).
+  void tick().then(confirmMarks);
 });
 </script>
 
@@ -831,7 +893,9 @@ onMount(() => {
                while it watches"). Top right, clear of the depth and sticky
                marks on the left. -->
           {#if area.watching}
-            <span class="watch-badge">● {text(language, 'area.watching')}</span>
+            <span class="watch-badge" data-area={area.id}
+              ><span class="watch-dot">●</span> {text(language, 'area.watching')}</span
+            >
           {/if}
         </div>
       {/if}
@@ -1100,13 +1164,11 @@ onMount(() => {
 }
 
 /* The watching mark: present exactly while the area reads its region. */
-/* Kept inside the area, clipped at its end so the dot shows first: the host
-   checks that the area's own top right corner (at most 240 by 40 physical
-   pixels) is on a monitor before it reads, which says the mark is on screen
-   only while the mark stays within that corner, true up to about 230 %
-   scaling (watch.rs MARK) (watch.rs `mark`, review of
-   #154 rounds 15 and 16), and an area too small to show the dot does not
-   watch (area.rs WATCH_MIN, round 17). Pinned by watch-badge-css.test.ts. */
+/* Kept inside the area, clipped at its end so the dot shows first. The page
+   tells the host which marks it can see (confirmMarks, $lib/mark-check): a
+   dot cut off by a small area, off the desktop, or under another area is not
+   seen, and the host does not read that area (watch.rs `confirm`, review of
+   #154 rounds 14 to 19). Pinned by watch-badge-css.test.ts. */
 .watch-badge {
   position: absolute;
   right: 4px;
