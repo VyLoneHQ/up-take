@@ -3337,7 +3337,10 @@ mod tests {
             .collect();
         assert_eq!(overlay.len(), 1, "one window is the overlay");
         assert_eq!(overlay[0]["create"], false);
-        assert!(overlay[0].get("focus").is_none(), "create decides the focus");
+        assert!(
+            overlay[0].get("focus").is_none(),
+            "create decides the focus"
+        );
         assert_eq!(overlay[0]["visible"], false, "and it is created hidden");
     }
 
