@@ -27,7 +27,7 @@ let problem = $state('');
 let tourArmed = $state(false);
 let wasReset = $state(false);
 // The licence files a development build does not have (I-443), and the ones
-// Windows refused to open: each button says which in words. Not `problem`, which
+// whose licence window could not be opened: each button says which in words. Not `problem`, which
 // is rendered as a settings save that failed, and opening a file saves nothing
 // (review of #130, round 1).
 let missingLicence = $state<string[]>([]);
