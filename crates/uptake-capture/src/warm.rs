@@ -643,6 +643,8 @@ static WATCH_SESSIONS: Mutex<Vec<Arc<Slot>>> = Mutex::new(Vec::new());
 
 /// The least time between frames for a watch area's session. Readings come
 /// every two seconds, so a frame up to a second old is as good as a new one.
+/// ⚠️ That a frame does arrive within this interval of a change is WGC's
+/// documented intent, not measured here (UP-TAKE backlog `I-474`).
 pub const WATCH_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Holds a session on every monitor that any of `regions` overlaps, and on no

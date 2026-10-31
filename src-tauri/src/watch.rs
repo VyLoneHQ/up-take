@@ -55,7 +55,7 @@
 //! fresh baseline when the gesture ends.
 //!
 //! ⚠️ **Known gaps, left to their own change on the founder's decision
-//! (2026-10-31, UP-TAKE backlog `I-475`).** Both are moments when the host
+//! (2026-10-31, UP-TAKE backlog `I-475`).** All three are moments when the host
 //! may read while the page is not showing the mark:
 //!
 //! - With *Show UP-TAKE in screen recordings* on, a freeze or another
@@ -75,7 +75,7 @@
 //!   frame out of a baseline, not out of every reading.
 //!
 //! Each check above closes one route by asking the host's state; rounds 2
-//! to 7 each found another. `ADR-0048`'s *Revisit if* names the fix that
+//! to 12 each found another. `ADR-0048`'s *Revisit if* names the fix that
 //! closes the class: the reader enforces the mark itself rather than
 //! trusting what the page should be drawing. That is UP-TAKE `I-475`, not this
 //! module's checks.
@@ -293,7 +293,12 @@ struct Watcher {
     /// again (the overlay state changed, the setting flipped, a move ended)
     /// could still show what came before, and the next reading would report
     /// that as a change (review of `#154`, round 12). One [`INTERVAL`] later
-    /// the frame is newer than the reason it started again.
+    /// the frame should be newer than the reason it started again.
+    ///
+    /// ⚠️ **Assumed, not measured:** that WGC, held at
+    /// `WATCH_FRAME_INTERVAL`, delivers a frame within that interval of a
+    /// change on screen. Nothing here probes frame age under the throttle
+    /// (round 13); UP-TAKE backlog `I-474` carries it.
     fresh: bool,
 }
 
@@ -846,10 +851,15 @@ mod tests {
             let list = targets(&[Rect::new(100, 100, 600, 400), Rect::new(800, 100, 600, 400)]);
             let (first, second) = (list[0].id, list[1].id);
             let mut fake = Fake::new(list);
+            let mut memory = Memory::default();
+            // A first pass makes both watchers; a watcher does not read in the
+            // pass that made it, so without it this test could not fail
+            // (review of `#154`, round 13).
+            let _ = pass(&mut fake, &mut memory);
             // At the start of the pass `first` is moving; before the first
             // area, still `first`; before the second, `second` is pressed.
             fake.gestures = VecDeque::from([Some(first), Some(first), Some(second)]);
-            let _ = pass(&mut fake, &mut Memory::default());
+            let _ = pass(&mut fake, &mut memory);
             assert!(fake.captured.is_empty(), "{:?}", fake.captured);
         }
 
@@ -872,8 +882,10 @@ mod tests {
         #[test]
         fn an_area_no_longer_watching_is_not_read() {
             let mut fake = Fake::new(targets(&[Rect::new(100, 100, 600, 400)]));
+            let mut memory = Memory::default();
+            let _ = pass(&mut fake, &mut memory);
             fake.still = false;
-            let _ = pass(&mut fake, &mut Memory::default());
+            let _ = pass(&mut fake, &mut memory);
             assert!(fake.captured.is_empty());
         }
 
@@ -894,7 +906,8 @@ mod tests {
         #[test]
         fn an_area_whose_mark_is_off_screen_is_not_read() {
             let mut fake = Fake::new(targets(&[Rect::new(1700, 100, 600, 400)]));
-            let _ = pass(&mut fake, &mut Memory::default());
+            let mut memory = Memory::default();
+            run(&mut fake, &mut memory, 2);
             assert_eq!(fake.captured.len(), 0);
         }
 
