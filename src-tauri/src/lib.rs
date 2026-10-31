@@ -294,6 +294,16 @@ pub fn run() -> tauri::Result<()> {
             // which now read a setting: the tour decides whether to run and the
             // summon decides whether to happen at all.
             settings::init();
+            // Decided once, right after the settings load, and used twice: the
+            // overlay window takes the keyboard at creation only when it is about
+            // to be shown (`I-457`), and the summon at the end of setup happens on
+            // the same answer. `tauri.conf.json` marks the window `create: false`
+            // so that this is the one place it is made.
+            let starts_placing = autostart::starts_placing(
+                autostart::launched_by_windows(std::env::args()),
+                settings::current().hand_launch_state,
+            );
+            overlay::create(app.handle(), starts_placing)?;
             // Read once, here, so the answer cannot change under a running
             // Placement — a setting that flipped between `sync_warm_sessions`
             // starting the sessions and `freeze` consulting them would leak
@@ -427,9 +437,7 @@ pub fn run() -> tauri::Result<()> {
             // same startup an autostart does; the argument still decides
             // whether this *is* a hand launch, and the setting decides only
             // what a hand launch does.
-            if !autostart::launched_by_windows(std::env::args())
-                && settings::current().hand_launch_state == settings::HandLaunchState::Placing
-            {
+            if starts_placing {
                 overlay::summon(app.handle());
             }
             Ok(())

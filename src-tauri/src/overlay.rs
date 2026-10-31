@@ -14,7 +14,10 @@ use std::collections::BTreeSet;
 use std::sync::{Mutex, MutexGuard, PoisonError, RwLock};
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
+use tauri::{
+    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow,
+    WebviewWindowBuilder,
+};
 use uptake_core::area::{
     AfterCreate, Area, AreaId, AreaStore, AreaType, Input, Layer, OcrBehaviour,
 };
@@ -28,6 +31,30 @@ use crate::placement;
 
 /// Label of the overlay window as declared in `tauri.conf.json`.
 pub const WINDOW_LABEL: &str = "overlay";
+
+/// Creates the overlay window from its entry in `tauri.conf.json`, which is
+/// marked `create: false` so that Tauri does not make it first.
+///
+/// `take_focus` is whether the window and its web view ask for the keyboard
+/// focus as they are created (`I-457`). Tauri's default is yes; at a hidden
+/// start that made a window nobody can see the foreground window in 33 of 34
+/// traced starts. Called once, from `setup`, before anything reads the window.
+pub fn create(app: &AppHandle, take_focus: bool) -> Result<(), String> {
+    let config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|window| window.label == WINDOW_LABEL)
+        .ok_or_else(|| format!("No window '{WINDOW_LABEL}' in tauri.conf.json."))?
+        .clone();
+    WebviewWindowBuilder::from_config(app, &config)
+        .map_err(|error| format!("overlay window config: {error}"))?
+        .focused(take_focus)
+        .build()
+        .map_err(|error| format!("overlay window: {error}"))?;
+    Ok(())
+}
 
 /// Resizes the overlay to cover the entire virtual desktop and shows it.
 ///
@@ -3288,6 +3315,33 @@ mod tests {
             ],
             &[],
         );
+    }
+
+    /// The overlay window is made by `setup`, not by Tauri from the config.
+    ///
+    /// `create` decides whether the window takes the keyboard focus as it is
+    /// made (`I-457`), and that only holds if Tauri does not make the window
+    /// first with its own default. The config also must not carry a `focus`
+    /// value: `create` overrides it, so one there would only mislead a reader.
+    #[test]
+    fn the_overlay_window_is_made_by_setup_not_by_the_config() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap_or_default();
+        let windows = config["app"]["windows"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let overlay: Vec<_> = windows
+            .iter()
+            .filter(|window| window["label"] == WINDOW_LABEL)
+            .collect();
+        assert_eq!(overlay.len(), 1, "one window is the overlay");
+        assert_eq!(overlay[0]["create"], false);
+        assert!(
+            overlay[0].get("focus").is_none(),
+            "create decides the focus"
+        );
+        assert_eq!(overlay[0]["visible"], false, "and it is created hidden");
     }
 
     /// The termination property of the sync ↔ window-event cycle. Everything

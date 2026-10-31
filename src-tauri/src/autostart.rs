@@ -68,6 +68,25 @@ where
     args.into_iter().any(|arg| arg.as_ref() == FLAG)
 }
 
+/// Whether this start opens the overlay in Placement, rather than leaving it
+/// hidden. A start by Windows never does; a hand launch does unless the user
+/// chose Hidden for it (`UI-UX.md` section 4).
+///
+/// One answer for two questions, so they cannot disagree: whether startup
+/// summons the overlay, and whether the overlay window is created with the
+/// keyboard focus (`I-457`). A window created with the focus at a hidden start
+/// became the foreground window with nothing on screen, taking the keyboard
+/// from whatever the user was typing into; a start that opens in Placement
+/// keeps the focus at creation exactly as before, because an `Esc` pressed in
+/// its first moments was measured to be lost more often without it
+/// (`evidence/i457-esc-measurement`, 7 of 20 against 2 of 20).
+pub fn starts_placing(
+    launched_by_windows: bool,
+    hand_launch: crate::settings::HandLaunchState,
+) -> bool {
+    !launched_by_windows && hand_launch == crate::settings::HandLaunchState::Placing
+}
+
 /// The command line the Run value holds: this executable, quoted, plus
 /// [`FLAG`].
 ///
@@ -253,7 +272,17 @@ fn read_value() -> Option<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FLAG, launched_by_windows};
+    use super::{FLAG, launched_by_windows, starts_placing};
+    use crate::settings::HandLaunchState;
+
+    /// The four starts, and the one that opens in Placement.
+    #[test]
+    fn only_a_hand_launch_set_to_placing_starts_placing() {
+        assert!(starts_placing(false, HandLaunchState::Placing));
+        assert!(!starts_placing(false, HandLaunchState::Hidden));
+        assert!(!starts_placing(true, HandLaunchState::Placing));
+        assert!(!starts_placing(true, HandLaunchState::Hidden));
+    }
 
     #[test]
     fn the_flag_is_what_makes_a_launch_windows_own() {
