@@ -15,8 +15,11 @@
 //! visibly marked while it reads, reading is switched on per area and off by
 //! default, and what it reads stays on the machine. [`Watch::Off`] is the
 //! default for that reason, and nothing here keeps a reading: a
-//! [`Fingerprint`] is a few hundred brightness averages, which cannot be turned
-//! back into the picture.
+//! [`Fingerprint`] is at most 256 brightness averages, which cannot be turned
+//! back into the picture of any region larger than 16 by 16 pixels. A region
+//! under 16 pixels on a side keeps one value per pixel on that side, which is
+//! its greyscale picture at that size; it is held in memory, compared and
+//! dropped like any other (review of `#154`, round 9).
 //!
 //! # Why a grid of averages
 //!

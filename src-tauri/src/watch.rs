@@ -17,8 +17,9 @@
 //!   from the same `Area::is_watching`, sent in the area payload, so the two
 //!   answer one question once. Nothing is read while the overlay is hidden,
 //!   because the mark is hidden with it.
-//! - **Local.** A reading is reduced to a few hundred brightness averages
-//!   and the picture dropped; the detector keeps two such summaries, the
+//! - **Local.** A reading is reduced to at most 256 brightness averages
+//!   (a region under 16 pixels on a side keeps one per pixel on that side,
+//!   which is its greyscale picture) and the picture dropped; the detector keeps two such summaries, the
 //!   last still one and the last one. Nothing is written, logged or sent;
 //!   the notification says which moment it was, never what was read.
 //!
@@ -287,6 +288,12 @@ fn own_drawing(bounds: Rect, taken: Rect) -> [Rect; 5] {
     ]
 }
 
+/// Whether UP-TAKE's own drawing is in captures (*Show UP-TAKE in screen
+/// recordings*, `ADR-0019`).
+fn in_captures() -> bool {
+    crate::settings::current().show_in_screen_recordings
+}
+
 /// What a reading leaves out. Nothing while UP-TAKE is kept out of captures,
 /// which is the default (`ADR-0019`): its drawing is not in the reading, and
 /// leaving the corner out anyway cost every area its top right corner.
@@ -338,9 +345,11 @@ fn run(app: &AppHandle) {
     let mut last_state = None;
     loop {
         let (targets, switched_on) = look(app);
-        let state = overlay_state(app);
-        // A change of overlay state changes what UP-TAKE draws over the
-        // screen, which a reading sees when the overlay is in captures.
+        // What UP-TAKE draws over the screen, and whether a reading sees it
+        // and leaves it out: a change of either changes every reading
+        // without the screen changing, so every watcher starts again
+        // (the overlay state, round 2; the setting, round 9).
+        let state = (overlay_state(app), in_captures());
         if last_state != Some(state) {
             watchers.clear();
             last_state = Some(state);
@@ -348,7 +357,7 @@ fn run(app: &AppHandle) {
         match next(
             switched_on,
             !targets.is_empty(),
-            state != OverlayState::Hidden,
+            state.0 != OverlayState::Hidden,
         ) {
             Next::Sleep => {
                 watchers.clear();
@@ -375,7 +384,7 @@ fn run(app: &AppHandle) {
             // be stopped; this keeps the window to that one.
             match gate(
                 target.id,
-                overlay_state(app) == state,
+                (overlay_state(app), in_captures()) == state,
                 [moving, crate::placement::area_in_gesture()],
                 still_watching(app, target),
                 mark_on_screen(mark(target.bounds), &monitors),
@@ -402,11 +411,7 @@ fn run(app: &AppHandle) {
                     watcher.failing = false;
                     leave_out(
                         &mut captured.bitmap,
-                        &left_out(
-                            target.bounds,
-                            captured.rect,
-                            crate::settings::current().show_in_screen_recordings,
-                        ),
+                        &left_out(target.bounds, captured.rect, state.1),
                     );
                     Fingerprint::of(&captured.bitmap)
                 }
