@@ -63,14 +63,14 @@
 //! painted: the host cannot see a paint), counting as covering everything it
 //! draws after the mark and a freeze's hidden monitors. An area is read only
 //! while the page's latest word, at most [`CONFIRMATION_LIFETIME`] old and
-//! sent at least [`SETTLE`] after the host last told the page anything that
-//! changes what it draws ([`forget`]), says its mark is seen at the bounds
-//! and in the overlay state being read. That closes:
+//! measured after the last thing the host sent that changes what the page
+//! draws (it echoes that event's generation, [`emit_redraw`]), says its mark
+//! is seen at the bounds and in the overlay state being read. That closes:
 //!
 //! - the host ahead of the page, both ways: a mark appearing (switching
 //!   watching on, a sticky area resuming, a move ending; round 7) and a mark
-//!   going (a menu, a hover's controls or another area drawn over it; round
-//!   20);
+//!   going (a menu, a hover's controls or another area drawn over it; rounds
+//!   20 and 21);
 //! - anything the page draws over the mark (rounds 14 and 20);
 //! - the mark clipped away on a small area, at any scaling (rounds 17, 18);
 //! - the mark reaching past the host's corner in a long language (round 19);
@@ -133,6 +133,7 @@
 //! the review of `#154` found it asleep for good after a pause.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -282,27 +283,59 @@ fn overlay_state(app: &AppHandle) -> OverlayState {
 struct Confirmation {
     state: OverlayState,
     marks: Vec<(u64, Rect)>,
+    /// The generation the page had drawn when it measured ([`emit_redraw`]).
+    generation: u64,
     at: Instant,
 }
 
 static CONFIRMED: Mutex<Option<Confirmation>> = Mutex::new(None);
 
-/// When the host last sent the page something that can change what it draws
-/// ([`forget`]). A word must arrive at least [`SETTLE`] after it to count.
-static CHANGED: Mutex<Option<Instant>> = Mutex::new(None);
+/// How many times the host has sent the page something that changes what it
+/// draws ([`emit_redraw`]). The page echoes the number it has drawn, and a
+/// word counts only while it echoes this one.
+static GENERATION: AtomicU64 = AtomicU64::new(0);
 
-/// How long after a change a word is still taken to describe the page as it
-/// was before it. A word already on its way when the change was sent arrives
-/// inside this; the page's next one-second word lands after it.
-pub const SETTLE: Duration = Duration::from_millis(250);
+/// The event that tells the page which generation it has just been sent.
+pub const DRAWN_EVENT: &str = "overlay://drawn";
 
-/// The host has sent the page something that can change what it draws (areas,
-/// state, a menu, hover, a pin, the coach, a freeze's hide): the word held
-/// until now may describe a page that is gone, so it stops counting until a
-/// word arrives at least [`SETTLE`] later (review of `#154`, round 20: a word
-/// stood for up to three seconds after a menu or another area hid the mark).
-pub fn forget() {
-    *CHANGED.lock().unwrap_or_else(PoisonError::into_inner) = Some(Instant::now());
+/// The payload of [`DRAWN_EVENT`].
+#[derive(Clone, serde::Serialize)]
+struct DrawnPayload {
+    generation: u64,
+}
+
+/// Sends the page an event that can change what it draws (areas, state, a
+/// menu, hover, a pin, the coach, a freeze's hide), and then the generation
+/// that event begins.
+///
+/// **Exact, not timed** (review of `#154`, round 21, which found round 20's
+/// 250 ms settle assumed a word in flight arrives within it). The generation
+/// moves before the event, so every word the page measured before it echoes
+/// an older number and stops counting at once. The page learns the new number
+/// only from [`DRAWN_EVENT`], sent after the event; Tauri delivers one
+/// window's events in order, so the page has handled the change, and Svelte
+/// has applied it, before it can echo the number. A word that echoes the
+/// current generation therefore describes the page after the latest change.
+pub fn emit_redraw<R: tauri::Runtime, M: tauri::Emitter<R>, S: serde::Serialize + Clone>(
+    emitter: &M,
+    event: &str,
+    payload: S,
+) -> tauri::Result<()> {
+    in_order(
+        || emitter.emit(event, payload),
+        |generation| {
+            let _ = emitter.emit(DRAWN_EVENT, DrawnPayload { generation });
+        },
+    )
+}
+
+/// [`emit_redraw`]'s order, apart so it is tested without a window: the
+/// generation moves, then the event is sent, then the new generation is.
+fn in_order<T>(event: impl FnOnce() -> T, drawn: impl FnOnce(u64)) -> T {
+    let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    let sent = event();
+    drawn(generation);
+    sent
 }
 
 /// How long a confirmation stands. The page sends one every second while any
@@ -310,22 +343,23 @@ pub fn forget() {
 pub const CONFIRMATION_LIFETIME: Duration = Duration::from_secs(3);
 
 /// Records the page's latest confirmation ([`Confirmation`]).
-pub fn confirm(state: OverlayState, marks: Vec<(u64, Rect)>) {
+pub fn confirm(state: OverlayState, marks: Vec<(u64, Rect)>, generation: u64) {
     *CONFIRMED.lock().unwrap_or_else(PoisonError::into_inner) = Some(Confirmation {
         state,
         marks,
+        generation,
         at: Instant::now(),
     });
 }
 
 /// Whether the latest confirmation, as of `now`, says `target`'s mark is seen.
 fn mark_seen(target: Target, state: OverlayState, now: Instant) -> bool {
-    let changed = *CHANGED.lock().unwrap_or_else(PoisonError::into_inner);
+    let current = GENERATION.load(Ordering::SeqCst);
     CONFIRMED
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .as_ref()
-        .is_some_and(|word| seen_by(word, target, state, now, changed))
+        .is_some_and(|word| seen_by(word, target, state, now, current))
 }
 
 /// [`mark_seen`]'s rule, apart so it is tested without the shared store.
@@ -334,11 +368,11 @@ fn seen_by(
     target: Target,
     state: OverlayState,
     now: Instant,
-    changed: Option<Instant>,
+    current: u64,
 ) -> bool {
     word.state == state
+        && word.generation == current
         && now.saturating_duration_since(word.at) <= CONFIRMATION_LIFETIME
-        && changed.is_none_or(|changed| word.at >= changed + SETTLE)
         && word
             .marks
             .iter()
@@ -780,7 +814,7 @@ mod tests {
     /// found; each goes red if its line in [`pass`] is undone.
     mod the_loop {
         use super::super::{
-            CONFIRMATION_LIFETIME, Confirmation, Host, Memory, SETTLE, Target, pass, seen_by,
+            CONFIRMATION_LIFETIME, Confirmation, Host, Memory, Target, pass, seen_by,
         };
         use crate::overlay_state::OverlayState;
         use std::collections::VecDeque;
@@ -979,15 +1013,16 @@ mod tests {
             let word = Confirmation {
                 state: OverlayState::Living,
                 marks: vec![(one.id.get(), one.bounds)],
+                generation: 7,
                 at,
             };
-            assert!(seen_by(&word, one, OverlayState::Living, at, None));
+            assert!(seen_by(&word, one, OverlayState::Living, at, 7));
             assert!(
-                !seen_by(&word, other, OverlayState::Living, at, None),
+                !seen_by(&word, other, OverlayState::Living, at, 7),
                 "not named"
             );
             assert!(
-                !seen_by(&word, one, OverlayState::Placement, at, None),
+                !seen_by(&word, one, OverlayState::Placement, at, 7),
                 "another state"
             );
             let moved = Target {
@@ -995,12 +1030,12 @@ mod tests {
                 ..one
             };
             assert!(
-                !seen_by(&word, moved, OverlayState::Living, at, None),
+                !seen_by(&word, moved, OverlayState::Living, at, 7),
                 "other bounds"
             );
             let late = at + CONFIRMATION_LIFETIME + Duration::from_millis(1);
             assert!(
-                !seen_by(&word, one, OverlayState::Living, late, None),
+                !seen_by(&word, one, OverlayState::Living, late, 7),
                 "too old"
             );
             assert!(seen_by(
@@ -1008,24 +1043,21 @@ mod tests {
                 one,
                 OverlayState::Living,
                 at + CONFIRMATION_LIFETIME,
-                None
+                7
             ));
-            // Round 20: a change sent to the page after the word, or less
-            // than SETTLE before it, voids it.
-            let living = OverlayState::Living;
-            let after = Some(at + Duration::from_millis(10));
-            assert!(!seen_by(&word, one, living, at, after), "changed after");
-            let in_flight = at.checked_sub(SETTLE - Duration::from_millis(1));
-            assert!(!seen_by(&word, one, living, at, in_flight), "in flight");
-            let settled = at.checked_sub(SETTLE);
-            assert!(seen_by(&word, one, living, at, settled), "after it settled");
+            // Round 21: a word measured before the latest redraw echoes an
+            // older generation, however late it arrives.
+            assert!(
+                !seen_by(&word, one, OverlayState::Living, at, 8),
+                "measured before the latest redraw"
+            );
         }
 
-        /// Round 20: every host message that can change what the page draws
-        /// voids the page's word first (`forget`), so an emit added later
-        /// without it goes red here rather than letting a stale word stand.
+        /// Rounds 20 and 21: every host message that can change what the page
+        /// draws goes through `emit_redraw`, which moves the generation, so an
+        /// emit added later that bypasses it goes red here.
         #[test]
-        fn every_message_that_redraws_the_page_forgets_the_word() {
+        fn every_message_that_redraws_the_page_moves_the_generation() {
             const EVENTS: [&str; 11] = [
                 "FREEZE_HIDE_EVENT",
                 "STATE_EVENT",
@@ -1045,7 +1077,7 @@ mod tests {
                 }
                 at
             };
-            let mut found = 0;
+            let mut through = 0;
             for (name, source) in [
                 ("overlay.rs", include_str!("overlay.rs")),
                 ("placement.rs", include_str!("placement.rs")),
@@ -1053,21 +1085,47 @@ mod tests {
             ] {
                 for (at, _) in source.match_indices(".emit(") {
                     let end = floor(source, (at + 120).min(source.len()));
-                    if !EVENTS.iter().any(|event| source[at..end].contains(event)) {
-                        continue;
-                    }
-                    found += 1;
-                    let start = floor(source, at.saturating_sub(200));
                     assert!(
-                        source[start..at].contains("crate::watch::forget();"),
-                        "{name}: an emit at byte {at} does not forget the page's word"
+                        !EVENTS.iter().any(|event| source[at..end].contains(event)),
+                        "{name}: an emit at byte {at} sends a redrawing event past emit_redraw"
                     );
                 }
+                through += source.matches("crate::watch::emit_redraw(").count();
             }
             assert!(
-                found >= 14,
-                "found {found} emits; the scan has stopped seeing them"
+                through >= 14,
+                "found {through}; the scan has stopped seeing them"
             );
+        }
+
+        /// Round 21: the generation moves before the event, so a word measured
+        /// before it no longer counts, and is announced only after it, so the
+        /// page cannot echo it before it has the change.
+        #[test]
+        fn the_generation_moves_before_the_event_and_is_told_after() {
+            use super::super::{GENERATION, in_order};
+            use std::sync::atomic::Ordering;
+            let before = GENERATION.load(Ordering::SeqCst);
+            let mut steps = Vec::new();
+            let during = in_order(
+                || GENERATION.load(Ordering::SeqCst),
+                |told| steps.push(told),
+            );
+            assert!(during > before, "moved before the event was sent");
+            assert_eq!(steps, vec![during], "told after, the same number");
+        }
+
+        /// The page reads `generation` from the drawn event (`DrawnPayload` in
+        /// `overlay-state.ts`), and nothing else in this module goes to it.
+        #[test]
+        fn the_drawn_payload_is_the_key_the_page_reads() {
+            use crate::payload_keys::{assert_keys, assert_payload_coverage};
+            assert_keys(
+                "DrawnPayload",
+                &super::super::DrawnPayload { generation: 3 },
+                &["generation"],
+            );
+            assert_payload_coverage("watch.rs", include_str!("watch.rs"), &["DrawnPayload"], &[]);
         }
 
         /// An area whose mark the page has not confirmed is not read.

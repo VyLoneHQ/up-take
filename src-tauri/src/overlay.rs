@@ -653,28 +653,25 @@ fn page_aside(
     let page_app = app.clone();
     crate::freeze::PageAside::new(
         move |request| match request {
-            crate::freeze::PageRequest::Hide { token, covers } => {
-                crate::watch::forget();
-                page_app
-                    .emit(
-                        FREEZE_HIDE_EVENT,
-                        FreezeHidePayload {
-                            token,
-                            rects: covers
-                                .iter()
-                                .map(|rect| {
-                                    (
-                                        rect.origin.x,
-                                        rect.origin.y,
-                                        rect.size.width,
-                                        rect.size.height,
-                                    )
-                                })
-                                .collect(),
-                        },
-                    )
-                    .map_err(|error| error.to_string())
-            }
+            crate::freeze::PageRequest::Hide { token, covers } => crate::watch::emit_redraw(
+                &page_app,
+                FREEZE_HIDE_EVENT,
+                FreezeHidePayload {
+                    token,
+                    rects: covers
+                        .iter()
+                        .map(|rect| {
+                            (
+                                rect.origin.x,
+                                rect.origin.y,
+                                rect.size.width,
+                                rect.size.height,
+                            )
+                        })
+                        .collect(),
+                },
+            )
+            .map_err(|error| error.to_string()),
             crate::freeze::PageRequest::Reveal { token } => page_app
                 .emit(FREEZE_REVEAL_EVENT, FreezeRevealPayload { token })
                 .map_err(|error| error.to_string()),
@@ -1015,8 +1012,8 @@ fn emit_state(app: &AppHandle, state: OverlayState) -> Result<(), String> {
             )
         })
         .collect();
-    crate::watch::forget();
-    app.emit(
+    crate::watch::emit_redraw(
+        app,
         STATE_EVENT,
         StatePayload {
             state: state_name(state),
@@ -1366,8 +1363,7 @@ pub(crate) fn emit_areas(app: &AppHandle) -> Result<(), String> {
             .map(|area| payload_of(area, &monitors))
             .collect()
     };
-    crate::watch::forget();
-    app.emit(AREAS_EVENT, AreasPayload { areas })
+    crate::watch::emit_redraw(app, AREAS_EVENT, AreasPayload { areas })
         .map_err(|e| format!("Could not emit overlay areas: {e}"))
 }
 
@@ -2434,8 +2430,8 @@ struct FlashPayload {
 pub(crate) fn emit_flash(app: &AppHandle, id: AreaId) {
     static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nonce = NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    crate::watch::forget();
-    if let Err(error) = app.emit(
+    if let Err(error) = crate::watch::emit_redraw(
+        app,
         FLASH_EVENT,
         FlashPayload {
             id: id.get(),
@@ -2508,8 +2504,8 @@ pub(crate) fn emit_ocr_selection(app: &AppHandle, id: AreaId, range: Option<(usi
             u64::try_from(last).unwrap_or(u64::MAX),
         )
     });
-    crate::watch::forget();
-    if let Err(error) = app.emit(
+    if let Err(error) = crate::watch::emit_redraw(
+        app,
         OCR_SELECTION_EVENT,
         OcrSelectionPayload {
             id: id.get(),
@@ -2541,8 +2537,8 @@ pub(crate) fn emit_ocr(
             outline: unit.outline.map(|corner| [corner.x, corner.y]),
         })
         .collect();
-    crate::watch::forget();
-    if let Err(error) = app.emit(
+    if let Err(error) = crate::watch::emit_redraw(
+        app,
         OCR_EVENT,
         OcrPayload {
             id: id.get(),
@@ -2611,8 +2607,8 @@ struct PinPayload {
 ///
 /// [`FreshPin`]: crate::captures::FreshPin
 pub(crate) fn emit_pin(app: &AppHandle, pin: crate::captures::FreshPin) -> Result<(), String> {
-    crate::watch::forget();
-    app.emit(
+    crate::watch::emit_redraw(
+        app,
         PIN_EVENT,
         PinPayload {
             id: pin.id().get(),
@@ -2625,8 +2621,8 @@ pub(crate) fn emit_pin(app: &AppHandle, pin: crate::captures::FreshPin) -> Resul
 /// Announces that `id` has no pinned capture any more, so the area draws the
 /// screen underneath again (§3.4's floor; see `output::clear_magnification`).
 pub(crate) fn emit_unpin(app: &AppHandle, id: AreaId) -> Result<(), String> {
-    crate::watch::forget();
-    app.emit(
+    crate::watch::emit_redraw(
+        app,
         PIN_EVENT,
         PinPayload {
             id: id.get(),
@@ -2763,12 +2759,13 @@ pub fn overlay_report_scale(app: AppHandle, dpr: f64) {
 
 /// IPC surface (roadmap `1.58`): the page's word on which watching areas'
 /// marks it can see, each as its id and the physical bounds it drew it at,
-/// in the overlay state it drew in. See [`crate::watch::confirm`].
+/// in the overlay state it drew in, with the generation it had drawn
+/// ([`crate::watch::emit_redraw`]). See [`crate::watch::confirm`].
 ///
 /// An unknown state name confirms nothing, which stops the reading rather
 /// than guessing.
 #[tauri::command]
-pub fn overlay_confirm_marks(state: String, marks: Vec<ConfirmedMark>) {
+pub fn overlay_confirm_marks(state: String, marks: Vec<ConfirmedMark>, generation: u64) {
     let state = match state.as_str() {
         "placement" => OverlayState::Placement,
         "living" => OverlayState::Living,
@@ -2791,6 +2788,7 @@ pub fn overlay_confirm_marks(state: String, marks: Vec<ConfirmedMark>) {
                 )
             })
             .collect(),
+        generation,
     );
 }
 

@@ -26,6 +26,7 @@ import {
   type CoachPayload,
   type CoachView,
   copyFocusedOcr,
+  type DrawnPayload,
   dismissFocusedArea,
   escapeOverlay,
   type FlashPayload,
@@ -465,7 +466,15 @@ onMount(() => {
   // before that races the reply and drops it — which is exactly the startup
   // case, where the overlay is already in Placement (with areas possibly already
   // present) when the webview mounts. Chaining on the promise closes the gap.
+  // The generation of what Rust last sent that changes the drawing. Events
+  // arrive in order, so by now the change has been applied; confirm at once,
+  // echoing it (roadmap 1.58, watch.rs `emit_redraw`).
+  const unlistenDrawn = listen<DrawnPayload>('overlay://drawn', (event) => {
+    drawnGeneration = event.payload.generation;
+    void tick().then(confirmMarks);
+  });
   const ready = Promise.all([
+    unlistenDrawn,
     unlistenState,
     unlistenAreas,
     unlistenActiveMonitor,
@@ -599,6 +608,8 @@ onMount(() => {
  * hides whole monitors.
  */
 let confirmedNone = false;
+/** See `overlay://drawn`. 0 until the first one: Rust's count starts at 1. */
+let drawnGeneration = 0;
 /** What the page can draw over a watching mark. See `confirmMarks`. */
 const COVERS = [
   '.area',
@@ -664,9 +675,11 @@ function confirmMarks(): void {
   // Nothing to say twice: an empty answer once is enough until one changes.
   if (marks.length === 0 && confirmedNone) return;
   confirmedNone = marks.length === 0;
-  void invoke('overlay_confirm_marks', { state: overlayState, marks }).catch(
-    () => {},
-  );
+  void invoke('overlay_confirm_marks', {
+    state: overlayState,
+    marks,
+    generation: drawnGeneration,
+  }).catch(() => {});
 }
 
 // After every change to what is drawn, once it has been laid out.

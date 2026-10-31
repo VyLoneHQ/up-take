@@ -121,7 +121,7 @@ use std::sync::atomic::{
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 use uptake_core::area::{AreaId, AreaType, Input, Layer, OcrBehaviour};
 use uptake_core::geometry::{Point, Rect};
 use uptake_core::interaction::{self, Handle, Resize};
@@ -1360,8 +1360,8 @@ fn pump_gesture(app: &AppHandle, state: &mut PumpState) {
                     .then(|| u64::try_from(EPOCH.elapsed().as_nanos()).unwrap_or(u64::MAX))
             })
             .flatten();
-        crate::watch::forget();
-        let _ = app.emit(
+        let _ = crate::watch::emit_redraw(
+            app,
             SELECTION_EVENT,
             SelectionPayload {
                 rect: Some(rect),
@@ -1375,8 +1375,8 @@ fn pump_gesture(app: &AppHandle, state: &mut PumpState) {
         // appearance, so a cancelled or interrupted drag needs no separate undo
         // path: the styling was never stored, only derived from the live
         // gesture.
-        crate::watch::forget();
-        let _ = app.emit(
+        let _ = crate::watch::emit_redraw(
+            app,
             SELECTION_EVENT,
             SelectionPayload {
                 rect: None,
@@ -1849,8 +1849,8 @@ fn pump_hover(app: &AppHandle, state: &mut PumpState) {
         // out per field is one a later edit can drop half of silently.
         if (state.hovered_area, state.hovered_chrome_only) != hover {
             (state.hovered_area, state.hovered_chrome_only) = hover;
-            crate::watch::forget();
-            let _ = app.emit(
+            let _ = crate::watch::emit_redraw(
+                app,
                 HOVER_EVENT,
                 HoverPayload {
                     id: hover.0,
@@ -1955,8 +1955,8 @@ fn pump_hover(app: &AppHandle, state: &mut PumpState) {
     // the id has not moved, or the frontend keeps drawing the control alone.
     if (state.hovered_area, state.hovered_chrome_only) != (hovered_area, false) {
         (state.hovered_area, state.hovered_chrome_only) = (hovered_area, false);
-        crate::watch::forget();
-        let _ = app.emit(
+        let _ = crate::watch::emit_redraw(
+            app,
             HOVER_EVENT,
             HoverPayload {
                 id: hovered_area,
@@ -4878,8 +4878,7 @@ fn emit_menu(app: &AppHandle) {
         let guard = lock(&MENU);
         menu_payload(guard.as_ref())
     };
-    crate::watch::forget();
-    let _ = app.emit(MENU_EVENT, payload);
+    let _ = crate::watch::emit_redraw(app, MENU_EVENT, payload);
 }
 
 /// The area a move or resize is under way on, if any (roadmap `1.58`).

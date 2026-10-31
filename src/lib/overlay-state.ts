@@ -509,6 +509,16 @@ export interface PinPayload {
  * chose the surviving route — a narrow `SetSystemCursor` override on the Rust
  * side — and deleted this half rather than leave it looking functional.
  */
+/**
+ * The payload of `overlay://drawn` (roadmap 1.58): the generation of what Rust
+ * has just sent that changes the drawing. The page echoes it with its mark
+ * confirmations, and Rust counts only a confirmation that echoes the latest
+ * (`watch.rs`, `emit_redraw`).
+ */
+export interface DrawnPayload {
+  generation: number;
+}
+
 export interface HoverPayload {
   id: number | null;
   /**

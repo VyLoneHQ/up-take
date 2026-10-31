@@ -630,6 +630,8 @@ describe('an area renders the badges its state earns and no others', () => {
     try {
       const { container } = await mount();
       await emit('overlay://state', state());
+      // The generation Rust last sent; every confirmation echoes it.
+      await emit('overlay://drawn', { generation: 5 });
       vi.mocked(invoke).mockClear();
       await emit('overlay://areas', {
         areas: [area({ kind: 'watch', watch: 'changes', watching: true })],
@@ -641,6 +643,7 @@ describe('an area renders the badges its state earns and no others', () => {
         {
           state: 'placement',
           marks: [{ id: 1, rect: [100, 100, 400, 300] }],
+          generation: 5,
         },
       );
 
@@ -662,6 +665,7 @@ describe('an area renders the badges its state earns and no others', () => {
         {
           state: 'placement',
           marks: [],
+          generation: 5,
         },
       );
 
@@ -678,7 +682,7 @@ describe('an area renders the badges its state earns and no others', () => {
       await tick();
       expect(vi.mocked(invoke)).toHaveBeenLastCalledWith(
         'overlay_confirm_marks',
-        { state: 'placement', marks: [] },
+        { state: 'placement', marks: [], generation: 5 },
       );
 
       // Round 20: no other area now, so the mark is seen again; then a
@@ -690,7 +694,11 @@ describe('an area renders the badges its state earns and no others', () => {
       await tick();
       expect(vi.mocked(invoke)).toHaveBeenLastCalledWith(
         'overlay_confirm_marks',
-        { state: 'placement', marks: [{ id: 1, rect: [100, 100, 400, 300] }] },
+        {
+          state: 'placement',
+          marks: [{ id: 1, rect: [100, 100, 400, 300] }],
+          generation: 5,
+        },
       );
       await emit('overlay://freeze-hide', { token: 3, rects: [PRIMARY] });
       await tick();
@@ -702,7 +710,7 @@ describe('an area renders the badges its state earns and no others', () => {
         .mock.calls.filter(([command]) => command === 'overlay_confirm_marks');
       expect(confirmations.at(-1)).toEqual([
         'overlay_confirm_marks',
-        { state: 'placement', marks: [] },
+        { state: 'placement', marks: [], generation: 5 },
       ]);
     } finally {
       measured.mockRestore();
