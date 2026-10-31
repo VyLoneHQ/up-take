@@ -735,9 +735,9 @@ impl Area {
     /// areas, and the page draws the *watching* mark from this same answer,
     /// sent in the area payload, so the two cannot disagree about WHICH areas
     /// read (`ADR-0048`). Round 1 of the review of `#154` found them
-    /// disagreeing when the page derived the mark for itself. They can still
-    /// disagree about WHEN: the host learns an answer before the page draws it
-    /// (UP-TAKE backlog `I-475`, and the host's `watch.rs`).
+    /// disagreeing when the page derived the mark for itself. That they agree
+    /// about WHEN is the host's to wait for: it reads only areas whose mark
+    /// the page has since confirmed (the host's `watch.rs`, `confirm`).
     ///
     /// Whether its mark can actually be **seen** is not this answer's to
     /// give: only the page knows, so the host also waits for the page's word

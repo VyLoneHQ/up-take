@@ -259,6 +259,7 @@ pub fn emit(app: &AppHandle) {
             coach: guard.as_mut().and_then(|live| view(app, live)),
         }
     };
+    crate::watch::forget();
     let _ = app.emit(COACH_EVENT, payload);
 }
 

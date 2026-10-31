@@ -1360,6 +1360,7 @@ fn pump_gesture(app: &AppHandle, state: &mut PumpState) {
                     .then(|| u64::try_from(EPOCH.elapsed().as_nanos()).unwrap_or(u64::MAX))
             })
             .flatten();
+        crate::watch::forget();
         let _ = app.emit(
             SELECTION_EVENT,
             SelectionPayload {
@@ -1374,6 +1375,7 @@ fn pump_gesture(app: &AppHandle, state: &mut PumpState) {
         // appearance, so a cancelled or interrupted drag needs no separate undo
         // path: the styling was never stored, only derived from the live
         // gesture.
+        crate::watch::forget();
         let _ = app.emit(
             SELECTION_EVENT,
             SelectionPayload {
@@ -1847,6 +1849,7 @@ fn pump_hover(app: &AppHandle, state: &mut PumpState) {
         // out per field is one a later edit can drop half of silently.
         if (state.hovered_area, state.hovered_chrome_only) != hover {
             (state.hovered_area, state.hovered_chrome_only) = hover;
+            crate::watch::forget();
             let _ = app.emit(
                 HOVER_EVENT,
                 HoverPayload {
@@ -1952,6 +1955,7 @@ fn pump_hover(app: &AppHandle, state: &mut PumpState) {
     // the id has not moved, or the frontend keeps drawing the control alone.
     if (state.hovered_area, state.hovered_chrome_only) != (hovered_area, false) {
         (state.hovered_area, state.hovered_chrome_only) = (hovered_area, false);
+        crate::watch::forget();
         let _ = app.emit(
             HOVER_EVENT,
             HoverPayload {
@@ -4874,6 +4878,7 @@ fn emit_menu(app: &AppHandle) {
         let guard = lock(&MENU);
         menu_payload(guard.as_ref())
     };
+    crate::watch::forget();
     let _ = app.emit(MENU_EVENT, payload);
 }
 

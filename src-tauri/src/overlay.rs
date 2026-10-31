@@ -653,25 +653,28 @@ fn page_aside(
     let page_app = app.clone();
     crate::freeze::PageAside::new(
         move |request| match request {
-            crate::freeze::PageRequest::Hide { token, covers } => page_app
-                .emit(
-                    FREEZE_HIDE_EVENT,
-                    FreezeHidePayload {
-                        token,
-                        rects: covers
-                            .iter()
-                            .map(|rect| {
-                                (
-                                    rect.origin.x,
-                                    rect.origin.y,
-                                    rect.size.width,
-                                    rect.size.height,
-                                )
-                            })
-                            .collect(),
-                    },
-                )
-                .map_err(|error| error.to_string()),
+            crate::freeze::PageRequest::Hide { token, covers } => {
+                crate::watch::forget();
+                page_app
+                    .emit(
+                        FREEZE_HIDE_EVENT,
+                        FreezeHidePayload {
+                            token,
+                            rects: covers
+                                .iter()
+                                .map(|rect| {
+                                    (
+                                        rect.origin.x,
+                                        rect.origin.y,
+                                        rect.size.width,
+                                        rect.size.height,
+                                    )
+                                })
+                                .collect(),
+                        },
+                    )
+                    .map_err(|error| error.to_string())
+            }
             crate::freeze::PageRequest::Reveal { token } => page_app
                 .emit(FREEZE_REVEAL_EVENT, FreezeRevealPayload { token })
                 .map_err(|error| error.to_string()),
@@ -1012,6 +1015,7 @@ fn emit_state(app: &AppHandle, state: OverlayState) -> Result<(), String> {
             )
         })
         .collect();
+    crate::watch::forget();
     app.emit(
         STATE_EVENT,
         StatePayload {
@@ -1362,6 +1366,7 @@ pub(crate) fn emit_areas(app: &AppHandle) -> Result<(), String> {
             .map(|area| payload_of(area, &monitors))
             .collect()
     };
+    crate::watch::forget();
     app.emit(AREAS_EVENT, AreasPayload { areas })
         .map_err(|e| format!("Could not emit overlay areas: {e}"))
 }
@@ -2429,6 +2434,7 @@ struct FlashPayload {
 pub(crate) fn emit_flash(app: &AppHandle, id: AreaId) {
     static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nonce = NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    crate::watch::forget();
     if let Err(error) = app.emit(
         FLASH_EVENT,
         FlashPayload {
@@ -2502,6 +2508,7 @@ pub(crate) fn emit_ocr_selection(app: &AppHandle, id: AreaId, range: Option<(usi
             u64::try_from(last).unwrap_or(u64::MAX),
         )
     });
+    crate::watch::forget();
     if let Err(error) = app.emit(
         OCR_SELECTION_EVENT,
         OcrSelectionPayload {
@@ -2534,6 +2541,7 @@ pub(crate) fn emit_ocr(
             outline: unit.outline.map(|corner| [corner.x, corner.y]),
         })
         .collect();
+    crate::watch::forget();
     if let Err(error) = app.emit(
         OCR_EVENT,
         OcrPayload {
@@ -2603,6 +2611,7 @@ struct PinPayload {
 ///
 /// [`FreshPin`]: crate::captures::FreshPin
 pub(crate) fn emit_pin(app: &AppHandle, pin: crate::captures::FreshPin) -> Result<(), String> {
+    crate::watch::forget();
     app.emit(
         PIN_EVENT,
         PinPayload {
@@ -2616,6 +2625,7 @@ pub(crate) fn emit_pin(app: &AppHandle, pin: crate::captures::FreshPin) -> Resul
 /// Announces that `id` has no pinned capture any more, so the area draws the
 /// screen underneath again (§3.4's floor; see `output::clear_magnification`).
 pub(crate) fn emit_unpin(app: &AppHandle, id: AreaId) -> Result<(), String> {
+    crate::watch::forget();
     app.emit(
         PIN_EVENT,
         PinPayload {

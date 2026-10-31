@@ -621,6 +621,8 @@ describe('an area renders the badges its state earns and no others', () => {
       .spyOn(Element.prototype, 'getBoundingClientRect')
       .mockImplementation(function (this: Element) {
         for (const [name, rect] of boxes) {
+          // A watch area's own div never covers its own dot.
+          if (name === 'area' && this.querySelector('.watch-badge')) continue;
           if (this.classList.contains(name)) return rect;
         }
         return box(0, 0, 0, 0);
@@ -662,6 +664,46 @@ describe('an area renders the badges its state earns and no others', () => {
           marks: [],
         },
       );
+
+      // Round 20: the badge whole again, and another area drawn after this
+      // one over the dot. Anything drawn later covers it.
+      boxes.set('watch-badge', box(490, 102, 60, 11));
+      boxes.set('area', box(480, 95, 40, 40));
+      await emit('overlay://areas', {
+        areas: [
+          area({ kind: 'watch', watch: 'changes', watching: true }),
+          area({ id: 2, rect: [600, 600, 100, 100] }),
+        ],
+      });
+      await tick();
+      expect(vi.mocked(invoke)).toHaveBeenLastCalledWith(
+        'overlay_confirm_marks',
+        { state: 'placement', marks: [] },
+      );
+
+      // Round 20: no other area now, so the mark is seen again; then a
+      // freeze hides its monitor, and it is not.
+      boxes.delete('area');
+      await emit('overlay://areas', {
+        areas: [area({ kind: 'watch', watch: 'changes', watching: true })],
+      });
+      await tick();
+      expect(vi.mocked(invoke)).toHaveBeenLastCalledWith(
+        'overlay_confirm_marks',
+        { state: 'placement', marks: [{ id: 1, rect: [100, 100, 400, 300] }] },
+      );
+      await emit('overlay://freeze-hide', { token: 3, rects: [PRIMARY] });
+      await tick();
+      // The page answers a hide on its own animation frames; let them run
+      // here rather than inside the next test.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const confirmations = vi
+        .mocked(invoke)
+        .mock.calls.filter(([command]) => command === 'overlay_confirm_marks');
+      expect(confirmations.at(-1)).toEqual([
+        'overlay_confirm_marks',
+        { state: 'placement', marks: [] },
+      ]);
     } finally {
       measured.mockRestore();
     }

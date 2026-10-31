@@ -59,29 +59,37 @@
 //! 19 of the review of `#154` each found another way for the mark to be
 //! unseen while those checks passed (UP-TAKE backlog `I-475`). `ADR-0048`'s
 //! *Revisit if* names the fix for the class: the reader enforces the mark.
-//! The page measures each watching mark once it is laid out and painted, and
-//! an area is read only while the page's latest word, at most
-//! [`CONFIRMATION_LIFETIME`] old, says its mark is seen at the bounds and in
-//! the overlay state being read. That closes:
+//! The page measures each watching mark once it is laid out (not once it is
+//! painted: the host cannot see a paint), counting as covering everything it
+//! draws after the mark and a freeze's hidden monitors. An area is read only
+//! while the page's latest word, at most [`CONFIRMATION_LIFETIME`] old and
+//! sent at least [`SETTLE`] after the host last told the page anything that
+//! changes what it draws ([`forget`]), says its mark is seen at the bounds
+//! and in the overlay state being read. That closes:
 //!
-//! - the host ahead of the page: switching watching on, a sticky area
-//!   resuming, a move or resize ending (round 7);
-//! - another area drawn over the mark (round 14);
+//! - the host ahead of the page, both ways: a mark appearing (switching
+//!   watching on, a sticky area resuming, a move ending; round 7) and a mark
+//!   going (a menu, a hover's controls or another area drawn over it; round
+//!   20);
+//! - anything the page draws over the mark (rounds 14 and 20);
 //! - the mark clipped away on a small area, at any scaling (rounds 17, 18);
-//! - the mark reaching past the host's corner in a long language (round 19).
+//! - the mark reaching past the host's corner in a long language (round 19);
+//! - a freeze's or another capture's step-aside, which reaches the page as a
+//!   hide that voids the word, after which the page leaves those marks out
+//!   (round 5).
 //!
-//! ⚠️ **Two routes stay open**, and remain `I-475`'s:
+//! ⚠️ **What stays open is timing**, and remains `I-475`'s. The page's word,
+//! the host's check before a reading and the frame the reading uses are three
+//! moments:
 //!
-//! - With *Show UP-TAKE in screen recordings* on, a freeze or another
-//!   area's capture steps UP-TAKE's drawing aside for a few hundred
-//!   milliseconds (`freeze::STEP_ASIDE`), after the page's word and without
-//!   the page's knowledge; a reading can land inside that gap (round 5).
-//! - A reading uses a held session's newest frame, which can be up to
-//!   `warm::WATCH_FRAME_INTERVAL` (one second) older than the page's word; a
-//!   frame from just before the mark was painted can be the one read (round
-//!   12). A watcher made or started again waits one pass before its first
-//!   reading ([`Watcher`]), which keeps such a frame out of a baseline, not
-//!   out of every reading.
+//! - a change between the check and the frame read back, a few milliseconds,
+//!   is not seen by the check;
+//! - the frame is a held session's newest, which can be up to
+//!   `warm::WATCH_FRAME_INTERVAL` (one second) older than the check, and can
+//!   come from between the page's layout and its paint (rounds 12 and 20). A
+//!   watcher made or started again waits one pass before its first reading
+//!   ([`Watcher`]), which keeps such a frame out of a baseline, not out of
+//!   every reading.
 //!
 //! ⚠️ **With *Show UP-TAKE in screen recordings* on, UP-TAKE's own drawing
 //! is in every reading, and only the border and the mark are left out.**
@@ -152,7 +160,8 @@ const EDGE: u32 = 4;
 /// it is wider than 240, and from about 300 % taller than 40. The page clips
 /// the mark to the area, not to this corner, so on a wide area the dot can
 /// then lie outside the corner [`mark_on_screen`] checks (review of `#154`,
-/// round 19). Named among `I-475`'s routes in the module docs.
+/// round 19). The page's word closes that route: it measures the mark it
+/// drew ([`confirm`]).
 const MARK: (u32, u32) = (240, 40);
 
 /// Whether the thread exists, and whether it has been woken since it last
@@ -260,7 +269,7 @@ fn overlay_state(app: &AppHandle) -> OverlayState {
 /// The page's latest word on which watching marks it can see (roadmap
 /// `1.58`, `ADR-0048`'s *Revisit if*: the mark enforced by the reader).
 ///
-/// The page measures each watching area's mark once laid out and painted: its
+/// The page measures each watching area's mark once laid out: its
 /// dot wholly inside the badge, on a monitor, under no other area
 /// (`src/lib/mark-check.ts`). It sends the areas whose mark is seen, with the
 /// bounds it drew them at and the overlay state it drew in, after every change
@@ -268,12 +277,8 @@ fn overlay_state(app: &AppHandle) -> OverlayState {
 /// its present bounds, in the present state, and is no older than
 /// [`CONFIRMATION_LIFETIME`]: a page that stopped answering stops the reading.
 ///
-/// **What it closes** (UP-TAKE backlog `I-475`): the host ahead of the page
-/// (round 7), the mark covered by another area (round 14), the mark clipped
-/// away on a small area or at high scaling (rounds 17 and 18), and a mark
-/// wider than the host's corner (round 19), since the page measures the mark
-/// it drew. **What it does not**: a freeze stepping the drawing aside after
-/// the page's word (round 5), and a held frame older than the word (round 12).
+/// What it closes and what stays open (timing) is in the module docs, under
+/// *The page confirms the mark*.
 struct Confirmation {
     state: OverlayState,
     marks: Vec<(u64, Rect)>,
@@ -281,6 +286,24 @@ struct Confirmation {
 }
 
 static CONFIRMED: Mutex<Option<Confirmation>> = Mutex::new(None);
+
+/// When the host last sent the page something that can change what it draws
+/// ([`forget`]). A word must arrive at least [`SETTLE`] after it to count.
+static CHANGED: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// How long after a change a word is still taken to describe the page as it
+/// was before it. A word already on its way when the change was sent arrives
+/// inside this; the page's next one-second word lands after it.
+pub const SETTLE: Duration = Duration::from_millis(250);
+
+/// The host has sent the page something that can change what it draws (areas,
+/// state, a menu, hover, a pin, the coach, a freeze's hide): the word held
+/// until now may describe a page that is gone, so it stops counting until a
+/// word arrives at least [`SETTLE`] later (review of `#154`, round 20: a word
+/// stood for up to three seconds after a menu or another area hid the mark).
+pub fn forget() {
+    *CHANGED.lock().unwrap_or_else(PoisonError::into_inner) = Some(Instant::now());
+}
 
 /// How long a confirmation stands. The page sends one every second while any
 /// mark is seen, so three missed in a row stop the reading.
@@ -297,17 +320,25 @@ pub fn confirm(state: OverlayState, marks: Vec<(u64, Rect)>) {
 
 /// Whether the latest confirmation, as of `now`, says `target`'s mark is seen.
 fn mark_seen(target: Target, state: OverlayState, now: Instant) -> bool {
+    let changed = *CHANGED.lock().unwrap_or_else(PoisonError::into_inner);
     CONFIRMED
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .as_ref()
-        .is_some_and(|word| seen_by(word, target, state, now))
+        .is_some_and(|word| seen_by(word, target, state, now, changed))
 }
 
 /// [`mark_seen`]'s rule, apart so it is tested without the shared store.
-fn seen_by(word: &Confirmation, target: Target, state: OverlayState, now: Instant) -> bool {
+fn seen_by(
+    word: &Confirmation,
+    target: Target,
+    state: OverlayState,
+    now: Instant,
+    changed: Option<Instant>,
+) -> bool {
     word.state == state
         && now.saturating_duration_since(word.at) <= CONFIRMATION_LIFETIME
+        && changed.is_none_or(|changed| word.at >= changed + SETTLE)
         && word
             .marks
             .iter()
@@ -749,7 +780,7 @@ mod tests {
     /// found; each goes red if its line in [`pass`] is undone.
     mod the_loop {
         use super::super::{
-            CONFIRMATION_LIFETIME, Confirmation, Host, Memory, Target, pass, seen_by,
+            CONFIRMATION_LIFETIME, Confirmation, Host, Memory, SETTLE, Target, pass, seen_by,
         };
         use crate::overlay_state::OverlayState;
         use std::collections::VecDeque;
@@ -950,13 +981,13 @@ mod tests {
                 marks: vec![(one.id.get(), one.bounds)],
                 at,
             };
-            assert!(seen_by(&word, one, OverlayState::Living, at));
+            assert!(seen_by(&word, one, OverlayState::Living, at, None));
             assert!(
-                !seen_by(&word, other, OverlayState::Living, at),
+                !seen_by(&word, other, OverlayState::Living, at, None),
                 "not named"
             );
             assert!(
-                !seen_by(&word, one, OverlayState::Placement, at),
+                !seen_by(&word, one, OverlayState::Placement, at, None),
                 "another state"
             );
             let moved = Target {
@@ -964,17 +995,79 @@ mod tests {
                 ..one
             };
             assert!(
-                !seen_by(&word, moved, OverlayState::Living, at),
+                !seen_by(&word, moved, OverlayState::Living, at, None),
                 "other bounds"
             );
             let late = at + CONFIRMATION_LIFETIME + Duration::from_millis(1);
-            assert!(!seen_by(&word, one, OverlayState::Living, late), "too old");
+            assert!(
+                !seen_by(&word, one, OverlayState::Living, late, None),
+                "too old"
+            );
             assert!(seen_by(
                 &word,
                 one,
                 OverlayState::Living,
-                at + CONFIRMATION_LIFETIME
+                at + CONFIRMATION_LIFETIME,
+                None
             ));
+            // Round 20: a change sent to the page after the word, or less
+            // than SETTLE before it, voids it.
+            let living = OverlayState::Living;
+            let after = Some(at + Duration::from_millis(10));
+            assert!(!seen_by(&word, one, living, at, after), "changed after");
+            let in_flight = at.checked_sub(SETTLE - Duration::from_millis(1));
+            assert!(!seen_by(&word, one, living, at, in_flight), "in flight");
+            let settled = at.checked_sub(SETTLE);
+            assert!(seen_by(&word, one, living, at, settled), "after it settled");
+        }
+
+        /// Round 20: every host message that can change what the page draws
+        /// voids the page's word first (`forget`), so an emit added later
+        /// without it goes red here rather than letting a stale word stand.
+        #[test]
+        fn every_message_that_redraws_the_page_forgets_the_word() {
+            const EVENTS: [&str; 11] = [
+                "FREEZE_HIDE_EVENT",
+                "STATE_EVENT",
+                "AREAS_EVENT",
+                "FLASH_EVENT",
+                "OCR_SELECTION_EVENT",
+                "OCR_EVENT",
+                "PIN_EVENT",
+                "SELECTION_EVENT",
+                "HOVER_EVENT",
+                "MENU_EVENT",
+                "COACH_EVENT",
+            ];
+            let floor = |text: &str, mut at: usize| {
+                while !text.is_char_boundary(at) {
+                    at -= 1;
+                }
+                at
+            };
+            let mut found = 0;
+            for (name, source) in [
+                ("overlay.rs", include_str!("overlay.rs")),
+                ("placement.rs", include_str!("placement.rs")),
+                ("first_run.rs", include_str!("first_run.rs")),
+            ] {
+                for (at, _) in source.match_indices(".emit(") {
+                    let end = floor(source, (at + 120).min(source.len()));
+                    if !EVENTS.iter().any(|event| source[at..end].contains(event)) {
+                        continue;
+                    }
+                    found += 1;
+                    let start = floor(source, at.saturating_sub(200));
+                    assert!(
+                        source[start..at].contains("crate::watch::forget();"),
+                        "{name}: an emit at byte {at} does not forget the page's word"
+                    );
+                }
+            }
+            assert!(
+                found >= 14,
+                "found {found} emits; the scan has stopped seeing them"
+            );
         }
 
         /// An area whose mark the page has not confirmed is not read.

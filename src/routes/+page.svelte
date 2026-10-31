@@ -595,9 +595,28 @@ onMount(() => {
  *
  * The page measures because only it knows where the mark is laid out, at what
  * size in this scale and language, and what is drawn over it ($lib/mark-check).
- * An area drawn later is drawn above (`areaFrames` is bottom-first).
+ * Anything drawn after a mark is drawn over it (COVERS), and a freeze's mask
+ * hides whole monitors.
  */
 let confirmedNone = false;
+/** What the page can draw over a watching mark. See `confirmMarks`. */
+const COVERS = [
+  '.area',
+  '.close',
+  '.grab-bar',
+  '.outside-handle',
+  '.layer-badge',
+  '.sticky-badge',
+  '.zoom-badge',
+  '.flash',
+  '.ocr',
+  '.ocr-status',
+  '.selection',
+  '.armed-badge',
+  '.frozen-badge',
+  '.menu',
+  '.coach',
+].join(', ');
 function confirmMarks(): void {
   const shown =
     overlayState === 'hidden'
@@ -607,14 +626,29 @@ function confirmMarks(): void {
         );
   const monitorsCss = physRectsToCss(monitors, origin, dpr);
   const marks: { id: number; rect: PhysRect }[] = [];
-  shown.forEach((frame, index) => {
-    if (!frame.watching) return;
+  for (const frame of shown) {
+    if (!frame.watching) continue;
     const badge = document.querySelector(
       `.watch-badge[data-area="${frame.id}"]`,
     );
     const dot = badge?.querySelector('.watch-dot');
-    if (!badge || !dot) return;
-    const above = shown.slice(index + 1).map((other) => other.rect);
+    if (!badge || !dot) continue;
+    // Whatever is drawn after the badge is drawn over it: later areas, every
+    // area's outside controls, the menu, the coach (review of #154, round 20,
+    // found menus and controls missing when only areas were counted). And a
+    // freeze's mask hides whole monitors.
+    const above = [
+      ...[...document.querySelectorAll(COVERS)]
+        .filter(
+          (element) =>
+            !badge.contains(element) &&
+            (badge.compareDocumentPosition(element) &
+              Node.DOCUMENT_POSITION_FOLLOWING) !==
+              0,
+        )
+        .map((element) => element.getBoundingClientRect()),
+      ...freezeHidden,
+    ];
     if (
       markSeen(
         dot.getBoundingClientRect(),
@@ -626,7 +660,7 @@ function confirmMarks(): void {
       const view = areas.find((area) => area.id === frame.id);
       if (view) marks.push({ id: frame.id, rect: view.rect });
     }
-  });
+  }
   // Nothing to say twice: an empty answer once is enough until one changes.
   if (marks.length === 0 && confirmedNone) return;
   confirmedNone = marks.length === 0;
@@ -635,9 +669,17 @@ function confirmMarks(): void {
   );
 }
 
-// After every change to what is drawn, once it has been laid out and painted.
+// After every change to what is drawn, once it has been laid out.
 $effect(() => {
-  void [areaFrames, overlayState, monitors, origin, dpr, language];
+  void [
+    areaFrames,
+    overlayState,
+    monitors,
+    origin,
+    dpr,
+    language,
+    freezeHidden,
+  ];
   // After Svelte has updated the DOM: reading the boxes lays them out, so no
   // animation frame is needed (and the freeze tests count those).
   void tick().then(confirmMarks);
