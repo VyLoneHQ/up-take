@@ -40,11 +40,11 @@ __pycache__/
 /dist
 
 # The staging directory the installer packages: the ONNX Runtime DLL, its two
-# notice files, and the OCR models. ~47.6 MB of binaries that are ACQUIRED
+# notice files, and the OCR models. ~48.7 MB of binaries that are ACQUIRED
 # rather than committed -- `scripts/acquire-onnxruntime.py`,
 # `scripts/acquire-ppocr-detector.py` and `scripts/acquire-ppocr-recogniser.py`
 # each verify every byte against a pinned SHA-256 before writing here, which is
-# ADR-0032 decision 2. The exact figure is 47,608,523 B, and
+# ADR-0032 decision 2. The exact figure is 48,713,563 B since ONNX Runtime 1.31.0, and
 # `installer_payload_bytes()` derives it from the six pins -- do not hand-write
 # a total here, which is how the "~31 MB" below went stale in the first place.
 #
