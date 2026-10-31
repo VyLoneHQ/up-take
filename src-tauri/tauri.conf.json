@@ -17,7 +17,7 @@
         "width": 800,
         "height": 600,
         "visible": false,
-        "focus": false,
+        "create": false,
         "transparent": true,
         "decorations": false,
         "shadow": false,
