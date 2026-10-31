@@ -39,6 +39,7 @@ mod source_guard;
 mod sticky;
 mod strings;
 mod tray;
+mod watch;
 
 use std::sync::Mutex;
 
@@ -150,6 +151,9 @@ pub fn run() -> tauri::Result<()> {
         // (architecture §4). No frontend capability grants it, so the WebView
         // cannot open dialogs.
         .plugin(tauri_plugin_dialog::init())
+        // Roadmap 1.58: a watch area's only way to tell the user anything
+        // while they are looking at something else.
+        .plugin(tauri_plugin_notification::init())
         // The freeze probe's IPC endpoint is registered in debug builds only.
         // Nothing stamps a probe in release, so the release form was an inert
         // endpoint with an empty body — harmless, but a command surface that

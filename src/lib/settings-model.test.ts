@@ -187,6 +187,7 @@ describe('the inventory', () => {
       'F',
       'U',
       'O',
+      'W',
     ]);
     // Every row says what the type DOES, which is the whole complaint.
     for (const each of legend.types) {

@@ -374,6 +374,17 @@ $effect(() => {
   background: rgba(255, 170, 80, 0.2);
 }
 
+.keycap.tone-watch {
+  border: 1px solid rgba(120, 225, 170, 0.55);
+  background: rgba(100, 210, 150, 0.14);
+  color: #a6f0c8;
+}
+
+.swatch.tone-watch {
+  border: 1.5px solid rgba(120, 225, 170, 0.85);
+  background: rgba(100, 210, 150, 0.12);
+}
+
 .keycap.tone-upscale,
 .keycap.tone-text {
   border: 1px solid rgba(235, 240, 250, 0.22);

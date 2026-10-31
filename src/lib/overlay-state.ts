@@ -97,6 +97,13 @@ export type LayerName = 'front' | 'auto' | 'back';
 export type StickyState = 'free' | 'following' | 'paused';
 
 /**
+ * What a watch area tells the user about (roadmap 1.58): nothing, a change,
+ * or the end of one. Anything but `off` means the area is reading its region,
+ * and the page marks it while it does (ADR-0048).
+ */
+export type WatchState = 'off' | 'changes' | 'settles';
+
+/**
  * Whether an area is drawn at all in this overlay state (roadmap 1.47, the
  * maintainer's decision of 2026-10-12). A paused area's window is minimised,
  * hidden or closed, so while the user works the area is out of sight. It is
@@ -136,7 +143,8 @@ export type AreaKind =
   | 'ocr'
   | 'upscale'
   | 'analysis'
-  | 'filter';
+  | 'filter'
+  | 'watch';
 
 /**
  * One area as Rust sends it. Every rectangle is **physical** and already laid
@@ -160,6 +168,8 @@ export interface AreaView {
   ocr_behaviour: OcrBehaviour;
   /** Whether the area follows a window. See {@link StickyState}. */
   sticky: StickyState;
+  /** What a watch area watches for. See {@link WatchState}. */
+  watch: WatchState;
   /**
    * Magnification (§3.4), `1` at natural size.
    *
@@ -610,6 +620,8 @@ export interface AreaFrame {
   ocrBehaviour: OcrBehaviour;
   /** Whether the area follows a window. See {@link StickyState}. */
   sticky: StickyState;
+  /** The area is reading its region now: draw its watching mark. */
+  watching: boolean;
   /** Magnification (§3.4), `1` at natural size. See {@link AreaView.zoom}. */
   zoom: number;
   /** Draw this area as the one a press would grab: brighter, lit border. */
@@ -675,6 +687,7 @@ export function kindLabels(language: Language): Record<AreaKind, string> {
     upscale: text(language, 'kind.upscale'),
     analysis: text(language, 'kind.analysis'),
     filter: text(language, 'kind.filter'),
+    watch: text(language, 'kind.watch'),
   };
 }
 
@@ -751,6 +764,9 @@ export function areaFramesCss(
     kind: area.kind,
     ocrBehaviour: area.ocr_behaviour,
     sticky: area.sticky,
+    // The same rule the host reads by: a watch area whose choice is not
+    // `off`. Taken from the one payload, so the mark and the reading agree.
+    watching: area.kind === 'watch' && area.watch !== 'off',
     zoom: area.zoom,
     // A dragged area is not also "hovered": the hover chrome invites a gesture
     // that is already under way, and its close control would sit at the source
@@ -1085,7 +1101,7 @@ export function isFreezeKey(
  */
 export type ArmableType = Extract<
   AreaKind,
-  'screenshot' | 'filter' | 'upscale' | 'ocr'
+  'screenshot' | 'filter' | 'upscale' | 'ocr' | 'watch'
 >;
 
 /**
@@ -1123,6 +1139,10 @@ export function armedTypeForKey(
     // the `overlay://ocr` listener are the other half of this key.
     case 'o':
       return 'ocr';
+    // Roadmap 1.58. `W` for Watch. The area is created reading nothing; the
+    // user switches watching on from its menu (ADR-0048).
+    case 'w':
+      return 'watch';
     default:
       return null;
   }

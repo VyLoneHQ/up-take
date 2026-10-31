@@ -31,12 +31,13 @@ Until then it is written by hand.
 - System tray icon and menu, and a single-instance guard.
 - Areas: drag to create, then move, resize and dismiss them. Areas live until dismissed or until the
   app exits, and do not survive a restart.
-- Five area types, chosen from the area's own right-click menu. A plain pinned region; a screenshot
+- Six area types, chosen from the area's own right-click menu. A plain pinned region; a screenshot
   area that captures what is under it and keeps the still, which Copy and Save export; a filter
   area that tints what is underneath and lets clicks pass through to it; an upscale area that
   sharpens the piece of screen under it in place, without magnifying it, as a still rather than a
-  live view; and an OCR area that reads the text under it, shows what it read in place, and puts
-  that text on the clipboard so it can be pasted straight into something else. The
+  live view; an OCR area that reads the text under it, shows what it read in place, and puts
+  that text on the clipboard so it can be pasted straight into something else; and a watch area
+  that shows a Windows notification when the screen under it starts changing, or stops. The
   installer carries the OCR runtime and the models; they are not in this repository, and three
   checksummed scripts fetch them before a build can bundle them. (This said "two" scripts until
   2026-09-08; there are three, one each for the runtime, the detector and the recogniser.)
@@ -65,7 +66,7 @@ Until then it is written by hand.
      of that entry: the recognised text is copied automatically, which is the whole of what 1.13
      is. It reached this line on the branch that built it rather than a session later, which is
      the correction the two notes above record being needed twice), 1.27 (area types chosen from the area's own menu) and
-     1.28 (those types in a submenu), which the "Five area types" entry above derives from and
+     1.28 (those types in a submenu), which the "Six area types" entry above derives from and
      which sit outside the 1.1-1.9f range this line used to name on its own. `P-6` asks for the
      source of the claim rather than of the page, and that range stopped covering the entry when
      the entry was rewritten. Corrected after the independent review of 1.28.

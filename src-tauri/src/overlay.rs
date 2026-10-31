@@ -21,6 +21,7 @@ use uptake_core::area::{
 use uptake_core::geometry::{Monitor, Point, Rect, Size, virtual_desktop_bounds};
 use uptake_core::interaction;
 use uptake_core::sticky::Sticky;
+use uptake_core::watch::Watch;
 
 use crate::click_through;
 use crate::overlay_state::{Event, OverlayState, next};
@@ -810,6 +811,7 @@ pub(crate) const fn type_name(kind: AreaType) -> &'static str {
         AreaType::Upscale => "upscale",
         AreaType::Analysis => "analysis",
         AreaType::Filter => "filter",
+        AreaType::Watch => "watch",
     }
 }
 
@@ -1246,6 +1248,10 @@ struct AreaPayload {
     /// (roadmap `1.47`): `free`, `following` or `paused`. The page marks a
     /// sticky area and says so when it is paused.
     sticky: Sticky,
+    /// What a watch area tells the user about (roadmap `1.58`): `off`,
+    /// `changes` or `settles`. The page marks an area that is watching, from
+    /// this field, so the mark and the reading cannot disagree (`ADR-0048`).
+    watch: Watch,
     /// The area's magnification (§3.4), `1.0` at natural size.
     ///
     /// **The frontend does not scale anything with this.** The magnified
@@ -1320,6 +1326,7 @@ fn payload_of(area: &Area, monitors: &[Rect]) -> AreaPayload {
         kind: type_name(area.kind),
         ocr_behaviour: area.ocr_behaviour,
         sticky: area.sticky,
+        watch: area.watch,
         zoom: area.zoom.factor(),
         bar: interaction::grab_bar(area.bounds, monitors).map(as_tuple),
         handles: interaction::outside_resize_handles(area.bounds)
@@ -1371,6 +1378,8 @@ pub(crate) struct AreaSummary {
     /// Whether the area follows a window (roadmap `1.47`), for the menu's
     /// tick.
     pub sticky: Sticky,
+    /// What a watch area watches for (roadmap `1.58`), for its Watch rows.
+    pub watch: Watch,
 }
 
 impl AreaSummary {
@@ -1382,6 +1391,7 @@ impl AreaSummary {
             kind: area.kind,
             ocr_behaviour: area.ocr_behaviour,
             sticky: area.sticky,
+            watch: area.watch,
         }
     }
 }
@@ -1595,6 +1605,20 @@ pub(crate) fn set_area_ocr_behaviour(app: &AppHandle, id: AreaId, behaviour: Ocr
         }
     }
     true
+}
+
+/// Sets what a watch area tells the user about (roadmap `1.58`) and wakes the
+/// watcher, which reads the new choice on its next look. Returns whether it
+/// changed.
+pub(crate) fn set_area_watch(app: &AppHandle, id: AreaId, watch: Watch) -> bool {
+    let changed = {
+        let store = app.state::<Mutex<AreaStore>>();
+        lock(&store).set_watch(id, watch)
+    };
+    if changed {
+        crate::watch::wake(app);
+    }
+    changed
 }
 
 /// Whether `id` is an OCR area whose text can be selected, copied or read
@@ -2783,6 +2807,10 @@ fn armable_type(name: &str) -> Option<AreaType> {
         // draws its recognised text over the region rather than capturing
         // continuously.
         "ocr" => Some(AreaType::Ocr),
+        // Watch is the fifth (roadmap 1.58, key `W`). It is created reading
+        // nothing: watching is switched on from the area's own menu
+        // (`ADR-0048`), so the gesture only places the frame.
+        "watch" => Some(AreaType::Watch),
         _ => None,
     }
 }
@@ -3145,6 +3173,7 @@ mod tests {
                 kind: "default",
                 ocr_behaviour: OcrBehaviour::InPlace,
                 sticky: state,
+                watch: Watch::Off,
                 zoom: 1.0,
                 bar: None,
                 handles: Vec::new(),
@@ -3179,6 +3208,7 @@ mod tests {
             kind: "default",
             ocr_behaviour: OcrBehaviour::InPlace,
             sticky: Sticky::Paused,
+            watch: Watch::Off,
             zoom: 1.0,
             bar: Some((0, -18, 10, 18)),
             handles: vec![(0, 0, 18, 18)],
@@ -3194,6 +3224,7 @@ mod tests {
                 "kind",
                 "ocr_behaviour",
                 "sticky",
+                "watch",
                 "zoom",
                 "bar",
                 "handles",
@@ -3905,6 +3936,7 @@ mod tests {
             ("filter", AreaType::Filter),
             ("upscale", AreaType::Upscale),
             ("ocr", AreaType::Ocr),
+            ("watch", AreaType::Watch),
         ] {
             assert_eq!(armable_type(name), Some(kind), "{name} must arm");
             assert_eq!(type_name(kind), name, "{name} must round trip");
@@ -3929,7 +3961,7 @@ mod tests {
         assert_eq!(armable_type(""), None);
     }
 
-    /// All seven wire names, pinned, so a *rename* goes red on this side.
+    /// Every wire name, pinned, so a *rename* goes red on this side.
     ///
     /// **The other direction is covered as well, and it is covered elsewhere.**
     /// This doc said *"nothing checks it from the other side"* and *"this test
@@ -3951,6 +3983,7 @@ mod tests {
             (AreaType::Upscale, "upscale"),
             (AreaType::Analysis, "analysis"),
             (AreaType::Filter, "filter"),
+            (AreaType::Watch, "watch"),
         ] {
             assert_eq!(type_name(kind), name);
         }

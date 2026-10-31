@@ -56,10 +56,11 @@ We believe in quality over quantity, while making sure no important functionalit
 
 ## What works today
 
-Five of seven area types are built.
+Six of eight area types are built.
 <!-- source: STATUS.md Phase 1 (1A merged, 1B partial); ROADMAP.md tasks 1.9b (Screenshot),
-     1.23 (Filter, merged 2026-08-12), 1.24 (Upscale) and 1.26 (OCR); PRODUCT-VISION.md
-     section 3.1 (the seven types).
+     1.23 (Filter, merged 2026-08-12), 1.24 (Upscale), 1.26 (OCR) and 1.58 (Watch); PRODUCT-VISION.md
+     section 3.1 (the seven types), and ROADMAP.md 1.58 for the eighth, decided as a type of its own
+     on 2026-09-27 (Q-40).
      This line said "Two of seven" until 2026-08-21. Filter shipped on 2026-08-12 and the
      count was never updated, so the front page of a public repository under-reported what
      was built for ten days. Update it in the same change that ships a type. -->
@@ -160,6 +161,18 @@ Five of seven area types are built.
        most: ADR-0031 question 3 makes the founder's eye at the rig the ONLY v1 gate on whether
        the sharpening looks right, because there is no number to hold it to. If a rig pass finds
        it reads as over-sharpened, or as doing nothing, this bullet is what has to change. -->
+- **A watch area.** Place it over something that changes, such as a download bar, a render or a
+  chat, and it shows a Windows notification when that piece of screen starts changing, or when it
+  stops. It reads nothing until you switch watching on in its right-click menu, and says
+  *watching* on the area for as long as it reads. What it reads stays on your computer: it keeps a
+  coarse summary of the last reading to compare with the next, and nothing else.
+  <!-- source: ROADMAP.md task 1.58 and ADR-0048 (an area may read its own region repeatedly: the
+       user placed it, it is marked while it reads, reading is per area and off by default, and it
+       stays local). The code is crates/uptake-core/src/watch.rs (the rule and its tests) and
+       src-tauri/src/watch.rs (the readings and the notification).
+       Deliberately NOT claimed here: reading a window that other windows cover (ROADMAP 1.48, not
+       built), watching for a word or a number (later in 1.58), and any cost figure, because the
+       reading rate is a first value whose cost has not been measured yet. -->
 
 Around those:
 

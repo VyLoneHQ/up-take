@@ -299,6 +299,7 @@ const KINDS = [
   'upscale',
   'analysis',
   'filter',
+  'watch',
 ] as const satisfies readonly AreaKind[];
 
 describe('the overlay renders what Rust tells it and nothing more', () => {
@@ -390,6 +391,7 @@ describe('an area renders the badges its state earns and no others', () => {
       layer: 'auto',
       kind,
       sticky: 'free',
+      watch: 'off',
       // 2 rather than some larger number because the badge turns on `> 1`; the
       // value only has to be magnified, and inventing a bigger one would imply
       // this file knows a factor Rust no longer defines.
@@ -573,6 +575,35 @@ describe('an area renders the badges its state earns and no others', () => {
    * one, both fail here. The first review of this feature swapped the two in
    * the template and the whole suite stayed green.
    */
+  /**
+   * Roadmap 1.58, ADR-0048: a watch area is marked exactly while it reads, and
+   * an area of another type never is, whatever its `watch` field says.
+   */
+  test('a watch area says watching exactly while it watches', async () => {
+    const { container } = await mount();
+    await emit('overlay://state', state());
+
+    await emit('overlay://areas', {
+      areas: [area({ kind: 'watch', watch: 'off' })],
+    });
+    expect(container.querySelector('.area')?.classList).toContain('watch');
+    expect(container.querySelectorAll('.watch-badge')).toHaveLength(0);
+
+    for (const watch of ['changes', 'settles'] as const) {
+      await emit('overlay://areas', {
+        areas: [area({ kind: 'watch', watch })],
+      });
+      expect(container.querySelector('.watch-badge')?.textContent?.trim()).toBe(
+        '● watching',
+      );
+    }
+
+    await emit('overlay://areas', {
+      areas: [area({ kind: 'default', watch: 'changes' })],
+    });
+    expect(container.querySelectorAll('.watch-badge')).toHaveLength(0);
+  });
+
   test('a sticky area shows its mark, and says Paused only while paused', async () => {
     const { container } = await mount();
     await emit('overlay://state', state());

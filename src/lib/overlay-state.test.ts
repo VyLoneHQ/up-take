@@ -152,6 +152,7 @@ describe('areaFramesCss', () => {
       kind: 'default',
       ocr_behaviour: 'in_place',
       sticky: 'free',
+      watch: 'off',
       zoom: 1,
       // 200x150, so it is above `CHROME_INSIDE_SPAN` on both axes: bands
       // inside, and therefore no outside handles. Rust decides this; the
@@ -167,6 +168,7 @@ describe('areaFramesCss', () => {
       kind: 'filter',
       ocr_behaviour: 'rendered',
       sticky: 'paused',
+      watch: 'off',
       zoom: 1,
       bar: [-1000, -218, 300, 18],
       handles: [],
@@ -550,6 +552,11 @@ describe('armedTypeForKey', () => {
     expect(armedTypeForKey(key({ key: 'S', shiftKey: true }))).toBe(
       'screenshot',
     );
+  });
+
+  it('arms Watch on W, in either case (roadmap 1.58)', () => {
+    expect(armedTypeForKey(key({ key: 'w' }))).toBe('watch');
+    expect(armedTypeForKey(key({ key: 'W' }))).toBe('watch');
   });
 
   it('arms Filter on F, in either case', () => {

@@ -610,6 +610,14 @@ fn capture_bitmap(app: &AppHandle, bounds: Rect, split: &mut Split) -> Result<Rg
     Ok(captured.bitmap)
 }
 
+/// One reading for a watch area (roadmap `1.58`): `bounds` captured live, with
+/// UP-TAKE's own drawing out of the picture as for every capture here, so the
+/// area's mark is never read as a change. Never the frozen still or the frame
+/// held since a press: a watch area compares the screen with itself over time.
+pub(crate) fn capture_for_watch(app: &AppHandle, bounds: Rect) -> Result<RgbaBitmap, String> {
+    capture_bitmap(app, bounds, &mut Split::default())
+}
+
 /// Captures `bounds` and encodes it as PNG, returning both the raw bitmap
 /// (needed for the DIB clipboard format, which is not decoded back out of the
 /// PNG) and the encoded bytes, and recording each stage's cost in `split`.

@@ -665,6 +665,7 @@ onMount(() => {
           class:hovered={area.hovered}
           class:pinned={area.layer !== 'auto'}
           class:filter={area.kind === 'filter'}
+          class:watch={area.kind === 'watch'}
           style="transform: translate3d({area.rect.x}px, {area.rect.y}px, 0); width: {area
             .rect.width}px; height: {area.rect.height}px"
         >
@@ -824,6 +825,13 @@ onMount(() => {
               class:beside-layer={area.layer !== 'auto'}
               class:paused={area.sticky === 'paused'}
             >◈{area.sticky === 'paused' ? ` ${text(language, 'area.sticky.paused')}` : ''}</span>
+          {/if}
+          <!-- A watch area that is reading its region says so, in words, for
+               as long as it reads (roadmap 1.58, ADR-0048: "visibly marked
+               while it watches"). Top right, clear of the depth and sticky
+               marks on the left. -->
+          {#if area.watching}
+            <span class="watch-badge">● {text(language, 'area.watching')}</span>
           {/if}
         </div>
       {/if}
@@ -1074,6 +1082,32 @@ onMount(() => {
   /* 1.5x the resting wash, which is what `0.24` was to `0.16`. */
   background: rgba(255, 170, 80, calc(1.5 * var(--filter-alpha, 0.16)));
   box-shadow: 0 0 10px rgba(255, 170, 80, 0.45);
+}
+
+/* A Watch area (roadmap 1.58, key `W`): green, so it reads as its own type at a
+   glance. Pass-through like a Filter, with no wash: it watches what is under
+   it and must not change how that looks. */
+.area.watch {
+  border-color: rgba(120, 225, 170, 0.85);
+  background: none;
+  box-shadow: 0 0 6px rgba(100, 210, 150, 0.25);
+}
+
+/* Hover survives the type, as for `.area.filter.hovered` above. */
+.area.watch.hovered {
+  border-color: rgba(160, 240, 195, 1);
+  box-shadow: 0 0 10px rgba(100, 210, 150, 0.45);
+}
+
+/* The watching mark: present exactly while the area reads its region. */
+.watch-badge {
+  position: absolute;
+  right: 4px;
+  top: 2px;
+  font: 11px/1 system-ui, sans-serif;
+  color: rgba(140, 235, 180, 0.98);
+  text-shadow: 0 0 3px rgba(0, 0, 0, 0.8);
+  white-space: nowrap;
 }
 
 /* A pinned tier (ADR-0013) is a state the user set and must be able to see; an

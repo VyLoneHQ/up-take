@@ -50,6 +50,11 @@
       "de": "Typ: OCR",
       "de_from": "29d32bb1"
     },
+    "menu.type.watch": {
+      "en": "Type: Watch",
+      "de": "Typ: Beobachten",
+      "de_from": "3e78d7c6"
+    },
     "menu.depth": {
       "en": "Depth",
       "de": "Tiefe",
@@ -74,6 +79,26 @@
       "en": "Stick to window",
       "de": "An Fenster heften",
       "de_from": "ac13c0d0"
+    },
+    "menu.watch": {
+      "en": "Watch",
+      "de": "Beobachten",
+      "de_from": "ec266ec8"
+    },
+    "menu.watch.off": {
+      "en": "Off",
+      "de": "Aus",
+      "de_from": "0dc6b4aa"
+    },
+    "menu.watch.changes": {
+      "en": "Notify when it changes",
+      "de": "Melden, wenn sich etwas ändert",
+      "de_from": "c8dd024c"
+    },
+    "menu.watch.settles": {
+      "en": "Notify when it stops changing",
+      "de": "Melden, wenn es zur Ruhe kommt",
+      "de_from": "102a79bb"
     },
     "menu.on_resize": {
       "en": "On resize",
@@ -104,6 +129,26 @@
       "en": "Paused",
       "de": "Pausiert",
       "de_from": "de281feb"
+    },
+    "area.watching": {
+      "en": "watching",
+      "de": "beobachtet",
+      "de_from": "75a4b320"
+    },
+    "watch.notify.title": {
+      "en": "UP-TAKE",
+      "de": "UP-TAKE",
+      "de_from": "3405ab74"
+    },
+    "watch.notify.changed": {
+      "en": "A watch area changed.",
+      "de": "Ein Beobachten-Bereich hat sich geändert.",
+      "de_from": "34a1d282"
+    },
+    "watch.notify.settled": {
+      "en": "A watch area stopped changing.",
+      "de": "Ein Beobachten-Bereich hat sich nicht mehr geändert.",
+      "de_from": "b777c8de"
     },
     "menu.click_through": {
       "en": "Click-through",
@@ -230,6 +275,11 @@
       "de": "Filter",
       "de_from": "f4a9c097"
     },
+    "kind.watch": {
+      "en": "Watch",
+      "de": "Beobachten",
+      "de_from": "ec266ec8"
+    },
     "overlay.frozen": {
       "en": "frozen",
       "de": "eingefroren",
@@ -324,6 +374,11 @@
       "en": "Reads the text in the region so you can copy it",
       "de": "Liest den Text in der Region, damit Sie ihn kopieren können",
       "de_from": "7fb331a9"
+    },
+    "coach.types.watch": {
+      "en": "Tells you when it changes, or stops changing.",
+      "de": "Meldet, wenn sich etwas ändert oder zur Ruhe kommt.",
+      "de_from": "ac26813f"
     },
     "coach.types.footer": {
       "en": "Drag with no key held and you get a plain area.",

@@ -38,6 +38,7 @@ toml = { workspace = true }
 uptake-log = { workspace = true }
 tauri-plugin-global-shortcut = "2.3.2"
 tauri-plugin-dialog = "2.7.2"
+tauri-plugin-notification = "2"
 tauri-plugin-single-instance = "2"
 
 [target."cfg(windows)".dependencies]

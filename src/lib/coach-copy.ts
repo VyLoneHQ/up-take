@@ -38,7 +38,7 @@ import { kindLabels } from './overlay-state';
 import { fill, type Language, type TextKey, text } from './strings';
 
 /** How a type row's swatch is coloured. */
-export type TypeTone = 'accent' | 'filter' | 'upscale' | 'text';
+export type TypeTone = 'accent' | 'filter' | 'upscale' | 'text' | 'watch';
 
 /** One area type on step 2. */
 export interface TypeRow {
@@ -114,6 +114,12 @@ export function coachCopy(language: Language) {
           does: say('coach.types.ocr'),
           tone: 'text',
         },
+        {
+          key: 'W',
+          name: kinds.watch,
+          does: say('coach.types.watch'),
+          tone: 'watch',
+        },
       ] satisfies TypeRow[],
       footer: say('coach.types.footer'),
     },
@@ -152,7 +158,7 @@ export function coachCopy(language: Language) {
       placingHeading: say('coach.reference.placing'),
       placing: [
         { keys: drag, does: say('coach.reference.draw') },
-        { keys: 'S F U O', does: say('coach.reference.type') },
+        { keys: 'S F U O W', does: say('coach.reference.type') },
         { keys: 'Ctrl+Space', does: say('coach.reference.freeze') },
         { keys: 'Delete', does: say('coach.reference.remove') },
         { keys: 'Esc', does: say('coach.reference.leave') },

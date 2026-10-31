@@ -721,6 +721,9 @@ kbd {
 .swatch[data-tone='text'] {
   background: rgba(243, 201, 105, 0.75);
 }
+.swatch[data-tone='watch'] {
+  background: rgba(120, 225, 170, 0.85);
+}
 .type-name {
   color: var(--text);
 }

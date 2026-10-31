@@ -75,6 +75,7 @@ const NUMBER_WORDS = [
   'five',
   'six',
   'seven',
+  'eight',
 ] as const;
 
 /**
@@ -91,7 +92,7 @@ const SITES = [
     name: 'README.md "what works today"',
     source: readmeMd,
     // "Four of seven area types are built."
-    pattern: /\b(\w+) of seven area types are built\b/i,
+    pattern: /\b(\w+) of eight area types are built\b/i,
     complement: false,
   },
   {
@@ -105,7 +106,7 @@ const SITES = [
     name: 'CONTRIBUTING.md',
     source: contributingMd,
     // "Four of seven area types are built and there is no release yet."
-    pattern: /\b(\w+) of seven area types are built\b/i,
+    pattern: /\b(\w+) of eight area types are built\b/i,
     complement: false,
   },
   {
@@ -125,7 +126,7 @@ const SITES = [
 ] as const;
 
 /** Every area type there is, which the complement sentences count down from. */
-const TOTAL_TYPES = 7;
+const TOTAL_TYPES = 8;
 
 /**
  * How many area types have behaviour, read out of `conversion_label`.

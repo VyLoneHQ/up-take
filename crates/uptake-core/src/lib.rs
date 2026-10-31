@@ -51,3 +51,4 @@ pub mod geometry;
 pub mod interaction;
 pub mod sharpen;
 pub mod sticky;
+pub mod watch;

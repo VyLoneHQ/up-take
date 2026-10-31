@@ -13,7 +13,7 @@ on an assumption that is about to change is work nobody gets to keep.
 
 ## What state the project is in
 
-Five of seven area types are built and there is no release yet. The
+Six of eight area types are built and there is no release yet. The
 [README](README.md) says what runs today and what the product is meant to be. Text extraction has code now, and the README says what
 is still missing from it. If you are looking for the read aloud or AI description features, those
 are designed and not written, so there is no code there to improve.
