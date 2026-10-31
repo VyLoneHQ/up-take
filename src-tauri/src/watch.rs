@@ -307,13 +307,23 @@ fn left_out(bounds: Rect, taken: Rect, overlay_in_captures: bool) -> Vec<Rect> {
         return Vec::new();
     }
     let parts = own_drawing(bounds, taken);
-    let (width, height) = (bounds.size.width, bounds.size.height);
-    let beside_the_mark = width > MARK.0 + EDGE;
-    let below_the_mark = height > MARK.1 + EDGE;
-    if beside_the_mark || below_the_mark {
-        parts.to_vec()
-    } else {
-        parts[..4].to_vec()
+    // Decided on the picture actually taken, which is `bounds` clamped to
+    // the desktop: an area hanging off an edge keeps only part of itself
+    // (review of `#154`, round 10, after round 8 decided it on `bounds`).
+    let picture = Rect::new(0, 0, taken.size.width, taken.size.height);
+    let inside = Rect::new(
+        bounds.origin.x - taken.origin.x + i32::try_from(EDGE).unwrap_or(0),
+        bounds.origin.y - taken.origin.y + i32::try_from(EDGE).unwrap_or(0),
+        bounds.size.width.saturating_sub(2 * EDGE),
+        bounds.size.height.saturating_sub(2 * EDGE),
+    )
+    .intersection(picture);
+    match inside {
+        // Nothing inside the border is on screen: leave it all in, since the
+        // border is as still as the mark.
+        None => Vec::new(),
+        Some(inside) if parts[4].intersection(inside) == Some(inside) => parts[..4].to_vec(),
+        Some(_) => parts.to_vec(),
     }
 }
 
@@ -512,6 +522,33 @@ mod tests {
         );
         let large = Rect::new(0, 0, 600, 400);
         assert_eq!(left_out(large, large, true).len(), 5);
+    }
+
+    /// Round 10: an area hanging off the desktop is judged by the part that
+    /// was captured, so it too keeps something to compare.
+    #[test]
+    fn an_area_off_the_edge_keeps_something_to_compare() {
+        let monitor = Rect::new(0, 0, 1920, 1080);
+        for bounds in [
+            Rect::new(100, 1040, 200, 100),
+            Rect::new(-360, 100, 600, 10),
+        ] {
+            let Some(taken) = bounds.intersection(monitor) else {
+                panic!("partly on screen");
+            };
+            let (width, height) = (taken.size.width, taken.size.height);
+            let Some(mut bitmap) = uptake_core::bitmap::RgbaBitmap::from_pixels(
+                uptake_core::geometry::Size::new(width, height),
+                [255_u8; 4].repeat(usize::try_from(width * height).unwrap_or(0)),
+            ) else {
+                panic!("a bitmap");
+            };
+            uptake_core::watch::leave_out(&mut bitmap, &left_out(bounds, taken, true));
+            assert!(
+                bitmap.pixels().chunks(4).any(|pixel| pixel[0] != 0),
+                "{bounds:?} keeps something"
+            );
+        }
     }
 
     /// An area is read right before its capture only while the overlay state
