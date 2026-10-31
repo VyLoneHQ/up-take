@@ -43,8 +43,9 @@
 //! area may hang off the desktop or into a gap between monitors; the capture
 //! would still read the part that is on screen while the mark is drawn
 //! nowhere, which is `ADR-0048`'s first *Revisit if* (review of `#154`,
-//! round 3). Checked against the corner left out for the mark, which is
-//! larger than the mark, so it errs on the side of reading less.
+//! round 3). Checked against a corner larger than the mark, at that size even
+//! when the area is smaller (round 15), so it errs on the side of reading
+//! less.
 //!
 //! **Each of these is asked again right before each capture**, not once a
 //! pass, so an overlay hidden or a move started partway through a pass stops
@@ -374,16 +375,20 @@ fn left_out(bounds: Rect, taken: Rect, overlay_in_captures: bool) -> Vec<Rect> {
     }
 }
 
-/// Where the *watching* mark can be, in desktop pixels: the top right corner
-/// of `bounds` that [`own_drawing`] leaves out.
+/// Where the *watching* mark can be, in desktop pixels: a [`MARK`]-sized
+/// corner whose top right is the area's, **whatever the area's size**. The
+/// page anchors the mark to the area's right edge and lets it run left and
+/// down past a narrow or short area (it does not clip), so a corner clamped
+/// to the area would let a narrow area at the desktop's edge read with its
+/// mark off screen (review of `#154`, round 15). [`own_drawing`] clamps,
+/// because it works in the area's own pixels.
 fn mark(bounds: Rect) -> Rect {
-    let width = MARK.0.min(bounds.size.width);
     let right = bounds.origin.x + i32::try_from(bounds.size.width).unwrap_or(i32::MAX);
     Rect::new(
-        right - i32::try_from(width).unwrap_or(0),
+        right - i32::try_from(MARK.0).unwrap_or(0),
         bounds.origin.y,
-        width,
-        MARK.1.min(bounds.size.height),
+        MARK.0,
+        MARK.1,
     )
 }
 
@@ -856,6 +861,9 @@ mod tests {
             assert_eq!(fake.captured.len(), 1, "waits a pass after the move");
             run(&mut fake, &mut memory, 3);
             assert_eq!(fake.notified.len(), 0, "{:?}", fake.notified);
+            // And it reads again: a watcher that never forgot the old place
+            // would start again every pass and never read (round 15).
+            assert!(fake.captured.len() > 1, "{:?}", fake.captured);
         }
 
         /// Nothing switched on: the loop sleeps until woken.
@@ -1039,6 +1047,9 @@ mod tests {
         let monitors = [left, right];
         let inside = Rect::new(100, 100, 600, 400);
         assert_eq!(mark(inside), Rect::new(700 - 240, 100, MARK.0, MARK.1));
+        // Round 15: a narrow area at the desktop's left edge, whose mark
+        // runs left past it and off the desktop.
+        assert!(!mark_on_screen(mark(Rect::new(0, 100, 40, 400)), &monitors));
         assert!(mark_on_screen(mark(inside), &monitors));
         // Past the right edge of the rightmost monitor.
         assert!(!mark_on_screen(
