@@ -61,9 +61,17 @@ use crate::watch::Watch;
 /// The smallest watch area that watches, in physical pixels (roadmap `1.58`).
 ///
 /// The page keeps the *watching* mark inside its area and clips it at the end,
-/// dot first, so below some size no mark is left to see. At 250 % scaling the
-/// dot needs about 30 by 33 physical pixels with the badge's offsets; this
-/// leaves room. See [`Area::is_watching`].
+/// dot first, so below some size no mark is left to see. Sized for up to
+/// 250 % scaling, where the dot needs about 30 by 33 physical pixels with the
+/// badge's offsets (an estimate from the CSS, not rendered). See
+/// [`Area::is_watching`].
+///
+/// ⚠️ **Physical pixels, while the page draws in CSS pixels**, so the
+/// minimum shrinks as scaling rises: above about 300 % an area of this size
+/// can clip its dot away while it reads (review of `#154`, round 18). The
+/// host cannot size it by the page's scale, which `ADR-0011` makes the
+/// WebView's alone; it is a member of UP-TAKE backlog `I-475`, closed when
+/// the reader enforces the mark itself.
 pub const WATCH_MIN: (u32, u32) = (48, 40);
 
 /// A stable identity for an area, unique within the [`AreaStore`] that issued

@@ -55,7 +55,7 @@
 //! fresh baseline when the gesture ends.
 //!
 //! ⚠️ **Known gaps, left to their own change on the founder's decision
-//! (2026-10-31, UP-TAKE backlog `I-475`).** All four are moments when the host
+//! (2026-10-31, UP-TAKE backlog `I-475`).** All five are moments when the host
 //! may read while the page is not showing the mark:
 //!
 //! - With *Show UP-TAKE in screen recordings* on, a freeze or another
@@ -78,9 +78,12 @@
 //!   in sight. A screenshot area's still is opaque, so one placed over the
 //!   corner hides the mark while this area keeps reading (round 14). With
 //!   the setting off, the still is not in the reading either.
+//! - Above about 300 % scaling, an area near the smallest size that watches
+//!   (`uptake_core::area::WATCH_MIN`, in physical pixels) can have its mark
+//!   clipped away by the page, which draws in CSS pixels (round 18).
 //!
 //! Each check above closes one route by asking the host's state; rounds 2
-//! to 14 each found another. `ADR-0048`'s *Revisit if* names the fix that
+//! to 18 each found another. `ADR-0048`'s *Revisit if* names the fix that
 //! closes the class: the reader enforces the mark itself rather than
 //! trusting what the page should be drawing. That is UP-TAKE `I-475`, not this
 //! module's checks.
