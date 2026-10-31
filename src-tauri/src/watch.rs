@@ -77,14 +77,25 @@
 //!
 //! # Cost
 //!
-//! 🔴 **Measured 2026-10-31, and this route fails `quality-bars.md` section
-//! 1** (UP-TAKE backlog `I-474`, workspace `evidence/1.58-watch-cost/`).
-//! Each reading is one `uptake_capture::capture_region`, which builds a
-//! session per call, every [`INTERVAL`] for each watching area: 7.3 % of a
-//! core for one area, 11.4 % for three and 16.5 % for five, against 2 % per
-//! live area (hard fail 5 %). A `BitBlt` per reading, or one held session per
-//! monitor, costs about a hundredth of that. Which route replaces this one is
-//! the founder's decision.
+//! **Readings come from capture sessions held on the monitors under watching
+//! areas** (`uptake_capture::warm::watch_hold`), each sent at most one frame
+//! a second; a pass reads each monitor's frame once and cuts every area out
+//! of it (`warm::compose`). The founder's choice, 2026-10-31 (UP-TAKE backlog
+//! `I-474`), after the measurement in workspace `evidence/1.58-watch-cost/`:
+//!
+//! - **This route: 0.13 % of a core for one area and for five**, every
+//!   [`INTERVAL`], on a still screen.
+//! - The first route, a capture built per reading, cost 7.3 % for one area
+//!   and 16.5 % for five, against `quality-bars.md` section 1's 2 % per live
+//!   area (hard fail 5 %).
+//! - ⚠️ **A busy screen under a held session is not measured for this
+//!   route.** `ADR-0026` measured an unthrottled one at +1.33 points with
+//!   video playing; these are throttled to one frame a second.
+//!
+//! The sessions are let go whenever nothing can be read (switched off,
+//! paused, overlay hidden). For about a third of a second after they are
+//! taken, and on a monitor WGC cannot hold, a reading falls back to one
+//! capture of its own (`output.rs`, `capture_for_watch`), at the old cost.
 //!
 //! # The thread
 //!
@@ -364,6 +375,11 @@ trait Host {
     fn still_watching(&mut self, target: Target) -> bool;
     /// Every monitor's rectangle.
     fn monitors(&mut self) -> Vec<Rect>;
+    /// Keeps capture sessions held on the monitors under `regions`, and
+    /// starts a pass: frames read in the last pass are not reused.
+    fn hold(&mut self, regions: &[Rect]);
+    /// Lets every held session go: nothing will be read for a while.
+    fn release(&mut self);
     /// One reading of `bounds`.
     fn capture(&mut self, bounds: Rect) -> Result<uptake_capture::CapturedRegion, String>;
     /// A reading failed; logged once until one succeeds.
@@ -372,27 +388,58 @@ trait Host {
     fn notify(&mut self, event: Event);
 }
 
-/// The app itself.
-struct AppHost<'a>(&'a AppHandle);
+/// The app itself, and the monitor frames read in this pass.
+struct AppHost<'a> {
+    app: &'a AppHandle,
+    /// Each monitor's frame, read once a pass however many areas it holds.
+    frames: Vec<uptake_capture::CapturedRegion>,
+}
 
 impl Host for AppHost<'_> {
     fn look(&mut self) -> (Vec<Target>, bool) {
-        look(self.0)
+        look(self.app)
+    }
+    fn hold(&mut self, regions: &[Rect]) {
+        self.frames.clear();
+        let _ = uptake_capture::warm::watch_hold(regions);
+    }
+    fn release(&mut self) {
+        self.frames.clear();
+        uptake_capture::warm::watch_release();
     }
     fn state(&mut self) -> (OverlayState, bool) {
-        (overlay_state(self.0), in_captures())
+        (overlay_state(self.app), in_captures())
     }
     fn in_gesture(&mut self) -> Option<AreaId> {
         crate::placement::area_in_gesture()
     }
     fn still_watching(&mut self, target: Target) -> bool {
-        still_watching(self.0, target)
+        still_watching(self.app, target)
     }
     fn monitors(&mut self) -> Vec<Rect> {
         crate::overlay::monitor_rects()
     }
     fn capture(&mut self, bounds: Rect) -> Result<uptake_capture::CapturedRegion, String> {
-        crate::output::capture_for_watch(bounds)
+        // From the held sessions: each monitor's frame read once a pass, the
+        // area cut out of it. A monitor whose session is still warming up
+        // (about a third of a second after `hold`), or could not be held,
+        // falls back to one capture of its own for this reading.
+        for monitor in crate::overlay::monitor_rects() {
+            if monitor.intersection(bounds).is_none()
+                || self
+                    .frames
+                    .iter()
+                    .any(|frame| frame.rect.intersection(monitor) == Some(monitor))
+            {
+                continue;
+            }
+            match uptake_capture::warm::watch_capture_monitor(monitor) {
+                Some(frame) => self.frames.push(frame),
+                None => return crate::output::capture_for_watch(bounds),
+            }
+        }
+        uptake_capture::warm::compose(bounds, &self.frames)
+            .map_or_else(|| crate::output::capture_for_watch(bounds), Ok)
     }
     fn trouble(&mut self, error: &str) {
         crate::diagnostics::trouble(
@@ -401,7 +448,7 @@ impl Host for AppHost<'_> {
         );
     }
     fn notify(&mut self, event: Event) {
-        notify(self.0, event);
+        notify(self.app, event);
     }
 }
 
@@ -417,7 +464,10 @@ struct Memory {
 }
 
 fn run(app: &AppHandle) {
-    let mut host = AppHost(app);
+    let mut host = AppHost {
+        app,
+        frames: Vec::new(),
+    };
     let mut memory = Memory::default();
     loop {
         let timeout = pass(&mut host, &mut memory);
@@ -446,14 +496,22 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
     ) {
         Next::Sleep => {
             watchers.clear();
+            host.release();
             return None;
         }
         Next::Look => {
             watchers.clear();
+            host.release();
             return Some(INTERVAL);
         }
         Next::Read => {}
     }
+    host.hold(
+        &targets
+            .iter()
+            .map(|target| target.bounds)
+            .collect::<Vec<_>>(),
+    );
     let moving: Option<AreaId> = host.in_gesture();
     watchers.retain(|id, _| Some(*id) != moving && targets.iter().any(|target| target.id == *id));
     for target in targets {
@@ -598,6 +656,10 @@ mod tests {
             level: u8,
             captured: Vec<Rect>,
             notified: Vec<Event>,
+            /// What the loop last asked to hold sessions for.
+            held: Vec<Rect>,
+            /// How many times it let them go.
+            released: usize,
         }
 
         impl Fake {
@@ -612,6 +674,8 @@ mod tests {
                     level: 200,
                     captured: Vec::new(),
                     notified: Vec::new(),
+                    held: Vec::new(),
+                    released: 0,
                 }
             }
         }
@@ -631,6 +695,13 @@ mod tests {
             }
             fn monitors(&mut self) -> Vec<Rect> {
                 vec![self.monitor]
+            }
+            fn hold(&mut self, regions: &[Rect]) {
+                self.held = regions.to_vec();
+            }
+            fn release(&mut self) {
+                self.held.clear();
+                self.released += 1;
             }
             fn capture(&mut self, bounds: Rect) -> Result<CapturedRegion, String> {
                 self.captured.push(bounds);
@@ -687,6 +758,25 @@ mod tests {
             fake.level = 20;
             run(&mut fake, &mut memory, 1);
             assert_eq!(fake.notified, vec![Event::Changed]);
+        }
+
+        /// Sessions are held for the areas being read, and let go as soon as
+        /// nothing can be read: switched off, or the overlay hidden.
+        #[test]
+        fn sessions_are_held_only_while_reading() {
+            let bounds = Rect::new(100, 100, 600, 400);
+            let mut fake = Fake::new(targets(&[bounds]));
+            let mut memory = Memory::default();
+            let _ = pass(&mut fake, &mut memory);
+            assert_eq!(fake.held, vec![bounds]);
+            fake.state = (OverlayState::Hidden, false);
+            let _ = pass(&mut fake, &mut memory);
+            assert_eq!((fake.held.len(), fake.released), (0, 1), "hidden");
+            fake.state = (OverlayState::Living, false);
+            let _ = pass(&mut fake, &mut memory);
+            fake.targets.clear();
+            let _ = pass(&mut fake, &mut memory);
+            assert_eq!((fake.held.len(), fake.released), (0, 2), "switched off");
         }
 
         /// Nothing switched on: the loop sleeps until woken.

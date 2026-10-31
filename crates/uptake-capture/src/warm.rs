@@ -171,6 +171,12 @@ struct Slot {
     /// rebuilt — so a rebuild that failed would look like a session that never
     /// served a frame at all.
     ever_retained: AtomicBool,
+    /// The least time between two frames the compositor sends this session,
+    /// or `None` for WGC's default. Freeze holds `None` (frame age is its
+    /// fidelity bar); watch areas hold [`WATCH_FRAME_INTERVAL`], since a
+    /// reading every two seconds gains nothing from fresher frames and a busy
+    /// screen costs per frame.
+    min_interval: Option<std::time::Duration>,
 }
 
 impl Slot {
@@ -354,15 +360,25 @@ pub fn start(scope: Scope) -> usize {
         stop();
         return 0;
     };
-    let monitors = in_scope(monitors, scope);
+    hold(&SESSIONS, in_scope(monitors, scope), None)
+}
+
+/// Makes `held` hold exactly `monitors`, keeping the sessions it has when they
+/// already do. The body of [`start`], apart so the watch areas' own set
+/// ([`watch_hold`]) is held by the same code, not a copy of it.
+fn hold(
+    held: &Mutex<Vec<Arc<Slot>>>,
+    monitors: Vec<crate::plan::MonitorInfo>,
+    min_interval: Option<std::time::Duration>,
+) -> usize {
     {
-        let sessions = SESSIONS.lock().unwrap_or_else(PoisonError::into_inner);
+        let sessions = held.lock().unwrap_or_else(PoisonError::into_inner);
         if covers(&sessions, &monitors) {
             return sessions.len();
         }
     }
-    stop();
-    let mut sessions = SESSIONS.lock().unwrap_or_else(PoisonError::into_inner);
+    let _ = stop_in(held, || true);
+    let mut sessions = held.lock().unwrap_or_else(PoisonError::into_inner);
     for monitor in monitors {
         let slot = Arc::new(Slot {
             bounds: monitor.bounds,
@@ -372,6 +388,7 @@ pub fn start(scope: Scope) -> usize {
             thread_id: Mutex::new(None),
             unservable: AtomicBool::new(false),
             ever_retained: AtomicBool::new(false),
+            min_interval,
         });
         // The pump publishes its id before the slot joins `SESSIONS`, so
         // `thread_id` is never "not yet" for a slot a reader can reach. It can
@@ -496,8 +513,13 @@ pub fn stop() {
 /// caller today is a detached worker with no latency budget rather than the
 /// event-loop thread.
 pub fn stop_if(should_stop: impl FnOnce() -> bool) -> bool {
+    stop_in(&SESSIONS, should_stop)
+}
+
+/// [`stop_if`] on either set of sessions.
+fn stop_in(list: &Mutex<Vec<Arc<Slot>>>, should_stop: impl FnOnce() -> bool) -> bool {
     let held: Vec<Arc<Slot>> = {
-        let mut sessions = SESSIONS.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut sessions = list.lock().unwrap_or_else(PoisonError::into_inner);
         if !should_stop() {
             return false;
         }
@@ -567,8 +589,13 @@ pub fn status() -> WarmStatus {
 /// [`crate::capture_region`].
 #[must_use]
 pub fn capture_monitor(monitor: Rect) -> Option<CapturedRegion> {
+    capture_monitor_in(&SESSIONS, monitor)
+}
+
+/// [`capture_monitor`] on either set of sessions.
+fn capture_monitor_in(list: &Mutex<Vec<Arc<Slot>>>, monitor: Rect) -> Option<CapturedRegion> {
     let slot = {
-        let sessions = SESSIONS.lock().unwrap_or_else(PoisonError::into_inner);
+        let sessions = list.lock().unwrap_or_else(PoisonError::into_inner);
         // Matched by which held monitor **contains the centre** of the requested
         // rectangle, so a caller asking with slightly different bounds — a
         // rounding, a stale copy — still reaches the right monitor rather than
@@ -592,6 +619,112 @@ pub fn capture_monitor(monitor: Rect) -> Option<CapturedRegion> {
         // `capture_region` follows in returning what it took rather than what it
         // was asked for.
         rect: slot.bounds,
+        bitmap,
+    })
+}
+
+/// The sessions held for watch areas (roadmap `1.58`, backlog `I-474`): one per
+/// monitor under a watching area, for as long as one reads.
+///
+/// **A set of its own, not a share of freeze's.** Freeze starts and stops its
+/// sessions on every overlay transition and holds only the cursor's monitor;
+/// a watch area reads in Living too, on any monitor. Sharing would make each
+/// feature tear down what the other needs. While both hold the same monitor
+/// there are two sessions on it, which costs only while Placement is open with
+/// freeze's warm path switched on.
+///
+/// **Why held rather than one capture per reading** — measured 2026-10-31,
+/// workspace `evidence/1.58-watch-cost/`: a capture per reading builds a
+/// session each time and cost 7.3 % of a core for one area; a held session
+/// read every two seconds cost 0.05 %, and 0.34 % for five areas, on a still
+/// screen. ADR-0026 measured a held session at +1.33 points of a core with
+/// video playing, unthrottled; these are throttled to [`WATCH_FRAME_INTERVAL`].
+static WATCH_SESSIONS: Mutex<Vec<Arc<Slot>>> = Mutex::new(Vec::new());
+
+/// The least time between frames for a watch area's session. Readings come
+/// every two seconds, so a frame up to a second old is as good as a new one.
+pub const WATCH_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Holds a session on every monitor that any of `regions` overlaps, and on no
+/// other, keeping sessions already held for them. Returns how many are held.
+pub fn watch_hold(regions: &[Rect]) -> usize {
+    let Ok(monitors) = crate::monitors::enumerate() else {
+        watch_release();
+        return 0;
+    };
+    let wanted: Vec<crate::plan::MonitorInfo> = monitors
+        .into_iter()
+        .filter(|monitor| {
+            regions
+                .iter()
+                .any(|region| region.intersection(monitor.bounds).is_some())
+        })
+        .collect();
+    hold(&WATCH_SESSIONS, wanted, Some(WATCH_FRAME_INTERVAL))
+}
+
+/// Stops every watch area's session. Safe when none is held.
+pub fn watch_release() {
+    let _ = stop_in(&WATCH_SESSIONS, || true);
+}
+
+/// The newest frame held for watch areas on `monitor`, or `None` (not held,
+/// still warming up, or the monitor changed): the caller takes
+/// [`crate::capture_region`] instead.
+#[must_use]
+pub fn watch_capture_monitor(monitor: Rect) -> Option<CapturedRegion> {
+    capture_monitor_in(&WATCH_SESSIONS, monitor)
+}
+
+/// `region` cut out of whole-monitor `frames`, as [`crate::capture_region`]
+/// would have taken it: the rectangle is `region` clamped to the frames it
+/// overlaps, and pixels on none of them are transparent black. `None` when
+/// `region` overlaps no frame, or a cut fails.
+///
+/// A pure function, so the way a watch area spanning two monitors is put
+/// together is tested without a desktop.
+#[must_use]
+pub fn compose(region: Rect, frames: &[CapturedRegion]) -> Option<CapturedRegion> {
+    let parts: Vec<(Rect, &CapturedRegion)> = frames
+        .iter()
+        .filter_map(|frame| region.intersection(frame.rect).map(|part| (part, frame)))
+        .collect();
+    let (first, _) = parts.first()?;
+    let taken = parts.iter().skip(1).fold(*first, |all, (part, _)| {
+        let left = all.origin.x.min(part.origin.x);
+        let top = all.origin.y.min(part.origin.y);
+        let right = (i64::from(all.origin.x) + i64::from(all.size.width))
+            .max(i64::from(part.origin.x) + i64::from(part.size.width));
+        let bottom = (i64::from(all.origin.y) + i64::from(all.size.height))
+            .max(i64::from(part.origin.y) + i64::from(part.size.height));
+        Rect::new(
+            left,
+            top,
+            u32::try_from(right - i64::from(left)).unwrap_or(0),
+            u32::try_from(bottom - i64::from(top)).unwrap_or(0),
+        )
+    });
+    let mut bitmap = RgbaBitmap::transparent(taken.size)?;
+    for (part, frame) in parts {
+        let cut = frame.bitmap.crop(Rect::new(
+            part.origin.x - frame.rect.origin.x,
+            part.origin.y - frame.rect.origin.y,
+            part.size.width,
+            part.size.height,
+        ))?;
+        let placed = crate::blit::blit(
+            &mut bitmap,
+            u32::try_from(part.origin.x - taken.origin.x).ok()?,
+            u32::try_from(part.origin.y - taken.origin.y).ok()?,
+            cut.pixels(),
+            part.size,
+        );
+        if !placed {
+            return None;
+        }
+    }
+    Some(CapturedRegion {
+        rect: taken,
         bitmap,
     })
 }
@@ -941,12 +1074,16 @@ fn spawn_session(slot: Arc<Slot>) -> bool {
             CursorCaptureSettings::WithoutCursor,
             DrawBorderSettings::WithoutBorder,
             SecondaryWindowSettings::Default,
-            // Deliberately `Default`, the value `wgc.rs` captures with.
-            // Throttling would cut the CPU cost measured for this feature, but it
-            // buys that by letting the retained frame age — and frame age is the
-            // fidelity half of `quality-bars.md` §1's freeze rows, so it cannot
-            // be tuned on the CPU number alone.
-            MinimumUpdateIntervalSettings::Default,
+            // Freeze's sessions: deliberately `Default`, the value `wgc.rs`
+            // captures with. Throttling would cut the CPU cost measured for
+            // this feature, but it buys that by letting the retained frame age —
+            // and frame age is the fidelity half of `quality-bars.md` §1's
+            // freeze rows, so it cannot be tuned on the CPU number alone.
+            // Watch areas' sessions alone set an interval (see `Slot`).
+            slot.min_interval.map_or(
+                MinimumUpdateIntervalSettings::Default,
+                MinimumUpdateIntervalSettings::Custom,
+            ),
             DirtyRegionSettings::Default,
             ColorFormat::Rgba8,
             WarmFlags {
@@ -991,6 +1128,63 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    /// A monitor frame at `rect` filled with one grey `level`.
+    fn frame(rect: Rect, level: u8) -> CapturedRegion {
+        let pixels =
+            [level, level, level, 255].repeat((rect.size.width * rect.size.height) as usize);
+        CapturedRegion {
+            rect,
+            bitmap: RgbaBitmap::from_pixels(rect.size, pixels).unwrap(),
+        }
+    }
+
+    fn pixel(region: &CapturedRegion, x: u32, y: u32) -> [u8; 4] {
+        let i = ((y * region.rect.size.width + x) * 4) as usize;
+        region.bitmap.pixels()[i..i + 4].try_into().unwrap()
+    }
+
+    /// A watch area across two monitors is put together from both frames,
+    /// each piece in its place; one inside a monitor is a plain cut.
+    #[test]
+    fn compose_cuts_an_area_out_of_the_monitors_it_spans() {
+        let left = frame(Rect::new(0, 0, 100, 80), 10);
+        let right = frame(Rect::new(100, 0, 100, 80), 200);
+        let both = compose(Rect::new(90, 10, 20, 5), &[left.clone(), right.clone()]).unwrap();
+        assert_eq!(both.rect, Rect::new(90, 10, 20, 5));
+        assert_eq!(
+            pixel(&both, 9, 0),
+            [10, 10, 10, 255],
+            "from the left monitor"
+        );
+        assert_eq!(
+            pixel(&both, 10, 0),
+            [200, 200, 200, 255],
+            "from the right one"
+        );
+        let inside = compose(Rect::new(10, 10, 5, 5), &[left, right]).unwrap();
+        assert_eq!(pixel(&inside, 0, 0), [10, 10, 10, 255]);
+    }
+
+    /// Off the desktop the area is clamped, as `capture_region` clamps it;
+    /// in the gap below a shorter monitor the pixels are transparent black;
+    /// on no monitor at all there is nothing.
+    #[test]
+    fn compose_clamps_and_leaves_the_gaps_empty() {
+        let tall = frame(Rect::new(0, 0, 100, 80), 10);
+        let short = frame(Rect::new(100, 0, 100, 40), 200);
+        let clamped = compose(Rect::new(-20, 70, 40, 30), std::slice::from_ref(&tall)).unwrap();
+        assert_eq!(clamped.rect, Rect::new(0, 70, 20, 10));
+        let across = compose(Rect::new(90, 30, 20, 20), &[tall.clone(), short.clone()]).unwrap();
+        assert_eq!(across.rect, Rect::new(90, 30, 20, 20));
+        assert_eq!(
+            pixel(&across, 15, 15),
+            [0, 0, 0, 0],
+            "below the short monitor"
+        );
+        assert_eq!(pixel(&across, 15, 5), [200, 200, 200, 255]);
+        assert!(compose(Rect::new(500, 500, 10, 10), &[tall, short]).is_none());
+    }
 
     /// Builds a mapping whose every pixel encodes its own (x, y), so a copy that
     /// reads the wrong offset produces provably wrong content rather than
@@ -1100,6 +1294,7 @@ mod tests {
             thread_id: Mutex::new(Some(1000 + handle as u32)),
             unservable: AtomicBool::new(false),
             ever_retained: AtomicBool::new(false),
+            min_interval: None,
         })
     }
 
