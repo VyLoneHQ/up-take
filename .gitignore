@@ -44,9 +44,8 @@ __pycache__/
 # rather than committed -- `scripts/acquire-onnxruntime.py`,
 # `scripts/acquire-ppocr-detector.py` and `scripts/acquire-ppocr-recogniser.py`
 # each verify every byte against a pinned SHA-256 before writing here, which is
-# ADR-0032 decision 2. The exact figure is 48,713,563 B since ONNX Runtime 1.31.0, and
-# `installer_payload_bytes()` derives it from the six pins -- do not hand-write
-# a total here, which is how the "~31 MB" below went stale in the first place.
+# ADR-0032 decision 2. `installer_payload_bytes()` derives the exact figure from
+# the six pins -- do not hand-write an exact total here, which is how the "~31 MB" below went stale in the first place.
 #
 # ⚠️ This block said "the converted PP-OCRv4 models", named TWO scripts, and
 # said ~31 MB. All three were stale, and it sits eleven lines below the block
