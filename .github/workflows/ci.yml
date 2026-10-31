@@ -88,7 +88,7 @@ jobs:
 
       # The bundle checker's own tests (I-346). Synthetic assets and a synthetic
       # pins file in a temp directory, with the module's tables rebound at them,
-      # so they need none of the 47.6 MB this job does not have. Here for the same
+      # so they need none of the 48.7 MB this job does not have. Here for the same
       # reason as the two steps above it: a fast Python run on a Linux runner
       # that is already required, so it costs no new check to register in branch
       # protection and no queue time on the Windows runners.
@@ -335,7 +335,7 @@ jobs:
       # (merged in with --config at the build step below; it is deliberately NOT
       # in tauri.conf.json, because tauri-build validates resource paths at
       # compile time). They
-      # are ~47.6 MB of binaries acquired rather than committed, so a checkout
+      # are ~48.7 MB of binaries acquired rather than committed, so a checkout
       # alone cannot build a bundle and these steps are what make it
       # possible. Each verifies every byte against a pinned SHA-256 before
       # writing (ADR-0032 decision 2), so a tampered or moved upstream artifact
@@ -414,7 +414,7 @@ jobs:
       # `--config` MERGES the release-only bundle resources into the base
       # config. They are deliberately not in `tauri.conf.json`: `tauri-build`
       # validates resource paths at COMPILE time, so putting them there makes
-      # every `cargo check`/`clippy`/`test` require 47.6 MB of acquired assets.
+      # every `cargo check`/`clippy`/`test` require 48.7 MB of acquired assets.
       - name: Build application
         run: pnpm tauri build --config src-tauri/tauri.release.conf.json
 
