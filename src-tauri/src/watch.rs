@@ -77,12 +77,14 @@
 //!
 //! # Cost
 //!
-//! ⚠️ **Not measured yet, and the interval is a first value.** Each reading is
-//! one `uptake_capture::capture_region`, which builds a capture session per
-//! call (about 100 to 350 ms, mostly waiting, per that crate's notes), every
-//! [`INTERVAL`] for each watching area. Roadmap `1.58` requires the rate and
-//! its cost to be measured against `quality-bars.md` section 1 before the
-//! default is chosen; that measurement is owed.
+//! 🔴 **Measured 2026-10-31, and this route fails `quality-bars.md` section
+//! 1** (UP-TAKE backlog `I-474`, workspace `evidence/1.58-watch-cost/`).
+//! Each reading is one `uptake_capture::capture_region`, which builds a
+//! session per call, every [`INTERVAL`] for each watching area: 7.3 % of a
+//! core for one area, 11.4 % for three and 16.5 % for five, against 2 % per
+//! live area (hard fail 5 %). A `BitBlt` per reading, or one held session per
+//! monitor, costs about a hundredth of that. Which route replaces this one is
+//! the founder's decision.
 //!
 //! # The thread
 //!
@@ -454,7 +456,6 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
     }
     let moving: Option<AreaId> = host.in_gesture();
     watchers.retain(|id, _| Some(*id) != moving && targets.iter().any(|target| target.id == *id));
-    let monitors = host.monitors();
     for target in targets {
         // Asked again right before each capture, not only once a pass: a
         // pass reads its areas one after another, each capture taking up
@@ -465,6 +466,7 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
         let now = host.state();
         let gesture_now = host.in_gesture();
         let still = host.still_watching(target);
+        let monitors = host.monitors();
         match gate(
             target.id,
             now == state,
@@ -652,6 +654,10 @@ mod tests {
         }
 
         fn targets(bounds: &[Rect]) -> Vec<Target> {
+            targets_for(bounds, Watch::Changes)
+        }
+
+        fn targets_for(bounds: &[Rect], watch: Watch) -> Vec<Target> {
             let mut store = AreaStore::new();
             bounds
                 .iter()
@@ -659,7 +665,7 @@ mod tests {
                     store.create(AreaType::Watch, *bounds).map(|id| Target {
                         id,
                         bounds: *bounds,
-                        watch: Watch::Changes,
+                        watch,
                     })
                 })
                 .collect()
@@ -737,6 +743,30 @@ mod tests {
             fake.state = (OverlayState::Living, true);
             run(&mut fake, &mut memory, 5);
             assert!(fake.notified.is_empty(), "{:?}", fake.notified);
+        }
+
+        /// Round 3: an area whose mark corner is on no monitor is not read,
+        /// though part of the area is on screen.
+        #[test]
+        fn an_area_whose_mark_is_off_screen_is_not_read() {
+            let mut fake = Fake::new(targets(&[Rect::new(1700, 100, 600, 400)]));
+            let _ = pass(&mut fake, &mut Memory::default());
+            assert_eq!(fake.captured.len(), 0);
+        }
+
+        /// An area set to notify when the screen settles stays quiet when it
+        /// starts changing, and speaks when it settles.
+        #[test]
+        fn an_area_notifies_only_the_moment_it_was_set_to() {
+            let list = targets_for(&[Rect::new(100, 100, 600, 400)], Watch::Settles);
+            let mut fake = Fake::new(list);
+            let mut memory = Memory::default();
+            run(&mut fake, &mut memory, 2);
+            fake.level = 20;
+            run(&mut fake, &mut memory, 1);
+            assert_eq!(fake.notified.len(), 0);
+            run(&mut fake, &mut memory, 4);
+            assert_eq!(fake.notified, vec![Event::Settled]);
         }
 
         /// Round 10: an area hanging off the bottom of the desktop, with the
