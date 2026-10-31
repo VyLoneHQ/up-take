@@ -58,6 +58,14 @@ use crate::interaction;
 use crate::sticky::Sticky;
 use crate::watch::Watch;
 
+/// The smallest watch area that watches, in physical pixels (roadmap `1.58`).
+///
+/// The page keeps the *watching* mark inside its area and clips it at the end,
+/// dot first, so below some size no mark is left to see. At 250 % scaling the
+/// dot needs about 30 by 33 physical pixels with the badge's offsets; this
+/// leaves room. See [`Area::is_watching`].
+pub const WATCH_MIN: (u32, u32) = (48, 40);
+
 /// A stable identity for an area, unique within the [`AreaStore`] that issued
 /// it.
 ///
@@ -738,11 +746,18 @@ impl Area {
     /// disagreeing when the page derived the mark for itself. They can still
     /// disagree about WHEN: the host learns an answer before the page draws it
     /// (UP-TAKE backlog `I-475`, and the host's `watch.rs`).
+    ///
+    /// **An area smaller than [`WATCH_MIN`] does not watch**, switched on or
+    /// not: the page clips the mark to the area, and below that size it
+    /// clips the mark away, so the area would read with no mark to see
+    /// (review of `#154`, round 17). It neither reads nor shows the mark.
     #[must_use]
     pub fn is_watching(&self) -> bool {
         self.kind == AreaType::Watch
             && self.watch.is_on()
             && self.sticky != crate::sticky::Sticky::Paused
+            && self.bounds.size.width >= WATCH_MIN.0
+            && self.bounds.size.height >= WATCH_MIN.1
     }
 
     /// True when this area takes mouse events.
@@ -1696,6 +1711,20 @@ mod tests {
             Some(Watch::Off),
             "converted back, it does not resume an old choice"
         );
+        // Round 17: an area too small to show its mark does not watch, and
+        // one exactly the smallest size does.
+        let mut small = AreaStore::new();
+        for (width, height, watches) in [(47, 400, false), (400, 39, false), (48, 40, true)] {
+            let Some(id) = small.create(AreaType::Watch, Rect::new(0, 0, width, height)) else {
+                panic!("an area");
+            };
+            assert!(small.set_watch(id, Watch::Changes));
+            assert_eq!(
+                small.get(id).map(Area::is_watching),
+                Some(watches),
+                "{width} by {height}"
+            );
+        }
         // A paused sticky watch area does not read, and reads again when it
         // follows its window again.
         let Some(area) = store.area_mut(watch) else {

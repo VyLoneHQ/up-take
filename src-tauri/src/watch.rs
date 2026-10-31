@@ -379,7 +379,8 @@ fn left_out(bounds: Rect, taken: Rect, overlay_in_captures: bool) -> Vec<Rect> {
 ///
 /// **Correct only because the page keeps the mark inside the area**: the
 /// badge is clipped to the area (`+page.svelte`, `.watch-badge`, pinned by
-/// `page.svelte.test.ts`). Round 15 of the review of `#154` found it ran past
+/// `watch-badge-css.test.ts`), and an area too small to show it does not
+/// watch (`uptake_core::area::WATCH_MIN`, round 17). Round 15 of the review of `#154` found it ran past
 /// a narrow area's left edge, off the desktop, while this corner said it was
 /// on screen; round 16 found that sizing the corner at [`MARK`] whatever the
 /// area stopped small areas near a monitor's left edge from reading while
