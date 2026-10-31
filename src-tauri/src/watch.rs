@@ -55,7 +55,7 @@
 //! fresh baseline when the gesture ends.
 //!
 //! ⚠️ **Known gaps, left to their own change on the founder's decision
-//! (2026-10-31, UP-TAKE backlog `I-475`).** All three are moments when the host
+//! (2026-10-31, UP-TAKE backlog `I-475`).** All four are moments when the host
 //! may read while the page is not showing the mark:
 //!
 //! - With *Show UP-TAKE in screen recordings* on, a freeze or another
@@ -73,9 +73,14 @@
 //!   painted, can be the one read (round 12). A watcher made or started again
 //!   waits one pass before its first reading ([`Watcher`]), which keeps such a
 //!   frame out of a baseline, not out of every reading.
+//! - Another area drawn over this one's top right corner covers the mark,
+//!   and the host asks whether the mark is on a monitor, not whether it is
+//!   in sight. A screenshot area's still is opaque, so one placed over the
+//!   corner hides the mark while this area keeps reading (round 14). With
+//!   the setting off, the still is not in the reading either.
 //!
 //! Each check above closes one route by asking the host's state; rounds 2
-//! to 12 each found another. `ADR-0048`'s *Revisit if* names the fix that
+//! to 14 each found another. `ADR-0048`'s *Revisit if* names the fix that
 //! closes the class: the reader enforces the mark itself rather than
 //! trusting what the page should be drawing. That is UP-TAKE `I-475`, not this
 //! module's checks.
@@ -834,6 +839,23 @@ mod tests {
             fake.state = (OverlayState::Placement, false);
             let _ = pass(&mut fake, &mut memory);
             assert_eq!(fake.captured.len(), 1, "started again: waits a pass");
+        }
+
+        /// Round 14: an area that moved between two passes (a sticky area
+        /// following its window, a move that ended) starts again: it waits a
+        /// pass, then takes a new baseline, and its move is not a change.
+        #[test]
+        fn an_area_that_moved_starts_again() {
+            let mut fake = Fake::new(targets(&[Rect::new(100, 100, 600, 400)]));
+            let mut memory = Memory::default();
+            run(&mut fake, &mut memory, 2);
+            assert_eq!(fake.captured.len(), 1, "the baseline");
+            fake.targets[0].bounds = Rect::new(300, 200, 600, 400);
+            fake.level = 20;
+            run(&mut fake, &mut memory, 1);
+            assert_eq!(fake.captured.len(), 1, "waits a pass after the move");
+            run(&mut fake, &mut memory, 3);
+            assert_eq!(fake.notified.len(), 0, "{:?}", fake.notified);
         }
 
         /// Nothing switched on: the loop sleeps until woken.

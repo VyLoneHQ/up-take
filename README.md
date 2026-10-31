@@ -169,9 +169,13 @@ Six of eight area types are built.
   stops. It reads nothing until you switch watching on in its right-click menu, and says
   *watching* on the area for as long as it reads. What it reads stays on your computer: it keeps
   coarse summaries of its readings, a grid of brightness averages, to compare, and nothing else.
-  <!-- Before release: for an area under 16 px on a side the grid is its greyscale picture
-       (crates/uptake-core/src/watch.rs, review of #154 round 9); say so or drop "coarse". -->
-  <!-- source: ROADMAP.md task 1.58 and ADR-0048 (an area may read its own region repeatedly: the
+  NOTES FOR RELEASE, not part of the draft. (1) For an area under 16 px on a side the grid is its
+  greyscale picture (crates/uptake-core/src/watch.rs, review of #154 round 9): say so or drop
+  "coarse". (2) "Nothing else" must also allow for the capture sessions, which hold each watched
+  monitor's newest frame in graphics memory while an area watches (#154 round 12).
+  This block is one HTML comment and must contain no other comment marker: an inner one closes it
+  early and publishes what follows (#154 round 14).
+  Source: ROADMAP.md task 1.58 and ADR-0048 (an area may read its own region repeatedly: the
        user placed it, it is marked while it reads, reading is per area and off by default, and it
        stays local). The code is crates/uptake-core/src/watch.rs (the rule and its tests) and
        src-tauri/src/watch.rs (the readings and the notification).

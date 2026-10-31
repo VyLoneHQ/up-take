@@ -633,7 +633,7 @@ fn capture_monitor_in(list: &Mutex<Vec<Arc<Slot>>>, monitor: Rect) -> Option<Cap
 /// there are two sessions on it, which costs only while Placement is open with
 /// freeze's warm path switched on.
 ///
-/// **Why held rather than one capture per reading** — measured 2026-10-31,
+/// **Why held rather than one capture per reading.** Measured 2026-10-31,
 /// workspace `evidence/1.58-watch-cost/`: a capture per reading builds a
 /// session each time and cost 7.3 % of a core for one area; these sessions,
 /// read every two seconds, cost 0.13 % for one area and for five, on a still
