@@ -132,7 +132,7 @@
     },
     "area.watching": {
       "en": "watching",
-      "de": "beobachtet",
+      "de": "Beobachtung läuft",
       "de_from": "75a4b320"
     },
     "watch.notify.title": {
@@ -142,12 +142,12 @@
     },
     "watch.notify.changed": {
       "en": "A watch area changed.",
-      "de": "Ein Beobachten-Bereich hat sich geändert.",
+      "de": "Ein Beobachtungsbereich hat sich geändert.",
       "de_from": "34a1d282"
     },
     "watch.notify.settled": {
       "en": "A watch area stopped changing.",
-      "de": "Ein Beobachten-Bereich hat sich nicht mehr geändert.",
+      "de": "Ein Beobachtungsbereich ist zur Ruhe gekommen.",
       "de_from": "b777c8de"
     },
     "menu.click_through": {
