@@ -19,9 +19,17 @@
 //!   because the mark is hidden with it.
 //! - **Local.** A reading is reduced to at most 256 brightness averages
 //!   (a region under 16 pixels on a side keeps one per pixel on that side,
-//!   which is its greyscale picture) and the picture dropped; the detector keeps two such summaries, the
-//!   last still one and the last one. Nothing is written, logged or sent;
-//!   the notification says which moment it was, never what was read.
+//!   which is its greyscale picture), and the detector keeps two such
+//!   summaries, the last still one and the last one. Nothing is written,
+//!   logged or sent; the notification says which moment it was, never what
+//!   was read. ⚠️ **What is held in between is larger than a reading:** while
+//!   any area reads, a capture session on each monitor under one keeps that
+//!   monitor's newest frame as a GPU texture (`uptake_capture::warm`), and
+//!   each pass copies it to memory, cuts the areas out and drops the copy at
+//!   the end of the pass. Only the areas' parts are read; the whole frame is
+//!   what the session holds. `ADR-0048` forecloses a whole-screen *watcher*,
+//!   which this is not, but it is the reason a held frame stays in memory and
+//!   is never written anywhere.
 //!
 //! The fourth, *the user placed it*, is true of every area.
 //!
@@ -59,6 +67,12 @@
 //!   reading can start before the mark is painted; a sticky area resuming
 //!   and a move or resize ending reach the next look the same way (round 7).
 //!   This one happens with the setting off, which is the default.
+//! - A reading uses a held session's newest frame, which can be up to
+//!   `warm::WATCH_FRAME_INTERVAL` (one second) older than the checks before
+//!   it; a frame taken while a move was under way, or before the mark was
+//!   painted, can be the one read (round 12). A watcher made or started again
+//!   waits one pass before its first reading ([`Watcher`]), which keeps such a
+//!   frame out of a baseline, not out of every reading.
 //!
 //! Each check above closes one route by asking the host's state; rounds 2
 //! to 7 each found another. `ADR-0048`'s *Revisit if* names the fix that
@@ -271,6 +285,16 @@ struct Watcher {
     /// on a monitor that was unplugged) is logged once and not every
     /// [`INTERVAL`].
     failing: bool,
+    /// Made, or started again, in this pass: it reads from the next pass on.
+    ///
+    /// A reading comes from a held session's newest frame, which can be up to
+    /// [`uptake_capture::warm::WATCH_FRAME_INTERVAL`] older than the checks
+    /// made before it. A baseline taken in the pass that started a watcher
+    /// again (the overlay state changed, the setting flipped, a move ended)
+    /// could still show what came before, and the next reading would report
+    /// that as a change (review of `#154`, round 12). One [`INTERVAL`] later
+    /// the frame is newer than the reason it started again.
+    fresh: bool,
 }
 
 /// The parts of a reading that are UP-TAKE's own drawing, in the reading's
@@ -380,6 +404,8 @@ trait Host {
     fn hold(&mut self, regions: &[Rect]);
     /// Lets every held session go: nothing will be read for a while.
     fn release(&mut self);
+    /// The pass is over: drop what it read.
+    fn end_pass(&mut self);
     /// One reading of `bounds`.
     fn capture(&mut self, bounds: Rect) -> Result<uptake_capture::CapturedRegion, String>;
     /// A reading failed; logged once until one succeeds.
@@ -406,6 +432,9 @@ impl Host for AppHost<'_> {
     fn release(&mut self) {
         self.frames.clear();
         uptake_capture::warm::watch_release();
+    }
+    fn end_pass(&mut self) {
+        self.frames.clear();
     }
     fn state(&mut self) -> (OverlayState, bool) {
         (overlay_state(self.app), in_captures())
@@ -438,7 +467,7 @@ impl Host for AppHost<'_> {
                 None => return crate::output::capture_for_watch(bounds),
             }
         }
-        uptake_capture::warm::compose(bounds, &self.frames)
+        uptake_capture::warm::compose(bounds, &self.frames, &crate::overlay::monitor_rects())
             .map_or_else(|| crate::output::capture_for_watch(bounds), Ok)
     }
     fn trouble(&mut self, error: &str) {
@@ -544,10 +573,16 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
             target,
             detector: Detector::new(),
             failing: false,
+            fresh: true,
         });
         if watcher.target != target {
             watcher.target = target;
             watcher.detector = Detector::new();
+            watcher.fresh = true;
+        }
+        if watcher.fresh {
+            watcher.fresh = false;
+            continue;
         }
         let reading = match host.capture(target.bounds) {
             Ok(mut captured) => {
@@ -572,6 +607,7 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
             host.notify(event);
         }
     }
+    host.end_pass();
     Some(INTERVAL)
 }
 
@@ -703,6 +739,7 @@ mod tests {
                 self.held.clear();
                 self.released += 1;
             }
+            fn end_pass(&mut self) {}
             fn capture(&mut self, bounds: Rect) -> Result<CapturedRegion, String> {
                 self.captured.push(bounds);
                 if let Some(state) = self.state_after_capture.take() {
@@ -779,6 +816,21 @@ mod tests {
             assert_eq!((fake.held.len(), fake.released), (0, 2), "switched off");
         }
 
+        /// Round 12: a watcher made in a pass does not read until the next,
+        /// so its baseline is newer than whatever made it.
+        #[test]
+        fn a_new_watcher_reads_from_the_next_pass() {
+            let mut fake = Fake::new(targets(&[Rect::new(100, 100, 600, 400)]));
+            let mut memory = Memory::default();
+            let _ = pass(&mut fake, &mut memory);
+            assert_eq!(fake.captured.len(), 0);
+            let _ = pass(&mut fake, &mut memory);
+            assert_eq!(fake.captured.len(), 1);
+            fake.state = (OverlayState::Placement, false);
+            let _ = pass(&mut fake, &mut memory);
+            assert_eq!(fake.captured.len(), 1, "started again: waits a pass");
+        }
+
         /// Nothing switched on: the loop sleeps until woken.
         #[test]
         fn nothing_switched_on_sleeps_until_woken() {
@@ -809,8 +861,10 @@ mod tests {
                 Rect::new(100, 100, 600, 400),
                 Rect::new(800, 100, 600, 400),
             ]));
+            let mut memory = Memory::default();
+            let _ = pass(&mut fake, &mut memory);
             fake.state_after_capture = Some((OverlayState::Hidden, false));
-            let _ = pass(&mut fake, &mut Memory::default());
+            let _ = pass(&mut fake, &mut memory);
             assert_eq!(fake.captured.len(), 1);
         }
 

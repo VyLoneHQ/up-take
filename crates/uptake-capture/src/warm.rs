@@ -635,9 +635,9 @@ fn capture_monitor_in(list: &Mutex<Vec<Arc<Slot>>>, monitor: Rect) -> Option<Cap
 ///
 /// **Why held rather than one capture per reading** — measured 2026-10-31,
 /// workspace `evidence/1.58-watch-cost/`: a capture per reading builds a
-/// session each time and cost 7.3 % of a core for one area; a held session
-/// read every two seconds cost 0.05 %, and 0.34 % for five areas, on a still
-/// screen. ADR-0026 measured a held session at +1.33 points of a core with
+/// session each time and cost 7.3 % of a core for one area; these sessions,
+/// read every two seconds, cost 0.13 % for one area and for five, on a still
+/// screen (route 3 there). ADR-0026 measured a held session at +1.33 points of a core with
 /// video playing, unthrottled; these are throttled to [`WATCH_FRAME_INTERVAL`].
 static WATCH_SESSIONS: Mutex<Vec<Arc<Slot>>> = Mutex::new(Vec::new());
 
@@ -676,34 +676,36 @@ pub fn watch_capture_monitor(monitor: Rect) -> Option<CapturedRegion> {
     capture_monitor_in(&WATCH_SESSIONS, monitor)
 }
 
-/// `region` cut out of whole-monitor `frames`, as [`crate::capture_region`]
-/// would have taken it: the rectangle is `region` clamped to the frames it
-/// overlaps, and pixels on none of them are transparent black. `None` when
+/// `region` cut out of whole-monitor `frames`, exactly as
+/// [`crate::capture_region`] would take it across `desktop` (every monitor's
+/// bounds): the rectangle is `region` clamped to the desktop's bounding box,
+/// and pixels on no frame are transparent black (`plan.rs`). `None` when
 /// `region` overlaps no frame, or a cut fails.
+///
+/// **The same rectangle as `capture_region` on purpose.** A reading falls back
+/// to `capture_region` while a session warms up, so the two routes meet in one
+/// watcher; a picture of a different size would move every cell of the
+/// fingerprint and notify on a still screen (review of `#154`, round 12, when
+/// this clamped to the frames instead).
 ///
 /// A pure function, so the way a watch area spanning two monitors is put
 /// together is tested without a desktop.
 #[must_use]
-pub fn compose(region: Rect, frames: &[CapturedRegion]) -> Option<CapturedRegion> {
+pub fn compose(
+    region: Rect,
+    frames: &[CapturedRegion],
+    desktop: &[Rect],
+) -> Option<CapturedRegion> {
+    let (first, rest) = desktop.split_first()?;
+    let bounding = rest.iter().fold(*first, |all, monitor| all.union(*monitor));
+    let taken = region.intersection(bounding)?;
     let parts: Vec<(Rect, &CapturedRegion)> = frames
         .iter()
-        .filter_map(|frame| region.intersection(frame.rect).map(|part| (part, frame)))
+        .filter_map(|frame| taken.intersection(frame.rect).map(|part| (part, frame)))
         .collect();
-    let (first, _) = parts.first()?;
-    let taken = parts.iter().skip(1).fold(*first, |all, (part, _)| {
-        let left = all.origin.x.min(part.origin.x);
-        let top = all.origin.y.min(part.origin.y);
-        let right = (i64::from(all.origin.x) + i64::from(all.size.width))
-            .max(i64::from(part.origin.x) + i64::from(part.size.width));
-        let bottom = (i64::from(all.origin.y) + i64::from(all.size.height))
-            .max(i64::from(part.origin.y) + i64::from(part.size.height));
-        Rect::new(
-            left,
-            top,
-            u32::try_from(right - i64::from(left)).unwrap_or(0),
-            u32::try_from(bottom - i64::from(top)).unwrap_or(0),
-        )
-    });
+    if parts.is_empty() {
+        return None;
+    }
     let mut bitmap = RgbaBitmap::transparent(taken.size)?;
     for (part, frame) in parts {
         let cut = frame.bitmap.crop(Rect::new(
@@ -1150,7 +1152,13 @@ mod tests {
     fn compose_cuts_an_area_out_of_the_monitors_it_spans() {
         let left = frame(Rect::new(0, 0, 100, 80), 10);
         let right = frame(Rect::new(100, 0, 100, 80), 200);
-        let both = compose(Rect::new(90, 10, 20, 5), &[left.clone(), right.clone()]).unwrap();
+        let desk = [left.rect, right.rect];
+        let both = compose(
+            Rect::new(90, 10, 20, 5),
+            &[left.clone(), right.clone()],
+            &desk,
+        )
+        .unwrap();
         assert_eq!(both.rect, Rect::new(90, 10, 20, 5));
         assert_eq!(
             pixel(&both, 9, 0),
@@ -1162,7 +1170,7 @@ mod tests {
             [200, 200, 200, 255],
             "from the right one"
         );
-        let inside = compose(Rect::new(10, 10, 5, 5), &[left, right]).unwrap();
+        let inside = compose(Rect::new(10, 10, 5, 5), &[left, right], &desk).unwrap();
         assert_eq!(pixel(&inside, 0, 0), [10, 10, 10, 255]);
     }
 
@@ -1173,9 +1181,20 @@ mod tests {
     fn compose_clamps_and_leaves_the_gaps_empty() {
         let tall = frame(Rect::new(0, 0, 100, 80), 10);
         let short = frame(Rect::new(100, 0, 100, 40), 200);
-        let clamped = compose(Rect::new(-20, 70, 40, 30), std::slice::from_ref(&tall)).unwrap();
+        let desk = [tall.rect, short.rect];
+        let clamped = compose(
+            Rect::new(-20, 70, 40, 30),
+            std::slice::from_ref(&tall),
+            &desk,
+        )
+        .unwrap();
         assert_eq!(clamped.rect, Rect::new(0, 70, 20, 10));
-        let across = compose(Rect::new(90, 30, 20, 20), &[tall.clone(), short.clone()]).unwrap();
+        let across = compose(
+            Rect::new(90, 30, 20, 20),
+            &[tall.clone(), short.clone()],
+            &desk,
+        )
+        .unwrap();
         assert_eq!(across.rect, Rect::new(90, 30, 20, 20));
         assert_eq!(
             pixel(&across, 15, 15),
@@ -1183,7 +1202,17 @@ mod tests {
             "below the short monitor"
         );
         assert_eq!(pixel(&across, 15, 5), [200, 200, 200, 255]);
-        assert!(compose(Rect::new(500, 500, 10, 10), &[tall, short]).is_none());
+        // Round 12: on the short monitor and into the gap below it, the
+        // picture keeps the asked height, as `capture_region` does.
+        let gap = compose(
+            Rect::new(150, 0, 20, 60),
+            &[tall.clone(), short.clone()],
+            &desk,
+        )
+        .unwrap();
+        assert_eq!(gap.rect, Rect::new(150, 0, 20, 60));
+        assert_eq!(pixel(&gap, 5, 50), [0, 0, 0, 0]);
+        assert!(compose(Rect::new(500, 500, 10, 10), &[tall, short], &desk).is_none());
     }
 
     /// Builds a mapping whose every pixel encodes its own (x, y), so a copy that

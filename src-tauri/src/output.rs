@@ -610,8 +610,11 @@ fn capture_bitmap(app: &AppHandle, bounds: Rect, split: &mut Split) -> Result<Rg
     Ok(captured.bitmap)
 }
 
-/// One reading for a watch area (roadmap `1.58`): `bounds` captured live.
-/// Never the frozen still or the frame held since a press: a watch area
+/// One reading for a watch area (roadmap `1.58`) by a capture of its own:
+/// `bounds` captured live. **The fallback, not the usual route**: a reading
+/// comes from the watch areas' held sessions (`watch.rs`, `AppHost::capture`),
+/// and this runs only while a session warms up or on a monitor WGC cannot
+/// hold. Never the frozen still or the frame held since a press: a watch area
 /// compares the screen with itself over time.
 ///
 /// ⚠️ **The one capture here that does NOT step UP-TAKE's drawing aside**

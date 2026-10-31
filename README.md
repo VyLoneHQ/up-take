@@ -177,7 +177,7 @@ Six of eight area types are built.
        src-tauri/src/watch.rs (the readings and the notification).
        Deliberately NOT claimed here: reading a window that other windows cover (ROADMAP 1.48, not
        built), watching for a word or a number (later in 1.58), and any cost figure, because the
-       reading route measured on 2026-10-31 fails the CPU budget and is being replaced (I-474).
+       reading route was measured on 2026-10-31 on a still screen only (I-474).
      END OF HELD DRAFT -->
 
 Around those:
