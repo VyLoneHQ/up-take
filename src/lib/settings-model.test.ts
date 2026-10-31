@@ -151,7 +151,7 @@ describe('the inventory', () => {
     const does = keys.keys.map((each) => each.does);
 
     expect(does).not.toContain("Set the next area's type");
-    expect(keys.keys.map((each) => each.keys)).not.toContain('S F U O');
+    expect(keys.keys.map((each) => each.keys)).not.toContain('S F U O W');
     // Everything else survives. A filter that matched too much would leave a
     // reference sheet quietly missing keys the app still honours.
     expect(does).toEqual([

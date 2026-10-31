@@ -4877,9 +4877,6 @@ fn emit_menu(app: &AppHandle) {
     let _ = app.emit(MENU_EVENT, payload);
 }
 
-/// Locks a mutex, treating poisoning as recoverable: everything under these
-/// locks is plain data that stays valid after a panic, and architecture §5
-/// forbids `unwrap`.
 /// The area a move or resize is under way on, if any (roadmap `1.58`).
 ///
 /// While one is, the page draws that area as a preview with none of its
@@ -4894,6 +4891,9 @@ pub(crate) fn area_in_gesture() -> Option<AreaId> {
     }
 }
 
+/// Locks a mutex, treating poisoning as recoverable: everything under these
+/// locks is plain data that stays valid after a panic, and architecture §5
+/// forbids `unwrap`.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }

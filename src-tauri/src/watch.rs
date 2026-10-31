@@ -29,6 +29,14 @@
 //! `capture_for_watch`): the area's border and mark are left in the picture
 //! and left out of the comparison ([`own_drawing`]).
 //!
+//! **An area whose mark is not wholly on a monitor does not read** ([`mark`],
+//! [`mark_on_screen`]). The mark sits in the area's top right corner, and an
+//! area may hang off the desktop or into a gap between monitors; the capture
+//! would still read the part that is on screen while the mark is drawn
+//! nowhere, which is `ADR-0048`'s first *Revisit if* (review of `#154`,
+//! round 3). Checked against the corner left out for the mark, which is
+//! larger than the mark, so it errs on the side of reading less.
+//!
 //! **An area being moved or resized does not read**, because the page draws
 //! it as a preview without its mark, and its readings start again from a
 //! fresh baseline when the gesture ends.
@@ -243,6 +251,26 @@ fn own_drawing(bounds: Rect, taken: Rect) -> [Rect; 5] {
     ]
 }
 
+/// Where the *watching* mark can be, in desktop pixels: the top right corner
+/// of `bounds` that [`own_drawing`] leaves out.
+fn mark(bounds: Rect) -> Rect {
+    let width = MARK.0.min(bounds.size.width);
+    let right = bounds.origin.x + i32::try_from(bounds.size.width).unwrap_or(i32::MAX);
+    Rect::new(
+        right - i32::try_from(width).unwrap_or(0),
+        bounds.origin.y,
+        width,
+        MARK.1.min(bounds.size.height),
+    )
+}
+
+/// Whether the whole of `mark` is on one monitor, so the user can see it.
+fn mark_on_screen(mark: Rect, monitors: &[Rect]) -> bool {
+    monitors
+        .iter()
+        .any(|monitor| mark.intersection(*monitor) == Some(mark))
+}
+
 fn run(app: &AppHandle) {
     // Each area's watcher, with the target it was made for: an area that
     // moved, was resized or was given another choice starts again from a fresh
@@ -278,8 +306,11 @@ fn run(app: &AppHandle) {
         let moving: Option<AreaId> = crate::placement::area_in_gesture();
         watchers
             .retain(|id, _| Some(*id) != moving && targets.iter().any(|target| target.id == *id));
+        let monitors = crate::overlay::monitor_rects();
         for target in targets {
-            if Some(target.id) == moving {
+            if Some(target.id) == moving || !mark_on_screen(mark(target.bounds), &monitors) {
+                // Not read, and read again from a fresh baseline.
+                watchers.remove(&target.id);
                 continue;
             }
             let watcher = watchers.entry(target.id).or_insert_with(|| Watcher {
@@ -342,7 +373,41 @@ fn notify(app: &AppHandle, event: Event) {
 
 #[cfg(test)]
 mod tests {
-    use super::{EDGE, MARK, Next, next, own_drawing};
+    use super::{EDGE, MARK, Next, mark, mark_on_screen, next, own_drawing};
+
+    /// The mark is on screen only when its whole corner is on one monitor:
+    /// not past the desktop's right edge, not above its top, not across the
+    /// gap where a shorter monitor ends.
+    #[test]
+    fn the_mark_must_be_wholly_on_one_monitor() {
+        let left = Rect::new(0, 0, 1920, 1080);
+        let right = Rect::new(1920, 0, 1280, 720);
+        let monitors = [left, right];
+        let inside = Rect::new(100, 100, 600, 400);
+        assert_eq!(mark(inside), Rect::new(700 - 240, 100, MARK.0, MARK.1));
+        assert!(mark_on_screen(mark(inside), &monitors));
+        // Past the right edge of the rightmost monitor.
+        assert!(!mark_on_screen(
+            mark(Rect::new(2900, 100, 600, 400)),
+            &monitors
+        ));
+        // Above the top of the desktop.
+        assert!(!mark_on_screen(
+            mark(Rect::new(100, -20, 600, 400)),
+            &monitors
+        ));
+        // Below the shorter right monitor, beside the taller left one.
+        assert!(!mark_on_screen(
+            mark(Rect::new(1700, 900, 600, 100)),
+            &monitors
+        ));
+        // Across the seam between two monitors: on neither wholly.
+        assert!(!mark_on_screen(
+            mark(Rect::new(1500, 100, 500, 300)),
+            &monitors
+        ));
+        assert!(!mark_on_screen(mark(inside), &[]), "no monitors, no mark");
+    }
 
     /// The thread sleeps without a timeout only while no watch area is
     /// switched on; a switched-on area it cannot read now is looked at again.
