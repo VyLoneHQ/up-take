@@ -772,14 +772,28 @@ const STATE_EVENT: &str = "overlay://state";
 /// authority on its scale) and the `origin` reported here. Rust deliberately
 /// does not pre-convert: doing so would reintroduce the scale-mismatch bug
 /// ADR-0011 exists to prevent.
+/// Whether the state payload carries the monitor list: in every state that
+/// draws areas.
+///
+/// **It was Placement only until 2026-11-03**, when the list fed nothing but
+/// Placement's per-monitor frames. The page's watch-mark check (`markSeen`,
+/// `$lib/mark-check`) later started requiring the dot to lie inside a monitor
+/// from this same list, so in Living it found no monitor, confirmed no mark,
+/// and no watch area read once the user handed the screen back: found at the
+/// maintainer's rig with a trace build (`monitors=0` in Living, every reading
+/// skipped).
+const fn sends_monitors(state: OverlayState) -> bool {
+    !matches!(state, OverlayState::Hidden)
+}
+
 #[derive(Serialize, Clone)]
 struct StatePayload {
     /// `"hidden"`, `"placement"`, or `"living"`.
     state: &'static str,
     /// The overlay's virtual-desktop origin (its inner top-left), physical px.
     origin: (i32, i32),
-    /// Each monitor's bounds in physical virtual-desktop px. Empty unless the
-    /// state draws per-monitor chrome (Placement).
+    /// Each monitor's bounds in physical virtual-desktop px, in every state
+    /// that draws areas ([`sends_monitors`]). Empty while hidden.
     monitors: Vec<(i32, i32, u32, u32)>,
     /// The type armed for the next drag, or `null` for none (ADR-0018 §3).
     ///
@@ -994,15 +1008,17 @@ fn emit_state(app: &AppHandle, state: OverlayState) -> Result<(), String> {
         .inner_position()
         .map_err(|e| format!("Could not read the overlay position: {e}"))?;
     let origin = (position.x, position.y);
-    // The per-monitor focus frames are a Placement-only indicator; every other
-    // state sends none.
+    // Sent in every state that draws areas ([`sends_monitors`]): the page
+    // checks each watch mark against them in Living as well. The per-monitor
+    // focus frames stay a Placement-only indicator, which the page decides
+    // (`showsTint`), not this list.
     // Read from `MONITOR_CACHE` rather than re-enumerating. `show` refreshes the
     // cache immediately before this runs, so it is current — and using the one
     // list means `overlay://active-monitor`'s index cannot address a different
     // array than the one sent here. A fresh enumeration would be a second
     // source of truth for the same fact, which is how the badge would end up
     // highlighting the wrong monitor.
-    let monitors = if matches!(state, OverlayState::Placement) {
+    let monitors = if sends_monitors(state) {
         monitor_rects()
             .iter()
             .map(|bounds| {
@@ -3264,6 +3280,16 @@ mod tests {
             };
             assert_eq!(json["sticky"], serde_json::json!(word));
         }
+    }
+
+    /// A watch area reads in Living too, and the page confirms its mark only
+    /// inside a monitor from the state payload's list, so Living must carry
+    /// the list (found at the rig, 2026-11-03).
+    #[test]
+    fn every_state_that_draws_areas_sends_the_monitors() {
+        assert!(super::sends_monitors(OverlayState::Placement));
+        assert!(super::sends_monitors(OverlayState::Living));
+        assert!(!super::sends_monitors(OverlayState::Hidden));
     }
 
     #[test]
