@@ -37,6 +37,7 @@ import {
   type HoverPayload,
   isCopyKey,
   isFreezeKey,
+  isHoldKey,
   isRemoveKey,
   isSelectAllKey,
   kindLabels,
@@ -67,6 +68,7 @@ import {
   showsTint,
   stillsFromWire,
   toggleFreeze,
+  toggleHeldFocusedArea,
 } from '$lib/overlay-state';
 import { type CssRect, isDismissKey } from '$lib/regions';
 import type { Settings } from '$lib/settings-model';
@@ -306,6 +308,14 @@ function onKeydown(event: KeyboardEvent) {
     // keeps that true if it ever does.
     event.preventDefault();
     void dismissFocusedArea(invoke);
+    return;
+  }
+  // ADR-0053: pause or resume the area under the cursor. Placement only, like
+  // copy below: outside it the overlay may still hold focus, and a bare `P`
+  // there belongs to whatever the user is typing into.
+  if (overlayState === 'placement' && isHoldKey(event)) {
+    event.preventDefault();
+    void toggleHeldFocusedArea(invoke);
     return;
   }
   // Roadmap 1.41: copy the OCR area under the cursor, or select all of it.
@@ -938,6 +948,9 @@ $effect(() => {
             <span class="watch-badge" data-area={area.id}
               ><span class="watch-dot">●</span> {text(language, 'area.watching')}</span
             >
+          {:else if area.held}
+            <!-- ADR-0053: a paused area says so where its working mark was. -->
+            <span class="held-badge">❚❚ {text(language, 'area.held')}</span>
           {/if}
         </div>
       {/if}
@@ -1220,6 +1233,20 @@ $effect(() => {
   overflow: hidden;
   font: 11px/1 system-ui, sans-serif;
   color: rgba(140, 235, 180, 0.98);
+  text-shadow: 0 0 3px rgba(0, 0, 0, 0.8);
+  white-space: nowrap;
+}
+
+/* The paused mark (ADR-0053): where the watching mark sits, dimmer, so a
+   paused area reads as stopped at a glance. */
+.held-badge {
+  position: absolute;
+  right: 4px;
+  top: 2px;
+  max-width: calc(100% - 8px);
+  overflow: hidden;
+  font: 11px/1 system-ui, sans-serif;
+  color: rgba(220, 220, 220, 0.85);
   text-shadow: 0 0 3px rgba(0, 0, 0, 0.8);
   white-space: nowrap;
 }

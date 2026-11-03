@@ -245,7 +245,7 @@ fn look(app: &AppHandle) -> (Vec<Target>, bool) {
     let store = store.lock().unwrap_or_else(PoisonError::into_inner);
     let switched_on = store
         .iter()
-        .any(|area| area.kind == AreaType::Watch && area.watch.is_on());
+        .any(|area| area.kind == AreaType::Watch && !area.held);
     let targets = store
         .iter()
         .filter(|area| area.is_watching())
