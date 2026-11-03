@@ -13,6 +13,7 @@ import {
   frozenFrameKeys,
   isCopyKey,
   isFreezeKey,
+  isHoldKey,
   isRemoveKey,
   isSelectAllKey,
   type MenuView,
@@ -152,7 +153,8 @@ describe('areaFramesCss', () => {
       kind: 'default',
       ocr_behaviour: 'in_place',
       sticky: 'free',
-      watch: 'off',
+      watch: 'changes',
+      held: false,
       watching: false,
       name: null,
       zoom: 1,
@@ -170,7 +172,8 @@ describe('areaFramesCss', () => {
       kind: 'filter',
       ocr_behaviour: 'rendered',
       sticky: 'paused',
-      watch: 'off',
+      watch: 'changes',
+      held: false,
       watching: false,
       name: null,
       zoom: 1,
@@ -561,6 +564,16 @@ describe('armedTypeForKey', () => {
   it('arms Watch on W, in either case (roadmap 1.58)', () => {
     expect(armedTypeForKey(key({ key: 'w' }))).toBe('watch');
     expect(armedTypeForKey(key({ key: 'W' }))).toBe('watch');
+  });
+
+  it('pauses or resumes on a bare P, in either case, and arms nothing (ADR-0053)', () => {
+    expect(isHoldKey(key({ key: 'p' }))).toBe(true);
+    expect(isHoldKey(key({ key: 'P', shiftKey: true }))).toBe(true);
+    expect(isHoldKey(key({ key: 'p', ctrlKey: true }))).toBe(false);
+    expect(isHoldKey(key({ key: 'p', altKey: true }))).toBe(false);
+    expect(isHoldKey(key({ key: 'p', metaKey: true }))).toBe(false);
+    expect(isHoldKey(key({ key: 'w' }))).toBe(false);
+    expect(armedTypeForKey(key({ key: 'p' }))).toBeNull();
   });
 
   it('arms Filter on F, in either case', () => {

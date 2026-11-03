@@ -110,8 +110,6 @@ texts! {
     MenuTypeWatch => "menu.type.watch",
     /// Area menu: a watch area's list of what to watch for.
     MenuWatch => "menu.watch",
-    /// That list: not watching. The default.
-    MenuWatchOff => "menu.watch.off",
     /// That list: notify when the region changes.
     MenuWatchChanges => "menu.watch.changes",
     /// That list: notify when the region stops changing.
@@ -124,6 +122,11 @@ texts! {
     NoticeChanged => "notice.event.changed",
     /// A card's event: the region stopped changing.
     NoticeSettled => "notice.event.settled",
+    /// Area menu: pause the area's ongoing work (`ADR-0053`). Only on a type
+    /// that keeps working.
+    MenuPause => "menu.pause",
+    /// Area menu: resume a paused area's work (`ADR-0053`).
+    MenuResume => "menu.resume",
     /// Area menu: an OCR area's Behaviour list (roadmap `1.45`). The settings
     /// pane's own label, so the menu and the pane name the choice alike.
     MenuOcrBehaviour => "settings.ocr_behaviour.name",

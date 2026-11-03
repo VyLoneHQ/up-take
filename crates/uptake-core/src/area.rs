@@ -122,12 +122,23 @@ pub enum AreaType {
     /// or stops changing (roadmap `1.58`, `ADR-0048`). PRODUCT-VISION §3.2's
     /// Type row lists it among the planned types, several of which (Notes,
     /// Translate, Rewind) are not modelled here yet; the founder made it a
-    /// type of its own on 2026-09-27 (`Q-40`). It reads nothing until the
-    /// user switches watching on for the area ([`crate::watch::Watch`]).
+    /// type of its own on 2026-09-27 (`Q-40`). It starts reading the moment
+    /// it is made, and the user pauses it to stop ([`Area::held`],
+    /// `ADR-0053`).
     Watch,
 }
 
 impl AreaType {
+    /// Whether an area of this type keeps working after it is placed, and so
+    /// can be paused and resumed (`ADR-0053` decisions 2 and 3). Only the
+    /// watch area today: every other type reads once and holds a still, or
+    /// does nothing to pause. A type that gains ongoing work (the rewind area,
+    /// OCR that re-reads) answers `true` here and gains Pause with it.
+    #[must_use]
+    pub const fn keeps_working(self) -> bool {
+        matches!(self, Self::Watch)
+    }
+
     /// Every variant, in PRODUCT-VISION §3.2's Type-row order.
     ///
     /// For callers that have to *offer* the types rather than answer a question
@@ -699,10 +710,20 @@ pub struct Area {
     /// creation. The host sets it, because only the host can tell whether the
     /// window is still there.
     pub sticky: Sticky,
-    /// What a watch area tells the user about (roadmap `1.58`).
-    /// [`Watch::Off`] at creation and after every conversion: watching is
-    /// switched on by the user, for one area, from its menu (`ADR-0048`).
+    /// What a watch area tells the user about (roadmap `1.58`). The default,
+    /// [`Watch::Changes`], at creation and after every conversion (`ADR-0053`
+    /// decision 1).
     pub watch: Watch,
+    /// Whether the user paused this area's ongoing work (`ADR-0053` decision
+    /// 2): `false` at creation and after every conversion. Meaningful only
+    /// for a type that [`AreaType::keeps_working`]; [`AreaStore::set_held`]
+    /// refuses any other.
+    ///
+    /// **Not [`Sticky::Paused`]**, which is the host's answer to "is the
+    /// window this area follows minimised or gone". The two are independent:
+    /// holding an area does not stop it following its window (`ADR-0053`
+    /// decision 4), and a sticky pause does not change what the user chose.
+    pub held: bool,
 }
 
 /// The capture an area's own contents are made of: which rectangle of screen to
@@ -745,9 +766,7 @@ impl Area {
     /// of the review of `#154`, was wrong at some scale whatever its value.
     #[must_use]
     pub fn is_watching(&self) -> bool {
-        self.kind == AreaType::Watch
-            && self.watch.is_on()
-            && self.sticky != crate::sticky::Sticky::Paused
+        self.kind == AreaType::Watch && !self.held && self.sticky != crate::sticky::Sticky::Paused
     }
 
     /// True when this area takes mouse events.
@@ -1044,7 +1063,8 @@ impl AreaStore {
             zoom: kind.default_zoom(),
             ocr_behaviour: OcrBehaviour::default(),
             sticky: Sticky::default(),
-            watch: Watch::Off,
+            watch: Watch::default(),
+            held: false,
         };
         let index = self.top_of_tier(area.layer);
         self.areas.insert(index, area);
@@ -1211,6 +1231,20 @@ impl AreaStore {
         }
     }
 
+    /// Pauses (`true`) or resumes (`false`) an area's ongoing work
+    /// (`ADR-0053` decision 2). Returns whether it CHANGED; `false` for an
+    /// unknown id as well, and for an area whose type does not
+    /// [`AreaType::keeps_working`], which has nothing to pause.
+    pub fn set_held(&mut self, id: AreaId, held: bool) -> bool {
+        match self.area_mut(id) {
+            Some(area) if area.kind.keeps_working() && area.held != held => {
+                area.held = held;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Converts an area to another [`AreaType`] (roadmap task 1.27). `None` for
     /// an unknown id; otherwise a [`Conversion`] saying what the caller still
     /// owes.
@@ -1268,10 +1302,12 @@ impl AreaStore {
         area.kind = kind;
         area.visual = kind.default_visual();
         area.input = kind.default_input();
-        // Whatever it was, and whichever way the conversion goes: an area
-        // converted back to Watch must not resume reading its region on a
-        // choice made before, out of sight of the menu that made it.
-        area.watch = Watch::Off;
+        // Whatever it was, and whichever way the conversion goes: becoming a
+        // watch area starts it watching for changes, the same as making one
+        // (`ADR-0053` decision 1, the founder's "same as new"), and it does not
+        // carry a choice or a pause made before, out of sight of the menu.
+        area.watch = Watch::default();
+        area.held = false;
         // THE NEW TYPE'S DEFAULT, not `NATURAL`, and the difference only shows
         // on a type that is born magnified. ⚠️ **There is none as of roadmap
         // 1.29**, so today this is exactly `NATURAL` for every type and the
@@ -1726,46 +1762,72 @@ mod tests {
         vec![Rect::new(-3000, -3000, 6000, 6000)]
     }
 
-    /// Roadmap 1.58: an area is born not watching, only a watch area can be set
-    /// watching, and a conversion in either direction switches it off.
+    /// Roadmap 1.58 and `ADR-0053`: a watch area is born watching for
+    /// changes, only a watch area can be set or paused, and a conversion to
+    /// Watch starts it the same way, with no old choice or pause carried.
     #[test]
-    fn watching_is_off_at_birth_only_for_watch_areas_and_off_after_a_conversion() {
+    fn a_watch_area_watches_from_birth_and_a_conversion_starts_it_afresh() {
         use crate::watch::Watch;
         let (mut store, ids) = store_with(&[AreaType::Watch, AreaType::Default]);
         let (watch, plain) = (ids[0], ids[1]);
-        assert_eq!(store.get(watch).map(|area| area.watch), Some(Watch::Off));
-        assert!(
-            !store.set_watch(plain, Watch::Changes),
-            "a Default area has nothing to watch with"
-        );
-        assert_eq!(store.get(plain).map(|area| area.watch), Some(Watch::Off));
-        assert!(store.set_watch(watch, Watch::Changes));
-        assert!(
-            !store.set_watch(watch, Watch::Changes),
-            "no change, so false"
-        );
-        assert!(store.set_kind(watch, AreaType::Default).is_some());
-        assert_eq!(store.get(watch).map(|area| area.watch), Some(Watch::Off));
-        assert!(store.set_kind(watch, AreaType::Watch).is_some());
         assert_eq!(
             store.get(watch).map(|area| area.watch),
-            Some(Watch::Off),
-            "converted back, it does not resume an old choice"
+            Some(Watch::Changes)
         );
+        assert_eq!(store.get(watch).map(|area| area.held), Some(false));
+        assert_eq!(store.get(watch).map(Area::is_watching), Some(true));
+        assert!(
+            !store.set_watch(plain, Watch::Settles),
+            "a Default area has nothing to watch with"
+        );
+        assert!(
+            !store.set_held(plain, true),
+            "a Default area has nothing to pause"
+        );
+        assert_eq!(store.get(plain).map(|area| area.held), Some(false));
+        assert!(store.set_watch(watch, Watch::Settles));
+        assert!(
+            !store.set_watch(watch, Watch::Settles),
+            "no change, so false"
+        );
+        // Paused: not watching, and the choice is kept for the resume.
+        assert!(store.set_held(watch, true));
+        assert!(!store.set_held(watch, true), "no change, so false");
+        assert_eq!(store.get(watch).map(Area::is_watching), Some(false));
+        assert_eq!(
+            store.get(watch).map(|area| area.watch),
+            Some(Watch::Settles)
+        );
+        assert!(store.set_held(watch, false));
+        assert_eq!(store.get(watch).map(Area::is_watching), Some(true));
+        assert_eq!(
+            store.get(watch).map(|area| area.watch),
+            Some(Watch::Settles)
+        );
+        // Converted away while paused, then back: watching for changes again.
+        assert!(store.set_held(watch, true));
+        assert!(store.set_kind(watch, AreaType::Default).is_some());
+        assert_eq!(store.get(watch).map(|area| area.held), Some(false));
+        assert!(store.set_kind(watch, AreaType::Watch).is_some());
+        assert_eq!(
+            store.get(watch).map(|area| (area.watch, area.held)),
+            Some((Watch::Changes, false)),
+            "converted back, it starts afresh and carries no old choice or pause"
+        );
+        assert_eq!(store.get(watch).map(Area::is_watching), Some(true));
         // A paused sticky watch area does not read, and reads again when it
-        // follows its window again.
+        // follows its window again; holding is independent of following.
         let Some(area) = store.area_mut(watch) else {
             panic!("the area is there")
         };
-        area.kind = AreaType::Watch;
-        area.watch = Watch::Changes;
         assert!(area.is_watching());
         area.sticky = crate::sticky::Sticky::Paused;
         assert!(!area.is_watching());
         area.sticky = crate::sticky::Sticky::Following;
         assert!(area.is_watching());
-        area.watch = Watch::Off;
+        area.held = true;
         assert!(!area.is_watching());
+        assert_eq!(area.sticky, crate::sticky::Sticky::Following);
         // A watch area lets clicks through to what it watches.
         assert_eq!(AreaType::Watch.default_input(), Input::PassThrough);
     }
@@ -1812,6 +1874,23 @@ mod tests {
             tidy_name(&umlauts).map(|n| n.chars().count()),
             Some(NAME_LIMIT)
         );
+    }
+
+    /// `ADR-0053` decision 3: only a type with ongoing work can be paused.
+    #[test]
+    fn only_a_type_that_keeps_working_can_be_paused() {
+        for kind in [
+            AreaType::Default,
+            AreaType::Screenshot,
+            AreaType::Ocr,
+            AreaType::Upscale,
+            AreaType::Filter,
+        ] {
+            assert!(!kind.keeps_working(), "{kind:?}");
+            let (mut store, ids) = store_with(&[kind]);
+            assert!(!store.set_held(ids[0], true), "{kind:?}");
+        }
+        assert!(AreaType::Watch.keeps_working());
     }
 
     fn store_with(kinds: &[AreaType]) -> (AreaStore, Vec<AreaId>) {
@@ -2615,7 +2694,8 @@ mod tests {
             zoom: AreaType::Upscale.default_zoom(),
             ocr_behaviour: OcrBehaviour::InPlace,
             sticky: Sticky::Free,
-            watch: crate::watch::Watch::Off,
+            watch: crate::watch::Watch::Changes,
+            held: false,
         };
         assert_eq!(
             area.retake(),
@@ -2731,7 +2811,8 @@ mod tests {
             zoom: Zoom::NATURAL.stepped(4),
             ocr_behaviour: OcrBehaviour::InPlace,
             sticky: Sticky::Free,
-            watch: crate::watch::Watch::Off,
+            watch: crate::watch::Watch::Changes,
+            held: false,
         };
         // A hypothetical second zooming type inherits the factor, so both sides
         // answer with the same rectangle and the same treatment: equal, so
