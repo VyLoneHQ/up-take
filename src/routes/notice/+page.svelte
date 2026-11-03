@@ -3,10 +3,11 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { onMount } from 'svelte';
 import { flip } from 'svelte/animate';
-import { cubicOut } from 'svelte/easing';
+import { cubicInOut, cubicOut } from 'svelte/easing';
 import { scale } from 'svelte/transition';
 import {
   type Card,
+  cardText,
   dismiss,
   expire,
   hold,
@@ -17,6 +18,7 @@ import {
   receive,
   release,
 } from '$lib/notice';
+import { TONES } from '$lib/tones';
 
 // UP-TAKE's notification stack (ADR-0054; the rules and their tests are in
 // $lib/notice). Rust shows this window without focus at the top centre of
@@ -63,6 +65,8 @@ $effect(() => {
 });
 
 function enter(): void {
+  // Rust remembers who has the keyboard, so a click can give it back.
+  void invoke('notice_hover').catch(() => {});
   held = true;
   stack = hold(stack, Date.now());
 }
@@ -73,21 +77,24 @@ function leave(): void {
 }
 
 /**
- * A card that goes: it fades, slides a little up and gives its height back,
- * so the cards below glide into its place as it leaves rather than jumping
- * once it is gone.
+ * A card that goes. It fades a little ahead of the rest of the motion and
+ * drifts aside, while its slot gives its height back, so the cards below
+ * glide up into its place as it leaves rather than jumping once it is gone.
+ * The slot clips only while it collapses, so a card's shadow is never cut
+ * while it shows.
  */
 function collapse(node: HTMLElement) {
   const height = node.offsetHeight;
   const gap = Number.parseFloat(getComputedStyle(node).marginBottom) || 0;
   return {
-    duration: MOVE_MS,
-    easing: cubicOut,
+    duration: MOVE_MS + 40,
+    easing: cubicInOut,
     css: (t: number) => `
-      opacity: ${t};
+      overflow: hidden;
+      opacity: ${t * t};
       height: ${t * height}px;
       margin-bottom: ${t * gap}px;
-      transform: translateY(${(1 - t) * -6}px) scale(${0.97 + 0.03 * t});
+      transform: translateX(${(1 - t) * 18}px);
     `,
   };
 }
@@ -105,18 +112,32 @@ function arrive(_node: HTMLElement) {
 }
 
 // Size the window to the stack: zero (hidden) when nothing is drawn, the
-// list's height otherwise. A leaving card gives its height back over its
-// animation, so the window shrinks with it and nothing is clipped.
+// list's height otherwise. It GROWS at once, so a new card is never clipped,
+// and SHRINKS only once the stack has stopped moving: resizing a window lands
+// a frame or two late, so shrinking along with a leaving card made the edge
+// chase the animation and cut into it (the founder's rig, 2026-11-03).
 let sent = -1;
 let frame = 0;
+let shrink: ReturnType<typeof setTimeout> | undefined;
+function measure(): number {
+  return list && list.childElementCount > 0 ? Math.ceil(list.offsetHeight) : 0;
+}
+function send(height: number): void {
+  if (height === sent) return;
+  sent = height;
+  void invoke('notice_resize', { height }).catch(() => {});
+}
 function report(): void {
   cancelAnimationFrame(frame);
   frame = requestAnimationFrame(() => {
-    const height =
-      list && list.childElementCount > 0 ? Math.ceil(list.offsetHeight) : 0;
-    if (height === sent) return;
-    sent = height;
-    void invoke('notice_resize', { height }).catch(() => {});
+    const height = measure();
+    if (height > sent) {
+      clearTimeout(shrink);
+      send(height);
+    } else if (height < sent) {
+      clearTimeout(shrink);
+      shrink = setTimeout(() => send(measure()), MOVE_MS + 80);
+    }
   });
 }
 
@@ -132,6 +153,7 @@ onMount(() => {
     observer.disconnect();
     cancelAnimationFrame(frame);
     clearTimeout(timer);
+    clearTimeout(shrink);
     void ready.then((unlisten) => unlisten());
   };
 });
@@ -162,14 +184,20 @@ $effect(() => {
       <button
         type="button"
         class="card"
+        style="--tone: {TONES[card.tone]}"
+        title={cardText(card)}
         onclick={() => {
           stack = dismiss(stack, card.id);
         }}
       >
         <span class="dot" aria-hidden="true">●</span>
-        <span class="text">
-          <span class="title">{card.title}</span>
-          <span class="body">{card.body}</span>
+        <span class="line">
+          {#if card.name}<span class="name">{card.name}</span><span
+              class="sep"
+              aria-hidden="true">//</span
+            >{/if}<span class="what">{card.areaType}<span class="dot-sep"
+              >·</span
+            >{card.event}</span>
         </span>
         {#if card.count > 1}
           {#key card.count}
@@ -201,12 +229,12 @@ $effect(() => {
 
 .stack {
   box-sizing: border-box;
-  padding: 6px 6px 0;
+  /* Room for the cards' shadow, inside the window. */
+  padding: 6px 10px 6px;
 }
 
 .slot {
   margin-bottom: 8px;
-  overflow: hidden;
   border-radius: 10px;
 }
 
@@ -215,50 +243,64 @@ $effect(() => {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   width: 100%;
-  min-height: 60px;
-  padding: 10px 14px 12px 16px;
-  border: 1px solid rgba(100, 210, 150, 0.45);
+  min-height: 46px;
+  padding: 11px 12px 13px 14px;
+  border: 1px solid rgba(var(--tone), 0.45);
   border-radius: 10px;
   background: rgba(22, 24, 28, 0.94);
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+  box-shadow:
+    0 4px 14px rgba(0, 0, 0, 0.4),
+    inset 3px 0 0 rgba(var(--tone), 0.85);
   color: rgba(235, 238, 240, 0.98);
   font: 13px/1.3 system-ui, sans-serif;
   text-align: left;
   cursor: pointer;
   overflow: hidden;
-  transition: border-color 160ms ease-out, background-color 160ms ease-out;
+  transition:
+    border-color 160ms ease-out,
+    background-color 160ms ease-out;
 }
 
 .card:hover {
-  border-color: rgba(140, 235, 180, 0.8);
+  border-color: rgba(var(--tone), 0.8);
   background: rgba(28, 31, 36, 0.96);
 }
 
 .dot {
   flex: none;
-  color: rgba(140, 235, 180, 0.98);
-  font-size: 14px;
-}
-
-.text {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.title {
-  font-weight: 600;
+  color: rgba(var(--tone), 1);
   font-size: 12px;
-  color: rgba(140, 235, 180, 0.98);
 }
 
-.body {
+/* "<name> // <area type> · <event>", on one line: the name is what the eye
+   looks for, so it carries the colour and the weight. */
+.line {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.name {
+  font-weight: 600;
+  color: rgba(var(--tone), 1);
+}
+
+.sep {
+  margin: 0 7px;
+  color: rgba(235, 238, 240, 0.35);
+}
+
+.what {
+  color: rgba(235, 238, 240, 0.86);
+}
+
+.dot-sep {
+  margin: 0 6px;
+  color: rgba(235, 238, 240, 0.45);
 }
 
 /* How many times this kind fired while its card showed. */
@@ -267,9 +309,9 @@ $effect(() => {
   min-width: 22px;
   padding: 2px 8px;
   border-radius: 999px;
-  background: rgba(100, 210, 150, 0.18);
-  border: 1px solid rgba(100, 210, 150, 0.5);
-  color: rgba(160, 240, 195, 1);
+  background: rgba(var(--tone), 0.16);
+  border: 1px solid rgba(var(--tone), 0.5);
+  color: rgba(var(--tone), 1);
   font: 600 12px/1.2 system-ui, sans-serif;
   font-variant-numeric: tabular-nums;
   text-align: center;
@@ -284,7 +326,7 @@ $effect(() => {
   right: 0;
   bottom: 0;
   height: 2px;
-  background: rgba(100, 210, 150, 0.55);
+  background: rgba(var(--tone), 0.6);
   transform-origin: left center;
   animation-name: run-out;
   animation-timing-function: linear;

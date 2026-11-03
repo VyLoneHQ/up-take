@@ -24,14 +24,52 @@
  * window or a clock (`notice.test.ts`).
  */
 
-/** One card, as Rust's `NoticePayload` sends it. */
+import { isTone, type Tone } from './tones';
+
+/**
+ * One card, as Rust's `NoticePayload` sends it. Written as
+ * `<name> // <area type> · <event>`, or `<area type> · <event>` for an area
+ * with no name: the founder's format of 2026-11-03, the default for every
+ * card an area raises ({@link cardLine}).
+ */
 export interface NoticePayload {
   /** The area and the moment: two cards of one kind are "the same". */
   kind: string;
-  /** The title line. */
-  title: string;
-  /** The text. Says which moment it was, never what an area read. */
-  body: string;
+  /** The name the user gave the area, or `null`. */
+  name: string | null;
+  /** The area's type, as the card says it ("Watch area"). */
+  area_type: string;
+  /** What happened, as the card says it ("changed"). Never what was read. */
+  event: string;
+  /** The type's colour in the legend ($lib/tones). */
+  tone: string;
+}
+
+/** A card's line, in its three parts, for the page to set in type. */
+export interface CardLine {
+  /** The area's name, or `null` when it has none (then no `//` either). */
+  name: string | null;
+  /** `<area type> · <event>`. */
+  what: string;
+}
+
+/** The founder's format: `<name> // <area type> · <event>`. */
+export function cardLine(card: {
+  name: string | null;
+  areaType: string;
+  event: string;
+}): CardLine {
+  return { name: card.name, what: `${card.areaType} · ${card.event}` };
+}
+
+/** The same line as plain text, as it reads. */
+export function cardText(card: {
+  name: string | null;
+  areaType: string;
+  event: string;
+}): string {
+  const line = cardLine(card);
+  return line.name ? `${line.name} // ${line.what}` : line.what;
 }
 
 /** A card on the stack. */
@@ -39,8 +77,11 @@ export interface Card {
   /** Unique on this page, for keyed rendering and animation. */
   id: number;
   kind: string;
-  title: string;
-  body: string;
+  name: string | null;
+  areaType: string;
+  event: string;
+  /** The legend colour it is drawn in. */
+  tone: Tone;
   /** How many times this kind fired while its card was shown. */
   count: number;
   /** When it goes, in the clock {@link receive} was given. */
@@ -73,8 +114,10 @@ export function isNotice(value: unknown): value is NoticePayload {
   const card = value as Record<string, unknown>;
   return (
     typeof card.kind === 'string' &&
-    typeof card.title === 'string' &&
-    typeof card.body === 'string'
+    (card.name === null || typeof card.name === 'string') &&
+    typeof card.area_type === 'string' &&
+    typeof card.event === 'string' &&
+    typeof card.tone === 'string'
   );
 }
 
@@ -96,8 +139,7 @@ export function receive(
       index === existing
         ? {
             ...card,
-            title: payload.title,
-            body: payload.body,
+            ...fields(payload),
             count: card.count + 1,
             expiresAt: now + LINGER_MS,
             lifetime: LINGER_MS,
@@ -109,14 +151,25 @@ export function receive(
   const card: Card = {
     id,
     kind: payload.kind,
-    title: payload.title,
-    body: payload.body,
+    ...fields(payload),
     count: 1,
     expiresAt: now + LINGER_MS,
     lifetime: LINGER_MS,
     remaining: held ? LINGER_MS : null,
   };
   return [card, ...stack].slice(0, MAX_CARDS);
+}
+
+/** What a card shows, from what arrived; the latest name wins on a repeat. */
+function fields(
+  payload: NoticePayload,
+): Pick<Card, 'name' | 'areaType' | 'event' | 'tone'> {
+  return {
+    name: payload.name,
+    areaType: payload.area_type,
+    event: payload.event,
+    tone: isTone(payload.tone) ? payload.tone : 'accent',
+  };
 }
 
 /** The stack with every card whose time is up at `now` gone. Held cards stay. */

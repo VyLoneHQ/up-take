@@ -177,6 +177,8 @@ export interface AreaView {
    * of #154, round 1, found the two disagreeing when it did).
    */
   watching: boolean;
+  /** The name the user gave the area, or `null` (the founder, 2026-11-03). */
+  name: string | null;
   /**
    * Magnification (§3.4), `1` at natural size.
    *
@@ -639,6 +641,8 @@ export interface AreaFrame {
   sticky: StickyState;
   /** The area is reading its region now: draw its watching mark. */
   watching: boolean;
+  /** The area's name, shown on it, or `null`. */
+  name: string | null;
   /** Magnification (§3.4), `1` at natural size. See {@link AreaView.zoom}. */
   zoom: number;
   /** Draw this area as the one a press would grab: brighter, lit border. */
@@ -782,6 +786,7 @@ export function areaFramesCss(
     ocrBehaviour: area.ocr_behaviour,
     sticky: area.sticky,
     watching: area.watching,
+    name: area.name,
     zoom: area.zoom,
     // A dragged area is not also "hovered": the hover chrome invites a gesture
     // that is already under way, and its close control would sit at the source
@@ -1161,6 +1166,36 @@ export function armedTypeForKey(
       return 'watch';
     default:
       return null;
+  }
+}
+
+/**
+ * `overlay://rename`: show the name field over area `id` (the founder,
+ * 2026-11-03). Rust's `RenamePayload`.
+ */
+export interface RenamePayload {
+  /** The area to name. */
+  id: number;
+  /** Its name now, to edit, or empty. */
+  name: string;
+}
+
+/**
+ * Confirms (`cancel` false) or closes (`cancel` true) the name field. Rust
+ * names the area its menu asked about; the page sends only the text. Never
+ * throws, for the same reason {@link escapeOverlay} does not.
+ */
+export async function finishRename(
+  invoke: Invoke,
+  name: string,
+  cancel: boolean,
+): Promise<boolean> {
+  try {
+    await invoke('overlay_rename_area', { name, cancel });
+    return true;
+  } catch (error) {
+    console.error('Failed to name the area:', error);
+    return false;
   }
 }
 

@@ -115,6 +115,8 @@ const PAIRS_EXEMPT: Record<string, string> = {
     'coach-copy.ts. One line of the keybind reference, composed on this side ' +
     'from a key name written in that file and a translated sentence.',
   TypeRow: 'coach-copy.ts. One area type on the tour step 2, like KeyRow.',
+  CardLine:
+    'notice.ts. A card line split for typesetting, from a Card; nothing sends it.',
   Card:
     'notice.ts. One card on the notification stack (ADR-0054), built on this ' +
     'side from the NoticePayload that DID arrive, with its count and lifetime.',

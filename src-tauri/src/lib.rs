@@ -182,6 +182,8 @@ pub fn run() -> tauri::Result<()> {
                     overlay::overlay_dismiss_focused,
                     notice::notice_take,
                     notice::notice_resize,
+                    notice::notice_hover,
+                    overlay::overlay_rename_area,
                     overlay::overlay_ocr_copy_focused,
                     overlay::overlay_ocr_select_all_focused,
                     overlay::overlay_request_state,
@@ -212,6 +214,8 @@ pub fn run() -> tauri::Result<()> {
                     overlay::overlay_dismiss_focused,
                     notice::notice_take,
                     notice::notice_resize,
+                    notice::notice_hover,
+                    overlay::overlay_rename_area,
                     overlay::overlay_ocr_copy_focused,
                     overlay::overlay_ocr_select_all_focused,
                     overlay::overlay_request_state,
@@ -239,6 +243,14 @@ pub fn run() -> tauri::Result<()> {
             }
         })
         .on_window_event(|window, event| {
+            // A card's window never keeps the keyboard (ADR-0054): a click on
+            // a card hands it straight back, or placing goes deaf to `Esc`.
+            if window.label().starts_with(notice::LABEL_PREFIX)
+                && matches!(event, WindowEvent::Focused(true))
+            {
+                notice::give_focus_back(window.app_handle(), window);
+                return;
+            }
             if window.label() != overlay::WINDOW_LABEL {
                 return;
             }

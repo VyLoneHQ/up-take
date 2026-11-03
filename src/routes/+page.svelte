@@ -31,6 +31,7 @@ import {
   escapeOverlay,
   type FlashPayload,
   type FrozenStill,
+  finishRename,
   formatZoom,
   frameKey,
   frozenFrameKeys,
@@ -57,6 +58,7 @@ import {
   type PinPayload,
   physRectsToCss,
   physRectToCss,
+  type RenamePayload,
   reportCoachLayout,
   reportFreezeLatency,
   reportLatency,
@@ -287,7 +289,35 @@ const menuFrame: MenuFrame | null = $derived(
   showsMenu(overlayState) ? menuFrameCss(menu, origin, dpr) : null,
 );
 
+// Naming an area (the founder, 2026-11-03): Rust asks for the field, the
+// page sends back only the text. While the field is open it has every key, so
+// the letters, `Delete` and `Esc` reach it rather than placing.
+const NAME_LIMIT = 40;
+let renaming = $state<{ id: number } | null>(null);
+let renameText = $state('');
+let renameField: HTMLInputElement | undefined = $state();
+
+function finishRenaming(cancel: boolean): void {
+  if (!renaming) return;
+  renaming = null;
+  void finishRename(invoke, renameText, cancel);
+}
+
+function onRenameKey(event: KeyboardEvent): void {
+  // The field's keys are its own: none of them reaches placing.
+  event.stopPropagation();
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    finishRenaming(false);
+  } else if (event.key === 'Escape') {
+    event.preventDefault();
+    finishRenaming(true);
+  }
+}
+
 function onKeydown(event: KeyboardEvent) {
+  // The name field handles its own keys (above); placing takes none of them.
+  if (renaming) return;
   if (isDismissKey(event.key)) {
     void escapeOverlay(invoke);
     return;
@@ -469,6 +499,14 @@ onMount(() => {
   // The generation of what Rust last sent that changes the drawing. Events
   // arrive in order, so by now the change has been applied; confirm at once,
   // echoing it (roadmap 1.58, watch.rs `emit_redraw`).
+  const unlistenRename = listen<RenamePayload>('overlay://rename', (event) => {
+    renameText = event.payload.name;
+    renaming = { id: event.payload.id };
+    void tick().then(() => {
+      renameField?.focus();
+      renameField?.select();
+    });
+  });
   const unlistenDrawn = listen<DrawnPayload>('overlay://drawn', (event) => {
     // Rust sends them rising; an older one is never a step back.
     drawnGeneration = Math.max(drawnGeneration, event.payload.generation);
@@ -476,6 +514,7 @@ onMount(() => {
   });
   const ready = Promise.all([
     unlistenDrawn,
+    unlistenRename,
     unlistenState,
     unlistenAreas,
     unlistenActiveMonitor,
@@ -939,6 +978,24 @@ $effect(() => {
               ><span class="watch-dot">●</span> {text(language, 'area.watching')}</span
             >
           {/if}
+          <!-- The name the user gave the area (the founder, 2026-11-03), at
+               its bottom left, clear of every mark along its top. -->
+          {#if area.name && renaming?.id !== area.id}
+            <span class="name-badge">{area.name}</span>
+          {/if}
+          {#if renaming?.id === area.id}
+            <input
+              class="rename"
+              type="text"
+              maxlength={NAME_LIMIT}
+              spellcheck="false"
+              placeholder={text(language, 'rename.placeholder')}
+              bind:value={renameText}
+              bind:this={renameField}
+              onkeydown={onRenameKey}
+              onblur={() => finishRenaming(false)}
+            />
+          {/if}
         </div>
       {/if}
       {#if area.showClose && inSight}
@@ -1234,6 +1291,39 @@ $effect(() => {
 .watch-dot {
   display: inline-block;
   line-height: 1;
+}
+
+/* The area's name (the founder, 2026-11-03), at its bottom left: clear of the
+   depth, sticky and watching marks along the top. */
+.name-badge {
+  position: absolute;
+  left: 4px;
+  bottom: 3px;
+  max-width: calc(100% - 8px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font: 600 11px/1.2 system-ui, sans-serif;
+  color: rgba(235, 238, 240, 0.92);
+  text-shadow: 0 0 3px rgba(0, 0, 0, 0.85);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* The name field, over the area's top left while the user names it. */
+.rename {
+  position: absolute;
+  left: 4px;
+  top: 4px;
+  width: min(220px, calc(100% - 8px));
+  box-sizing: border-box;
+  padding: 4px 7px;
+  border: 1px solid rgba(120, 180, 255, 0.85);
+  border-radius: 5px;
+  background: rgba(18, 20, 24, 0.95);
+  color: rgba(240, 242, 244, 1);
+  font: 12px/1.2 system-ui, sans-serif;
+  outline: none;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
 }
 
 /* A pinned tier (ADR-0013) is a state the user set and must be able to see; an

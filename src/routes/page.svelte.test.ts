@@ -393,6 +393,7 @@ describe('an area renders the badges its state earns and no others', () => {
       sticky: 'free',
       watch: 'off',
       watching: false,
+      name: null,
       // 2 rather than some larger number because the badge turns on `> 1`; the
       // value only has to be magnified, and inventing a bigger one would imply
       // this file knows a factor Rust no longer defines.
@@ -574,6 +575,66 @@ describe('an area renders the badges its state earns and no others', () => {
    * area, drawn in placement) carries no mark, which is the case round 1 of
    * the review of #154 found the page getting wrong when it decided for itself.
    */
+  /**
+   * The founder, 2026-11-03: an area can be named, and the name shows on it.
+   * The menu asks Rust, Rust asks the page for a field, and the page sends
+   * back only the text: Enter names, Escape cancels, and while the field is
+   * open no key reaches placing.
+   */
+  test('an area shows its name, and the name field keeps its keys', async () => {
+    const { container } = await mount();
+    await emit('overlay://state', state());
+    await emit('overlay://areas', {
+      areas: [area({ name: 'Download watcher' })],
+    });
+    expect(container.querySelector('.name-badge')?.textContent).toBe(
+      'Download watcher',
+    );
+
+    await emit('overlay://rename', { id: 1, name: 'Download watcher' });
+    await tick();
+    const field = container.querySelector<HTMLInputElement>('.rename');
+    expect(field?.value).toBe('Download watcher');
+    expect(container.querySelector('.name-badge')).toBeNull();
+
+    vi.mocked(invoke).mockClear();
+    // A letter that would arm a type while placing goes into the field: the
+    // field keeps it, so it never reaches placing's handler on the window.
+    if (!field) throw new Error('the field is open');
+    field.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'w', bubbles: true }),
+    );
+    expect(vi.mocked(invoke)).not.toHaveBeenCalledWith(
+      'overlay_arm_type',
+      expect.anything(),
+    );
+    field.value = 'Renders';
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+    field.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+    );
+    await tick();
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith('overlay_rename_area', {
+      name: 'Renders',
+      cancel: false,
+    });
+    expect(container.querySelector('.rename')).toBeNull();
+
+    await emit('overlay://rename', { id: 1, name: '' });
+    await tick();
+    const again = container.querySelector<HTMLInputElement>('.rename');
+    again?.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+    );
+    await tick();
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith('overlay_rename_area', {
+      name: '',
+      cancel: true,
+    });
+    // Escape in the field closed the field, not the overlay.
+    expect(vi.mocked(invoke)).not.toHaveBeenCalledWith('overlay_escape');
+  });
+
   test('a watch area says watching exactly when Rust says it reads', async () => {
     const { container } = await mount();
     await emit('overlay://state', state());

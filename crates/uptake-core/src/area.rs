@@ -909,6 +909,31 @@ pub struct AreaStore {
     /// The next id to issue. Strictly greater than every id ever issued by this
     /// store, including those since removed.
     next_id: u64,
+    /// The names the user gave areas (the founder, 2026-11-03: a watch area
+    /// is named, and its name heads every card it raises). Kept here rather
+    /// than on [`Area`], which is `Copy` and copied everywhere; dropped with
+    /// the area. An area without an entry has no name.
+    names: std::collections::HashMap<AreaId, String>,
+}
+
+/// The longest name an area keeps, in characters. Long enough for "Download
+/// watcher, second monitor"; short enough to fit a card's line.
+pub const NAME_LIMIT: usize = 40;
+
+/// A name as the store keeps it: trimmed, inner runs of whitespace (a pasted
+/// line break, a tab) made one space, cut to [`NAME_LIMIT`] characters, and
+/// `None` when nothing is left.
+#[must_use]
+pub fn tidy_name(name: &str) -> Option<String> {
+    let tidy: String = name
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(NAME_LIMIT)
+        .collect();
+    let tidy = tidy.trim_end().to_string();
+    (!tidy.is_empty()).then_some(tidy)
 }
 
 /// What a completed [`AreaStore::set_kind`] leaves for its caller to finish.
@@ -974,6 +999,7 @@ impl AreaStore {
         Self {
             areas: Vec::new(),
             next_id: 1,
+            names: std::collections::HashMap::new(),
         }
     }
 
@@ -1030,7 +1056,31 @@ impl AreaStore {
     /// The removed id is not recycled — see [`AreaId`].
     pub fn remove(&mut self, id: AreaId) -> Option<Area> {
         let index = self.index_of(id)?;
+        self.names.remove(&id);
         Some(self.areas.remove(index))
+    }
+
+    /// The name the user gave area `id`, if any.
+    #[must_use]
+    pub fn name(&self, id: AreaId) -> Option<&str> {
+        self.names.get(&id).map(String::as_str)
+    }
+
+    /// Names area `id`, or clears its name when `name` is blank. Kept as
+    /// [`tidy_name`] leaves it. Returns whether it CHANGED; `false` for an
+    /// unknown id as well.
+    pub fn set_name(&mut self, id: AreaId, name: &str) -> bool {
+        if self.index_of(id).is_none() {
+            return false;
+        }
+        match tidy_name(name) {
+            Some(name) if self.names.get(&id) != Some(&name) => {
+                self.names.insert(id, name);
+                true
+            }
+            Some(_) => false,
+            None => self.names.remove(&id).is_some(),
+        }
     }
 
     /// Removes every area.
@@ -1039,6 +1089,7 @@ impl AreaStore {
     /// resolve to a new area.
     pub fn clear(&mut self) {
         self.areas.clear();
+        self.names.clear();
     }
 
     /// The area with this id.
@@ -1717,6 +1768,50 @@ mod tests {
         assert!(!area.is_watching());
         // A watch area lets clicks through to what it watches.
         assert_eq!(AreaType::Watch.default_input(), Input::PassThrough);
+    }
+
+    /// The founder, 2026-11-03: an area can be named. Tidied, limited,
+    /// cleared by a blank name, kept through a conversion, gone with the area.
+    #[test]
+    fn an_area_keeps_a_tidy_name_until_it_is_gone() {
+        let (mut store, ids) = store_with(&[AreaType::Default, AreaType::Default]);
+        let (one, two) = (ids[0], ids[1]);
+        assert_eq!(store.name(one), None);
+        assert!(store.set_name(one, "  Download\n  watcher\t"));
+        assert_eq!(store.name(one), Some("Download watcher"));
+        assert!(!store.set_name(one, "Download watcher"), "no change");
+        assert_eq!(store.name(two), None, "names are per area");
+        let long = "x".repeat(NAME_LIMIT + 10);
+        assert!(store.set_name(two, &long));
+        assert_eq!(store.name(two).map(str::len), Some(NAME_LIMIT));
+        assert!(store.set_kind(one, AreaType::Watch).is_some());
+        assert_eq!(
+            store.name(one),
+            Some("Download watcher"),
+            "kept through a conversion"
+        );
+        assert!(store.set_name(one, "   "), "a blank name clears it");
+        assert_eq!(store.name(one), None);
+        assert!(!store.set_name(one, ""), "already none");
+        assert!(store.set_name(one, "Again"));
+        assert!(store.remove(one).is_some());
+        assert_eq!(store.name(one), None, "gone with the area");
+        assert!(!store.set_name(one, "x"), "an unknown id is not named");
+        store.clear();
+        assert_eq!(store.name(two), None);
+    }
+
+    #[test]
+    fn a_name_is_tidied_the_same_way_everywhere() {
+        assert_eq!(tidy_name(""), None);
+        assert_eq!(tidy_name(" \t\n "), None);
+        assert_eq!(tidy_name("a  b"), Some("a b".to_string()));
+        // Cut by characters, not bytes: no broken umlaut at the limit.
+        let umlauts = "ä".repeat(NAME_LIMIT + 3);
+        assert_eq!(
+            tidy_name(&umlauts).map(|n| n.chars().count()),
+            Some(NAME_LIMIT)
+        );
     }
 
     fn store_with(kinds: &[AreaType]) -> (AreaStore, Vec<AreaId>) {

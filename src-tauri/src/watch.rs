@@ -828,11 +828,27 @@ fn gate<Id: PartialEq + Copy>(
 /// Not a Windows toast any more: at the first real-screen test Windows
 /// accepted every toast and showed none.
 fn notify(app: &AppHandle, event: Event, id: AreaId, bounds: Rect) {
-    let (moment, body) = match event {
-        Event::Changed => ("changed", text(Text::WatchChanged)),
-        Event::Settled => ("settled", text(Text::WatchSettled)),
+    let (moment, label) = match event {
+        Event::Changed => ("changed", text(Text::NoticeChanged)),
+        Event::Settled => ("settled", text(Text::NoticeSettled)),
     };
-    crate::notice::show(app, id.get(), bounds, moment, text(Text::WatchTitle), body);
+    let name = {
+        let store = app.state::<Mutex<AreaStore>>();
+        let store = store.lock().unwrap_or_else(PoisonError::into_inner);
+        store.name(id).map(str::to_string)
+    };
+    crate::notice::show(
+        app,
+        crate::notice::Raised {
+            area: id.get(),
+            bounds,
+            name,
+            area_type: text(Text::NoticeTypeWatch),
+            tone: "watch",
+            moment,
+            event: label,
+        },
+    );
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   type Card,
+  cardText,
   dismiss,
   expire,
   hold,
@@ -16,8 +17,10 @@ import {
 
 const card = (kind: string): NoticePayload => ({
   kind,
-  title: 'UP-TAKE',
-  body: `${kind} happened`,
+  name: null,
+  area_type: 'Watch area',
+  event: 'changed',
+  tone: 'watch',
 });
 const kinds = (stack: readonly Card[]) => stack.map((c) => c.kind);
 
@@ -110,8 +113,36 @@ describe('the notification stack (ADR-0054, the founder 2026-11-03)', () => {
 
   it('draws only a well-formed card', () => {
     expect(isNotice(card('a'))).toBe(true);
-    expect(isNotice({ title: 'UP-TAKE', body: 'x' })).toBe(false);
-    expect(isNotice({ kind: 1, title: 'x', body: 'x' })).toBe(false);
+    expect(isNotice({ ...card('a'), name: 'Download watcher' })).toBe(true);
+    expect(isNotice({ ...card('a'), name: 3 })).toBe(false);
+    expect(isNotice({ kind: 'a', title: 'x', body: 'x' })).toBe(false);
     expect(isNotice(null)).toBe(false);
+  });
+
+  it("reads as the founder's format, with or without a name", () => {
+    expect(
+      cardText({
+        name: 'Download Watcher',
+        areaType: 'Watch area',
+        event: 'changed',
+      }),
+    ).toBe('Download Watcher // Watch area · changed');
+    expect(
+      cardText({ name: null, areaType: 'Watch area', event: 'changed' }),
+    ).toBe('Watch area · changed');
+  });
+
+  it('draws a card in its type colour, and an unknown one in the default', () => {
+    expect(receive([], card('a'), 0, 1)[0]?.tone).toBe('watch');
+    expect(receive([], { ...card('a'), tone: 'nope' }, 0, 1)[0]?.tone).toBe(
+      'accent',
+    );
+  });
+
+  it('takes the latest name on a repeat (renamed while its card shows)', () => {
+    let stack = receive([], card('a'), 0, 1);
+    stack = receive(stack, { ...card('a'), name: 'Renamed' }, 10, 2);
+    expect(stack[0]?.name).toBe('Renamed');
+    expect(stack[0]?.count).toBe(2);
   });
 });

@@ -135,21 +135,6 @@
       "de": "Beobachtung läuft",
       "de_from": "75a4b320"
     },
-    "watch.notify.title": {
-      "en": "UP-TAKE",
-      "de": "UP-TAKE",
-      "de_from": "3405ab74"
-    },
-    "watch.notify.changed": {
-      "en": "A watch area changed.",
-      "de": "Ein Beobachtungsbereich hat sich geändert.",
-      "de_from": "34a1d282"
-    },
-    "watch.notify.settled": {
-      "en": "A watch area stopped changing.",
-      "de": "Ein Beobachtungsbereich ist zur Ruhe gekommen.",
-      "de_from": "b777c8de"
-    },
     "menu.click_through": {
       "en": "Click-through",
       "de": "Durchklickbar",
@@ -559,6 +544,31 @@
       "en": "UP-TAKE's own card at the top of the screen, for example when a watch area changes. Windows' notification settings do not affect it.",
       "de": "Die eigene Karte von UP-TAKE oben am Bildschirm, zum Beispiel wenn sich ein Beobachtungsbereich ändert. Die Benachrichtigungseinstellungen von Windows wirken sich nicht darauf aus.",
       "de_from": "d9d13b04"
+    },
+    "menu.rename": {
+      "en": "Rename…",
+      "de": "Umbenennen…",
+      "de_from": "8628af0d"
+    },
+    "rename.placeholder": {
+      "en": "Name this area",
+      "de": "Diesen Bereich benennen",
+      "de_from": "0081bba3"
+    },
+    "notice.type.watch": {
+      "en": "Watch area",
+      "de": "Beobachtungsbereich",
+      "de_from": "26172151"
+    },
+    "notice.event.changed": {
+      "en": "changed",
+      "de": "geändert",
+      "de_from": "4629e89b"
+    },
+    "notice.event.settled": {
+      "en": "stopped changing",
+      "de": "zur Ruhe gekommen",
+      "de_from": "6c2011c9"
     },
     "settings.section.startup": {
       "en": "Starting up",

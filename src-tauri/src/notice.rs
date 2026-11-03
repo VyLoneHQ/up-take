@@ -62,16 +62,42 @@ const TOP_MARGIN: f64 = 12.0;
 /// keeps five); a page that never loads must not grow this without bound.
 const QUEUE_LIMIT: usize = 32;
 
-/// One card to show.
+/// One card to show. The page writes it as `<name> // <area type> · <event>`,
+/// or `<area type> · <event>` for an area with no name: the founder's format
+/// of 2026-11-03, and the default for every card an area raises.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct NoticePayload {
     /// What makes two cards "the same": the area and the moment. A card of a
     /// kind already on show counts up there instead of adding a card.
     pub kind: String,
-    /// The card's title line.
-    pub title: String,
-    /// The card's text.
-    pub body: String,
+    /// The name the user gave the area, if any.
+    pub name: Option<String>,
+    /// The area's type, as the card says it ("Watch area").
+    pub area_type: String,
+    /// What happened, as the card says it ("changed").
+    pub event: String,
+    /// The type's colour in the legend (`$lib/tones`): `watch`, `filter`,
+    /// `upscale`, `text` or `accent`. The card is drawn in it.
+    pub tone: &'static str,
+}
+
+/// What an area raises: everything a card needs, from whichever area type.
+#[derive(Debug, Clone)]
+pub struct Raised {
+    /// The area's id, for [`kind_of`].
+    pub area: u64,
+    /// Where the area is, for the monitor the card goes on.
+    pub bounds: Rect,
+    /// Its name, if the user gave it one.
+    pub name: Option<String>,
+    /// Its type, as the card says it.
+    pub area_type: &'static str,
+    /// Its type's colour in the legend.
+    pub tone: &'static str,
+    /// A stable word for the moment, for [`kind_of`] ("changed").
+    pub moment: &'static str,
+    /// The moment, as the card says it.
+    pub event: &'static str,
 }
 
 /// Cards waiting for their window's page, by window label.
@@ -139,6 +165,18 @@ pub fn monitor_for(bounds: Rect, monitors: &[Monitor]) -> Option<Monitor> {
         .copied()
 }
 
+/// The card for what an area raised.
+#[must_use]
+pub fn payload_of(raised: Raised) -> NoticePayload {
+    NoticePayload {
+        kind: kind_of(raised.area, raised.moment),
+        name: raised.name,
+        area_type: raised.area_type.to_string(),
+        event: raised.event.to_string(),
+        tone: raised.tone,
+    }
+}
+
 /// Adds `card` to `label`'s queue, dropping the oldest past [`QUEUE_LIMIT`].
 fn enqueue(label: &str, card: NoticePayload) {
     let mut queues = QUEUES.lock().unwrap_or_else(PoisonError::into_inner);
@@ -153,24 +191,17 @@ fn enqueue(label: &str, card: NoticePayload) {
     }
 }
 
-/// Shows a card for the area `area` at `bounds`, unless the user switched
-/// UP-TAKE's notifications off. Never blocks the caller on the page.
-pub fn show(app: &AppHandle, area: u64, bounds: Rect, moment: &str, title: &str, body: &str) {
+/// Shows a card for what an area raised, unless the user switched UP-TAKE's
+/// notifications off. Never blocks the caller on the page.
+pub fn show(app: &AppHandle, raised: Raised) {
     if !crate::settings::current().notifications {
         return;
     }
-    let Some(monitor) = monitor_for(bounds, &crate::overlay::monitors_cached()) else {
+    let Some(monitor) = monitor_for(raised.bounds, &crate::overlay::monitors_cached()) else {
         return;
     };
     let label = label_for(monitor.bounds);
-    enqueue(
-        &label,
-        NoticePayload {
-            kind: kind_of(area, moment),
-            title: title.to_string(),
-            body: body.to_string(),
-        },
-    );
+    enqueue(&label, payload_of(raised));
     // Window work belongs on the main thread; the watcher calls from its own.
     let app_for_main = app.clone();
     let scheduled = app.run_on_main_thread(move || {
@@ -277,6 +308,98 @@ fn show_without_focus(hwnd: windows_sys::Win32::Foundation::HWND) {
     }
 }
 
+/// Where the keyboard goes back to after a card's window took it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusBack {
+    /// The overlay, while the user places areas: placing listens for its keys
+    /// (`Esc`, the type letters) through the overlay's own window.
+    Overlay,
+    /// The window that had the keyboard when the pointer came onto the stack.
+    Window(isize),
+    /// Nothing known to give it back to.
+    Nothing,
+}
+
+/// The rule, apart so it is tested: while placing, the overlay; otherwise the
+/// window that had the keyboard before the pointer came onto the stack.
+#[must_use]
+pub const fn focus_back(placing: bool, before: Option<isize>) -> FocusBack {
+    if placing {
+        FocusBack::Overlay
+    } else if let Some(window) = before {
+        FocusBack::Window(window)
+    } else {
+        FocusBack::Nothing
+    }
+}
+
+/// The window that had the keyboard when the pointer last came onto a stack,
+/// as a raw handle (0 for none). Read by [`give_focus_back`].
+static FOCUS_BEFORE: Mutex<isize> = Mutex::new(0);
+
+/// IPC surface: the pointer came onto the stack. Remembers which window has
+/// the keyboard, so a click on a card can give it back. The founder found the
+/// gap at the rig, 2026-11-03: a click on a card while placing left placing
+/// deaf to every key, `Esc` included, because the card's window had taken the
+/// keyboard and the placement hook leaves a key alone while UP-TAKE has it.
+#[tauri::command]
+pub fn notice_hover(window: tauri::WebviewWindow) {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+        // SAFETY: reads window-manager state only.
+        let foreground = unsafe { GetForegroundWindow() } as isize;
+        let own = window.hwnd().map_or(0, |hwnd| hwnd.0 as isize);
+        if foreground != 0 && foreground != own {
+            *FOCUS_BEFORE.lock().unwrap_or_else(PoisonError::into_inner) = foreground;
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = window;
+}
+
+/// A card's window received the keyboard (a click on it): give the keyboard
+/// back by [`focus_back`], and keep the stack above whatever took it back.
+pub fn give_focus_back(app: &AppHandle, window: &tauri::Window) {
+    let placing = *app
+        .state::<Mutex<crate::overlay_state::OverlayState>>()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        == crate::overlay_state::OverlayState::Placement;
+    let before = match *FOCUS_BEFORE.lock().unwrap_or_else(PoisonError::into_inner) {
+        0 => None,
+        hwnd => Some(hwnd),
+    };
+    match focus_back(placing, before) {
+        FocusBack::Overlay => {
+            if let Some(overlay) = app.get_webview_window(crate::overlay::WINDOW_LABEL)
+                && let Err(error) = overlay.set_focus()
+            {
+                crate::diagnostics::trouble(
+                    "notice: could not give the overlay its keyboard back",
+                    &error,
+                );
+            }
+        }
+        #[cfg(windows)]
+        FocusBack::Window(hwnd) => {
+            use windows_sys::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+            // SAFETY: a handle read from the window manager moments ago; a
+            // window that has since closed makes the call fail harmlessly.
+            unsafe {
+                SetForegroundWindow(hwnd as windows_sys::Win32::Foundation::HWND);
+            }
+        }
+        #[cfg(not(windows))]
+        FocusBack::Window(_) => {}
+        FocusBack::Nothing => {}
+    }
+    #[cfg(windows)]
+    if let Ok(hwnd) = window.hwnd() {
+        show_without_focus(hwnd.0);
+    }
+}
+
 /// The monitor a notice window belongs to, from its label.
 fn monitor_of(label: &str) -> Option<Monitor> {
     crate::overlay::monitors_cached()
@@ -332,10 +455,12 @@ mod tests {
             "NoticePayload",
             &NoticePayload {
                 kind: kind_of(7, "changed"),
-                title: "UP-TAKE".to_string(),
-                body: "A watch area changed.".to_string(),
+                name: Some("Download watcher".to_string()),
+                area_type: "Watch area".to_string(),
+                event: "changed".to_string(),
+                tone: "watch",
             },
-            &["kind", "title", "body"],
+            &["kind", "name", "area_type", "event", "tone"],
         );
         assert_payload_coverage(
             "notice.rs",
@@ -372,6 +497,39 @@ mod tests {
             label_for(Rect::new(-1, 3, 1, 1))
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        );
+    }
+
+    /// The founder's rig, 2026-11-03: a click on a card while placing took the
+    /// keyboard from placing. It goes back to the overlay while placing, and
+    /// otherwise to the window that had it.
+    #[test]
+    fn a_click_on_a_card_gives_the_keyboard_back() {
+        use super::{FocusBack, focus_back};
+        assert_eq!(focus_back(true, Some(42)), FocusBack::Overlay);
+        assert_eq!(focus_back(true, None), FocusBack::Overlay);
+        assert_eq!(focus_back(false, Some(42)), FocusBack::Window(42));
+        assert_eq!(focus_back(false, None), FocusBack::Nothing);
+    }
+
+    /// The card carries the area's name, type, event and colour, and its kind
+    /// from the area and the moment (the founder's format, 2026-11-03).
+    #[test]
+    fn a_raised_area_becomes_its_card() {
+        let card = super::payload_of(super::Raised {
+            area: 3,
+            bounds: Rect::new(0, 0, 10, 10),
+            name: Some("Download watcher".to_string()),
+            area_type: "Watch area",
+            tone: "watch",
+            moment: "changed",
+            event: "changed",
+        });
+        assert_eq!(card.kind, kind_of(3, "changed"));
+        assert_eq!(card.name.as_deref(), Some("Download watcher"));
+        assert_eq!(
+            (card.area_type.as_str(), card.event.as_str(), card.tone),
+            ("Watch area", "changed", "watch")
         );
     }
 
@@ -435,8 +593,10 @@ mod tests {
                 label,
                 NoticePayload {
                     kind: index.to_string(),
-                    title: String::new(),
-                    body: String::new(),
+                    name: None,
+                    area_type: String::new(),
+                    event: String::new(),
+                    tone: "watch",
                 },
             );
         }
