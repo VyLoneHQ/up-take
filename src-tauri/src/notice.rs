@@ -1,81 +1,127 @@
-//! UP-TAKE's own notification card (`ADR-0054`).
+//! UP-TAKE's own notification cards (`ADR-0054`).
 //!
-//! A watch area that notices a change says so in a small card drawn by
-//! UP-TAKE, at the top centre of the monitor the area is on. Not a Windows
-//! toast: at the first real-screen test (2026-11-03) Windows accepted every
-//! toast and showed none, and toasts are off on some PCs altogether. The card
-//! shows whatever Windows' notification settings are, and follows UP-TAKE's
-//! own *Show notifications* setting instead.
+//! A watch area that notices a change says so in a card drawn by UP-TAKE, at
+//! the top centre of the monitor the area is on. Not a Windows toast: at the
+//! first real-screen test (2026-11-03) Windows accepted every toast and showed
+//! none, and toasts are off on some PCs altogether. The cards show whatever
+//! Windows' notification settings are, and follow UP-TAKE's own *Show
+//! notifications* setting instead.
 //!
-//! # The window
+//! # The stack
 //!
-//! One window, labelled [`LABEL`], made the first time a card is shown and
-//! reused after: transparent, without a frame, always on top, out of the
-//! taskbar, and **never focused**. It takes a click (to close the card) but
+//! The page (`src/routes/notice/+page.svelte`, its rules in
+//! `src/lib/notice.ts`) keeps the cards as a stack, the founder's design of
+//! 2026-11-03: a card for a new kind (another area, or another moment) goes on
+//! top and pushes the others down; the same kind again while its card shows
+//! counts up on that card and restarts its lifetime, where it is; each card
+//! fades after its own six seconds, and the cards below move up into the gap.
+//! [`NoticePayload::kind`] is what "the same kind" means.
+//!
+//! # The windows
+//!
+//! One window per monitor, labelled [`label_for`], made for its monitor's first
+//! card and reused after: transparent, without a frame, always on top, out of
+//! the taskbar, and **never focused**. It takes a click (to close a card) but
 //! never the keyboard, so a card appearing while the user types does not take
 //! their keystrokes. It follows the overlay's capture policy (`ADR-0019`): with
 //! *Show UP-TAKE in screen recordings* off it is excluded from capture, which
 //! also keeps it out of a watch area's own readings.
 //!
-//! # The card
+//! The page sizes its window to its stack through [`notice_resize`]: at once
+//! when the stack grows, and only after an exit animation when it shrinks, so
+//! no card is clipped while it moves. A height of zero hides the window.
 //!
-//! The page (`src/routes/notice/+page.svelte`) draws it, fades it out after
-//! six seconds unless the pointer is over it, and closes it on a click; either
-//! way it calls [`notice_dismiss`], which hides the window. The text says which
-//! moment it was and never what an area read.
+//! # Handing cards over
+//!
+//! Cards wait in a queue per window until its page takes them
+//! ([`notice_take`]); the event only says there is something to take. So a
+//! card sent before the page has loaded is not lost, and no card is shown
+//! twice. The text says which moment it was and never what an area read.
 
+use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use uptake_core::geometry::{Monitor, Rect};
 
-/// The notification window's label. `capabilities/notice.json` grants it.
-pub const LABEL: &str = "notice";
+/// Every notification window's label starts with this;
+/// `capabilities/notice.json` grants the pattern.
+pub const LABEL_PREFIX: &str = "notice-";
 
-/// The event that hands the page a card to show.
-const NOTICE_EVENT: &str = "notice://show";
+/// The event that tells a page it has cards to take.
+const NOTICE_EVENT: &str = "notice://ready";
 
-/// The card's size in logical pixels. The page lays the card out inside it.
-const SIZE: (f64, f64) = (380.0, 84.0);
+/// The window's width in logical pixels; the page lays the stack out inside it.
+const WIDTH: f64 = 392.0;
 
-/// How far below the monitor's top edge the card sits, in logical pixels.
-const TOP_MARGIN: f64 = 16.0;
+/// How far below the monitor's top edge the stack starts, in logical pixels.
+const TOP_MARGIN: f64 = 12.0;
 
-/// One card: what it says.
+/// How many cards wait for a page at most. Far more than it shows (the page
+/// keeps five); a page that never loads must not grow this without bound.
+const QUEUE_LIMIT: usize = 32;
+
+/// One card to show.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct NoticePayload {
+    /// What makes two cards "the same": the area and the moment. A card of a
+    /// kind already on show counts up there instead of adding a card.
+    pub kind: String,
     /// The card's title line.
     pub title: String,
     /// The card's text.
     pub body: String,
-    /// Counts up with every card, so the page restarts its fade for a new card
-    /// with the same words.
-    pub serial: u64,
 }
 
-/// The card on show, for a page that loaded after the event was sent.
-static CURRENT: Mutex<Option<NoticePayload>> = Mutex::new(None);
+/// Cards waiting for their window's page, by window label.
+static QUEUES: Mutex<Option<HashMap<String, Vec<NoticePayload>>>> = Mutex::new(None);
 
-/// Where the card goes: centred across `monitor`, [`TOP_MARGIN`] below its
-/// top edge, sized for its scale. Physical pixels, as `(x, y, width, height)`.
+/// The window label for the monitor at `bounds`: one window, one stack, per
+/// monitor. From the monitor's position, which is what tells two monitors
+/// apart in the virtual desktop. Letters and digits only (`n` for a negative
+/// coordinate), as a window label must be.
 #[must_use]
-pub fn placement(monitor: &Monitor) -> (i32, i32, u32, u32) {
+pub fn label_for(bounds: Rect) -> String {
+    let part = |value: i32| {
+        if value < 0 {
+            format!("n{}", value.unsigned_abs())
+        } else {
+            value.to_string()
+        }
+    };
+    format!(
+        "{LABEL_PREFIX}{}x{}",
+        part(bounds.origin.x),
+        part(bounds.origin.y)
+    )
+}
+
+/// The card's kind for an area and a moment.
+#[must_use]
+pub fn kind_of(area: u64, moment: &str) -> String {
+    format!("{area}:{moment}")
+}
+
+/// Where the window goes for a stack `height_logical` tall: centred across
+/// `monitor`, [`TOP_MARGIN`] below its top edge, sized for its scale. Physical
+/// pixels, as `(x, y, width, height)`. The height is clamped to the monitor.
+#[must_use]
+pub fn placement(monitor: &Monitor, height_logical: f64) -> (i32, i32, u32, u32) {
     let scale = if monitor.scale_factor > 0.0 {
         monitor.scale_factor
     } else {
         1.0
     };
-    // Rounded and clamped so a monitor narrower than the card still gets a
-    // card that starts on it.
+    let bounds = monitor.bounds;
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let width = ((SIZE.0 * scale).round() as u32).min(monitor.bounds.size.width.max(1));
+    let width = ((WIDTH * scale).round() as u32).min(bounds.size.width.max(1));
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let height = (SIZE.1 * scale).round() as u32;
+    let height = ((height_logical.max(0.0) * scale).round() as u32).min(bounds.size.height);
     #[allow(clippy::cast_possible_wrap)]
-    let x = monitor.bounds.origin.x + ((monitor.bounds.size.width - width) / 2) as i32;
+    let x = bounds.origin.x + ((bounds.size.width - width) / 2) as i32;
     #[allow(clippy::cast_possible_truncation)]
-    let y = monitor.bounds.origin.y + (TOP_MARGIN * scale).round() as i32;
+    let y = bounds.origin.y + (TOP_MARGIN * scale).round() as i32;
     (x, y, width, height)
 }
 
@@ -93,30 +139,42 @@ pub fn monitor_for(bounds: Rect, monitors: &[Monitor]) -> Option<Monitor> {
         .copied()
 }
 
-/// Shows a card for an area at `bounds`, unless the user switched UP-TAKE's
-/// notifications off. Never blocks the caller on the page.
-pub fn show(app: &AppHandle, bounds: Rect, title: &str, body: &str) {
+/// Adds `card` to `label`'s queue, dropping the oldest past [`QUEUE_LIMIT`].
+fn enqueue(label: &str, card: NoticePayload) {
+    let mut queues = QUEUES.lock().unwrap_or_else(PoisonError::into_inner);
+    let queue = queues
+        .get_or_insert_with(HashMap::new)
+        .entry(label.to_string())
+        .or_default();
+    queue.push(card);
+    if queue.len() > QUEUE_LIMIT {
+        let excess = queue.len() - QUEUE_LIMIT;
+        queue.drain(..excess);
+    }
+}
+
+/// Shows a card for the area `area` at `bounds`, unless the user switched
+/// UP-TAKE's notifications off. Never blocks the caller on the page.
+pub fn show(app: &AppHandle, area: u64, bounds: Rect, moment: &str, title: &str, body: &str) {
     if !crate::settings::current().notifications {
         return;
     }
     let Some(monitor) = monitor_for(bounds, &crate::overlay::monitors_cached()) else {
         return;
     };
-    let payload = {
-        let mut current = CURRENT.lock().unwrap_or_else(PoisonError::into_inner);
-        let serial = current.as_ref().map_or(1, |card| card.serial + 1);
-        let card = NoticePayload {
+    let label = label_for(monitor.bounds);
+    enqueue(
+        &label,
+        NoticePayload {
+            kind: kind_of(area, moment),
             title: title.to_string(),
             body: body.to_string(),
-            serial,
-        };
-        *current = Some(card.clone());
-        card
-    };
+        },
+    );
     // Window work belongs on the main thread; the watcher calls from its own.
     let app_for_main = app.clone();
     let scheduled = app.run_on_main_thread(move || {
-        if let Err(error) = present(&app_for_main, &monitor, &payload) {
+        if let Err(error) = wake_page(&app_for_main, &label, &monitor) {
             crate::diagnostics::trouble("notice: the card could not be shown", &error);
         }
     });
@@ -125,28 +183,45 @@ pub fn show(app: &AppHandle, bounds: Rect, title: &str, body: &str) {
     }
 }
 
-/// Makes or reuses the window, places it, shows it without taking focus, and
-/// hands the page its card.
-fn present(app: &AppHandle, monitor: &Monitor, payload: &NoticePayload) -> Result<(), String> {
-    let window = match app.get_webview_window(LABEL) {
+/// Makes `label`'s window if it is not there yet (hidden: its page shows it
+/// once it has sized itself), and tells its page there are cards to take.
+fn wake_page(app: &AppHandle, label: &str, monitor: &Monitor) -> Result<(), String> {
+    let window = match app.get_webview_window(label) {
         Some(window) => window,
-        None => WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("notice/".into()))
-            .title("UP-TAKE")
-            .transparent(true)
-            .decorations(false)
-            .shadow(false)
-            .always_on_top(true)
-            .skip_taskbar(true)
-            .resizable(false)
-            .focused(false)
-            .focusable(false)
-            .visible(false)
-            .build()
-            .map_err(|error| format!("could not make the notice window: {error}"))?,
+        None => {
+            let window = WebviewWindowBuilder::new(app, label, WebviewUrl::App("notice/".into()))
+                .title("UP-TAKE")
+                .transparent(true)
+                .decorations(false)
+                .shadow(false)
+                .always_on_top(true)
+                .skip_taskbar(true)
+                .resizable(false)
+                .focused(false)
+                .focusable(false)
+                .visible(false)
+                .build()
+                .map_err(|error| format!("could not make the notice window: {error}"))?;
+            place(&window, monitor, 0.0)?;
+            window
+        }
     };
-    let (x, y, width, height) = placement(monitor);
     window
-        .set_size(tauri::PhysicalSize::new(width, height))
+        .emit(NOTICE_EVENT, ())
+        .map_err(|error| format!("could not wake the notice page: {error}"))
+}
+
+/// Sizes and places `window` for a stack `height` logical pixels tall, shows
+/// it without focus, or hides it at zero.
+fn place(window: &tauri::WebviewWindow, monitor: &Monitor, height: f64) -> Result<(), String> {
+    let (x, y, width, physical_height) = placement(monitor, height);
+    if physical_height == 0 {
+        return window
+            .hide()
+            .map_err(|error| format!("could not hide the notice window: {error}"));
+    }
+    window
+        .set_size(tauri::PhysicalSize::new(width, physical_height))
         .map_err(|error| format!("could not size the notice window: {error}"))?;
     window
         .set_position(tauri::PhysicalPosition::new(x, y))
@@ -167,9 +242,7 @@ fn present(app: &AppHandle, monitor: &Monitor, payload: &NoticePayload) -> Resul
     window
         .show()
         .map_err(|error| format!("could not show the notice window: {error}"))?;
-    window
-        .emit(NOTICE_EVENT, payload.clone())
-        .map_err(|error| format!("could not hand the card to its page: {error}"))
+    Ok(())
 }
 
 /// Shows the window on top without activating it, so the program the user is
@@ -204,51 +277,65 @@ fn show_without_focus(hwnd: windows_sys::Win32::Foundation::HWND) {
     }
 }
 
-/// IPC surface: the card on show, for a page that loaded after it was sent.
-#[tauri::command]
-#[must_use]
-pub fn notice_current() -> Option<NoticePayload> {
-    CURRENT
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .clone()
+/// The monitor a notice window belongs to, from its label.
+fn monitor_of(label: &str) -> Option<Monitor> {
+    crate::overlay::monitors_cached()
+        .into_iter()
+        .find(|monitor| label_for(monitor.bounds) == label)
 }
 
-/// IPC surface: the page's card faded out or was clicked; hide the window.
-/// A newer card than `serial` keeps it open.
+/// IPC surface: the cards waiting for the calling window's page, oldest
+/// first. Taking them empties the queue.
 #[tauri::command]
-pub fn notice_dismiss(app: AppHandle, serial: u64) -> Result<(), String> {
-    {
-        let mut current = CURRENT.lock().unwrap_or_else(PoisonError::into_inner);
-        if current.as_ref().is_some_and(|card| card.serial != serial) {
-            return Ok(());
-        }
-        *current = None;
+#[must_use]
+pub fn notice_take(window: tauri::WebviewWindow) -> Vec<NoticePayload> {
+    QUEUES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_mut()
+        .and_then(|queues| queues.remove(window.label()))
+        .unwrap_or_default()
+}
+
+/// IPC surface: the page's stack is `height` logical pixels tall now; size the
+/// window to it, or hide it at zero.
+#[tauri::command]
+pub fn notice_resize(window: tauri::WebviewWindow, height: f64) -> Result<(), String> {
+    if !window.label().starts_with(LABEL_PREFIX) {
+        return Err("not a notice window".to_string());
     }
-    if let Some(window) = app.get_webview_window(LABEL) {
-        window
+    let Some(monitor) = monitor_of(window.label()) else {
+        // Its monitor is gone: nothing to show it on.
+        return window
             .hide()
-            .map_err(|error| format!("could not hide the notice window: {error}"))?;
-    }
-    Ok(())
+            .map_err(|error| format!("could not hide the notice window: {error}"));
+    };
+    place(&window, &monitor, height)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{NoticePayload, monitor_for, placement};
+    use super::{
+        LABEL_PREFIX, NoticePayload, QUEUE_LIMIT, kind_of, label_for, monitor_for, placement,
+    };
     use crate::payload_keys::{assert_keys, assert_payload_coverage};
+    use uptake_core::geometry::{Monitor, Rect};
 
-    /// The card crosses IPC to its page, so its keys are pinned (`I-67`).
+    fn monitor(x: i32, y: i32, width: u32, height: u32, scale: f64) -> Monitor {
+        Monitor::new(Rect::new(x, y, width, height), scale)
+    }
+
+    /// The cards cross IPC to their page, so their keys are pinned (`I-67`).
     #[test]
-    fn the_card_reaches_its_page_under_the_keys_it_reads() {
+    fn a_card_reaches_its_page_under_the_keys_it_reads() {
         assert_keys(
             "NoticePayload",
             &NoticePayload {
+                kind: kind_of(7, "changed"),
                 title: "UP-TAKE".to_string(),
                 body: "A watch area changed.".to_string(),
-                serial: 1,
             },
-            &["title", "body", "serial"],
+            &["kind", "title", "body"],
         );
         assert_payload_coverage(
             "notice.rs",
@@ -258,41 +345,68 @@ mod tests {
         );
     }
 
-    /// Its own window, never the overlay's: the overlay's window hooks key on
-    /// the label (see `settings_window`'s same test).
+    /// Its own windows, never the overlay's or the settings window: the
+    /// overlay's window hooks key on the label.
     #[test]
-    fn the_window_is_not_the_overlay() {
-        assert_ne!(super::LABEL, crate::overlay::WINDOW_LABEL);
-        assert_ne!(super::LABEL, crate::settings_window::WINDOW_LABEL);
+    fn the_windows_are_not_the_overlay() {
+        let label = label_for(Rect::new(0, 0, 10, 10));
+        assert!(label.starts_with(LABEL_PREFIX));
+        assert_ne!(label, crate::overlay::WINDOW_LABEL);
+        assert_ne!(label, crate::settings_window::WINDOW_LABEL);
     }
-    use uptake_core::geometry::{Monitor, Rect};
 
-    fn monitor(x: i32, y: i32, width: u32, height: u32, scale: f64) -> Monitor {
-        Monitor::new(Rect::new(x, y, width, height), scale)
+    /// One window per monitor, told apart by position, in characters a window
+    /// label accepts.
+    #[test]
+    fn each_monitor_gets_its_own_window() {
+        assert_eq!(label_for(Rect::new(0, 0, 1920, 1080)), "notice-0x0");
+        assert_eq!(
+            label_for(Rect::new(-2560, -200, 2560, 1440)),
+            "notice-n2560xn200"
+        );
+        assert_ne!(
+            label_for(Rect::new(1920, 0, 1920, 1080)),
+            label_for(Rect::new(0, 0, 1920, 1080))
+        );
+        assert!(
+            label_for(Rect::new(-1, 3, 1, 1))
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        );
+    }
+
+    /// The same area and moment is the same kind; anything else is not.
+    #[test]
+    fn a_kind_is_the_area_and_the_moment() {
+        assert_eq!(kind_of(3, "changed"), kind_of(3, "changed"));
+        assert_ne!(kind_of(3, "changed"), kind_of(4, "changed"));
+        assert_ne!(kind_of(3, "changed"), kind_of(3, "settled"));
     }
 
     /// `ADR-0054` decision 2: top centre of the monitor, sized for its scale.
     #[test]
-    fn the_card_sits_at_the_top_centre_of_its_monitor() {
+    fn the_stack_sits_at_the_top_centre_of_its_monitor() {
         assert_eq!(
-            placement(&monitor(0, 0, 1920, 1080, 1.0)),
-            (770, 16, 380, 84)
+            placement(&monitor(0, 0, 1920, 1080, 1.0), 100.0),
+            (764, 12, 392, 100)
         );
         // A monitor left of the primary, at 150 %.
         assert_eq!(
-            placement(&monitor(-2560, 0, 2560, 1440, 1.5)),
-            (-2560 + (2560 - 570) / 2, 24, 570, 126)
+            placement(&monitor(-2560, 0, 2560, 1440, 1.5), 100.0),
+            (-2560 + (2560 - 588) / 2, 18, 588, 150)
         );
-        // Narrower than the card: the card is clamped to it and starts on it.
+        // Narrower than the stack, and a stack taller than the monitor.
         assert_eq!(
-            placement(&monitor(100, 0, 300, 400, 1.0)),
-            (100, 16, 300, 84)
+            placement(&monitor(100, 0, 300, 400, 1.0), 900.0),
+            (100, 12, 300, 400)
         );
+        // Zero hides.
+        assert_eq!(placement(&monitor(0, 0, 1920, 1080, 1.0), 0.0).3, 0);
     }
 
-    /// The card goes on the monitor that holds most of the area.
+    /// The cards go on the monitor that holds most of the area.
     #[test]
-    fn the_card_follows_the_area_to_its_monitor() {
+    fn a_card_follows_its_area_to_its_monitor() {
         let left = monitor(-1920, 0, 1920, 1080, 1.0);
         let right = monitor(0, 0, 1920, 1080, 1.25);
         let monitors = [left, right];
@@ -304,11 +418,39 @@ mod tests {
             monitor_for(Rect::new(-500, 100, 50, 50), &monitors),
             Some(left)
         );
-        // Straddling: the side holding more of it wins.
         assert_eq!(
             monitor_for(Rect::new(-30, 0, 100, 10), &monitors),
             Some(right)
         );
         assert_eq!(monitor_for(Rect::new(0, 0, 10, 10), &[]), None);
+    }
+
+    /// A page that never takes its cards cannot grow the queue without bound,
+    /// and taking empties it in order.
+    #[test]
+    fn the_queue_is_bounded_and_keeps_the_newest() {
+        let label = "notice-test-queue";
+        for index in 0..QUEUE_LIMIT + 5 {
+            super::enqueue(
+                label,
+                NoticePayload {
+                    kind: index.to_string(),
+                    title: String::new(),
+                    body: String::new(),
+                },
+            );
+        }
+        let taken = super::QUEUES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()
+            .and_then(|queues| queues.remove(label))
+            .unwrap_or_default();
+        assert_eq!(taken.len(), QUEUE_LIMIT);
+        assert_eq!(taken.first().map(|card| card.kind.as_str()), Some("5"));
+        assert_eq!(
+            taken.last().map(|card| card.kind.clone()),
+            Some((QUEUE_LIMIT + 4).to_string())
+        );
     }
 }

@@ -588,8 +588,8 @@ trait Host {
     fn capture(&mut self, bounds: Rect) -> Result<uptake_capture::CapturedRegion, String>;
     /// A reading failed; logged once until one succeeds.
     fn trouble(&mut self, error: &str);
-    /// Raises the notification for `event`, for the area at `bounds`.
-    fn notify(&mut self, event: Event, bounds: Rect);
+    /// Raises the notification for `event`, for the area `id` at `bounds`.
+    fn notify(&mut self, event: Event, id: AreaId, bounds: Rect);
 }
 
 /// The app itself, and the monitor frames read in this pass.
@@ -657,8 +657,8 @@ impl Host for AppHost<'_> {
             &error,
         );
     }
-    fn notify(&mut self, event: Event, bounds: Rect) {
-        notify(self.app, event, bounds);
+    fn notify(&mut self, event: Event, id: AreaId, bounds: Rect) {
+        notify(self.app, event, id, bounds);
     }
 }
 
@@ -783,7 +783,7 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
         if let Some(event) = reading.and_then(|reading| watcher.detector.observe(reading))
             && target.watch.notifies(event)
         {
-            host.notify(event, target.bounds);
+            host.notify(event, target.id, target.bounds);
         }
     }
     host.end_pass();
@@ -827,12 +827,12 @@ fn gate<Id: PartialEq + Copy>(
 ///
 /// Not a Windows toast any more: at the first real-screen test Windows
 /// accepted every toast and showed none.
-fn notify(app: &AppHandle, event: Event, bounds: Rect) {
-    let body = match event {
-        Event::Changed => text(Text::WatchChanged),
-        Event::Settled => text(Text::WatchSettled),
+fn notify(app: &AppHandle, event: Event, id: AreaId, bounds: Rect) {
+    let (moment, body) = match event {
+        Event::Changed => ("changed", text(Text::WatchChanged)),
+        Event::Settled => ("settled", text(Text::WatchSettled)),
     };
-    crate::notice::show(app, bounds, text(Text::WatchTitle), body);
+    crate::notice::show(app, id.get(), bounds, moment, text(Text::WatchTitle), body);
 }
 
 #[cfg(test)]
@@ -938,7 +938,7 @@ mod tests {
                 Ok(CapturedRegion { rect, bitmap })
             }
             fn trouble(&mut self, _error: &str) {}
-            fn notify(&mut self, event: Event, _bounds: Rect) {
+            fn notify(&mut self, event: Event, _id: AreaId, _bounds: Rect) {
                 self.notified.push(event);
             }
         }
