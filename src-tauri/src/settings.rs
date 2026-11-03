@@ -154,6 +154,11 @@ pub struct Settings {
     pub start_with_windows: bool,
     /// Which state a launch by hand lands in.
     pub hand_launch_state: HandLaunchState,
+    /// Whether UP-TAKE shows its own notification cards (`ADR-0054`), such as
+    /// a watch area's. On by default: a watch area exists to tell the user,
+    /// and this card is the only way it does. Windows' notification settings
+    /// do not affect it; this does.
+    pub notifications: bool,
 
     // ---- Capture -------------------------------------------------------
     /// Where Save writes. `None` means `Pictures\UP-TAKE`, resolved at the
@@ -197,6 +202,7 @@ impl Default for Settings {
         Self {
             start_with_windows: false,
             hand_launch_state: HandLaunchState::Placing,
+            notifications: true,
             save_directory: None,
             leave_placing_after_screenshot: false,
             auto_save_screenshots: false,
@@ -317,6 +323,7 @@ mod tests {
         let settings = Settings::default();
         assert!(!settings.start_with_windows, "Q-14: off");
         assert_eq!(settings.hand_launch_state, HandLaunchState::Placing);
+        assert!(settings.notifications, "ADR-0054: on");
         assert_eq!(
             settings.save_directory, None,
             "None means Pictures\\UP-TAKE"
@@ -384,6 +391,7 @@ mod tests {
             &[
                 "start_with_windows",
                 "hand_launch_state",
+                "notifications",
                 "save_directory",
                 "leave_placing_after_screenshot",
                 "auto_save_screenshots",

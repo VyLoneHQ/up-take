@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "notice",
+  "description": "Capability for the notification card's window (ADR-0054, src-tauri/src/notice.rs). A second window starts with NOTHING granted (see settings.json for what that looked like on the rig). The card's page needs exactly one thing: to hear the card it should show, which arrives as the notice://show event, so it gets listen and unlisten and nothing else. Rust shows, places and hides the window, where no ACL applies, and the page reads the current card and dismisses it through UP-TAKE's own notice_current and notice_dismiss commands.",
+  "windows": ["notice"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten"
+  ]
+}

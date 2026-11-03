@@ -775,6 +775,7 @@ mod tests {
             vec![
                 "config.rs",
                 "first_run.rs",
+                "notice.rs",
                 "overlay.rs",
                 "placement.rs",
                 "settings.rs",

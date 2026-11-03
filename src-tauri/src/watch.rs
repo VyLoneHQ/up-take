@@ -588,8 +588,8 @@ trait Host {
     fn capture(&mut self, bounds: Rect) -> Result<uptake_capture::CapturedRegion, String>;
     /// A reading failed; logged once until one succeeds.
     fn trouble(&mut self, error: &str);
-    /// Raises the notification for `event`.
-    fn notify(&mut self, event: Event);
+    /// Raises the notification for `event`, for the area at `bounds`.
+    fn notify(&mut self, event: Event, bounds: Rect);
 }
 
 /// The app itself, and the monitor frames read in this pass.
@@ -657,8 +657,8 @@ impl Host for AppHost<'_> {
             &error,
         );
     }
-    fn notify(&mut self, event: Event) {
-        notify(self.app, event);
+    fn notify(&mut self, event: Event, bounds: Rect) {
+        notify(self.app, event, bounds);
     }
 }
 
@@ -783,7 +783,7 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
         if let Some(event) = reading.and_then(|reading| watcher.detector.observe(reading))
             && target.watch.notifies(event)
         {
-            host.notify(event);
+            host.notify(event, target.bounds);
         }
     }
     host.end_pass();
@@ -822,23 +822,17 @@ fn gate<Id: PartialEq + Copy>(
     }
 }
 
-/// Raises the Windows notification for `event`. Says which moment it was and
-/// never what the area read.
-fn notify(app: &AppHandle, event: Event) {
-    use tauri_plugin_notification::NotificationExt;
+/// Shows UP-TAKE's own card for `event` (`ADR-0054`), on the monitor of the
+/// area at `bounds`. Says which moment it was and never what the area read.
+///
+/// Not a Windows toast any more: at the first real-screen test Windows
+/// accepted every toast and showed none.
+fn notify(app: &AppHandle, event: Event, bounds: Rect) {
     let body = match event {
         Event::Changed => text(Text::WatchChanged),
         Event::Settled => text(Text::WatchSettled),
     };
-    if let Err(error) = app
-        .notification()
-        .builder()
-        .title(text(Text::WatchTitle))
-        .body(body)
-        .show()
-    {
-        crate::diagnostics::trouble("watch: the notification could not be shown", &error);
-    }
+    crate::notice::show(app, bounds, text(Text::WatchTitle), body);
 }
 
 #[cfg(test)]
@@ -944,7 +938,7 @@ mod tests {
                 Ok(CapturedRegion { rect, bitmap })
             }
             fn trouble(&mut self, _error: &str) {}
-            fn notify(&mut self, event: Event) {
+            fn notify(&mut self, event: Event, _bounds: Rect) {
                 self.notified.push(event);
             }
         }
@@ -1098,7 +1092,7 @@ mod tests {
         /// emitting, naming an event by its constant or by its text.
         #[test]
         fn every_message_that_redraws_the_page_moves_the_generation() {
-            const NOT_REDRAWING: [(&str, &str); 4] = [
+            const NOT_REDRAWING: [(&str, &str); 5] = [
                 (
                     "FREEZE_REVEAL_EVENT",
                     "only shows more; a mark it reveals is confirmed after",
@@ -1112,6 +1106,10 @@ mod tests {
                     "settings: area border and wash alpha, never the mark",
                 ),
                 ("DRAWN_EVENT", "the generation itself, sent by emit_redraw"),
+                (
+                    "NOTICE_EVENT",
+                    "the notice card's own window (ADR-0054), not the overlay page",
+                ),
             ];
             const SENDS: [&str; 4] = [".emit(", "emit_to(", "emit_filter(", "Emitter::emit("];
             let floor = |text: &str, mut at: usize| {

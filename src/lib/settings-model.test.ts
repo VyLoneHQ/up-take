@@ -49,6 +49,7 @@ import { LANGUAGES } from './strings';
 const INVENTORY: { pane: PaneId; id: string; shape: Row['shape'] }[] = [
   { pane: 'general', id: 'start-with-windows', shape: 'toggle' },
   { pane: 'general', id: 'hand-launch-state', shape: 'segmented' },
+  { pane: 'general', id: 'notifications', shape: 'toggle' },
   { pane: 'general', id: 'hotkey-summon', shape: 'fact' },
   { pane: 'general', id: 'hotkey-grab', shape: 'fact' },
   { pane: 'capture', id: 'save-directory', shape: 'folder' },
@@ -67,6 +68,7 @@ const INVENTORY: { pane: PaneId; id: string; shape: Row['shape'] }[] = [
 const DEFAULTS: Settings = {
   start_with_windows: false,
   hand_launch_state: 'placing',
+  notifications: true,
   save_directory: null,
   leave_placing_after_screenshot: false,
   auto_save_screenshots: false,

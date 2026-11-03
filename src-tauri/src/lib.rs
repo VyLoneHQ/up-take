@@ -13,6 +13,7 @@ mod first_run;
 mod freeze;
 mod hotkey;
 mod licence_window;
+mod notice;
 mod ocr;
 mod ocr_words;
 mod output;
@@ -179,6 +180,8 @@ pub fn run() -> tauri::Result<()> {
                     overlay::overlay_report_freeze_latency,
                     overlay::overlay_report_scale,
                     overlay::overlay_dismiss_focused,
+                    notice::notice_current,
+                    notice::notice_dismiss,
                     overlay::overlay_ocr_copy_focused,
                     overlay::overlay_ocr_select_all_focused,
                     overlay::overlay_request_state,
@@ -207,6 +210,8 @@ pub fn run() -> tauri::Result<()> {
                     overlay::overlay_report_latency,
                     overlay::overlay_confirm_marks,
                     overlay::overlay_dismiss_focused,
+                    notice::notice_current,
+                    notice::notice_dismiss,
                     overlay::overlay_ocr_copy_focused,
                     overlay::overlay_ocr_select_all_focused,
                     overlay::overlay_request_state,

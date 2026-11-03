@@ -545,6 +545,21 @@
       "de": "Hilfe",
       "de_from": "b89df01a"
     },
+    "settings.section.notifications": {
+      "en": "Notifications",
+      "de": "Benachrichtigungen",
+      "de_from": "381d190f"
+    },
+    "settings.notifications.name": {
+      "en": "Show notifications",
+      "de": "Benachrichtigungen anzeigen",
+      "de_from": "fae48728"
+    },
+    "settings.notifications.about": {
+      "en": "UP-TAKE's own card at the top of the screen, for example when a watch area changes. Windows' notification settings do not affect it.",
+      "de": "Die eigene Karte von UP-TAKE oben am Bildschirm, zum Beispiel wenn sich ein Beobachtungsbereich ändert. Die Benachrichtigungseinstellungen von Windows wirken sich nicht darauf aus.",
+      "de_from": "d9d13b04"
+    },
     "settings.section.startup": {
       "en": "Starting up",
       "de": "Starten",

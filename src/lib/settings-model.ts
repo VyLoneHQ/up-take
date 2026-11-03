@@ -83,6 +83,8 @@ export type OcrBehaviour = 'in_place' | 'rendered';
 export interface Settings {
   start_with_windows: boolean;
   hand_launch_state: HandLaunchState;
+  /** UP-TAKE's own notification cards (ADR-0054). */
+  notifications: boolean;
   save_directory: string | null;
   leave_placing_after_screenshot: boolean;
   auto_save_screenshots: boolean;
@@ -262,6 +264,21 @@ export function panes(
               ],
               set: (value) =>
                 with_({ hand_launch_state: value as HandLaunchState }),
+            },
+          ],
+        },
+        {
+          // ADR-0054: UP-TAKE draws its own cards, so its own switch is the
+          // only one that turns them off.
+          label: say('settings.section.notifications'),
+          rows: [
+            {
+              shape: 'toggle',
+              id: 'notifications',
+              name: say('settings.notifications.name'),
+              about: say('settings.notifications.about'),
+              value: settings.notifications,
+              set: (value) => with_({ notifications: value }),
             },
           ],
         },

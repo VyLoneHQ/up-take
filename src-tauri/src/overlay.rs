@@ -565,7 +565,7 @@ fn write_affinity(window: &WebviewWindow, show_in_recordings: bool) -> Result<()
 /// The one call that changes a window's display affinity. Takes a bare handle
 /// so the tests can make the same call on a window of their own.
 #[cfg(windows)]
-fn write_affinity_to(
+pub(crate) fn write_affinity_to(
     hwnd: windows_sys::Win32::Foundation::HWND,
     show_in_recordings: bool,
 ) -> Result<(), String> {
@@ -2274,6 +2274,12 @@ pub(crate) fn dev_perturb_cached_scale() -> Option<(Rect, f64, f64)> {
 ///
 /// Order is the cache's order, which is what makes an index from
 /// [`monitor_at_point`] addressable against this list.
+/// The cached monitors with their scale factors, for a window that is sized
+/// per monitor (the notification card, `crate::notice`).
+pub(crate) fn monitors_cached() -> Vec<Monitor> {
+    lock(&MONITOR_CACHE).clone()
+}
+
 pub(crate) fn monitor_rects() -> Vec<Rect> {
     lock(&MONITOR_CACHE)
         .iter()
