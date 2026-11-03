@@ -152,9 +152,12 @@ use crate::overlay_state::OverlayState;
 
 use crate::strings::{Text, text};
 
-/// How often a watching area reads its region. A first value; see the module
-/// docs' *Cost*.
-pub const INTERVAL: Duration = Duration::from_secs(2);
+/// How often a watching area reads its region: twice a second since
+/// 2026-11-03, when two seconds proved too slow at the maintainer's rig (a
+/// switch could wait two seconds to be seen, and a switch and back between two
+/// readings was missed). Held sessions measured 0.13 % of a core at two
+/// seconds; four times the readings is re-measured before release (`I-474`).
+pub const INTERVAL: Duration = Duration::from_millis(500);
 
 /// How wide a band along each edge of the area is left out of a reading, in
 /// physical pixels: the border, 1.5 CSS pixels, at up to 250 % scaling.
@@ -747,13 +750,13 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
         }
         let watcher = watchers.entry(target.id).or_insert_with(|| Watcher {
             target,
-            detector: Detector::new(),
+            detector: Detector::with_settle(target.watch.settle_readings()),
             failing: false,
             fresh: true,
         });
         if watcher.target != target {
             watcher.target = target;
-            watcher.detector = Detector::new();
+            watcher.detector = Detector::with_settle(target.watch.settle_readings());
             watcher.fresh = true;
         }
         if watcher.fresh {
@@ -1413,7 +1416,10 @@ mod tests {
             fake.level = 20;
             run(&mut fake, &mut memory, 1);
             assert_eq!(fake.notified.len(), 0);
-            run(&mut fake, &mut memory, 4);
+            // One reading more than the settle count, since a pass may land
+            // on the reading that only starts the still run.
+            let settle = usize::try_from(Watch::Settles.settle_readings()).unwrap_or(usize::MAX);
+            run(&mut fake, &mut memory, settle + 1);
             assert_eq!(fake.notified, vec![Event::Settled]);
         }
 
