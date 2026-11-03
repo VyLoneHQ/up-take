@@ -76,15 +76,27 @@ function onKeydown(event: KeyboardEvent): void {
   }
 }
 
+/** The margin around the panel inside its window, for its shadow (CSS). */
+const MARGIN = 12;
+
 let sent = 0;
 function report(): void {
-  // The panel's own height plus its 6px margin above and below, which
-  // leaves room for its shadow inside the window.
-  const height = shell ? Math.ceil(shell.offsetHeight) + 12 : 0;
-  if (height === 0 || height === sent) return;
+  const height = shell ? Math.ceil(shell.offsetHeight) + 2 * MARGIN : 0;
+  if (height <= 2 * MARGIN || height === sent) return;
   sent = height;
   void invoke('panel_resize', { height }).catch(() => {});
 }
+
+// The panel exists only once its area has been read, so it is measured from
+// then on: watching it from mount watched nothing, and the window kept its
+// first guess and cut the panel off (the founder's rig, 2026-11-03).
+$effect(() => {
+  if (!shell) return;
+  const observer = new ResizeObserver(report);
+  observer.observe(shell);
+  report();
+  return () => observer.disconnect();
+});
 
 onMount(() => {
   void invoke('overlay_language')
@@ -96,10 +108,7 @@ onMount(() => {
     void load();
   });
   void load();
-  const observer = new ResizeObserver(report);
-  if (shell) observer.observe(shell);
   return () => {
-    observer.disconnect();
     void ready.then((unlisten) => unlisten());
   };
 });
@@ -195,16 +204,18 @@ onMount(() => {
 
 .panel {
   box-sizing: border-box;
-  margin: 6px;
+  /* MARGIN in the script: room for the shadow inside the window. */
+  margin: 12px;
   padding: 10px 12px 12px;
   display: flex;
   flex-direction: column;
   gap: 10px;
-  border: 1px solid rgba(var(--tone), 0.45);
+  border: 1px solid rgba(var(--tone), 0.4);
   border-radius: 10px;
-  background: rgba(22, 24, 28, 0.96);
+  background: rgba(22, 24, 28, 0.97);
+  /* Fits inside the 12px margin: blur 10 at offset 3 reaches 13 below. */
   box-shadow:
-    0 6px 18px rgba(0, 0, 0, 0.45),
+    0 3px 9px rgba(0, 0, 0, 0.5),
     inset 3px 0 0 rgba(var(--tone), 0.85);
   animation: appear 160ms ease-out both;
 }
@@ -252,6 +263,18 @@ header {
 
 .close:hover {
   color: rgba(235, 238, 240, 1);
+}
+
+/* No focus ring on a click; a thin one in the type's colour from the
+   keyboard. */
+button:focus,
+input:focus {
+  outline: none;
+}
+
+button:focus-visible {
+  outline: 1px solid rgba(var(--tone), 0.8);
+  outline-offset: 1px;
 }
 
 .field {

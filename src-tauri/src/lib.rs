@@ -271,6 +271,11 @@ pub fn run() -> tauri::Result<()> {
             if window.label() != overlay::WINDOW_LABEL {
                 return;
             }
+            // The overlay rises to the top whenever it takes focus; the
+            // settings panel goes back above it (roadmap 1.60).
+            if matches!(event, WindowEvent::Focused(true)) {
+                panel::raise(window.app_handle());
+            }
             // Each of these can invalidate the overlay's fit — tao's
             // WM_DPICHANGED handler rescales the window's physical size, which
             // sync_bounds must undo. sync_bounds is self-converging, so the

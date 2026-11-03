@@ -55,8 +55,9 @@ pub const HOVER_OPEN: Duration = Duration::from_millis(400);
 /// unpinned panel closes.
 pub const HOVER_CLOSE: Duration = Duration::from_millis(300);
 
-/// The panel's width in logical pixels; its height is the page's.
-const WIDTH: f64 = 280.0;
+/// The window's width in logical pixels, the page's 12px margin on each side
+/// included (room for the shadow); its height is the page's.
+const WIDTH: f64 = 300.0;
 
 /// The gap between an area and a panel docked beside it, in logical pixels.
 const GAP: f64 = 8.0;
@@ -468,6 +469,36 @@ fn cursor() -> Option<Point> {
     None
 }
 
+/// Whether a press at `point` is the panel's: inside the open panel. Asked by
+/// the placement hook before anything else, by position rather than z-order
+/// (see the hook), so the panel's controls work wherever it sits in the stack.
+#[must_use]
+pub fn takes_press(point: Point) -> bool {
+    press_is_the_panels(open_now().map(|open| open.rect), point)
+}
+
+/// [`takes_press`]'s rule, apart so it is tested.
+#[must_use]
+pub fn press_is_the_panels(panel: Option<Rect>, point: Point) -> bool {
+    panel.is_some_and(|rect| rect.contains(point))
+}
+
+/// Puts the open panel back above the overlay, which rises above it whenever
+/// it takes focus. Without the keyboard, so it takes nothing from placing.
+pub fn raise(app: &AppHandle) {
+    if open_now().is_none() {
+        return;
+    }
+    #[cfg(windows)]
+    if let Some(window) = app.get_webview_window(LABEL)
+        && let Ok(hwnd) = window.hwnd()
+    {
+        show_on_top(hwnd.0);
+    }
+    #[cfg(not(windows))]
+    let _ = app;
+}
+
 /// A press while placing: one outside an open pinned panel closes it, the way
 /// a press outside the menu closes the menu. Returns whether it closed one,
 /// in which case the press does nothing else.
@@ -640,6 +671,31 @@ mod tests {
             &["id", "kind", "name", "watch", "held"],
         );
         assert_payload_coverage("panel.rs", include_str!("panel.rs"), &["PanelView"], &[]);
+    }
+
+    /// The founder's rig, 2026-11-03: presses on the panel were swallowed. A
+    /// press inside the open panel is the panel's; any other is not.
+    #[test]
+    fn a_press_inside_the_open_panel_is_the_panels() {
+        use super::press_is_the_panels;
+        let panel = Some(Rect::new(400, 100, 280, 200));
+        assert!(press_is_the_panels(panel, Point::new(410, 110)));
+        assert!(press_is_the_panels(panel, Point::new(679, 299)));
+        assert!(!press_is_the_panels(panel, Point::new(399, 110)));
+        assert!(!press_is_the_panels(panel, Point::new(680, 110)));
+        assert!(!press_is_the_panels(None, Point::new(410, 110)));
+    }
+
+    /// Both of the hook's z-order checks ask the panel first; the source is
+    /// held because the hook runs on a real Windows hook no test can drive.
+    #[test]
+    fn the_placement_hook_asks_the_panel_before_the_z_order() {
+        let hook = include_str!("placement.rs");
+        assert_eq!(
+            hook.matches("crate::panel::takes_press(point) || shadowed_by_another_window(point)")
+                .count(),
+            2
+        );
     }
 
     #[test]
