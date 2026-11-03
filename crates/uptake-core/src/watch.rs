@@ -82,16 +82,22 @@ pub const GRID: u32 = 16;
 /// How far one cell's average brightness must move, in levels of 255, before
 /// the region counts as changed.
 ///
-/// Twelve levels is a few percent of a cell's pixels going from light to dark.
-/// On a 1,000 by 600 region a cell is about 60 by 40 pixels, so a caret 2 by
-/// 16 pixels moves its cell's average by about three levels and is ignored,
-/// while one line of new text covers a fifth of a cell's rows and moves it by
-/// tens of levels.
+/// **Six, measured on a real screen, 2026-11-03** (the maintainer's rig, a
+/// 106 by 62 pixel watch area over two thin toolbar icons that appear and
+/// disappear on a dark background). Showing or hiding the icons moved the
+/// busiest cell by exactly 12 levels, and readings of the still screen
+/// differed by 0. The first value, 12, was chosen on arithmetic and compared
+/// with `>`, so that real change sat exactly on the line and was never
+/// reported. Six is half of it.
+///
+/// What it still ignores: on a 1,000 by 600 region a cell is about 60 by 40
+/// pixels, so a caret 2 by 16 pixels moves its cell's average by about three
+/// levels, under six. One line of new text moves a cell by tens of levels.
 ///
 /// ⚠️ **The smaller the region, the bigger a cell's share of each pixel.** On
 /// a region a few lines tall a cell is a handful of pixels, and a caret
-/// blinking in it does count as a change. A known limit of this first value.
-pub const CELL_DELTA: u8 = 12;
+/// blinking in it does count as a change. A known limit.
+pub const CELL_DELTA: u8 = 6;
 
 /// How far a cell may move between two CONSECUTIVE readings and the region
 /// still count as still, once it has started changing.
@@ -378,6 +384,17 @@ mod tests {
     fn a_new_line_of_text_is_a_change() {
         let before = grey(320, 200, 250);
         let after = with_patch(before.clone(), (10, 150, 300, 8), 0);
+        assert!(print(&before).differs(&print(&after)));
+    }
+
+    /// The real screen it was tuned on (2026-11-03): two toolbar icons
+    /// appearing moved the busiest cell by exactly 12 levels, which the first
+    /// threshold did not report. That change must count.
+    #[test]
+    fn the_measured_icons_are_a_change() {
+        let before = grey(GRID, GRID, 100);
+        let after = grey(GRID, GRID, 112);
+        assert_eq!(print(&before).moved(&print(&after)), 12);
         assert!(print(&before).differs(&print(&after)));
     }
 
