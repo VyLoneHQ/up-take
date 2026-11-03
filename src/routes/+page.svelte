@@ -1224,6 +1224,18 @@ $effect(() => {
   white-space: nowrap;
 }
 
+/* The dot's box must be its line box. As a plain inline span its box is the
+   whole glyph of the fallback symbol font, about 15px tall against the
+   badge's 11px, so it was never "wholly inside the badge" (markSeen), the page
+   never confirmed a mark, and no watch area ever read on a real screen
+   (measured in headless Edge at 100 to 200 %, 2026-11-03). An inline-block
+   with line-height 1 is exactly the badge's line. Pinned by
+   watch-badge-css.test.ts. */
+.watch-dot {
+  display: inline-block;
+  line-height: 1;
+}
+
 /* A pinned tier (ADR-0013) is a state the user set and must be able to see; an
    `Auto` area shows nothing, since that is the default and marking it would be
    noise on every area. */
