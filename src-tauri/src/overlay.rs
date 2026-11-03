@@ -999,6 +999,8 @@ fn apply(app: &AppHandle, state: OverlayState) -> Result<(), String> {
 /// Emits the current state to the overlay frontend, with the monitor geometry
 /// the focus indicator needs in Placement.
 fn emit_state(app: &AppHandle, state: OverlayState) -> Result<(), String> {
+    // An unpinned settings panel lives only while placing (1.60).
+    crate::panel::on_state(app, state == OverlayState::Placement);
     let window = overlay_window(app)?;
     // The real virtual-desktop origin travels with **every** state, not just
     // Placement. Living draws the persistent area borders and converts them to
@@ -1415,8 +1417,11 @@ pub(crate) fn emit_areas(app: &AppHandle) -> Result<(), String> {
             .map(|area| payload_of(area, &monitors, store.name(area.id)))
             .collect()
     };
-    crate::watch::emit_redraw(app, AREAS_EVENT, AreasPayload { areas })
-        .map_err(|e| format!("Could not emit overlay areas: {e}"))
+    let sent = crate::watch::emit_redraw(app, AREAS_EVENT, AreasPayload { areas })
+        .map_err(|e| format!("Could not emit overlay areas: {e}"));
+    // The settings panel follows its area, and closes when it goes (1.60).
+    crate::panel::refresh(app);
+    sent
 }
 
 /// What a hit-test resolves to: the identity and the menu-relevant properties

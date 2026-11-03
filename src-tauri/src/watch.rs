@@ -1108,7 +1108,7 @@ mod tests {
         /// emitting, naming an event by its constant or by its text.
         #[test]
         fn every_message_that_redraws_the_page_moves_the_generation() {
-            const NOT_REDRAWING: [(&str, &str); 5] = [
+            const NOT_REDRAWING: [(&str, &str); 6] = [
                 (
                     "FREEZE_REVEAL_EVENT",
                     "only shows more; a mark it reveals is confirmed after",
@@ -1125,6 +1125,10 @@ mod tests {
                 (
                     "NOTICE_EVENT",
                     "the notice card's own window (ADR-0054), not the overlay page",
+                ),
+                (
+                    "PANEL_EVENT",
+                    "the settings panel's own window (1.60), not the overlay page",
                 ),
             ];
             const SENDS: [&str; 4] = [".emit(", "emit_to(", "emit_filter(", "Emitter::emit("];

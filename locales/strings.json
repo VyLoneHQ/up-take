@@ -585,6 +585,21 @@
       "de": "zur Ruhe gekommen",
       "de_from": "6c2011c9"
     },
+    "menu.settings": {
+      "en": "Settings…",
+      "de": "Einstellungen…",
+      "de_from": "64d0d0b4"
+    },
+    "panel.name": {
+      "en": "Name",
+      "de": "Name",
+      "de_from": "0fe07306"
+    },
+    "panel.close": {
+      "en": "Close",
+      "de": "Schließen",
+      "de_from": "cd86acc3"
+    },
     "settings.section.startup": {
       "en": "Starting up",
       "de": "Starten",

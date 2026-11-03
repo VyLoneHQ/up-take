@@ -21,6 +21,7 @@ mod overlay;
 mod overlay_state;
 #[cfg(windows)]
 mod overlay_wndproc;
+mod panel;
 // Test-only. `I-67`: a payload key reaches the frontend by a route no guard in
 // this repository can see, so each module pins its own key sets and this holds
 // the machinery they share.
@@ -184,6 +185,13 @@ pub fn run() -> tauri::Result<()> {
                     notice::notice_resize,
                     notice::notice_hover,
                     overlay::overlay_rename_area,
+                    panel::panel_view,
+                    panel::panel_resize,
+                    panel::panel_pin,
+                    panel::panel_close,
+                    panel::panel_set_name,
+                    panel::panel_set_watch,
+                    panel::panel_set_held,
                     overlay::overlay_toggle_held_focused,
                     overlay::overlay_ocr_copy_focused,
                     overlay::overlay_ocr_select_all_focused,
@@ -217,6 +225,13 @@ pub fn run() -> tauri::Result<()> {
                     notice::notice_resize,
                     notice::notice_hover,
                     overlay::overlay_rename_area,
+                    panel::panel_view,
+                    panel::panel_resize,
+                    panel::panel_pin,
+                    panel::panel_close,
+                    panel::panel_set_name,
+                    panel::panel_set_watch,
+                    panel::panel_set_held,
                     overlay::overlay_toggle_held_focused,
                     overlay::overlay_ocr_copy_focused,
                     overlay::overlay_ocr_select_all_focused,

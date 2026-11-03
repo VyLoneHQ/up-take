@@ -777,6 +777,7 @@ mod tests {
                 "first_run.rs",
                 "notice.rs",
                 "overlay.rs",
+                "panel.rs",
                 "placement.rs",
                 "settings.rs",
                 "settings_window.rs",

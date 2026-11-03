@@ -530,6 +530,8 @@ enum MenuAction {
     /// Name the area (the founder, 2026-11-03): the page shows a name field
     /// over it. On every type, since every area-raised card leads with it.
     Rename,
+    /// Open the area's settings panel, pinned (roadmap `1.60`).
+    Settings,
     /// Pause (`true`) or resume (`false`) the area's ongoing work
     /// (`ADR-0053`). One row whose label says what it does, so the action
     /// carries the value the row switches *to*, like [`MenuAction::SetSticky`].
@@ -1961,6 +1963,10 @@ fn pump_hover(app: &AppHandle, state: &mut PumpState) {
     // side: leaving Living with a chrome-only hover live must re-emit even when
     // the id has not moved, or the frontend keeps drawing the control alone.
     if (state.hovered_area, state.hovered_chrome_only) != (hovered_area, false) {
+        // Resting on an area while placing opens its settings panel (1.60).
+        if state.hovered_area != hovered_area {
+            crate::panel::on_hover(app, hovered_area, point);
+        }
         (state.hovered_area, state.hovered_chrome_only) = (hovered_area, false);
         let _ = crate::watch::emit_redraw(
             app,
@@ -3667,6 +3673,11 @@ fn classify_press(point: Point) -> Gesture {
         if close_menu(app) {
             return Gesture::Inert;
         }
+        // A press outside an open settings panel closes it, the way a press
+        // outside the menu closes the menu, and does nothing else (1.60).
+        if crate::panel::close_on_press(app, point) {
+            return Gesture::Inert;
+        }
         // The first-run coach (roadmap 1.18) is above every area and all empty
         // overlay, and below an open menu, which the lines above have already
         // dealt with. A press on it never starts a drag.
@@ -4708,6 +4719,11 @@ fn menu_rows(area: &overlay::AreaSummary) -> Vec<MenuRow> {
     ));
     // The founder, 2026-11-03: every area can be named, and every card an
     // area raises leads with its name.
+    // The area's settings panel: the founder's way in to everything an area
+    // can be set to (roadmap 1.60). Until the menu's rows move into the
+    // panel, this row is how right-click reaches it. With the bottom group,
+    // so Copy and Save still lead a screenshot's menu.
+    rows.push(leaf(MenuAction::Settings, text(Text::MenuSettings), false));
     rows.push(leaf(MenuAction::Rename, text(Text::MenuRename), false));
     rows.push(leaf(MenuAction::Dismiss, text(Text::MenuDismiss), false));
     rows
@@ -4830,6 +4846,10 @@ fn activate_menu_item(app: &AppHandle, hit: MenuHit, release: Point) {
         MenuAction::SetWatch(watch) => overlay::set_area_watch(app, area, watch),
         MenuAction::Rename => {
             overlay::start_rename(app, area);
+            false
+        }
+        MenuAction::Settings => {
+            crate::panel::open(app, area, true, release);
             false
         }
         MenuAction::SetHeld(held) => overlay::set_area_held(app, area, held),
@@ -6409,6 +6429,7 @@ mod tests {
                 "Depth",
                 "Stick to window",
                 "Click-through",
+                "Settings…",
                 "Rename…",
                 "Dismiss"
             ]
@@ -6612,6 +6633,7 @@ mod tests {
                     "Stick to window",
                     "On resize",
                     "Click-through",
+                    "Settings…",
                     "Rename…",
                     "Dismiss"
                 ],
@@ -6741,6 +6763,7 @@ mod tests {
                 ("Depth", true),
                 ("Stick to window", false),
                 ("Click-through", true),
+                ("Settings…", true),
                 ("Rename…", true),
                 ("Dismiss", true),
             ]

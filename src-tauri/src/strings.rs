@@ -116,6 +116,8 @@ texts! {
     MenuWatchSettles => "menu.watch.settles",
     /// Area menu: name the area.
     MenuRename => "menu.rename",
+    /// Area menu: open the area's settings panel (roadmap `1.60`).
+    MenuSettings => "menu.settings",
     /// A card's area type, for a watch area: "<name> // Watch area · changed".
     NoticeTypeWatch => "notice.type.watch",
     /// A card's event: the region started changing.

@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "panel",
+  "description": "Capability for the area settings panel's window (roadmap 1.60, src-tauri/src/panel.rs). A second window starts with NOTHING granted (see settings.json for what that looked like on the rig). The page needs exactly one thing beyond UP-TAKE's own commands: to hear that its area changed, which arrives as the panel://changed event, so it gets listen and unlisten and nothing else. Rust shows, places and hides the window, where no ACL applies; the page reads and sets its area through the panel_* commands.",
+  "windows": ["area-panel"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten"
+  ]
+}
