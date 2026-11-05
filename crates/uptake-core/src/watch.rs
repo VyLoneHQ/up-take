@@ -415,7 +415,16 @@ impl Detector {
         }
         self.changing = false;
         self.still = 0;
-        self.baseline = Some(reading);
+        // A cell the settling reading could not see keeps the old baseline's
+        // value: what was under a card when the region settled is the last
+        // thing known there, so a change made under the card shows once the
+        // card goes. Left unknown, the card's going would teach the baseline
+        // that change as if it had always been (review of `#160`, round 3).
+        let mut settled = reading;
+        if let Some(previous) = &self.baseline {
+            settled.learn(previous);
+        }
+        self.baseline = Some(settled);
         Some(Event::Settled)
     }
 }
@@ -750,6 +759,31 @@ mod tests {
         assert_eq!(detector.observe(print(&under)), None, "learned");
         let changed = with_patch(under, (0, 0, 64, 16), 220);
         assert_eq!(detector.observe(print(&changed)), Some(Event::Changed));
+    }
+
+    /// Review of `#160`, round 3: a region that settles while a card covers
+    /// part of it, then changes under the card, reports that change once the
+    /// card has gone, instead of learning it as the baseline.
+    #[test]
+    fn a_change_made_under_a_card_shows_when_the_card_goes() {
+        let card = Rect::new(0, 0, 64, 16);
+        let mut detector = Detector::with_settle(Watch::Changes.settle_readings());
+        let screen = grey(64, 64, 40);
+        assert_eq!(detector.observe(print(&screen)), None, "baseline");
+        let moved = with_patch(screen.clone(), (0, 40, 64, 24), 200);
+        assert_eq!(
+            detector.observe(hiding(&moved, &[card])),
+            Some(Event::Changed)
+        );
+        let mut events = Vec::new();
+        for _ in 0..Watch::Changes.settle_readings() {
+            events.extend(detector.observe(hiding(&moved, &[card])));
+        }
+        assert_eq!(events, vec![Event::Settled], "settled with the card up");
+        // Under the card, the screen changes; then the card goes.
+        let under = with_patch(moved, (0, 0, 64, 16), 220);
+        assert_eq!(detector.observe(hiding(&under, &[card])), None);
+        assert_eq!(detector.observe(print(&under)), Some(Event::Changed));
     }
 
     /// Hiding marks every cell the rectangle touches and no other.
