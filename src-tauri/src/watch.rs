@@ -817,12 +817,18 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
                     &mut captured.bitmap,
                     &left_out(target.bounds, captured.rect, state.1),
                 );
-                // Whatever the setting: a window's own capture policy is
-                // written when it is placed, so one placed before the setting
-                // changed may still be in the picture (review of `#160`,
-                // round 2), and leaving out what was never there costs only
-                // the cells under the card.
-                let hidden = unknown_under(&host.own_windows(), captured.rect);
+                // Only while UP-TAKE is in captures: with the setting off a
+                // card is not in the picture and what is under it is read as
+                // it is, so a change there is reported at once (review of
+                // `#160`, round 3; round 2 hid it always, which kept such a
+                // change from ever showing). A card on screen when the setting
+                // is turned off is given the new policy at once
+                // (`notice::apply_capture_policy`).
+                let hidden = if state.1 {
+                    unknown_under(&host.own_windows(), captured.rect)
+                } else {
+                    Vec::new()
+                };
                 Fingerprint::of_hiding(&captured.bitmap, &hidden)
             }
             Err(error) => {
@@ -1005,8 +1011,10 @@ mod tests {
                     .ok_or_else(|| "off screen".to_owned())?;
                 let mut pixels = [self.level, self.level, self.level, 255]
                     .repeat(usize::try_from(rect.size.width * rect.size.height).unwrap_or(0));
-                // The card, drawn into the picture as a capture would show it.
-                if let Some((card, grey)) = self.card
+                // The card, drawn into the picture as a capture would show it:
+                // only while the setting puts UP-TAKE in captures.
+                if self.state.1
+                    && let Some((card, grey)) = self.card
                     && let Some(part) = card.intersection(rect)
                 {
                     for y in
@@ -1090,6 +1098,20 @@ mod tests {
                 run(&mut fake, &mut memory, 1);
                 assert_eq!(fake.notified, vec![Event::Changed], "{in_captures}");
             }
+        }
+
+        /// Review of `#160`, round 3: with the setting off (the default) the
+        /// card is not in the picture, so what is under it is still read, and
+        /// a change there is reported at once.
+        #[test]
+        fn with_up_take_out_of_captures_a_change_under_a_card_is_seen() {
+            let mut fake = Fake::new(targets(&[Rect::new(100, 100, 600, 400)]));
+            let mut memory = Memory::default();
+            run(&mut fake, &mut memory, 2);
+            fake.card = Some((Rect::new(100, 100, 600, 400), 250));
+            fake.level = 20;
+            run(&mut fake, &mut memory, 1);
+            assert_eq!(fake.notified, vec![Event::Changed]);
         }
 
         /// The working case: a baseline, then a change of the screen notifies.
