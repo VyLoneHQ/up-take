@@ -151,8 +151,32 @@ pub fn placement(monitor: &Monitor, height_logical: f64) -> (i32, i32, u32, u32)
     (x, y, width, height)
 }
 
-/// The monitor a card for `bounds` goes on: the one holding most of the
-/// area, else the first. `None` with no monitor at all.
+/// The monitor a card for an area at `bounds` goes on, by the setting: the
+/// main monitor (the one at the desktop's origin, which is Windows' primary;
+/// else the first), or the area's own ([`monitor_for`]). `None` with no
+/// monitor at all.
+#[must_use]
+pub fn card_monitor(
+    bounds: Rect,
+    monitors: &[Monitor],
+    on: crate::settings::NoticesOn,
+) -> Option<Monitor> {
+    match on {
+        crate::settings::NoticesOn::MainMonitor => monitors
+            .iter()
+            .find(|monitor| {
+                monitor
+                    .bounds
+                    .contains(uptake_core::geometry::Point::new(0, 0))
+            })
+            .or_else(|| monitors.first())
+            .copied(),
+        crate::settings::NoticesOn::AreasMonitor => monitor_for(bounds, monitors),
+    }
+}
+
+/// The monitor that holds most of an area at `bounds`, else the first.
+/// `None` with no monitor at all.
 #[must_use]
 pub fn monitor_for(bounds: Rect, monitors: &[Monitor]) -> Option<Monitor> {
     monitors
@@ -197,7 +221,11 @@ pub fn show(app: &AppHandle, raised: Raised) {
     if !crate::settings::current().notifications {
         return;
     }
-    let Some(monitor) = monitor_for(raised.bounds, &crate::overlay::monitors_cached()) else {
+    let Some(monitor) = card_monitor(
+        raised.bounds,
+        &crate::overlay::monitors_cached(),
+        crate::settings::current().notices_on,
+    ) else {
         return;
     };
     let label = label_for(monitor.bounds);
@@ -720,6 +748,47 @@ mod tests {
             Some(right)
         );
         assert_eq!(monitor_for(Rect::new(0, 0, 10, 10), &[]), None);
+    }
+
+    /// The maintainer's rig, 2026-11-05: by default the cards go on the main
+    /// monitor whichever monitor the area is on; the setting puts them on the
+    /// area's own instead.
+    #[test]
+    fn the_cards_go_on_the_main_monitor_unless_set_otherwise() {
+        use super::card_monitor;
+        use crate::settings::NoticesOn;
+        let left = monitor(-1920, 0, 1920, 1080, 1.0);
+        let main = monitor(0, 0, 2560, 1440, 1.25);
+        let above = monitor(0, -1080, 1920, 1080, 1.0);
+        let monitors = [left, above, main];
+        let on_left = Rect::new(-500, 100, 50, 50);
+        assert_eq!(
+            card_monitor(on_left, &monitors, NoticesOn::MainMonitor),
+            Some(main)
+        );
+        assert_eq!(
+            card_monitor(on_left, &monitors, NoticesOn::AreasMonitor),
+            Some(left)
+        );
+        let on_above = Rect::new(100, -500, 50, 50);
+        assert_eq!(
+            card_monitor(on_above, &monitors, NoticesOn::MainMonitor),
+            Some(main)
+        );
+        assert_eq!(
+            card_monitor(on_above, &monitors, NoticesOn::AreasMonitor),
+            Some(above)
+        );
+        // No monitor at the origin: the first.
+        assert_eq!(
+            card_monitor(on_left, &[left], NoticesOn::MainMonitor),
+            Some(left)
+        );
+        assert_eq!(card_monitor(on_left, &[], NoticesOn::MainMonitor), None);
+        assert_eq!(
+            crate::settings::Settings::default().notices_on,
+            NoticesOn::MainMonitor
+        );
     }
 
     /// A page that never takes its cards cannot grow the queue without bound,
