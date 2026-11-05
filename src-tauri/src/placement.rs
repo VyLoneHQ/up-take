@@ -524,9 +524,13 @@ enum MenuAction {
     /// `1.47`). Radio rows like [`MenuAction::SetType`], so the action carries
     /// the answer the row names.
     SetOnResize(uptake_core::sticky::OnResize),
-    /// Choose what a watch area tells the user about, or switch it off
-    /// (roadmap `1.58`). Radio rows like [`MenuAction::SetType`].
+    /// Choose what a watch area tells the user about (roadmap `1.58`). Radio
+    /// rows like [`MenuAction::SetType`].
     SetWatch(uptake_core::watch::Watch),
+    /// Pause (`true`) or resume (`false`) the area's ongoing work
+    /// (`ADR-0053`). One row whose label says what it does, so the action
+    /// carries the value the row switches *to*, like [`MenuAction::SetSticky`].
+    SetHeld(bool),
     /// Remove the area.
     Dismiss,
     /// Capture the area and publish it to the clipboard alone (task 1.9,
@@ -2133,6 +2137,9 @@ enum PlacementKey {
     /// cursor, its selection or all of it (roadmap `1.41`). The page's
     /// `isCopyKey`.
     Copy,
+    /// `P` without `Ctrl`, `Alt` or the Windows key: pause or resume the area
+    /// under the cursor (`ADR-0053`). The page's `isHoldKey`.
+    Hold,
     /// `Ctrl+A` without `Alt` or the Windows key: select all the text of the OCR
     /// area under the cursor. The page's `isSelectAllKey`.
     SelectAll,
@@ -2213,6 +2220,9 @@ fn placement_key(
         VK_A if ctrl && !alt && !win => Some(PlacementKey::SelectAll),
         _ if !ctrl && !alt && !win => {
             let typed = typed?;
+            if typed.eq_ignore_ascii_case(&'p') {
+                return Some(PlacementKey::Hold);
+            }
             ARM_KEYS
                 .iter()
                 .find(|(letter, _)| typed.eq_ignore_ascii_case(&char::from(*letter)))
@@ -2297,6 +2307,7 @@ fn act_on(app: &AppHandle, key: PlacementKey) {
             Ok(())
         }
         PlacementKey::Remove => overlay::overlay_dismiss_focused(app.clone()),
+        PlacementKey::Hold => overlay::overlay_toggle_held_focused(app.clone()),
         PlacementKey::Arm(kind) => overlay::overlay_arm_type(app.clone(), kind.to_string()),
         PlacementKey::Copy => overlay::overlay_ocr_copy_focused(app.clone()),
         PlacementKey::SelectAll => overlay::overlay_ocr_select_all_focused(app.clone()),
@@ -4580,10 +4591,24 @@ fn menu_rows(area: &overlay::AreaSummary) -> Vec<MenuRow> {
             ],
         });
     }
-    // Roadmap 1.58: a watch area chooses what it tells the user about, here,
-    // and Off is a row of the same list rather than a separate toggle, so the
-    // list says in one place whether the area is reading. Only on a watch
-    // area, the one type it means anything for.
+    // `ADR-0053`: an area that keeps working can be paused and resumed. One
+    // row that names what it will do, offered only on a type with ongoing
+    // work: on any other there is nothing to pause, and a row that did
+    // nothing would be worse than none (decision 3).
+    if area.kind.keeps_working() {
+        rows.push(leaf(
+            MenuAction::SetHeld(!area.held),
+            text(if area.held {
+                Text::MenuResume
+            } else {
+                Text::MenuPause
+            }),
+            false,
+        ));
+    }
+    // Roadmap 1.58: a watch area chooses what it tells the user about, here.
+    // It has no Off row since `ADR-0053`: Pause above stops it and keeps this
+    // choice. Only on a watch area, the one type it means anything for.
     if area.kind == AreaType::Watch {
         use uptake_core::watch::Watch;
         rows.push(MenuRow {
@@ -4592,7 +4617,6 @@ fn menu_rows(area: &overlay::AreaSummary) -> Vec<MenuRow> {
             checked: false,
             enabled: true,
             children: [
-                (Watch::Off, Text::MenuWatchOff),
                 (Watch::Changes, Text::MenuWatchChanges),
                 (Watch::Settles, Text::MenuWatchSettles),
             ]
@@ -4798,6 +4822,7 @@ fn activate_menu_item(app: &AppHandle, hit: MenuHit, release: Point) {
         MenuAction::SetSticky(sticky) => crate::sticky::set(app, area, sticky),
         MenuAction::SetOnResize(on_resize) => crate::sticky::set_on_resize(area, on_resize),
         MenuAction::SetWatch(watch) => overlay::set_area_watch(app, area, watch),
+        MenuAction::SetHeld(held) => overlay::set_area_held(app, area, held),
         MenuAction::Dismiss => overlay::dismiss_area(app, area),
         // Returned above, before the menu was closed.
         MenuAction::OpenSubmenu => false,
@@ -5057,6 +5082,23 @@ mod tests {
         assert_eq!(placement_key(0x43, Some('c'), false, false, false), None);
         assert_eq!(placement_key(0x43, Some('c'), true, true, false), None);
         assert_eq!(placement_key(0x41, Some('a'), true, false, true), None);
+        // `ADR-0053`: P pauses or resumes, in either case, and only bare.
+        assert_eq!(
+            placement_key(u32::from(b'P'), Some('p'), false, false, false),
+            Some(PlacementKey::Hold)
+        );
+        assert_eq!(
+            placement_key(u32::from(b'P'), Some('P'), false, false, false),
+            Some(PlacementKey::Hold)
+        );
+        assert_eq!(
+            placement_key(u32::from(b'P'), Some('p'), true, false, false),
+            None
+        );
+        assert_eq!(
+            placement_key(u32::from(b'P'), Some('p'), false, true, false),
+            None
+        );
     }
 
     /// The second review of the widened `#112`: the page arms on the
@@ -5231,7 +5273,8 @@ mod tests {
             kind,
             ocr_behaviour: uptake_core::area::OcrBehaviour::InPlace,
             sticky: uptake_core::sticky::Sticky::Free,
-            watch: uptake_core::watch::Watch::Off,
+            watch: uptake_core::watch::Watch::Changes,
+            held: false,
         }
     }
 
@@ -6451,10 +6494,10 @@ mod tests {
         }
     }
 
-    /// Roadmap 1.58: a watch area offers what to watch for, Off first and
-    /// ticked by default, and no other type offers it.
+    /// Roadmap 1.58: a watch area offers what to watch for, "changes" ticked
+    /// by default and no Off row since `ADR-0053`, and no other type offers it.
     #[test]
-    fn a_watch_area_offers_off_changes_and_settles_and_ticks_the_one_it_has() {
+    fn a_watch_area_offers_changes_and_settles_and_ticks_the_one_it_has() {
         use uptake_core::watch::Watch;
         let list = |rows: &[super::MenuRow]| -> Option<Vec<(&'static str, MenuAction, bool)>> {
             let parent = rows.iter().find(|row| row.label == "Watch")?;
@@ -6471,7 +6514,7 @@ mod tests {
             let rows = menu_rows(&summary(kind, Layer::Auto, Input::Interactive));
             assert_eq!(list(&rows).is_some(), kind == AreaType::Watch, "{kind:?}");
         }
-        for watch in [Watch::Off, Watch::Changes, Watch::Settles] {
+        for watch in [Watch::Changes, Watch::Settles] {
             let area = crate::overlay::AreaSummary {
                 watch,
                 ..summary(AreaType::Watch, Layer::Auto, Input::PassThrough)
@@ -6482,7 +6525,6 @@ mod tests {
             assert_eq!(
                 rows,
                 vec![
-                    ("Off", MenuAction::SetWatch(Watch::Off), watch == Watch::Off),
                     (
                         "Notify when it changes",
                         MenuAction::SetWatch(Watch::Changes),
@@ -6497,6 +6539,41 @@ mod tests {
                 "{watch:?}"
             );
         }
+    }
+
+    /// `ADR-0053`: an area that keeps working offers one row that says what
+    /// it will do, Pause or Resume, and no other type offers either.
+    #[test]
+    fn only_an_area_that_keeps_working_offers_pause_and_it_names_what_it_will_do() {
+        let held_row = |rows: &[super::MenuRow]| -> Option<(&'static str, MenuAction, bool)> {
+            rows.iter()
+                .find(|row| matches!(row.action, MenuAction::SetHeld(_)))
+                .map(|row| (row.label, row.action, row.checked))
+        };
+        for kind in AreaType::ALL {
+            let rows = menu_rows(&summary(kind, Layer::Auto, Input::Interactive));
+            assert_eq!(held_row(&rows).is_some(), kind.keeps_working(), "{kind:?}");
+            assert!(
+                !rows
+                    .iter()
+                    .any(|row| row.label == "Pause" || row.label == "Resume")
+                    || kind.keeps_working(),
+                "{kind:?}"
+            );
+        }
+        let running = summary(AreaType::Watch, Layer::Auto, Input::PassThrough);
+        assert_eq!(
+            held_row(&menu_rows(&running)),
+            Some(("Pause", MenuAction::SetHeld(true), false))
+        );
+        let paused = crate::overlay::AreaSummary {
+            held: true,
+            ..summary(AreaType::Watch, Layer::Auto, Input::PassThrough)
+        };
+        assert_eq!(
+            held_row(&menu_rows(&paused)),
+            Some(("Resume", MenuAction::SetHeld(false), false))
+        );
     }
 
     /// What a resize does is offered on a sticky area and on no other, as one
