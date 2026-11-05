@@ -374,7 +374,8 @@ pub struct Detector {
     /// The first reading of the current still run. Stillness is measured
     /// against it, not only against the reading before, so a change too slow
     /// to show between two readings still adds up and keeps the run from
-    /// counting as still (which matters more at a half-second reading).
+    /// counting as still (which matters more the more often the host reads:
+    /// up to every 50 ms while a change settles).
     still_from: Option<Fingerprint>,
     changing: bool,
     /// When `still_from` was read: the calm is measured from it.

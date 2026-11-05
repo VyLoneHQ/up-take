@@ -927,10 +927,6 @@ pub fn watch_capture_small(
 
 /// [`watch_capture_small`]'s GPU work on one monitor's newest frame.
 fn shrink_box(slot: &Slot, part: Rect) -> Result<Option<(Size, Vec<u8>)>, String> {
-    use windows::Win32::Graphics::Direct3D11::{
-        D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_RESOURCE_MISC_GENERATE_MIPS,
-        ID3D11ShaderResourceView,
-    };
     let guard = slot.retained.lock().unwrap_or_else(PoisonError::into_inner);
     let Some(retained) = guard.as_ref() else {
         return Ok(None);
@@ -939,15 +935,57 @@ fn shrink_box(slot: &Slot, part: Rect) -> Result<Option<(Size, Vec<u8>)>, String
         return Ok(None);
     }
     let source = box_in(slot.bounds, retained.size, part).ok_or("the box leaves the frame")?;
-    let level = fingerprint_level(part.size, uptake_core::watch::GRID);
-    let mut desc = D3D11_TEXTURE2D_DESC::default();
-    // SAFETY: fills `desc` from a live texture.
-    unsafe { retained.live.GetDesc(&mut desc) };
     // SAFETY: the context's own device; no preconditions.
     let device = unsafe { retained.context.GetDevice() }.map_err(|e| e.to_string())?;
+    average_box(
+        &device,
+        &retained.context,
+        &retained.live,
+        &source,
+        part.size,
+    )
+    .map(Some)
+}
+
+/// The size of the mip chain's first level for a picture of `size` averaged
+/// down `level` times: each side rounded up to a whole number of
+/// `2^level`, so every halving is exact and every pixel is weighed. A side
+/// halved with rounding down, as D3D11 sizes a chain, gives some pixels no
+/// weight at all: on a 1080p area a fifth of the rows, one band 56 pixels
+/// tall, never reached the fingerprint (review of `#162`, round 4).
+#[must_use]
+pub fn padded_for_level(size: Size, level: u32) -> Size {
+    let unit = 1_u32 << level;
+    let up = |side: u32| side.div_ceil(unit).saturating_mul(unit);
+    Size::new(up(size.width), up(size.height))
+}
+
+/// `source_box` of `source` (a texture of the frame's format), averaged down
+/// on the GPU to the smallest level still at least [`uptake_core::watch::GRID`]
+/// on both sides ([`fingerprint_level`]), and read back, RGBA8 top-down, with
+/// its size. Level 0 is padded to [`padded_for_level`] and cleared to black
+/// before the box is copied in, so the averaging weighs every pixel of the
+/// box equally; the padding is the same black in every reading, so it never
+/// differs.
+fn average_box(
+    device: &ID3D11Device,
+    context: &ID3D11DeviceContext,
+    source: &ID3D11Texture2D,
+    source_box: &D3D11_BOX,
+    size: Size,
+) -> Result<(Size, Vec<u8>), String> {
+    use windows::Win32::Graphics::Direct3D11::{
+        D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_RESOURCE_MISC_GENERATE_MIPS,
+        ID3D11RenderTargetView, ID3D11ShaderResourceView,
+    };
+    let level = fingerprint_level(size, uptake_core::watch::GRID);
+    let padded = padded_for_level(size, level);
+    let mut desc = D3D11_TEXTURE2D_DESC::default();
+    // SAFETY: fills `desc` from a live texture.
+    unsafe { source.GetDesc(&mut desc) };
     let mut chain = desc;
-    chain.Width = part.size.width;
-    chain.Height = part.size.height;
+    chain.Width = padded.width;
+    chain.Height = padded.height;
     chain.MipLevels = level + 1;
     chain.ArraySize = 1;
     chain.Usage = D3D11_USAGE_DEFAULT;
@@ -958,56 +996,56 @@ fn shrink_box(slot: &Slot, part: Rect) -> Result<Option<(Size, Vec<u8>)>, String
     // SAFETY: a valid description and out-pointer; no initial data.
     unsafe { device.CreateTexture2D(&chain, None, Some(&mut mips)) }.map_err(|e| e.to_string())?;
     let mips = mips.ok_or("no mip texture")?;
+    let mut target: Option<ID3D11RenderTargetView> = None;
+    // SAFETY: the texture was made with render-target binding; the default
+    // view is its first level.
+    unsafe { device.CreateRenderTargetView(&mips, None, Some(&mut target)) }
+        .map_err(|e| e.to_string())?;
+    let target = target.ok_or("no target view")?;
     let mut view: Option<ID3D11ShaderResourceView> = None;
     // SAFETY: the texture was made with shader-resource binding.
     unsafe { device.CreateShaderResourceView(&mips, None, Some(&mut view)) }
         .map_err(|e| e.to_string())?;
     let view = view.ok_or("no view")?;
-    // SAFETY: the same format by construction; the box lies inside the source
-    // (`box_in`) and fits level 0 exactly; then the GPU fills the levels.
+    // SAFETY: the views belong to `mips`; the box lies inside the source
+    // (the caller's `box_in`) and fits inside level 0 at its corner, which is
+    // the same format; then the GPU fills the levels.
     unsafe {
-        retained
-            .context
-            .CopySubresourceRegion(&mips, 0, 0, 0, 0, &retained.live, 0, Some(&source));
-        retained.context.GenerateMips(&view);
+        context.ClearRenderTargetView(&target, &[0.0, 0.0, 0.0, 1.0]);
+        context.CopySubresourceRegion(&mips, 0, 0, 0, 0, source, 0, Some(source_box));
+        context.GenerateMips(&view);
     }
-    let size = Size::new(
-        (part.size.width >> level).max(1),
-        (part.size.height >> level).max(1),
+    let small_size = Size::new(
+        (padded.width >> level).max(1),
+        (padded.height >> level).max(1),
     );
     let mut small = desc;
-    small.Width = size.width;
-    small.Height = size.height;
+    small.Width = small_size.width;
+    small.Height = small_size.height;
     let staging = create_texture(
-        &device,
+        device,
         &small,
         D3D11_USAGE_STAGING,
         D3D11_CPU_ACCESS_READ.0.cast_unsigned(),
     )?;
-    // SAFETY: level `level` of `mips` is `size` exactly and of the same format.
+    // SAFETY: level `level` of `mips` is `small_size` exactly, same format.
     unsafe {
-        retained
-            .context
-            .CopySubresourceRegion(&staging, 0, 0, 0, 0, &mips, level, None);
+        context.CopySubresourceRegion(&staging, 0, 0, 0, 0, &mips, level, None);
     }
     let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
     // SAFETY: as in `readback`.
-    unsafe {
-        retained
-            .context
-            .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
-    }
-    .map_err(|e| e.to_string())?;
+    unsafe { context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)) }
+        .map_err(|e| e.to_string())?;
     let mapped_len = mapped.DepthPitch as usize;
     // SAFETY: as in `readback`: valid until `Unmap`, its length D3D11's own.
     let mapped_bytes = unsafe { std::slice::from_raw_parts(mapped.pData.cast::<u8>(), mapped_len) };
-    let packed = pack_rows(mapped_bytes, mapped.RowPitch as usize, size);
+    let packed = pack_rows(mapped_bytes, mapped.RowPitch as usize, small_size);
     // SAFETY: unmaps exactly what was mapped above.
-    unsafe { retained.context.Unmap(&staging, 0) };
+    unsafe { context.Unmap(&staging, 0) };
     // A short mapping is a fault, as in `read_box`, not "no frame yet"
     // (review of `#162`, round 3).
     packed
-        .map(|pixels| Some((size, pixels)))
+        .map(|pixels| (small_size, pixels))
         .ok_or_else(|| "the mapped picture was short".to_string())
 }
 
@@ -1604,6 +1642,128 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    /// Review of `#162`, round 4: rounding each halving down left whole bands
+    /// of an area out of the GPU's average (on a 1080p area a fifth of the
+    /// rows). With level 0 padded to whole steps, every row and column of the
+    /// area changes the picture read back. Run on WARP, Windows' software
+    /// device, so it needs no GPU; the bands checked are the ones the review
+    /// measured on hardware, and lines at the edges.
+    #[test]
+    fn every_row_and_column_reaches_the_gpu_average() {
+        use windows::Win32::Foundation::HMODULE;
+        use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_WARP;
+        use windows::Win32::Graphics::Direct3D11::{
+            D3D11_CREATE_DEVICE_FLAG, D3D11_SDK_VERSION, D3D11_SUBRESOURCE_DATA, D3D11CreateDevice,
+        };
+        use windows::Win32::Graphics::Dxgi::Common::{
+            DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC,
+        };
+
+        assert_eq!(
+            padded_for_level(Size::new(600, 400), 4),
+            Size::new(608, 400)
+        );
+        assert_eq!(
+            padded_for_level(Size::new(1920, 1080), 6),
+            Size::new(1920, 1088)
+        );
+        assert_eq!(padded_for_level(Size::new(10, 10), 0), Size::new(10, 10));
+
+        let mut device = None;
+        let mut context = None;
+        // SAFETY: valid out-pointers; WARP needs no adapter.
+        unsafe {
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_WARP,
+                HMODULE::default(),
+                D3D11_CREATE_DEVICE_FLAG(0),
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                Some(&mut context),
+            )
+        }
+        .unwrap();
+        let (device, context) = (device.unwrap(), context.unwrap());
+        let read = |size: Size, line: Option<(bool, u32)>| -> Vec<u8> {
+            let (w, h) = (size.width as usize, size.height as usize);
+            let mut pixels = [120_u8, 120, 120, 255].repeat(w * h);
+            if let Some((row, at)) = line {
+                for i in 0..if row { w } else { h } {
+                    let (x, y) = if row {
+                        (i, at as usize)
+                    } else {
+                        (at as usize, i)
+                    };
+                    pixels[(y * w + x) * 4..(y * w + x) * 4 + 3].copy_from_slice(&[255, 255, 255]);
+                }
+            }
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: size.width,
+                Height: size.height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Usage: D3D11_USAGE_DEFAULT,
+                ..Default::default()
+            };
+            let data = D3D11_SUBRESOURCE_DATA {
+                pSysMem: pixels.as_ptr().cast(),
+                SysMemPitch: size.width * 4,
+                SysMemSlicePitch: 0,
+            };
+            let mut texture = None;
+            // SAFETY: a valid description with initial data of its size.
+            unsafe { device.CreateTexture2D(&desc, Some(&data), Some(&mut texture)) }.unwrap();
+            let texture = texture.unwrap();
+            let whole = D3D11_BOX {
+                left: 0,
+                top: 0,
+                front: 0,
+                right: size.width,
+                bottom: size.height,
+                back: 1,
+            };
+            average_box(&device, &context, &texture, &whole, size)
+                .unwrap()
+                .1
+        };
+        let cases: [(Size, bool, &[u32]); 2] = [
+            (
+                Size::new(600, 400),
+                false,
+                &[0, 288, 291, 295, 304, 308, 311, 599],
+            ),
+            (
+                Size::new(1920, 1080),
+                true,
+                &[
+                    0, 256, 263, 320, 384, 400, 452, 480, 512, 530, 567, 600, 620, 690, 820, 1079,
+                ],
+            ),
+        ];
+        for (size, rows, lines) in cases {
+            let flat = read(size, None);
+            for &at in lines {
+                let lit = read(size, Some((rows, at)));
+                assert_ne!(
+                    lit,
+                    flat,
+                    "{}x{}: {} {at} does not reach the average",
+                    size.width,
+                    size.height,
+                    if rows { "row" } else { "column" }
+                );
+            }
+        }
     }
 
     /// The GPU box for a part of a monitor: monitor-relative, and refused
