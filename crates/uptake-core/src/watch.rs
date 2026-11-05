@@ -144,6 +144,13 @@ pub struct Fingerprint {
     columns: u32,
     rows: u32,
     cells: Vec<u8>,
+    /// Cells that were under one of UP-TAKE's own windows when this was read
+    /// (a notification card, the settings panel): what the screen shows there
+    /// is unknown, so every comparison skips them (`I-480`, review of `#160`,
+    /// round 1). Painting them out instead, as [`leave_out`] does for the
+    /// area's own border, would itself read as a change when such a window
+    /// comes or goes, since the black is not in every reading.
+    hidden: Vec<bool>,
 }
 
 impl Fingerprint {
@@ -151,6 +158,62 @@ impl Fingerprint {
     /// summarise.
     #[must_use]
     pub fn of(bitmap: &RgbaBitmap) -> Option<Self> {
+        Self::of_hiding(bitmap, &[])
+    }
+
+    /// [`Self::of`], with every cell that any of `hide` touches marked
+    /// unknown. `hide` is in the bitmap's own pixels, top left at `0, 0`;
+    /// whatever falls outside the bitmap is ignored.
+    #[must_use]
+    pub fn of_hiding(bitmap: &RgbaBitmap, hide: &[crate::geometry::Rect]) -> Option<Self> {
+        let mut fingerprint = Self::summarise(bitmap)?;
+        let (width, height) = (bitmap.width(), bitmap.height());
+        let whole = crate::geometry::Rect::new(0, 0, width, height);
+        let (columns, rows) = (fingerprint.columns, fingerprint.rows);
+        // The pixel-to-cell mapping in `summarise` is monotonic, so a
+        // rectangle's cells are those of its first and last pixel and all
+        // between.
+        let column = |x: u32| (u64::from(x) * u64::from(columns) / u64::from(width)) as u32;
+        let row = |y: u32| (u64::from(y) * u64::from(rows) / u64::from(height)) as u32;
+        for part in hide {
+            let Some(part) = part.intersection(whole) else {
+                continue;
+            };
+            let (x0, y0) = (part.origin.x.max(0) as u32, part.origin.y.max(0) as u32);
+            let (x1, y1) = (x0 + part.size.width - 1, y0 + part.size.height - 1);
+            for r in row(y0)..=row(y1) {
+                for c in column(x0)..=column(x1) {
+                    if let Some(cell) = fingerprint.hidden.get_mut((r * columns + c) as usize) {
+                        *cell = true;
+                    }
+                }
+            }
+        }
+        Some(fingerprint)
+    }
+
+    /// Takes the value of every cell `self` did not know and `seen` shows,
+    /// as if it had been read that way: what lay under a window that has gone
+    /// is learned at its first sight, not reported as a change, and is watched
+    /// from then on. Nothing for a grid of another size.
+    fn learn(&mut self, seen: &Self) {
+        if (self.columns, self.rows) != (seen.columns, seen.rows) {
+            return;
+        }
+        for ((hidden, cell), (&seen_hidden, &seen_cell)) in self
+            .hidden
+            .iter_mut()
+            .zip(self.cells.iter_mut())
+            .zip(seen.hidden.iter().zip(&seen.cells))
+        {
+            if *hidden && !seen_hidden {
+                *hidden = false;
+                *cell = seen_cell;
+            }
+        }
+    }
+
+    fn summarise(bitmap: &RgbaBitmap) -> Option<Self> {
         let (width, height) = (bitmap.width(), bitmap.height());
         if width == 0 || height == 0 {
             return None;
@@ -184,12 +247,14 @@ impl Fingerprint {
             columns,
             rows,
             cells,
+            hidden: vec![false; (columns * rows) as usize],
         })
     }
 
     /// How far the cell that moved most between `self` and `other` moved, in
-    /// levels of 255. [`u8::MAX`] when the grids differ (the area was resized),
-    /// which is as different as two readings get.
+    /// levels of 255, among the cells both know. [`u8::MAX`] when the grids
+    /// differ (the area was resized), which is as different as two readings
+    /// get.
     #[must_use]
     pub fn moved(&self, other: &Self) -> u8 {
         if (self.columns, self.rows) != (other.columns, other.rows) {
@@ -198,7 +263,9 @@ impl Fingerprint {
         self.cells
             .iter()
             .zip(&other.cells)
-            .map(|(&a, &b)| a.abs_diff(b))
+            .zip(self.hidden.iter().zip(&other.hidden))
+            .filter(|(_, (a_hidden, b_hidden))| !**a_hidden && !**b_hidden)
+            .map(|((&a, &b), _)| a.abs_diff(b))
             .max()
             .unwrap_or(0)
     }
@@ -253,8 +320,8 @@ const fn luma(r: u8, g: u8, b: u8) -> u8 {
 pub enum Event {
     /// The region was still and now differs from its last reading.
     Changed,
-    /// The region had been changing and has now matched itself for
-    /// [`SETTLE_READINGS`] readings in a row.
+    /// The region had been changing and has now held still for the
+    /// detector's settle count of readings ([`Watch::settle_readings`]).
     Settled,
 }
 
@@ -263,11 +330,13 @@ pub enum Event {
 /// Two comparisons, one for each moment. **A change starts** when a reading
 /// differs by more than [`CELL_DELTA`] from the *baseline*, the reading the
 /// region was last still at, so a slow change adds up until it counts. **A
-/// change ends** when [`SETTLE_READINGS`] readings in a row each differ from
-/// the reading just before by no more than [`STILL_DELTA`]; that reading
-/// becomes the new baseline, wherever the region stopped. Each is reported
-/// once, so a video under a watch area raises one notification and not one
-/// every two seconds.
+/// change ends** when the settle count of readings in a row
+/// ([`Watch::settle_readings`]: [`REARM_READINGS`] for *Notify when it
+/// changes*, [`SETTLE_READINGS`] for *Notify when it stops changing*) each
+/// differ by no more than [`STILL_DELTA`] from the first reading of that
+/// still run; the last becomes the new baseline, wherever the region stopped.
+/// Each is reported once, so a video under a watch area raises one
+/// notification while it plays, not one a reading.
 #[derive(Debug, Clone)]
 pub struct Detector {
     baseline: Option<Fingerprint>,
@@ -311,6 +380,12 @@ impl Detector {
 
     /// Takes one reading and says whether it is a moment worth reporting.
     pub fn observe(&mut self, reading: Fingerprint) -> Option<Event> {
+        for known in [&mut self.baseline, &mut self.still_from]
+            .into_iter()
+            .flatten()
+        {
+            known.learn(&reading);
+        }
         let Some(baseline) = &self.baseline else {
             self.baseline = Some(reading.clone());
             self.still_from = Some(reading);
@@ -615,5 +690,84 @@ mod tests {
             detector.observe(print(&grey(64, 64, 200))),
             Some(Event::Changed)
         );
+    }
+
+    /// A reading of `bitmap` with `hide` under one of UP-TAKE's windows.
+    fn hiding(bitmap: &RgbaBitmap, hide: &[Rect]) -> Fingerprint {
+        Fingerprint::of_hiding(bitmap, hide).unwrap_or_else(|| unreachable!("a non-empty bitmap"))
+    }
+
+    /// Review of `#160`, round 1 (`I-480`): with *Show UP-TAKE in screen
+    /// recordings* on, a notification card over a watch area was read as a
+    /// change, and could raise the next card. Its cells are unknown while it
+    /// is there, so neither its coming, its animation nor its going is a
+    /// change, in either mode.
+    #[test]
+    fn a_window_of_up_takes_own_coming_and_going_is_no_change() {
+        let card = Rect::new(16, 0, 32, 12);
+        for watch in [Watch::Changes, Watch::Settles] {
+            let mut detector = Detector::with_settle(watch.settle_readings());
+            let screen = grey(64, 64, 40);
+            assert_eq!(detector.observe(print(&screen)), None, "the baseline");
+            for level in [250, 200, 120, 30] {
+                let drawn = with_patch(screen.clone(), (16, 0, 32, 12), level);
+                assert_eq!(detector.observe(hiding(&drawn, &[card])), None, "{watch:?}");
+            }
+            for _ in 0..SETTLE_READINGS + 1 {
+                assert_eq!(detector.observe(print(&screen)), None, "{watch:?}: gone");
+            }
+        }
+    }
+
+    /// While a card is up, the rest of the area is still watched.
+    #[test]
+    fn a_change_beside_a_window_of_up_takes_own_is_still_a_change() {
+        let mut detector = Detector::new();
+        let screen = grey(64, 64, 40);
+        detector.observe(print(&screen));
+        let changed = with_patch(screen, (0, 40, 64, 24), 200);
+        assert_eq!(
+            detector.observe(hiding(&changed, &[Rect::new(16, 0, 32, 12)])),
+            Some(Event::Changed)
+        );
+    }
+
+    /// What lay under a card when the baseline was taken is learned at its
+    /// first sight, not reported, and watched from then on: a change there
+    /// after the card has gone is a change.
+    #[test]
+    fn what_a_window_hid_is_learned_then_watched() {
+        let card = Rect::new(0, 0, 64, 16);
+        let mut detector = Detector::new();
+        let under = with_patch(grey(64, 64, 40), (0, 0, 64, 16), 90);
+        let covered = with_patch(under.clone(), (0, 0, 64, 16), 250);
+        assert_eq!(
+            detector.observe(hiding(&covered, &[card])),
+            None,
+            "baseline"
+        );
+        assert_eq!(detector.observe(print(&under)), None, "first sight");
+        assert_eq!(detector.observe(print(&under)), None, "learned");
+        let changed = with_patch(under, (0, 0, 64, 16), 220);
+        assert_eq!(detector.observe(print(&changed)), Some(Event::Changed));
+    }
+
+    /// Hiding marks every cell the rectangle touches and no other.
+    #[test]
+    fn hiding_marks_the_cells_a_rectangle_touches() {
+        let bitmap = grey(64, 64, 40);
+        let hidden = hiding(
+            &bitmap,
+            &[Rect::new(5, 5, 10, 2), Rect::new(100, 100, 5, 5)],
+        );
+        // 64 px over 16 cells: 4 px a cell, so x 5..=14 is cells 1..=3, y 5..=6
+        // is row 1.
+        let marked: Vec<usize> = hidden
+            .hidden
+            .iter()
+            .enumerate()
+            .filter_map(|(at, &is)| is.then_some(at))
+            .collect();
+        assert_eq!(marked, vec![17, 18, 19]);
     }
 }

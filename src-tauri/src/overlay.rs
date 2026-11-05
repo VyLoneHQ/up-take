@@ -765,13 +765,6 @@ pub async fn overlay_freeze_hidden(token: u64) {
 /// The Tauri event the overlay frontend listens on for state changes.
 const STATE_EVENT: &str = "overlay://state";
 
-/// The focus-indicator geometry sent to the frontend.
-///
-/// Monitor rects are **physical virtual-desktop pixels**; the frontend converts
-/// them to CSS with its own `devicePixelRatio` (ADR-0011 — the WebView is the
-/// authority on its scale) and the `origin` reported here. Rust deliberately
-/// does not pre-convert: doing so would reintroduce the scale-mismatch bug
-/// ADR-0011 exists to prevent.
 /// Whether the state payload carries the monitor list: in every state that
 /// draws areas.
 ///
@@ -786,6 +779,13 @@ const fn sends_monitors(state: OverlayState) -> bool {
     !matches!(state, OverlayState::Hidden)
 }
 
+/// The focus-indicator geometry sent to the frontend.
+///
+/// Monitor rects are **physical virtual-desktop pixels**; the frontend converts
+/// them to CSS with its own `devicePixelRatio` (ADR-0011 — the WebView is the
+/// authority on its scale) and the `origin` reported here. Rust deliberately
+/// does not pre-convert: doing so would reintroduce the scale-mismatch bug
+/// ADR-0011 exists to prevent.
 #[derive(Serialize, Clone)]
 struct StatePayload {
     /// `"hidden"`, `"placement"`, or `"living"`.
@@ -2082,7 +2082,6 @@ pub(crate) fn move_area(app: &AppHandle, id: AreaId, bounds: Rect) -> bool {
     guard.set_bounds(id, bounds) && guard.bring_to_front(id)
 }
 
-/// Removes an area. Returns whether one was removed.
 /// The event that asks the page to show the name field over an area.
 const RENAME_EVENT: &str = "overlay://rename";
 
@@ -2143,6 +2142,7 @@ pub fn overlay_rename_area(app: AppHandle, name: String, cancel: bool) -> Result
     Ok(())
 }
 
+/// Removes an area. Returns whether one was removed.
 pub(crate) fn dismiss_area(app: &AppHandle, id: AreaId) -> bool {
     let removed = {
         let store = app.state::<Mutex<AreaStore>>();
@@ -2367,16 +2367,16 @@ pub(crate) fn dev_perturb_cached_scale() -> Option<(Rect, f64, f64)> {
     Some((monitor.bounds, was, now))
 }
 
-/// The cached monitor rectangles, for snapping and containment.
-///
-/// Order is the cache's order, which is what makes an index from
-/// [`monitor_at_point`] addressable against this list.
 /// The cached monitors with their scale factors, for a window that is sized
 /// per monitor (the notification card, `crate::notice`).
 pub(crate) fn monitors_cached() -> Vec<Monitor> {
     lock(&MONITOR_CACHE).clone()
 }
 
+/// The cached monitor rectangles, for snapping and containment.
+///
+/// Order is the cache's order, which is what makes an index from
+/// [`monitor_at_point`] addressable against this list.
 pub(crate) fn monitor_rects() -> Vec<Rect> {
     lock(&MONITOR_CACHE)
         .iter()

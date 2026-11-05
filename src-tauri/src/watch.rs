@@ -1,6 +1,7 @@
 //! The host half of watch areas (roadmap `1.58`, `ADR-0048`): reading each
-//! watching area's region on a timer and raising a Windows notification when
-//! what it shows changes, or stops changing.
+//! watching area's region on a timer and raising UP-TAKE's own notification
+//! card (`ADR-0054`, `crate::notice`) when what it shows changes, or stops
+//! changing.
 //!
 //! The rule for *what counts* as a change is `uptake_core::watch`, which needs
 //! no screen and is tested there. This module takes the readings and says so.
@@ -85,7 +86,8 @@
 //! - a change between the check and the frame read back, a few milliseconds,
 //!   is not seen by the check;
 //! - the frame is a held session's newest, which can be up to
-//!   `warm::WATCH_FRAME_INTERVAL` (one second) older than the check, and can
+//!   `warm::WATCH_FRAME_INTERVAL` (a quarter of a second) older than the
+//!   check, and can
 //!   come from between the page's layout and its paint (rounds 12 and 20). A
 //!   watcher made or started again waits one pass before its first reading
 //!   ([`Watcher`]), which keeps such a frame out of a baseline, not out of
@@ -161,6 +163,17 @@ use crate::strings::{Text, text};
 /// readings was missed). Held sessions measured 0.13 % of a core at two
 /// seconds; four times the readings is re-measured before release (`I-474`).
 pub const INTERVAL: Duration = Duration::from_millis(500);
+
+// A reading uses a held session's newest frame, so frames must come at least
+// twice per reading: a frame up to one reading old could reach a fresh
+// baseline ([`Watcher::fresh`]), and one frame read twice counts as a still
+// reading, which re-arms *Notify when it changes* in the middle of a moving
+// region (review of `#159`, round 1: the reading interval went to 500 ms
+// while the frame throttle stayed at one second).
+const _: () = assert!(
+    INTERVAL.as_nanos() >= 2 * uptake_capture::warm::WATCH_FRAME_INTERVAL.as_nanos(),
+    "a watch reading must see at least two frame intervals"
+);
 
 /// How wide a band along each edge of the area is left out of a reading, in
 /// physical pixels: the border, 1.5 CSS pixels, at up to 250 % scaling.
@@ -480,7 +493,10 @@ struct Watcher {
     /// again (the overlay state changed, the setting flipped, a move ended)
     /// could still show what came before, and the next reading would report
     /// that as a change (review of `#154`, round 12). One [`INTERVAL`] later
-    /// the frame should be newer than the reason it started again.
+    /// the frame should be newer than the reason it started again, which
+    /// holds only while [`INTERVAL`] is at least twice the frame interval: a
+    /// compile-time assertion beside [`INTERVAL`] keeps it so (review of
+    /// `#159`, round 1).
     ///
     /// ⚠️ **Assumed, not measured:** that WGC, held at
     /// `WATCH_FRAME_INTERVAL`, delivers a frame within that interval of a
@@ -556,6 +572,27 @@ fn left_out(bounds: Rect, taken: Rect, overlay_in_captures: bool) -> Vec<Rect> {
     }
 }
 
+/// The parts of a reading that lie under UP-TAKE's own windows, in the
+/// reading's pixels: `windows` in desktop pixels, cut to `taken`, the
+/// rectangle the capture returned. With *Show UP-TAKE in screen recordings*
+/// on, a notification card or the settings panel over a watch area is in its
+/// reading; those parts are unknown to the comparison rather than a change,
+/// or a card could raise the next card (`I-480`, review of `#160`, round 1).
+fn unknown_under(windows: &[Rect], taken: Rect) -> Vec<Rect> {
+    windows
+        .iter()
+        .filter_map(|window| window.intersection(taken))
+        .map(|part| {
+            Rect::new(
+                part.origin.x - taken.origin.x,
+                part.origin.y - taken.origin.y,
+                part.size.width,
+                part.size.height,
+            )
+        })
+        .collect()
+}
+
 /// Where the *watching* mark can be, in desktop pixels: the area's top right
 /// corner, [`MARK`] in size or the area's own size when that is smaller.
 ///
@@ -609,6 +646,9 @@ trait Host {
     fn end_pass(&mut self);
     /// One reading of `bounds`.
     fn capture(&mut self, bounds: Rect) -> Result<uptake_capture::CapturedRegion, String>;
+    /// Where UP-TAKE's own windows outside the overlay are, or were a moment
+    /// ago (`crate::notice::own_windows`), desktop pixels.
+    fn own_windows(&mut self) -> Vec<Rect>;
     /// A reading failed; logged once until one succeeds.
     fn trouble(&mut self, error: &str);
     /// Raises the notification for `event`, for the area `id` at `bounds`.
@@ -673,6 +713,9 @@ impl Host for AppHost<'_> {
         }
         uptake_capture::warm::compose(bounds, &self.frames, &crate::overlay::monitor_rects())
             .map_or_else(|| crate::output::capture_for_watch(bounds), Ok)
+    }
+    fn own_windows(&mut self) -> Vec<Rect> {
+        crate::notice::own_windows()
     }
     fn trouble(&mut self, error: &str) {
         crate::diagnostics::trouble(
@@ -793,7 +836,12 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
                     &mut captured.bitmap,
                     &left_out(target.bounds, captured.rect, state.1),
                 );
-                Fingerprint::of(&captured.bitmap)
+                let hidden = if state.1 {
+                    unknown_under(&host.own_windows(), captured.rect)
+                } else {
+                    Vec::new()
+                };
+                Fingerprint::of_hiding(&captured.bitmap, &hidden)
             }
             Err(error) => {
                 if !watcher.failing {
@@ -913,6 +961,9 @@ mod tests {
             held: Vec<Rect>,
             /// How many times it let them go.
             released: usize,
+            /// One of UP-TAKE's own windows on screen, and the grey it shows,
+            /// desktop pixels; listed by `own_windows`.
+            card: Option<(Rect, u8)>,
         }
 
         impl Fake {
@@ -930,6 +981,7 @@ mod tests {
                     notified: Vec::new(),
                     held: Vec::new(),
                     released: 0,
+                    card: None,
                 }
             }
         }
@@ -969,12 +1021,37 @@ mod tests {
                 let rect = bounds
                     .intersection(self.monitor)
                     .ok_or_else(|| "off screen".to_owned())?;
-                let pixels = [self.level, self.level, self.level, 255]
+                let mut pixels = [self.level, self.level, self.level, 255]
                     .repeat(usize::try_from(rect.size.width * rect.size.height).unwrap_or(0));
+                // The card, drawn into the picture as a capture would show it.
+                if let Some((card, grey)) = self.card
+                    && let Some(part) = card.intersection(rect)
+                {
+                    for y in
+                        part.origin.y..part.origin.y + i32::try_from(part.size.height).unwrap_or(0)
+                    {
+                        for x in part.origin.x
+                            ..part.origin.x + i32::try_from(part.size.width).unwrap_or(0)
+                        {
+                            let at = usize::try_from(
+                                ((y - rect.origin.y) * i32::try_from(rect.size.width).unwrap_or(0)
+                                    + (x - rect.origin.x))
+                                    * 4,
+                            )
+                            .unwrap_or(0);
+                            if let Some(pixel) = pixels.get_mut(at..at + 3) {
+                                pixel.copy_from_slice(&[grey, grey, grey]);
+                            }
+                        }
+                    }
+                }
                 let bitmap =
                     RgbaBitmap::from_pixels(Size::new(rect.size.width, rect.size.height), pixels)
                         .ok_or_else(|| "bitmap".to_owned())?;
                 Ok(CapturedRegion { rect, bitmap })
+            }
+            fn own_windows(&mut self) -> Vec<Rect> {
+                self.card.map(|(card, _)| card).into_iter().collect()
             }
             fn trouble(&mut self, _error: &str) {}
             fn notify(&mut self, event: Event, _id: AreaId, _bounds: Rect) {
@@ -1043,6 +1120,39 @@ mod tests {
             for _ in 0..passes {
                 let _ = pass(fake, memory);
             }
+        }
+
+        /// Review of `#160`, round 1 (`I-480`): with *Show UP-TAKE in screen
+        /// recordings* on, a card over a watch area is in its reading. Its
+        /// coming, changing and going is no change, so a card cannot raise the
+        /// next card; with the setting off nothing is left out, since the card
+        /// is not in the picture at all.
+        #[test]
+        fn a_card_over_a_watch_area_is_no_change_of_its_screen() {
+            let card = (Rect::new(300, 100, 200, 60), 30);
+            let mut fake = Fake::new(targets(&[Rect::new(100, 100, 600, 400)]));
+            fake.state = (OverlayState::Living, true);
+            let mut memory = Memory::default();
+            run(&mut fake, &mut memory, 2);
+            for grey in [30, 120, 250] {
+                fake.card = Some((card.0, grey));
+                run(&mut fake, &mut memory, 2);
+            }
+            fake.card = None;
+            run(&mut fake, &mut memory, 4);
+            assert!(fake.notified.is_empty(), "its own card is no change");
+            fake.level = 20;
+            run(&mut fake, &mut memory, 1);
+            assert_eq!(fake.notified, vec![Event::Changed], "still watching");
+
+            // The setting off: the listed card is not in captures, so nothing
+            // is left out (and a card drawn into this fake picture counts).
+            let mut fake = Fake::new(targets(&[Rect::new(100, 100, 600, 400)]));
+            let mut memory = Memory::default();
+            run(&mut fake, &mut memory, 2);
+            fake.card = Some(card);
+            run(&mut fake, &mut memory, 1);
+            assert_eq!(fake.notified, vec![Event::Changed]);
         }
 
         /// The working case: a baseline, then a change of the screen notifies.

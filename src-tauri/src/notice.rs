@@ -249,6 +249,8 @@ fn place(window: &tauri::WebviewWindow, monitor: &Monitor, height: f64) -> Resul
     if physical_height == 0 {
         return hide_shown(window);
     }
+    // Listed before it is drawn there, so no reading sees it unlisted.
+    own_window_at(window.label(), Rect::new(x, y, width, physical_height));
     window
         .set_size(tauri::PhysicalSize::new(width, physical_height))
         .map_err(|error| format!("could not size the notice window: {error}"))?;
@@ -313,6 +315,7 @@ fn show_without_focus(hwnd: windows_sys::Win32::Foundation::HWND) {
 /// and topmost, where it could still be the window under the pointer
 /// (`I-478`'s cause, measured by a drill against tao 0.37.1).
 pub(crate) fn hide_shown(window: &tauri::WebviewWindow) -> Result<(), String> {
+    own_window_gone(window.label());
     #[cfg(windows)]
     {
         use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, ShowWindow};
@@ -328,6 +331,79 @@ pub(crate) fn hide_shown(window: &tauri::WebviewWindow) -> Result<(), String> {
     window
         .hide()
         .map_err(|error| format!("could not hide the notice window: {error}"))
+}
+
+/// One of UP-TAKE's own windows outside the overlay (a card stack, the
+/// settings panel): where it is, or where it was and since when.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OwnWindow {
+    label: String,
+    rect: Rect,
+    gone_at: Option<std::time::Instant>,
+}
+
+/// Where UP-TAKE's own windows are, for a watch reading to leave them out of
+/// its comparison (`I-480`, review of `#160`, round 1): with *Show UP-TAKE in
+/// screen recordings* on they are in every capture, and a card over a watch
+/// area read as a change could raise the next card.
+static OWN_WINDOWS: Mutex<Vec<OwnWindow>> = Mutex::new(Vec::new());
+
+/// How long a window's old place stays listed after it moves or hides: a
+/// reading's frame can be older than the move by up to
+/// `uptake_capture::warm::WATCH_FRAME_INTERVAL` (a quarter of a second), and
+/// a reading takes a moment more. A second leaves room for both.
+const GONE_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// `label`'s window is now at `rect`, physical desktop pixels.
+pub fn own_window_at(label: &str, rect: Rect) {
+    let mut list = OWN_WINDOWS.lock().unwrap_or_else(PoisonError::into_inner);
+    moved_to(&mut list, label, rect, std::time::Instant::now());
+}
+
+/// `label`'s window is hidden.
+pub fn own_window_gone(label: &str) {
+    let mut list = OWN_WINDOWS.lock().unwrap_or_else(PoisonError::into_inner);
+    retire(&mut list, label, std::time::Instant::now());
+}
+
+/// Where UP-TAKE's own windows are, or were less than [`GONE_GRACE`] ago.
+pub fn own_windows() -> Vec<Rect> {
+    let mut list = OWN_WINDOWS.lock().unwrap_or_else(PoisonError::into_inner);
+    listed(&mut list, std::time::Instant::now())
+}
+
+/// [`own_window_at`]'s rule: the old place is retired, unless it is the same.
+fn moved_to(list: &mut Vec<OwnWindow>, label: &str, rect: Rect, now: std::time::Instant) {
+    if list
+        .iter()
+        .any(|own| own.label == label && own.gone_at.is_none() && own.rect == rect)
+    {
+        return;
+    }
+    retire(list, label, now);
+    list.push(OwnWindow {
+        label: label.to_string(),
+        rect,
+        gone_at: None,
+    });
+}
+
+fn retire(list: &mut [OwnWindow], label: &str, now: std::time::Instant) {
+    for own in list
+        .iter_mut()
+        .filter(|own| own.label == label && own.gone_at.is_none())
+    {
+        own.gone_at = Some(now);
+    }
+}
+
+/// [`own_windows`]'s rule: drops what has been gone for [`GONE_GRACE`].
+fn listed(list: &mut Vec<OwnWindow>, now: std::time::Instant) -> Vec<Rect> {
+    list.retain(|own| {
+        own.gone_at
+            .is_none_or(|at| now.saturating_duration_since(at) < GONE_GRACE)
+    });
+    list.iter().map(|own| own.rect).collect()
 }
 
 /// Where the keyboard goes back to after a card's window took it.
@@ -382,6 +458,11 @@ pub fn notice_hover(window: tauri::WebviewWindow) {
 
 /// A card's window received the keyboard (a click on it): give the keyboard
 /// back by [`focus_back`], and keep the stack above whatever took it back.
+///
+/// `ADR-0054`'s *Revisit if* names a card taking focus from the program
+/// underneath. That fired at the founder's rig on 2026-11-03 and was answered
+/// here and in the window's build (unfocusable, `WS_EX_NOACTIVATE`) without
+/// changing the decision; the ADR records it.
 pub fn give_focus_back(app: &AppHandle, window: &tauri::Window) {
     let placing = *app
         .state::<Mutex<crate::overlay_state::OverlayState>>()
@@ -657,5 +738,38 @@ mod tests {
             at("ShowWindow(hwnd, SW_HIDE)")
                 < at("#[cfg(not(windows))]\n    window\n        .hide()")
         );
+    }
+
+    /// A watch reading leaves out where UP-TAKE's own windows are, and where
+    /// they were for a moment after they move or hide, since a frame can be
+    /// older than the move (`I-480`, review of `#160`, round 1).
+    #[test]
+    fn own_windows_stay_listed_for_a_moment_after_they_go() {
+        use super::{GONE_GRACE, listed, moved_to, retire};
+        let start = std::time::Instant::now();
+        let (first, second) = (Rect::new(0, 0, 100, 40), Rect::new(0, 0, 100, 80));
+        let mut list = Vec::new();
+        moved_to(&mut list, "notice-1", first, start);
+        moved_to(&mut list, "notice-1", first, start);
+        assert_eq!(listed(&mut list, start), vec![first], "the same place once");
+        moved_to(&mut list, "notice-1", second, start);
+        assert_eq!(listed(&mut list, start), vec![first, second], "grown");
+        retire(&mut list, "notice-1", start);
+        assert_eq!(
+            listed(&mut list, start + GONE_GRACE / 2),
+            vec![first, second]
+        );
+        assert!(listed(&mut list, start + GONE_GRACE).is_empty(), "gone");
+        assert!(list.is_empty(), "and forgotten");
+    }
+
+    /// Every way a card window is shown or hidden passes the list.
+    #[test]
+    fn placing_and_hiding_a_card_keep_the_list() {
+        let source = include_str!("notice.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or_default();
+        let at = |needle: &str| code.find(needle).unwrap_or(usize::MAX);
+        assert!(at("own_window_at(window.label()") < at("show_without_focus(hwnd);\n"));
+        assert!(at("own_window_gone(window.label());") < at("ShowWindow(hwnd, SW_HIDE)"));
     }
 }
