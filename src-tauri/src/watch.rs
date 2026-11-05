@@ -126,9 +126,11 @@
 //!   again every [`IDLE`] in case a change was missed.
 //! - **Measured so far:** on the maintainer's primary monitor (Windows build
 //!   26200) an ordinary desktop sent 3 to 11 frames a second, every one with
-//!   its dirty regions, about 2 to 3 % of the screen each. What a reading
-//!   costs on this route, and a busy screen's frames, are not measured yet
-//!   (`I-474`).
+//!   its dirty regions, about 2 to 3 % of the screen each. This route,
+//!   measured the same day (workspace `evidence/1.58-watch-events/`): 0.34 %
+//!   of a core for one area and 0.43 % for five on the small read, 1.69 % for
+//!   an area as large as a monitor. A busy screen held at 30 frames a second
+//!   for a long time is not measured yet (`I-474`).
 //! - Earlier routes, measured in workspace `evidence/1.58-watch-cost/`: held
 //!   sessions read whole every two seconds, 0.13 % of a core for one area
 //!   and for five on a still screen; a capture built per reading, 7.3 % for
@@ -185,15 +187,17 @@ pub const SETTLE_POLL: Duration = Duration::from_millis(50);
 /// how soon it looks again, since nothing wakes the thread when that changes.
 pub const LOOK: Duration = Duration::from_millis(500);
 
-/// A watcher made or started again reads this long after, and one whose
-/// monitor has no frame held yet tries again this soon: two frame intervals,
-/// so its first reading is a frame from after the reason it started again
-/// ([`Watcher::fresh`]).
+/// With nothing ringing sooner, how long until a watcher made or started
+/// again reads, and until one whose monitor has no frame held yet, or whose
+/// mark the page has not confirmed, is looked at again. A frame or the page's
+/// word can end the wait earlier; the bound that keeps a fresh baseline newer
+/// than the reason it started again is the governor's one-frame floor
+/// ([`Watcher::fresh`], [`rest_after`]), not this.
 pub const FRESH_WAIT: Duration = Duration::from_millis(66);
 
 const _: () = assert!(
     FRESH_WAIT.as_nanos() >= 2 * uptake_capture::warm::WATCH_FRAME_INTERVAL.as_nanos(),
-    "a fresh baseline must wait for two frames"
+    "the wait with nothing ringing spans at least two frames"
 );
 
 /// The share of one core the watcher's own thread may spend: `quality-bars.md`
@@ -698,6 +702,20 @@ trait Host {
     fn notify(&mut self, event: Event, id: AreaId, bounds: Rect);
 }
 
+/// Whether a held session's read has failed since one last succeeded, so a
+/// lasting fault is logged once and not on every reading (review of `#162`,
+/// rounds 1 and 2: the fallback ran silently).
+static GPU_TROUBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn gpu_trouble(error: &str) {
+    if !GPU_TROUBLE.swap(true, Ordering::Relaxed) {
+        crate::diagnostics::trouble(
+            "watch: reading a held capture session failed; reading by a capture of its own instead (said once until one succeeds)",
+            &error,
+        );
+    }
+}
+
 /// The app itself.
 struct AppHost<'a> {
     app: &'a AppHandle,
@@ -743,8 +761,16 @@ impl Host for AppHost<'_> {
         // Averaged down on the GPU and read back at about 16 x 16, so a
         // read costs about the same for any area size: when nothing has to
         // be painted out and the area is on one monitor.
-        if !whole && let Ok(small) = uptake_capture::warm::watch_capture_small(bounds, &desktop) {
-            return Ok(small);
+        if !whole {
+            match uptake_capture::warm::watch_capture_small(bounds, &desktop) {
+                Ok(small) => {
+                    GPU_TROUBLE.store(false, Ordering::Relaxed);
+                    return Ok(small);
+                }
+                // Spanning monitors is not a fault: the region read below.
+                Err(error) if error == uptake_capture::warm::NOT_ON_ONE_MONITOR => {}
+                Err(error) => gpu_trouble(&error),
+            }
         }
         // Otherwise only the area's own rectangle, copied on the GPU from the held
         // sessions and read back alone. A monitor whose session is still
@@ -752,8 +778,14 @@ impl Host for AppHost<'_> {
         // falls back to a capture of its own, which the governor then paces
         // by what it costs.
         match uptake_capture::warm::watch_capture_region(bounds, &desktop) {
-            Ok(read) => Ok(read),
-            Err(_) => crate::output::capture_for_watch(bounds).map(Some),
+            Ok(read) => {
+                GPU_TROUBLE.store(false, Ordering::Relaxed);
+                Ok(read)
+            }
+            Err(error) => {
+                gpu_trouble(&error);
+                crate::output::capture_for_watch(bounds).map(Some)
+            }
         }
     }
     fn own_windows(&mut self) -> Vec<Rect> {

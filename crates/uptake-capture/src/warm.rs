@@ -678,6 +678,21 @@ fn ring_watcher() {
     }
 }
 
+/// What [`watch_capture_small`] answers for a region across monitors or off
+/// one: not a fault, the caller reads the region whole instead.
+pub const NOT_ON_ONE_MONITOR: &str = "not wholly on one monitor";
+
+/// Whether this Windows build can report where a capture frame changed
+/// (`GraphicsCaptureSession.DirtyRegionMode`). Asked once; an error reads as
+/// no.
+fn dirty_regions_supported() -> bool {
+    static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SUPPORTED.get_or_init(|| {
+        windows_capture::graphics_capture_api::GraphicsCaptureApi::is_dirty_region_supported()
+            .unwrap_or(false)
+    })
+}
+
 /// Whether a frame that changed `dirty` (desktop pixels) may have changed
 /// one of `regions`. `None` (the frame said nothing about where it changed)
 /// and an empty list both count as touching: an unknown is read rather than
@@ -883,7 +898,7 @@ pub fn watch_capture_small(
         .filter(|monitor| monitor.intersection(region).is_some());
     let monitor = *on.next().ok_or("off the desktop")?;
     if on.next().is_some() || monitor.intersection(region) != Some(region) {
-        return Err("not wholly on one monitor".into());
+        return Err(NOT_ON_ONE_MONITOR.into());
     }
     let sessions = WATCH_SESSIONS
         .lock()
@@ -1454,7 +1469,12 @@ fn spawn_session(slot: Arc<Slot>) -> bool {
             // the maintainer's primary monitor, Windows build 26200: every
             // frame carried its regions, about 3 % of the screen per frame on
             // an ordinary desktop). Freeze's keep WGC's default.
-            if slot.watch {
+            // Only where Windows has the API: the library refuses to start a
+            // session that asks for it on a build without it, and the README
+            // sets the floor at build 19041 (review of `#162`, round 2).
+            // Without it a frame says nothing about where it changed, and
+            // every frame counts as touching (`touches_a_watch_area`).
+            if slot.watch && dirty_regions_supported() {
                 DirtyRegionSettings::ReportOnly
             } else {
                 DirtyRegionSettings::Default
@@ -1556,6 +1576,20 @@ mod tests {
             assert!(level == 0 || (lw >= 16 && lh >= 16), "{w} x {h}");
             assert!(lw / 2 < 16 || lh / 2 < 16, "{w} x {h}: the smallest");
         }
+    }
+
+    /// Review of `#162`, round 2: dirty regions are asked for only where
+    /// Windows has them; the library refuses a session that asks without.
+    #[test]
+    fn dirty_regions_are_asked_for_only_where_windows_has_them() {
+        let source = include_str!("warm.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or_default();
+        assert!(code.contains("if slot.watch && dirty_regions_supported() {"));
+        assert_eq!(
+            code.matches(concat!("DirtyRegionSettings::", "ReportOnly"))
+                .count(),
+            1
+        );
     }
 
     /// The GPU box for a part of a monitor: monitor-relative, and refused
