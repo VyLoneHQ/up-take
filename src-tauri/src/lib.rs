@@ -152,8 +152,9 @@ pub fn run() -> tauri::Result<()> {
         // (architecture §4). No frontend capability grants it, so the WebView
         // cannot open dialogs.
         .plugin(tauri_plugin_dialog::init())
-        // Roadmap 1.58: a watch area's only way to tell the user anything
-        // while they are looking at something else.
+        // Linked and no longer called: since ADR-0054 a watch area tells the
+        // user through UP-TAKE's own card (`notice.rs`), never a Windows
+        // toast. Removing the plugin and its dependency is backlog I-481.
         .plugin(tauri_plugin_notification::init())
         // The freeze probe's IPC endpoint is registered in debug builds only.
         // Nothing stamps a probe in release, so the release form was an inert
