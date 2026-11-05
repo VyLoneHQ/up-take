@@ -38,6 +38,7 @@ import {
   type HoverPayload,
   isCopyKey,
   isFreezeKey,
+  isHoldKey,
   isRemoveKey,
   isSelectAllKey,
   kindLabels,
@@ -69,6 +70,7 @@ import {
   showsTint,
   stillsFromWire,
   toggleFreeze,
+  toggleHeldFocusedArea,
 } from '$lib/overlay-state';
 import { type CssRect, isDismissKey } from '$lib/regions';
 import type { Settings } from '$lib/settings-model';
@@ -336,6 +338,14 @@ function onKeydown(event: KeyboardEvent) {
     // keeps that true if it ever does.
     event.preventDefault();
     void dismissFocusedArea(invoke);
+    return;
+  }
+  // ADR-0053: pause or resume the area under the cursor. Placement only, like
+  // copy below: outside it the overlay may still hold focus, and a bare `P`
+  // there belongs to whatever the user is typing into.
+  if (overlayState === 'placement' && isHoldKey(event)) {
+    event.preventDefault();
+    void toggleHeldFocusedArea(invoke);
     return;
   }
   // Roadmap 1.41: copy the OCR area under the cursor, or select all of it.
@@ -977,6 +987,9 @@ $effect(() => {
             <span class="watch-badge" data-area={area.id}
               ><span class="watch-dot">●</span> {text(language, 'area.watching')}</span
             >
+          {:else if area.held}
+            <!-- ADR-0053: a paused area says so where its working mark was. -->
+            <span class="held-badge">❚❚ {text(language, 'area.held')}</span>
           {/if}
           <!-- The name the user gave the area (the founder, 2026-11-03), at
                its bottom left, clear of every mark along its top. -->
@@ -1324,6 +1337,20 @@ $effect(() => {
   font: 12px/1.2 system-ui, sans-serif;
   outline: none;
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
+}
+
+/* The paused mark (ADR-0053): where the watching mark sits, dimmer, so a
+   paused area reads as stopped at a glance. */
+.held-badge {
+  position: absolute;
+  right: 4px;
+  top: 2px;
+  max-width: calc(100% - 8px);
+  overflow: hidden;
+  font: 11px/1 system-ui, sans-serif;
+  color: rgba(220, 220, 220, 0.85);
+  text-shadow: 0 0 3px rgba(0, 0, 0, 0.8);
+  white-space: nowrap;
 }
 
 /* A pinned tier (ADR-0013) is a state the user set and must be able to see; an

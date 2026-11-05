@@ -12,9 +12,10 @@
 //! # `ADR-0048`'s four conditions
 //!
 //! An area may read its region repeatedly only if the user placed it, it is
-//! visibly marked while it reads, reading is switched on per area and off by
-//! default, and what it reads stays on the machine. [`Watch::Off`] is the
-//! default for that reason, and nothing here keeps a reading: a
+//! visibly marked while it reads, reading is switched on per area, and what it
+//! reads stays on the machine. Since `ADR-0053` making a watch area is what
+//! switches it on, and pausing it (the area's `held` flag) stops it for a
+//! while; this module only compares. Nothing here keeps a reading: a
 //! [`Fingerprint`] is at most 256 brightness averages, which cannot be turned
 //! back into the picture of any region larger than 16 by 16 pixels. A region
 //! under 16 pixels on a side keeps one value per pixel on that side, which is
@@ -41,16 +42,19 @@ use crate::bitmap::RgbaBitmap;
 ///
 /// Every area carries one, so a conversion to `Watch` has a field to set
 /// rather than an optional to create; only a watch area's means anything, and
-/// a conversion sets it back to [`Watch::Off`] whatever it was.
+/// a conversion sets it back to the default whatever it was.
+///
+/// **There is no "off" here, since `ADR-0053`.** A watch area starts watching
+/// the moment it is made, in [`Watch::Changes`], and the user stops it for a
+/// while by pausing it, which is the area's `held` flag
+/// (`crate::area::Area::held`) and keeps this choice for when it resumes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Watch {
-    /// Not watching. The default (`ADR-0048`: off until the user switches it
-    /// on, for each area).
-    #[default]
-    Off,
     /// Notify when the region starts to change after being still: a new chat
-    /// message, a window appearing, a queue moving.
+    /// message, a window appearing, a queue moving. The default (`ADR-0053`
+    /// decision 1, the founder's choice of 2026-11-03).
+    #[default]
     Changes,
     /// Notify when the region stops changing after it had been changing: a
     /// download bar or a render reaching its end.
@@ -58,12 +62,6 @@ pub enum Watch {
 }
 
 impl Watch {
-    /// Whether the area is reading its region at all.
-    #[must_use]
-    pub const fn is_on(self) -> bool {
-        !matches!(self, Self::Off)
-    }
-
     /// How many still readings end a change for this choice: a short calm
     /// re-arms *changes*, a long one is needed to call something finished.
     #[must_use]
@@ -469,12 +467,10 @@ mod tests {
         Fingerprint::of(bitmap).unwrap_or_else(|| unreachable!("a non-empty bitmap"))
     }
 
+    /// `ADR-0053` decision 1: a watch area starts in "notify when it changes".
     #[test]
-    fn off_is_the_default_and_reads_nothing() {
-        assert_eq!(Watch::default(), Watch::Off);
-        assert!(!Watch::Off.is_on());
-        assert!(Watch::Changes.is_on());
-        assert!(Watch::Settles.is_on());
+    fn changes_is_the_default() {
+        assert_eq!(Watch::default(), Watch::Changes);
     }
 
     #[test]
@@ -483,8 +479,6 @@ mod tests {
         assert!(!Watch::Changes.notifies(Event::Settled));
         assert!(Watch::Settles.notifies(Event::Settled));
         assert!(!Watch::Settles.notifies(Event::Changed));
-        assert!(!Watch::Off.notifies(Event::Changed));
-        assert!(!Watch::Off.notifies(Event::Settled));
     }
 
     #[test]

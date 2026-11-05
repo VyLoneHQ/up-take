@@ -97,11 +97,11 @@ export type LayerName = 'front' | 'auto' | 'back';
 export type StickyState = 'free' | 'following' | 'paused';
 
 /**
- * What a watch area tells the user about (roadmap 1.58): nothing, a change,
- * or the end of one. Anything but `off` means the area is reading its region,
- * and the page marks it while it does (ADR-0048).
+ * What a watch area tells the user about (roadmap 1.58): a change, or the end
+ * of one. There is no `off` since ADR-0053: a watch area watches from the
+ * moment it is made, and pausing it is {@link AreaView.held}.
  */
-export type WatchState = 'off' | 'changes' | 'settles';
+export type WatchState = 'changes' | 'settles';
 
 /**
  * Whether an area is drawn at all in this overlay state (roadmap 1.47, the
@@ -170,6 +170,12 @@ export interface AreaView {
   sticky: StickyState;
   /** What a watch area watches for. See {@link WatchState}. */
   watch: WatchState;
+  /**
+   * Whether the user paused the area's ongoing work (ADR-0053). Rust only
+   * sets it on a type that keeps working, so the page says *paused* on any
+   * area that carries it.
+   */
+  held: boolean;
   /**
    * Whether the area reads its region now (roadmap 1.58). Rust's
    * `Area::is_watching`, the answer the watcher reads by, so the page draws
@@ -643,6 +649,8 @@ export interface AreaFrame {
   watching: boolean;
   /** The area's name, shown on it, or `null`. */
   name: string | null;
+  /** The user paused the area (ADR-0053): draw its paused mark. */
+  held: boolean;
   /** Magnification (§3.4), `1` at natural size. See {@link AreaView.zoom}. */
   zoom: number;
   /** Draw this area as the one a press would grab: brighter, lit border. */
@@ -787,6 +795,7 @@ export function areaFramesCss(
     sticky: area.sticky,
     watching: area.watching,
     name: area.name,
+    held: area.held,
     zoom: area.zoom,
     // A dragged area is not also "hovered": the hover chrome invites a gesture
     // that is already under way, and its close control would sit at the source
@@ -1082,6 +1091,38 @@ export function isRemoveKey(key: string): boolean {
 }
 
 /**
+ * Whether this key pauses or resumes the area under the cursor (ADR-0053):
+ * `P` in either case, bare. A chord is not it, for the reason
+ * {@link armedTypeForKey} gives. Rust's `placement_key` matches the same rule
+ * for the hook route.
+ */
+export function isHoldKey(
+  event: Pick<KeyboardEvent, 'key' | 'ctrlKey' | 'altKey' | 'metaKey'>,
+): boolean {
+  return (
+    !event.ctrlKey &&
+    !event.altKey &&
+    !event.metaKey &&
+    event.key.toLowerCase() === 'p'
+  );
+}
+
+/**
+ * Pauses or resumes the area under the cursor (ADR-0053). Never throws, for
+ * the same reason {@link dismissFocusedArea} does not; over empty overlay or
+ * an area with nothing to pause, Rust does nothing.
+ */
+export async function toggleHeldFocusedArea(invoke: Invoke): Promise<boolean> {
+  try {
+    await invoke('overlay_toggle_held_focused');
+    return true;
+  } catch (error) {
+    console.error('Failed to pause or resume the focused area:', error);
+    return false;
+  }
+}
+
+/**
  * Whether this event is the freeze toggle — `Ctrl+Space` (ADR-0026).
  *
  * # Why a chord where arming uses a bare letter
@@ -1160,8 +1201,8 @@ export function armedTypeForKey(
     // the `overlay://ocr` listener are the other half of this key.
     case 'o':
       return 'ocr';
-    // Roadmap 1.58. `W` for Watch. The area is created reading nothing; the
-    // user switches watching on from its menu (ADR-0048).
+    // Roadmap 1.58. `W` for Watch. The area watches from the moment it is
+    // made, and `P` pauses it (ADR-0053).
     case 'w':
       return 'watch';
     default:
