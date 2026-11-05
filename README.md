@@ -166,8 +166,8 @@ Six of eight area types are built.
      seen a notification on a real screen. The draft:
 - **A watch area.** Place it over something that changes, such as a download bar, a render or a
   chat, and it shows a Windows notification when that piece of screen starts changing, or when it
-  stops. It reads nothing until you switch watching on in its right-click menu, and says
-  *watching* on the area for as long as it reads. What it reads stays on your computer: it keeps
+  stops. It watches from the moment you make it, *Pause* in its settings or the key `P` stops it,
+  and it says *watching* on the area for as long as it reads. What it reads stays on your computer: it keeps
   coarse summaries of its readings, a grid of brightness averages, to compare, and nothing else.
   NOTES FOR RELEASE, not part of the draft. (1) For an area under 16 px on a side the grid is its
   greyscale picture (crates/uptake-core/src/watch.rs, review of #154 round 9): say so or drop
@@ -189,12 +189,13 @@ Around those:
 - **A three state model.** The hotkey toggles between placing areas and using your machine normally.
   Areas stay on screen either way.
   <!-- source: ADR-0012 (overlay interaction model) -->
-- **Change an area's type from its own menu.** Right-click an area and pick a type from the submenu;
-  it becomes that type in place.
+- **Change an area's type in its own settings.** Right-click an area and pick a type in the panel
+  that opens beside it; it becomes that type in place. Ctrl+right-click opens the area's menu
+  instead, which offers the same.
   <!-- source: ROADMAP.md tasks 1.27 (PR #55, merged 2026-08-14) and 1.28 (PR #59, merged 2026-08-18). -->
-- **Stick an area to a window.** Right-click an area and pick *Stick to window*, and it belongs to
+- **Stick an area to a window.** Right-click an area and switch on *Stick to window*, and it belongs to
   the window under it from then on. Move the window and the area moves with it, onto another
-  monitor too. Resize the window and the area scales with it; its menu has three other ways to
+  monitor too. Resize the window and the area scales with it; its settings have three other ways to
   answer a resize if scaling is wrong for what you are looking at. Minimise or close the window and
   the area hides until the window is back. It still floats above everything, so another window that
   covers its window does not cover the area.

@@ -2155,6 +2155,10 @@ enum PlacementKey {
     /// area read when nothing is selected, and in Living the key is only ours
     /// because something is.
     CopySelection,
+    /// `Esc` in Living while a settings panel is open: closes it, as `Esc`
+    /// closes it while placing (review of `#161`, round 2). Taken from the
+    /// program under the pointer only while the panel is open.
+    ClosePanel,
 }
 
 /// The virtual key of `C`, which copy is matched on in either mode.
@@ -2167,6 +2171,16 @@ const VK_C: u32 = 0x43;
 /// hook watches every key typed anywhere on the machine; the selection is the
 /// only reason one chord is borrowed, so the moment it is cleared the chord is
 /// the app's again.
+/// `Esc` in Living: the panel's, only while one is open; otherwise the
+/// program under the pointer keeps it. Pure, so it is tested.
+const fn living_escape(panel_open: bool) -> Option<PlacementKey> {
+    if panel_open {
+        Some(PlacementKey::ClosePanel)
+    } else {
+        None
+    }
+}
+
 const fn living_key(
     vk: u32,
     ctrl: bool,
@@ -2289,8 +2303,8 @@ fn key_action(
         return KeyAction::Swallow;
     }
     let in_mode = |key: PlacementKey| match mode {
-        Mode::Placement => key != PlacementKey::CopySelection,
-        Mode::Living => key == PlacementKey::CopySelection,
+        Mode::Placement => !matches!(key, PlacementKey::CopySelection | PlacementKey::ClosePanel),
+        Mode::Living => matches!(key, PlacementKey::CopySelection | PlacementKey::ClosePanel),
         Mode::Hidden => false,
     };
     match key {
@@ -2318,6 +2332,10 @@ fn act_on(app: &AppHandle, key: PlacementKey) {
         PlacementKey::SelectAll => overlay::overlay_ocr_select_all_focused(app.clone()),
         PlacementKey::CopySelection => {
             overlay::ocr_copy_selection(app);
+            Ok(())
+        }
+        PlacementKey::ClosePanel => {
+            crate::panel::close(app);
             Ok(())
         }
     };
@@ -2402,6 +2420,9 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
                     let (ctrl, alt, win) = modifiers();
                     let showing = ctrl && !alt && !win && selection_showing();
                     living_key(vk, ctrl, alt, win, showing)
+                }
+                Mode::Living if vk == u32::from(VK_ESCAPE) => {
+                    living_escape(crate::panel::is_open())
                 }
                 Mode::Living | Mode::Hidden => None,
             };
@@ -5097,6 +5118,21 @@ mod tests {
         assert_eq!(
             living_key(u32::from(super::VK_ESCAPE), false, false, false, true),
             None
+        );
+        // Esc is taken in Living only to close an open settings panel
+        // (review of `#161`, round 2).
+        assert_eq!(super::living_escape(true), Some(PlacementKey::ClosePanel));
+        assert_eq!(super::living_escape(false), None);
+        let close = Some(PlacementKey::ClosePanel);
+        assert_eq!(
+            super::key_action(super::Mode::Living, close, true, false, false),
+            super::KeyAction::Act(PlacementKey::ClosePanel),
+            "taken in Living"
+        );
+        assert_eq!(
+            super::key_action(super::Mode::Placement, close, true, false, false),
+            super::KeyAction::Pass,
+            "placing has Esc for it already"
         );
 
         assert_eq!(

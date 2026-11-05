@@ -431,9 +431,9 @@
       "de_from": "05201a6a"
     },
     "coach.reference.body": {
-      "en": "Everything else is a menu on an area. Right-click any area to change its type, pin it above or below, or throw it away.",
-      "de": "Alles Weitere ist ein Menü an einem Bereich. Klicken Sie mit der rechten Maustaste auf einen Bereich, um seinen Typ zu ändern, ihn nach vorne oder hinten zu legen oder ihn zu entfernen.",
-      "de_from": "398bbae8"
+      "en": "Everything else is in an area's settings. Right-click any area to change its type, pin it above or below, and more. Ctrl+right-click opens its menu, where you can also throw it away.",
+      "de": "Alles Weitere steht in den Einstellungen eines Bereichs. Klicken Sie mit der rechten Maustaste auf einen Bereich, um seinen Typ zu ändern, ihn nach vorne oder hinten zu legen und mehr. Mit Strg und rechter Maustaste öffnet sich sein Menü, in dem Sie ihn auch entfernen können.",
+      "de_from": "db4011f2"
     },
     "coach.reference.anywhere": {
       "en": "Anywhere",
@@ -971,9 +971,9 @@
       "de_from": "3856d9b4"
     },
     "settings.ocr_behaviour.about": {
-      "en": "How a new OCR area shows what it read. In place keeps the screen visible and marks each word, and you can drag across the text to select it. Rendered covers the area and shows the text in UP-TAKE's own style. Each area can change its own from its right-click menu.",
-      "de": "Wie ein neuer OCR-Bereich zeigt, was er gelesen hat. Direkt lässt den Bildschirm sichtbar und markiert jedes Wort, und du kannst den Text mit der Maus auswählen. Als Text deckt den Bereich ab und zeigt den Text in der Darstellung von UP-TAKE. Jeder Bereich kann das über sein Rechtsklickmenü selbst ändern.",
-      "de_from": "4eec2085"
+      "en": "How a new OCR area shows what it read. In place keeps the screen visible and marks each word, and you can drag across the text to select it. Rendered covers the area and shows the text in UP-TAKE's own style. Each area can change its own in its settings, which a right-click opens.",
+      "de": "Wie ein neuer OCR-Bereich zeigt, was er gelesen hat. Direkt lässt den Bildschirm sichtbar und markiert jedes Wort, und du kannst den Text mit der Maus auswählen. Als Text deckt den Bereich ab und zeigt den Text in der Darstellung von UP-TAKE. Jeder Bereich kann das in seinen Einstellungen selbst ändern, die ein Rechtsklick öffnet.",
+      "de_from": "6293da75"
     },
     "settings.ocr_behaviour.in_place": {
       "en": "In place",

@@ -116,6 +116,7 @@ function onNameKey(event: KeyboardEvent): void {
     event.preventDefault();
     endEditing();
     (event.currentTarget as HTMLInputElement).blur();
+    done();
   }
 }
 
@@ -165,7 +166,16 @@ onMount(() => {
 });
 </script>
 
-<svelte:window onkeydown={onKeydown} />
+<!-- Any press in the panel's window but in the name field hands the keyboard
+     back to placing: a label, the header, the padding, the shadow margin or a
+     greyed-out switch activate the window as a control does (review of #161,
+     round 2). -->
+<svelte:window
+  onkeydown={onKeydown}
+  onpointerup={(event) => {
+    if (!(event.target instanceof HTMLInputElement)) done();
+  }}
+/>
 
 {#if view}
   {@const tone = TONES[toneOf(view.kind)]}

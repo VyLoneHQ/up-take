@@ -457,6 +457,12 @@ pub fn refresh(app: &AppHandle) {
     });
 }
 
+/// Whether a settings panel is open.
+#[must_use]
+pub fn is_open() -> bool {
+    open_now().is_some()
+}
+
 /// Whether a press at `point` is the panel's: inside the open panel. Asked by
 /// the placement hook before anything else, by position rather than z-order
 /// (see the hook), so the panel's controls work wherever it sits in the stack.
@@ -873,58 +879,86 @@ mod tests {
 
     /// The maintainer's rig, 2026-11-05: a right-click inside a watch area in
     /// Living ended the app (tao's paint assertion), because the hook showed
-    /// and hid the panel window inside tao's own message handling. Every call
-    /// that shows, hides or places the window sits inside a `later` closure,
-    /// which posts it as an event; `present` and `show_on_top` themselves are
-    /// only reached that way. Held by source, as no test here runs the hook.
-    /// Review of `#161`, round 1: the first version counted
-    /// `run_on_main_thread` calls and stayed green with `present` called
-    /// directly.
+    /// and hid the panel window inside tao's own message handling. Every
+    /// window operation in this file lies inside the parentheses of a
+    /// `later(...)` call, which posts it as an event, or inside `present` and
+    /// `show_on_top`, which are reached only from there. Held by source, as no
+    /// test here runs the hook. Rounds 1 and 2 of the review of `#161` each
+    /// found a way past an earlier, line-based version of this check.
     #[test]
     fn the_panel_window_is_never_touched_inside_the_hook() {
         let source = include_str!("panel.rs");
         let code = source.split("#[cfg(test)]").next().unwrap_or_default();
+        // The extent of the bracketed group opening at `open` (a `(` or `{`).
+        let close_of = |open: usize| -> usize {
+            let bytes = code.as_bytes();
+            let (start, end) = match bytes[open] {
+                b'(' => (b'(', b')'),
+                _ => (b'{', b'}'),
+            };
+            let mut depth = 0_i32;
+            for (at, &byte) in bytes.iter().enumerate().skip(open) {
+                if byte == start {
+                    depth += 1;
+                } else if byte == end {
+                    depth -= 1;
+                    if depth == 0 {
+                        return at;
+                    }
+                }
+            }
+            usize::MAX
+        };
+        let mut allowed: Vec<(usize, usize)> = Vec::new();
+        for (at, _) in code.match_indices("later(") {
+            if code[..at].ends_with("fn ") {
+                continue;
+            }
+            let open = at + "later".len();
+            allowed.push((open, close_of(open)));
+        }
+        for body in ["fn present(", "fn show_on_top(", "fn later("] {
+            let at = code.find(body).unwrap_or(usize::MAX);
+            assert!(at < usize::MAX, "`{body}` is in panel.rs");
+            let open = at + code[at..].find('{').unwrap_or(0);
+            allowed.push((open, close_of(open)));
+        }
+        let operations = [
+            concat!("present", "(&"),
+            concat!("hide_", "shown("),
+            concat!("show_on_", "top("),
+            concat!(".set_", "focus("),
+            concat!(".sh", "ow()"),
+            concat!(".hi", "de()"),
+            concat!(".set_", "size("),
+            concat!(".set_", "position("),
+            concat!("WebviewWindow", "Builder::new"),
+            concat!("ShowWin", "dow("),
+            concat!("SetWindow", "Pos("),
+        ];
+        let mut found = 0;
+        for operation in operations {
+            for (at, _) in code.match_indices(operation) {
+                let line_start = code[..at].rfind('\n').map_or(0, |n| n + 1);
+                if code[line_start..at].trim_start().starts_with("//") {
+                    continue;
+                }
+                if operation.starts_with("show_on_") && code[..at].ends_with("fn ") {
+                    continue;
+                }
+                found += 1;
+                assert!(
+                    allowed.iter().any(|&(from, to)| from < at && at < to),
+                    "`{operation}` at byte {at} is outside `later` and the window functions"
+                );
+            }
+        }
+        assert!(found >= 10, "the operations were found ({found})");
         assert_eq!(
             code.matches(concat!(".run_on_main", "_thread(")).count(),
             1,
             "only inside `later`"
         );
-        let calls = [
-            concat!("present", "(&"),
-            concat!("hide_", "shown(&window)"),
-            concat!("show_on_", "top(hwnd.0)"),
-            concat!(".set_", "focus()"),
-        ];
-        let mut inside: Option<&str> = None;
-        let mut checked = 0;
-        for line in code.lines() {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("fn ") || trimmed.starts_with("pub fn ") {
-                inside = Some(
-                    if trimmed.contains("fn present(") || trimmed.contains("fn show_on_top(") {
-                        "window fn"
-                    } else {
-                        "fn"
-                    },
-                );
-            } else if trimmed.contains("later(") && !trimmed.starts_with("///") {
-                inside = Some("later");
-            }
-            if trimmed.starts_with("//") {
-                continue;
-            }
-            for call in calls {
-                if line.contains(call) {
-                    checked += 1;
-                    assert!(
-                        matches!(inside, Some("later" | "window fn")),
-                        "`{}` outside `later`",
-                        line.trim()
-                    );
-                }
-            }
-        }
-        assert!(checked >= 6, "the calls were found ({checked})");
     }
 
     #[test]

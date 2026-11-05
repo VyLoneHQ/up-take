@@ -888,6 +888,14 @@ pub fn escape(app: &AppHandle) {
     if placement::close_menu(app) {
         return;
     }
+    // An open settings panel is closed first, as the menu is: the panel does
+    // not hold the keyboard while placing, so Esc reaches the overlay, and
+    // leaving placing with the panel still up was the defect (review of
+    // `#161`, round 2).
+    if crate::panel::is_open() {
+        crate::panel::close(app);
+        return;
+    }
     if placement::is_dragging() {
         placement::cancel_drag();
         drive(
