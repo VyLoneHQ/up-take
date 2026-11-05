@@ -101,10 +101,13 @@
 //! is in every reading, and only the border and the mark are left out.**
 //! The largest other part, Placement's darkened edges, comes and goes with
 //! the overlay state, so every watcher starts again from a fresh baseline
-//! when the state changes (review of `#154`, round 2). What is left: a
-//! menu, a selection box or another area's flash drawn over a watched
-//! region while the user works there can count as a change. The setting
-//! is off by default.
+//! when the state changes (review of `#154`, round 2). The area's name label
+//! comes and goes with its name, so a rename starts its watcher again too
+//! ([`Target::label`], `I-480`). What is left: a menu, a selection box or
+//! another area's flash drawn over a watched region while the user works
+//! there can count as a change, and so can a notification card or the
+//! settings panel over one (`I-480`'s second half, open). The setting is off
+//! by default.
 //!
 //! # Cost
 //!
