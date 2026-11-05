@@ -247,9 +247,7 @@ fn wake_page(app: &AppHandle, label: &str, monitor: &Monitor) -> Result<(), Stri
 fn place(window: &tauri::WebviewWindow, monitor: &Monitor, height: f64) -> Result<(), String> {
     let (x, y, width, physical_height) = placement(monitor, height);
     if physical_height == 0 {
-        return window
-            .hide()
-            .map_err(|error| format!("could not hide the notice window: {error}"));
+        return hide_shown(window);
     }
     window
         .set_size(tauri::PhysicalSize::new(width, physical_height))
@@ -306,6 +304,30 @@ fn show_without_focus(hwnd: windows_sys::Win32::Foundation::HWND) {
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         );
     }
+}
+
+/// Hides a window that [`show_without_focus`] showed, the same way: with
+/// `ShowWindow` itself. tao's own hide does nothing to it, because tao hides a
+/// window only when its own record says it is visible, and a raw `ShowWindow`
+/// leaves that record at hidden. So an emptied stack stayed on screen, clear
+/// and topmost, where it could still be the window under the pointer
+/// (`I-478`'s cause, measured by a drill against tao 0.37.1).
+pub(crate) fn hide_shown(window: &tauri::WebviewWindow) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, ShowWindow};
+        let hwnd = window
+            .hwnd()
+            .map_err(|error| format!("could not get the notice window handle: {error}"))?
+            .0;
+        // SAFETY: `hwnd` is this process's live window; this only hides it.
+        unsafe { ShowWindow(hwnd, SW_HIDE) };
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    window
+        .hide()
+        .map_err(|error| format!("could not hide the notice window: {error}"))
 }
 
 /// Where the keyboard goes back to after a card's window took it.
@@ -429,9 +451,7 @@ pub fn notice_resize(window: tauri::WebviewWindow, height: f64) -> Result<(), St
     }
     let Some(monitor) = monitor_of(window.label()) else {
         // Its monitor is gone: nothing to show it on.
-        return window
-            .hide()
-            .map_err(|error| format!("could not hide the notice window: {error}"));
+        return hide_shown(&window);
     };
     place(&window, &monitor, height)
 }
@@ -611,6 +631,31 @@ mod tests {
         assert_eq!(
             taken.last().map(|card| card.kind.clone()),
             Some((QUEUE_LIMIT + 4).to_string())
+        );
+    }
+
+    /// The card window is shown by a raw `ShowWindow`, which tao does not see,
+    /// so tao's own hide would leave an emptied stack on screen (`I-478`).
+    /// Every hide goes through `hide_shown`, whose only tao hide is for other
+    /// systems; held by source because no test here can run a tao window.
+    #[test]
+    fn the_card_window_is_hidden_the_way_it_was_shown() {
+        let source = include_str!("notice.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or_default();
+        assert_eq!(
+            code.matches(".hide()").count(),
+            1,
+            "only the non-Windows hide"
+        );
+        assert_eq!(
+            code.matches("hide_shown(").count(),
+            3,
+            "the helper and its two calls"
+        );
+        let at = |needle: &str| code.find(needle).unwrap_or(usize::MAX);
+        assert!(
+            at("ShowWindow(hwnd, SW_HIDE)")
+                < at("#[cfg(not(windows))]\n    window\n        .hide()")
         );
     }
 }
