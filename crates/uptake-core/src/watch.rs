@@ -62,6 +62,16 @@ pub enum Watch {
 }
 
 impl Watch {
+    /// How many still readings end a change for this choice: a short calm
+    /// re-arms *changes*, a long one is needed to call something finished.
+    #[must_use]
+    pub const fn settle_readings(self) -> u32 {
+        match self {
+            Self::Changes => REARM_READINGS,
+            _ => SETTLE_READINGS,
+        }
+    }
+
     /// Whether `event` is the one this choice asked to be told about.
     #[must_use]
     pub const fn notifies(self, event: Event) -> bool {
@@ -80,16 +90,22 @@ pub const GRID: u32 = 16;
 /// How far one cell's average brightness must move, in levels of 255, before
 /// the region counts as changed.
 ///
-/// Twelve levels is a few percent of a cell's pixels going from light to dark.
-/// On a 1,000 by 600 region a cell is about 60 by 40 pixels, so a caret 2 by
-/// 16 pixels moves its cell's average by about three levels and is ignored,
-/// while one line of new text covers a fifth of a cell's rows and moves it by
-/// tens of levels.
+/// **Six, measured on a real screen, 2026-11-03** (the maintainer's rig, a
+/// 106 by 62 pixel watch area over two thin toolbar icons that appear and
+/// disappear on a dark background). Showing or hiding the icons moved the
+/// busiest cell by exactly 12 levels, and readings of the still screen
+/// differed by 0. The first value, 12, was chosen on arithmetic and compared
+/// with `>`, so that real change sat exactly on the line and was never
+/// reported. Six is half of it.
+///
+/// What it still ignores: on a 1,000 by 600 region a cell is about 60 by 40
+/// pixels, so a caret 2 by 16 pixels moves its cell's average by about three
+/// levels, under six. One line of new text moves a cell by tens of levels.
 ///
 /// ⚠️ **The smaller the region, the bigger a cell's share of each pixel.** On
 /// a region a few lines tall a cell is a handful of pixels, and a caret
-/// blinking in it does count as a change. A known limit of this first value.
-pub const CELL_DELTA: u8 = 12;
+/// blinking in it does count as a change. A known limit.
+pub const CELL_DELTA: u8 = 6;
 
 /// How far a cell may move between two CONSECUTIVE readings and the region
 /// still count as still, once it has started changing.
@@ -108,10 +124,18 @@ pub const CELL_DELTA: u8 = 12;
 pub const STILL_DELTA: u8 = 2;
 
 /// How many readings in a row must match before a region that was changing
-/// counts as settled. With the host's reading every two seconds, three is six
-/// seconds of stillness: long enough that a progress bar pausing between
-/// chunks is not reported as finished.
-pub const SETTLE_READINGS: u32 = 3;
+/// counts as settled, for *Notify when it stops changing*. With the host
+/// reading every half second, twelve is six seconds of stillness: long enough
+/// that a progress bar pausing between chunks is not reported as finished.
+/// (Three readings at two seconds until 2026-11-03: the same six seconds.)
+pub const SETTLE_READINGS: u32 = 12;
+
+/// How many still readings re-arm *Notify when it changes* after a change:
+/// one second at the host's half-second reading. Until 2026-11-03 this mode
+/// waited the full [`SETTLE_READINGS`] too, so at the maintainer's rig a
+/// second change within six seconds of the first was never reported. This
+/// mode reports change, not completion, so a short calm is enough.
+pub const REARM_READINGS: u32 = 2;
 
 /// One reading, summarised: the average brightness of each cell of a grid laid
 /// over the region.
@@ -229,8 +253,8 @@ const fn luma(r: u8, g: u8, b: u8) -> u8 {
 pub enum Event {
     /// The region was still and now differs from its last reading.
     Changed,
-    /// The region had been changing and has now matched itself for
-    /// [`SETTLE_READINGS`] readings in a row.
+    /// The region had been changing and has now held still for the
+    /// detector's settle count of readings ([`Watch::settle_readings`]).
     Settled,
 }
 
@@ -239,17 +263,30 @@ pub enum Event {
 /// Two comparisons, one for each moment. **A change starts** when a reading
 /// differs by more than [`CELL_DELTA`] from the *baseline*, the reading the
 /// region was last still at, so a slow change adds up until it counts. **A
-/// change ends** when [`SETTLE_READINGS`] readings in a row each differ from
-/// the reading just before by no more than [`STILL_DELTA`]; that reading
-/// becomes the new baseline, wherever the region stopped. Each is reported
-/// once, so a video under a watch area raises one notification and not one
-/// every two seconds.
-#[derive(Debug, Clone, Default)]
+/// change ends** when the settle count of readings in a row
+/// ([`Watch::settle_readings`]: [`REARM_READINGS`] for *Notify when it
+/// changes*, [`SETTLE_READINGS`] for *Notify when it stops changing*) each
+/// differ by no more than [`STILL_DELTA`] from the first reading of that
+/// still run; the last becomes the new baseline, wherever the region stopped.
+/// Each is reported once, so a video under a watch area raises one
+/// notification while it plays, not one a reading.
+#[derive(Debug, Clone)]
 pub struct Detector {
     baseline: Option<Fingerprint>,
-    previous: Option<Fingerprint>,
+    /// The first reading of the current still run. Stillness is measured
+    /// against it, not only against the reading before, so a change too slow
+    /// to show between two readings still adds up and keeps the run from
+    /// counting as still (which matters more at a half-second reading).
+    still_from: Option<Fingerprint>,
     changing: bool,
     still: u32,
+    settle: u32,
+}
+
+impl Default for Detector {
+    fn default() -> Self {
+        Self::with_settle(SETTLE_READINGS)
+    }
 }
 
 impl Detector {
@@ -261,30 +298,46 @@ impl Detector {
         Self::default()
     }
 
+    /// A detector whose change ends after `settle` still readings (at least
+    /// one): [`Watch::settle_readings`] for the area's choice.
+    #[must_use]
+    pub fn with_settle(settle: u32) -> Self {
+        Self {
+            baseline: None,
+            still_from: None,
+            changing: false,
+            still: 0,
+            settle: settle.max(1),
+        }
+    }
+
     /// Takes one reading and says whether it is a moment worth reporting.
     pub fn observe(&mut self, reading: Fingerprint) -> Option<Event> {
-        let (Some(baseline), Some(previous)) = (&self.baseline, &self.previous) else {
+        let Some(baseline) = &self.baseline else {
             self.baseline = Some(reading.clone());
-            self.previous = Some(reading);
+            self.still_from = Some(reading);
             return None;
         };
         if !self.changing {
-            let started = baseline.differs(&reading);
-            self.previous = Some(reading);
-            if !started {
+            if !baseline.differs(&reading) {
                 return None;
             }
             self.changing = true;
             self.still = 0;
+            self.still_from = Some(reading);
             return Some(Event::Changed);
         }
-        if previous.moved(&reading) > STILL_DELTA {
+        let moved = self
+            .still_from
+            .as_ref()
+            .map_or(u8::MAX, |from| from.moved(&reading));
+        if moved > STILL_DELTA {
             self.still = 0;
-        } else {
-            self.still += 1;
+            self.still_from = Some(reading);
+            return None;
         }
-        self.previous = Some(reading.clone());
-        if self.still < SETTLE_READINGS {
+        self.still += 1;
+        if self.still < self.settle {
             return None;
         }
         self.changing = false;
@@ -375,6 +428,17 @@ mod tests {
         assert!(print(&before).differs(&print(&after)));
     }
 
+    /// The real screen it was tuned on (2026-11-03): two toolbar icons
+    /// appearing moved the busiest cell by exactly 12 levels, which the first
+    /// threshold did not report. That change must count.
+    #[test]
+    fn the_measured_icons_are_a_change() {
+        let before = grey(GRID, GRID, 100);
+        let after = grey(GRID, GRID, 112);
+        assert_eq!(print(&before).moved(&print(&after)), 12);
+        assert!(print(&before).differs(&print(&after)));
+    }
+
     /// Exactly the line: a whole cell moving by `CELL_DELTA` is not a change,
     /// and one level more is.
     #[test]
@@ -459,7 +523,7 @@ mod tests {
         for step in [4_u32, 10, 20] {
             let mut detector = Detector::new();
             let mut reported = Vec::new();
-            for reading in 0..90_u32 {
+            for reading in 0..80 + SETTLE_READINGS + 5 {
                 let filled = (reading.min(80) * step).min(940);
                 let picture = with_patch(grey(960, 640, 240), (10, 300, filled.max(1), 8), 20);
                 if let Some(event) = detector.observe(print(&picture)) {
@@ -489,6 +553,55 @@ mod tests {
             print(&before).differs(&print(&elsewhere)),
             "the rest still counts"
         );
+    }
+
+    /// The maintainer's rig, 2026-11-03: icons switched every few seconds. In
+    /// *changes* mode each switch is reported once the region has been calm
+    /// for [`REARM_READINGS`], not only the first in every six seconds.
+    #[test]
+    fn changes_mode_reports_each_change_after_a_short_calm() {
+        let mut detector = Detector::with_settle(Watch::Changes.settle_readings());
+        let (a, b) = (print(&grey(64, 64, 10)), print(&grey(64, 64, 60)));
+        let mut reported = Vec::new();
+        detector.observe(a.clone());
+        // Switch every three readings: one changed reading, then a calm of
+        // two, which re-arms.
+        for round in 0..6 {
+            let next = if round % 2 == 0 { &b } else { &a };
+            for _ in 0..3 {
+                reported.extend(detector.observe(next.clone()));
+            }
+        }
+        let changes = reported
+            .iter()
+            .filter(|event| **event == Event::Changed)
+            .count();
+        assert_eq!(changes, 6, "{reported:?}");
+        assert_eq!(Watch::Settles.settle_readings(), SETTLE_READINGS);
+    }
+
+    /// Slower than [`STILL_DELTA`] between two readings, which a half-second
+    /// reading makes common: measured from the start of the still run, the
+    /// drift adds up and a moving bar does not settle until it stops.
+    #[test]
+    fn a_bar_slower_than_the_still_delta_does_not_settle_while_it_moves() {
+        for step in [1_u32, 2] {
+            let mut detector = Detector::new();
+            let mut reported = Vec::new();
+            for reading in 0..120_u32 {
+                let filled = (reading.min(90) * step).min(940);
+                let picture = with_patch(grey(960, 640, 240), (10, 300, filled.max(1), 8), 20);
+                if let Some(event) = detector.observe(print(&picture)) {
+                    reported.push((reading, event));
+                }
+            }
+            let settled: Vec<_> = reported
+                .iter()
+                .filter(|(_, event)| *event == Event::Settled)
+                .collect();
+            assert_eq!(settled.len(), 1, "{step} px a reading: {reported:?}");
+            assert!(settled[0].0 >= 90, "{step} px: settled at {}", settled[0].0);
+        }
     }
 
     /// After settling, the next change is reported again.

@@ -24,3 +24,20 @@ describe('the watching mark stays inside its area', () => {
     expect(block).toContain('top: 2px;');
   });
 });
+
+/**
+ * The page confirms a mark only when its dot lies wholly inside the badge
+ * ($lib/mark-check, `markSeen`). A plain inline span's box is the whole glyph
+ * of the font that draws the dot, taller than the badge's 11px line, so no
+ * mark was ever confirmed and no watch area read on a real screen (found at
+ * the maintainer's rig, 2026-11-03; measured in headless Edge). jsdom does no
+ * layout, so the rule that makes the dot's box its line box is pinned here.
+ */
+describe('the watching dot fits inside its badge', () => {
+  const block = page.match(/\.watch-dot \{([^}]*)\}/)?.[1] ?? '';
+
+  it('is laid out as its line box, not as its glyph', () => {
+    expect(block).toContain('display: inline-block;');
+    expect(block).toContain('line-height: 1;');
+  });
+});

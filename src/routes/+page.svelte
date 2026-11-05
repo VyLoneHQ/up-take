@@ -1237,6 +1237,18 @@ $effect(() => {
   white-space: nowrap;
 }
 
+/* The dot's box must be its line box. As a plain inline span its box is the
+   whole glyph of the fallback symbol font, about 15px tall against the
+   badge's 11px, so it was never "wholly inside the badge" (markSeen), the page
+   never confirmed a mark, and no watch area ever read on a real screen
+   (measured in headless Edge at 100 to 200 %, 2026-11-03). An inline-block
+   with line-height 1 is exactly the badge's line. Pinned by
+   watch-badge-css.test.ts. */
+.watch-dot {
+  display: inline-block;
+  line-height: 1;
+}
+
 /* The paused mark (ADR-0053): where the watching mark sits, dimmer, so a
    paused area reads as stopped at a glance. */
 .held-badge {

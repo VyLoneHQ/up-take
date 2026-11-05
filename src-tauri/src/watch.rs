@@ -85,7 +85,8 @@
 //! - a change between the check and the frame read back, a few milliseconds,
 //!   is not seen by the check;
 //! - the frame is a held session's newest, which can be up to
-//!   `warm::WATCH_FRAME_INTERVAL` (one second) older than the check, and can
+//!   `warm::WATCH_FRAME_INTERVAL` (a quarter of a second) older than the
+//!   check, and can
 //!   come from between the page's layout and its paint (rounds 12 and 20). A
 //!   watcher made or started again waits one pass before its first reading
 //!   ([`Watcher`]), which keeps such a frame out of a baseline, not out of
@@ -109,24 +110,27 @@
 //! # Cost
 //!
 //! **Readings come from capture sessions held on the monitors under watching
-//! areas** (`uptake_capture::warm::watch_hold`), each sent at most one frame
-//! a second; a pass reads each monitor's frame once and cuts every area out
+//! areas** (`uptake_capture::warm::watch_hold`), each sent at most four frames
+//! a second (`warm::WATCH_FRAME_INTERVAL`); a pass reads each monitor's frame once and cuts every area out
 //! of it (`warm::compose`). The founder's choice, 2026-10-31 (UP-TAKE backlog
 //! `I-474`), after the measurement in workspace `evidence/1.58-watch-cost/`:
 //!
-//! - **This route: 0.13 % of a core for one area and for five**, every
-//!   [`INTERVAL`], on a still screen.
+//! - **This route: 0.13 % of a core for one area and for five**, read every
+//!   two seconds on a still screen; not re-measured at [`INTERVAL`] (`I-474`).
 //! - The first route, a capture built per reading, cost 7.3 % for one area
 //!   and 16.5 % for five, against `quality-bars.md` section 1's 2 % per live
 //!   area (hard fail 5 %).
 //! - ⚠️ **A busy screen under a held session is not measured for this
 //!   route.** `ADR-0026` measured an unthrottled one at +1.33 points with
-//!   video playing; these are throttled to one frame a second.
+//!   video playing; these are throttled to four frames a second.
 //!
 //! The sessions are let go whenever nothing can be read (switched off,
 //! paused, overlay hidden). For about a third of a second after they are
 //! taken, and on a monitor WGC cannot hold, a reading falls back to one
-//! capture of its own (`output.rs`, `capture_for_watch`), at the old cost.
+//! capture of its own (`output.rs`, `capture_for_watch`), at the old cost
+//! per reading: 7.3 % of a core was measured at a reading every two
+//! seconds, and readings now come four times as often, so a monitor WGC
+//! cannot hold costs about four times that (not measured, `I-474`).
 //!
 //! # The thread
 //!
@@ -152,9 +156,23 @@ use crate::overlay_state::OverlayState;
 
 use crate::strings::{Text, text};
 
-/// How often a watching area reads its region. A first value; see the module
-/// docs' *Cost*.
-pub const INTERVAL: Duration = Duration::from_secs(2);
+/// How often a watching area reads its region: twice a second since
+/// 2026-11-03, when two seconds proved too slow at the maintainer's rig (a
+/// switch could wait two seconds to be seen, and a switch and back between two
+/// readings was missed). Held sessions measured 0.13 % of a core at two
+/// seconds; four times the readings is re-measured before release (`I-474`).
+pub const INTERVAL: Duration = Duration::from_millis(500);
+
+// A reading uses a held session's newest frame, so frames must come at least
+// twice per reading: a frame up to one reading old could reach a fresh
+// baseline ([`Watcher::fresh`]), and one frame read twice counts as a still
+// reading, which re-arms *Notify when it changes* in the middle of a moving
+// region (review of `#159`, round 1: the reading interval went to 500 ms
+// while the frame throttle stayed at one second).
+const _: () = assert!(
+    INTERVAL.as_nanos() >= 2 * uptake_capture::warm::WATCH_FRAME_INTERVAL.as_nanos(),
+    "a watch reading must see at least two frame intervals"
+);
 
 /// How wide a band along each edge of the area is left out of a reading, in
 /// physical pixels: the border, 1.5 CSS pixels, at up to 250 % scaling.
@@ -454,7 +472,10 @@ struct Watcher {
     /// again (the overlay state changed, the setting flipped, a move ended)
     /// could still show what came before, and the next reading would report
     /// that as a change (review of `#154`, round 12). One [`INTERVAL`] later
-    /// the frame should be newer than the reason it started again.
+    /// the frame should be newer than the reason it started again, which
+    /// holds only while [`INTERVAL`] is at least twice the frame interval: a
+    /// compile-time assertion beside [`INTERVAL`] keeps it so (review of
+    /// `#159`, round 1).
     ///
     /// ⚠️ **Assumed, not measured:** that WGC, held at
     /// `WATCH_FRAME_INTERVAL`, delivers a frame within that interval of a
@@ -747,13 +768,13 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
         }
         let watcher = watchers.entry(target.id).or_insert_with(|| Watcher {
             target,
-            detector: Detector::new(),
+            detector: Detector::with_settle(target.watch.settle_readings()),
             failing: false,
             fresh: true,
         });
         if watcher.target != target {
             watcher.target = target;
-            watcher.detector = Detector::new();
+            watcher.detector = Detector::with_settle(target.watch.settle_readings());
             watcher.fresh = true;
         }
         if watcher.fresh {
@@ -1413,7 +1434,10 @@ mod tests {
             fake.level = 20;
             run(&mut fake, &mut memory, 1);
             assert_eq!(fake.notified.len(), 0);
-            run(&mut fake, &mut memory, 4);
+            // One reading more than the settle count, since a pass may land
+            // on the reading that only starts the still run.
+            let settle = usize::try_from(Watch::Settles.settle_readings()).unwrap_or(usize::MAX);
+            run(&mut fake, &mut memory, settle + 1);
             assert_eq!(fake.notified, vec![Event::Settled]);
         }
 
