@@ -678,6 +678,11 @@ fn ring_watcher() {
     }
 }
 
+/// What the watch reads answer when a monitor the area covers cannot be
+/// held by WGC at all: expected on such a monitor, not a GPU fault; the
+/// caller reads by a capture of its own.
+pub const UNSERVABLE: &str = "a monitor the watch area covers cannot be held";
+
 /// What [`watch_capture_small`] answers for a region across monitors or off
 /// one: not a fault, the caller reads the region whole instead.
 pub const NOT_ON_ONE_MONITOR: &str = "not wholly on one monitor";
@@ -777,7 +782,7 @@ pub fn watch_capture_region(
             return Ok(None);
         };
         if slot.is_unservable() {
-            return Err("a monitor the watch area covers cannot be held".into());
+            return Err(UNSERVABLE.into());
         }
         let Some(pixels) = read_box(slot, part)? else {
             return Ok(None);
@@ -908,7 +913,7 @@ pub fn watch_capture_small(
         return Ok(None);
     };
     if slot.is_unservable() {
-        return Err("the monitor cannot be held".into());
+        return Err(UNSERVABLE.into());
     }
     let Some((size, pixels)) = shrink_box(slot, region)? else {
         return Ok(None);
@@ -999,7 +1004,11 @@ fn shrink_box(slot: &Slot, part: Rect) -> Result<Option<(Size, Vec<u8>)>, String
     let packed = pack_rows(mapped_bytes, mapped.RowPitch as usize, size);
     // SAFETY: unmaps exactly what was mapped above.
     unsafe { retained.context.Unmap(&staging, 0) };
-    Ok(packed.map(|pixels| (size, pixels)))
+    // A short mapping is a fault, as in `read_box`, not "no frame yet"
+    // (review of `#162`, round 3).
+    packed
+        .map(|pixels| Some((size, pixels)))
+        .ok_or_else(|| "the mapped picture was short".to_string())
 }
 
 /// The texture box `part` (desktop pixels) covers on a monitor at `monitor`
@@ -1021,9 +1030,12 @@ fn box_in(monitor: Rect, frame: Size, part: Rect) -> Option<D3D11_BOX> {
         })
 }
 
-/// The newest frame held for watch areas on `monitor`, or `None` (not held,
-/// still warming up, or the monitor changed): the caller takes
-/// [`crate::capture_region`] instead.
+/// The newest frame held for watch areas on `monitor`, whole, or `None` (not
+/// held, still warming up, or the monitor changed). **Not the watcher's
+/// route since the event-driven watch area** (`up-take` #162), which reads
+/// each area alone from the GPU ([`watch_capture_small`],
+/// [`watch_capture_region`]); kept for the examples that measure the
+/// whole-frame route.
 #[must_use]
 pub fn watch_capture_monitor(monitor: Rect) -> Option<CapturedRegion> {
     capture_monitor_in(&WATCH_SESSIONS, monitor)
@@ -1035,11 +1047,13 @@ pub fn watch_capture_monitor(monitor: Rect) -> Option<CapturedRegion> {
 /// and pixels on no frame are transparent black (`plan.rs`). `None` when
 /// `region` overlaps no frame, or a cut fails.
 ///
-/// **The same rectangle as `capture_region` on purpose.** A reading falls back
-/// to `capture_region` while a session warms up, so the two routes meet in one
-/// watcher; a picture of a different size would move every cell of the
-/// fingerprint and notify on a still screen (review of `#154`, round 12, when
-/// this clamped to the frames instead).
+/// **The same rectangle as `capture_region` on purpose**, and
+/// [`watch_capture_region`] keeps it too: a reading falls back to
+/// `capture_region` on a monitor that cannot be held, so the routes meet in
+/// one watcher, and a picture of a different size would move every cell of
+/// the fingerprint and notify on a still screen (review of `#154`, round 12).
+/// Not on the watcher's route since `up-take` #162; it states the rectangle
+/// in a form the tests check without a desktop.
 ///
 /// A pure function, so the way a watch area spanning two monitors is put
 /// together is tested without a desktop.

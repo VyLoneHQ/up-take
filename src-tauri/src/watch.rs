@@ -702,17 +702,36 @@ trait Host {
     fn notify(&mut self, event: Event, id: AreaId, bounds: Rect);
 }
 
-/// Whether a held session's read has failed since one last succeeded, so a
-/// lasting fault is logged once and not on every reading (review of `#162`,
-/// rounds 1 and 2: the fallback ran silently).
-static GPU_TROUBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// How an area was read from a held session, for [`Troubles`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Route {
+    /// Averaged down on the GPU (`warm::watch_capture_small`).
+    Small,
+    /// Its own rectangle from the GPU (`warm::watch_capture_region`).
+    Region,
+    /// A monitor it covers cannot be held: read by a capture of its own.
+    Unheld,
+}
 
-fn gpu_trouble(error: &str) {
-    if !GPU_TROUBLE.swap(true, Ordering::Relaxed) {
-        crate::diagnostics::trouble(
-            "watch: reading a held capture session failed; reading by a capture of its own instead (said once until one succeeds)",
-            &error,
-        );
+/// Which areas are failing on which route, so a lasting fault is logged once
+/// for that area and route, and again only after that same read has
+/// succeeded (review of `#162`, rounds 1 to 3: first nothing was logged, then
+/// one flag for every area and route let any success re-arm it, and a fault
+/// confined to one route logged on every reading).
+#[derive(Debug, Default)]
+struct Troubles {
+    failing: std::collections::HashSet<(Rect, Route)>,
+}
+
+impl Troubles {
+    /// The read of `bounds` by `route` failed: whether to log it.
+    fn failed(&mut self, bounds: Rect, route: Route) -> bool {
+        self.failing.insert((bounds, route))
+    }
+
+    /// The read of `bounds` by `route` worked.
+    fn worked(&mut self, bounds: Rect, route: Route) {
+        self.failing.remove(&(bounds, route));
     }
 }
 
@@ -721,6 +740,24 @@ struct AppHost<'a> {
     app: &'a AppHandle,
     /// The origin of [`Host::now`].
     started: Instant,
+    /// Reads that are failing, logged once each.
+    troubles: Troubles,
+}
+
+impl AppHost<'_> {
+    fn failed(&mut self, bounds: Rect, route: Route, error: &str) {
+        if self.troubles.failed(bounds, route) {
+            let what = match route {
+                Route::Unheld => {
+                    "watch: a monitor this area covers cannot be held, so it is read by a capture of its own (said once)"
+                }
+                Route::Small | Route::Region => {
+                    "watch: reading this area from a held capture session failed; reading it another way (said once until that read works again)"
+                }
+            };
+            crate::diagnostics::trouble(what, &error);
+        }
+    }
 }
 
 impl Host for AppHost<'_> {
@@ -764,12 +801,14 @@ impl Host for AppHost<'_> {
         if !whole {
             match uptake_capture::warm::watch_capture_small(bounds, &desktop) {
                 Ok(small) => {
-                    GPU_TROUBLE.store(false, Ordering::Relaxed);
+                    self.troubles.worked(bounds, Route::Small);
                     return Ok(small);
                 }
                 // Spanning monitors is not a fault: the region read below.
                 Err(error) if error == uptake_capture::warm::NOT_ON_ONE_MONITOR => {}
-                Err(error) => gpu_trouble(&error),
+                // Nor is a monitor that cannot be held: said once below.
+                Err(error) if error == uptake_capture::warm::UNSERVABLE => {}
+                Err(error) => self.failed(bounds, Route::Small, &error),
             }
         }
         // Otherwise only the area's own rectangle, copied on the GPU from the held
@@ -779,11 +818,16 @@ impl Host for AppHost<'_> {
         // by what it costs.
         match uptake_capture::warm::watch_capture_region(bounds, &desktop) {
             Ok(read) => {
-                GPU_TROUBLE.store(false, Ordering::Relaxed);
+                self.troubles.worked(bounds, Route::Region);
                 Ok(read)
             }
             Err(error) => {
-                gpu_trouble(&error);
+                let route = if error == uptake_capture::warm::UNSERVABLE {
+                    Route::Unheld
+                } else {
+                    Route::Region
+                };
+                self.failed(bounds, route, &error);
                 crate::output::capture_for_watch(bounds).map(Some)
             }
         }
@@ -817,6 +861,7 @@ fn run(app: &AppHandle) {
     let mut host = AppHost {
         app,
         started: Instant::now(),
+        troubles: Troubles::default(),
     };
     let mut memory = Memory::default();
     uptake_capture::warm::on_watch_frame(ring);
@@ -1316,6 +1361,28 @@ mod tests {
             let mut fake = Fake::new(targets(&[Rect::new(100, 100, 600, 400)]));
             fake.seen = false;
             assert_eq!(pass(&mut fake, &mut Memory::default()), Some(FRESH_WAIT));
+        }
+
+        /// Review of `#162`, round 3: a failing read is logged once for its
+        /// area and route, not again until that same read works; another
+        /// area's success, or another route's, does not re-arm it.
+        #[test]
+        fn a_failing_read_is_logged_once_per_area_and_route() {
+            use super::super::{Route, Troubles};
+            let (a, b) = (Rect::new(0, 0, 10, 10), Rect::new(50, 0, 10, 10));
+            let mut troubles = Troubles::default();
+            assert!(troubles.failed(a, Route::Small), "first: logged");
+            troubles.worked(a, Route::Region);
+            troubles.worked(b, Route::Small);
+            assert!(!troubles.failed(a, Route::Small), "not re-armed by others");
+            assert!(troubles.failed(a, Route::Region), "another route: its own");
+            troubles.worked(a, Route::Small);
+            assert!(
+                troubles.failed(a, Route::Small),
+                "after it worked: logged again"
+            );
+            assert!(troubles.failed(b, Route::Unheld));
+            assert!(!troubles.failed(b, Route::Unheld));
         }
 
         /// The governor: a pass that took `t` is followed by a rest of 49 `t`,
