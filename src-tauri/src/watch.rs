@@ -1228,11 +1228,7 @@ mod tests {
             assert_eq!(fake.notified, vec![Event::Changed]);
             // The fake clock steps half a second a pass, longer than the
             // re-arm: the next pass ends the change.
-            assert_eq!(
-                pass(&mut fake, &mut memory),
-                Some(IDLE),
-                "settled"
-            );
+            assert_eq!(pass(&mut fake, &mut memory), Some(IDLE), "settled");
             fake.seen = false;
             fake.still = false;
             fake.targets.clear();
