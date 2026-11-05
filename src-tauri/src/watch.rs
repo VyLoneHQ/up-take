@@ -110,24 +110,27 @@
 //! # Cost
 //!
 //! **Readings come from capture sessions held on the monitors under watching
-//! areas** (`uptake_capture::warm::watch_hold`), each sent at most one frame
-//! a second; a pass reads each monitor's frame once and cuts every area out
+//! areas** (`uptake_capture::warm::watch_hold`), each sent at most four frames
+//! a second (`warm::WATCH_FRAME_INTERVAL`); a pass reads each monitor's frame once and cuts every area out
 //! of it (`warm::compose`). The founder's choice, 2026-10-31 (UP-TAKE backlog
 //! `I-474`), after the measurement in workspace `evidence/1.58-watch-cost/`:
 //!
-//! - **This route: 0.13 % of a core for one area and for five**, every
-//!   [`INTERVAL`], on a still screen.
+//! - **This route: 0.13 % of a core for one area and for five**, read every
+//!   two seconds on a still screen; not re-measured at [`INTERVAL`] (`I-474`).
 //! - The first route, a capture built per reading, cost 7.3 % for one area
 //!   and 16.5 % for five, against `quality-bars.md` section 1's 2 % per live
 //!   area (hard fail 5 %).
 //! - ⚠️ **A busy screen under a held session is not measured for this
 //!   route.** `ADR-0026` measured an unthrottled one at +1.33 points with
-//!   video playing; these are throttled to one frame a second.
+//!   video playing; these are throttled to four frames a second.
 //!
 //! The sessions are let go whenever nothing can be read (switched off,
 //! paused, overlay hidden). For about a third of a second after they are
 //! taken, and on a monitor WGC cannot hold, a reading falls back to one
-//! capture of its own (`output.rs`, `capture_for_watch`), at the old cost.
+//! capture of its own (`output.rs`, `capture_for_watch`), at the old cost
+//! per reading: 7.3 % of a core was measured at a reading every two
+//! seconds, and readings now come four times as often, so a monitor WGC
+//! cannot hold costs about four times that (not measured, `I-474`).
 //!
 //! # The thread
 //!
