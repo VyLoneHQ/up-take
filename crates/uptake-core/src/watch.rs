@@ -145,7 +145,7 @@ pub struct Fingerprint {
     rows: u32,
     cells: Vec<u8>,
     /// Cells that were under one of UP-TAKE's own windows when this was read
-    /// (a notification card, the settings panel): what the screen shows there
+    /// (a notification card, say): what the screen shows there
     /// is unknown, so every comparison skips them (`I-480`, review of `#160`,
     /// round 1). Painting them out instead, as [`leave_out`] does for the
     /// area's own border, would itself read as a change when such a window
