@@ -333,8 +333,46 @@ pub(crate) fn hide_shown(window: &tauri::WebviewWindow) -> Result<(), String> {
         .map_err(|error| format!("could not hide the notice window: {error}"))
 }
 
-/// One of UP-TAKE's own windows outside the overlay (a card stack, the
-/// settings panel): where it is, or where it was and since when.
+/// *Show UP-TAKE in screen recordings* changed: gives every card window on
+/// screen the new capture policy at once (review of `#160`, round 2). Each
+/// card is given the policy when it is placed, so without this a card on
+/// screen at the change kept the old one: in recordings after the user turned
+/// that off, until the stack next moved.
+///
+/// Hidden windows are left alone and get the policy when next placed: a
+/// hidden window told `WDA_NONE` is drawn by Windows (`I-451`).
+#[cfg(windows)]
+pub fn apply_capture_policy(app: &AppHandle, show_in_recordings: bool) -> Result<(), String> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible;
+    let mut failed = Vec::new();
+    for (label, window) in app.webview_windows() {
+        if !label.starts_with(LABEL_PREFIX) {
+            continue;
+        }
+        let Ok(hwnd) = window.hwnd() else {
+            continue;
+        };
+        // SAFETY: reads the visibility of this process's own live window.
+        if unsafe { IsWindowVisible(hwnd.0) } == 0 {
+            continue;
+        }
+        if let Err(error) = crate::overlay::write_affinity_to(hwnd.0, show_in_recordings) {
+            failed.push(format!("{label}: {error}"));
+        }
+    }
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "capture policy not applied to {}",
+            failed.join("; ")
+        ))
+    }
+}
+
+/// One of UP-TAKE's own windows outside the overlay (today the card stacks;
+/// the settings panel joins in `1.60`'s pull request): where it is, or where
+/// it was and since when.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct OwnWindow {
     label: String,
@@ -768,8 +806,32 @@ mod tests {
     fn placing_and_hiding_a_card_keep_the_list() {
         let source = include_str!("notice.rs");
         let code = source.split("#[cfg(test)]").next().unwrap_or_default();
-        let at = |needle: &str| code.find(needle).unwrap_or(usize::MAX);
+        let at = |needle: &str| {
+            let found = code.find(needle);
+            assert!(found.is_some(), "`{needle}` is no longer in notice.rs");
+            found.unwrap_or(usize::MAX)
+        };
         assert!(at("own_window_at(window.label()") < at("show_without_focus(hwnd);\n"));
         assert!(at("own_window_gone(window.label());") < at("ShowWindow(hwnd, SW_HIDE)"));
+    }
+
+    /// Review of `#160`, round 2: turning *Show UP-TAKE in screen
+    /// recordings* off reaches the cards on screen too, and only those shown.
+    #[test]
+    fn a_change_of_the_capture_setting_reaches_the_cards_on_screen() {
+        let settings = include_str!("settings_window.rs");
+        assert!(settings.contains(
+            "crate::notice::apply_capture_policy(&app, settings.show_in_screen_recordings)"
+        ));
+        let source = include_str!("notice.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or_default();
+        let body = code
+            .split("pub fn apply_capture_policy(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .unwrap_or_default();
+        assert!(body.contains("label.starts_with(LABEL_PREFIX)"));
+        assert!(body.contains("IsWindowVisible(hwnd.0) } == 0"));
+        assert!(body.contains("write_affinity_to(hwnd.0, show_in_recordings)"));
     }
 }

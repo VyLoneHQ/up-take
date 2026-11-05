@@ -552,9 +552,10 @@ fn left_out(bounds: Rect, taken: Rect, overlay_in_captures: bool) -> Vec<Rect> {
 /// The parts of a reading that lie under UP-TAKE's own windows, in the
 /// reading's pixels: `windows` in desktop pixels, cut to `taken`, the
 /// rectangle the capture returned. With *Show UP-TAKE in screen recordings*
-/// on, a notification card or the settings panel over a watch area is in its
-/// reading; those parts are unknown to the comparison rather than a change,
-/// or a card could raise the next card (`I-480`, review of `#160`, round 1).
+/// on, a notification card over a watch area is in its reading (and the
+/// settings panel, once `1.60`'s pull request lists it); those parts are
+/// unknown to the comparison rather than a change, or a card could raise the
+/// next card (`I-480`, review of `#160`, round 1).
 fn unknown_under(windows: &[Rect], taken: Rect) -> Vec<Rect> {
     windows
         .iter()
@@ -813,11 +814,12 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
                     &mut captured.bitmap,
                     &left_out(target.bounds, captured.rect, state.1),
                 );
-                let hidden = if state.1 {
-                    unknown_under(&host.own_windows(), captured.rect)
-                } else {
-                    Vec::new()
-                };
+                // Whatever the setting: a window's own capture policy is
+                // written when it is placed, so one placed before the setting
+                // changed may still be in the picture (review of `#160`,
+                // round 2), and leaving out what was never there costs only
+                // the cells under the card.
+                let hidden = unknown_under(&host.own_windows(), captured.rect);
                 Fingerprint::of_hiding(&captured.bitmap, &hidden)
             }
             Err(error) => {
@@ -1063,34 +1065,28 @@ mod tests {
         /// Review of `#160`, round 1 (`I-480`): with *Show UP-TAKE in screen
         /// recordings* on, a card over a watch area is in its reading. Its
         /// coming, changing and going is no change, so a card cannot raise the
-        /// next card; with the setting off nothing is left out, since the card
-        /// is not in the picture at all.
+        /// next card. Round 2: the same with the setting off, since a card
+        /// placed before the setting was turned off can still be in the
+        /// picture.
         #[test]
         fn a_card_over_a_watch_area_is_no_change_of_its_screen() {
-            let card = (Rect::new(300, 100, 200, 60), 30);
-            let mut fake = Fake::new(targets(&[Rect::new(100, 100, 600, 400)]));
-            fake.state = (OverlayState::Living, true);
-            let mut memory = Memory::default();
-            run(&mut fake, &mut memory, 2);
-            for grey in [30, 120, 250] {
-                fake.card = Some((card.0, grey));
+            let card = Rect::new(300, 100, 200, 60);
+            for in_captures in [true, false] {
+                let mut fake = Fake::new(targets(&[Rect::new(100, 100, 600, 400)]));
+                fake.state = (OverlayState::Living, in_captures);
+                let mut memory = Memory::default();
                 run(&mut fake, &mut memory, 2);
+                for grey in [30, 120, 250] {
+                    fake.card = Some((card, grey));
+                    run(&mut fake, &mut memory, 2);
+                }
+                fake.card = None;
+                run(&mut fake, &mut memory, 4);
+                assert!(fake.notified.is_empty(), "{in_captures}: its own card");
+                fake.level = 20;
+                run(&mut fake, &mut memory, 1);
+                assert_eq!(fake.notified, vec![Event::Changed], "{in_captures}");
             }
-            fake.card = None;
-            run(&mut fake, &mut memory, 4);
-            assert!(fake.notified.is_empty(), "its own card is no change");
-            fake.level = 20;
-            run(&mut fake, &mut memory, 1);
-            assert_eq!(fake.notified, vec![Event::Changed], "still watching");
-
-            // The setting off: the listed card is not in captures, so nothing
-            // is left out (and a card drawn into this fake picture counts).
-            let mut fake = Fake::new(targets(&[Rect::new(100, 100, 600, 400)]));
-            let mut memory = Memory::default();
-            run(&mut fake, &mut memory, 2);
-            fake.card = Some(card);
-            run(&mut fake, &mut memory, 1);
-            assert_eq!(fake.notified, vec![Event::Changed]);
         }
 
         /// The working case: a baseline, then a change of the screen notifies.
