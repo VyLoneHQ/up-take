@@ -13,6 +13,7 @@ mod first_run;
 mod freeze;
 mod hotkey;
 mod licence_window;
+mod notice;
 mod ocr;
 mod ocr_words;
 mod output;
@@ -151,8 +152,9 @@ pub fn run() -> tauri::Result<()> {
         // (architecture §4). No frontend capability grants it, so the WebView
         // cannot open dialogs.
         .plugin(tauri_plugin_dialog::init())
-        // Roadmap 1.58: a watch area's only way to tell the user anything
-        // while they are looking at something else.
+        // Linked and no longer called: since ADR-0054 a watch area tells the
+        // user through UP-TAKE's own card (`notice.rs`), never a Windows
+        // toast. Removing the plugin and its dependency is backlog I-481.
         .plugin(tauri_plugin_notification::init())
         // The freeze probe's IPC endpoint is registered in debug builds only.
         // Nothing stamps a probe in release, so the release form was an inert
@@ -179,6 +181,10 @@ pub fn run() -> tauri::Result<()> {
                     overlay::overlay_report_freeze_latency,
                     overlay::overlay_report_scale,
                     overlay::overlay_dismiss_focused,
+                    notice::notice_take,
+                    notice::notice_resize,
+                    notice::notice_hover,
+                    overlay::overlay_rename_area,
                     overlay::overlay_toggle_held_focused,
                     overlay::overlay_ocr_copy_focused,
                     overlay::overlay_ocr_select_all_focused,
@@ -208,6 +214,10 @@ pub fn run() -> tauri::Result<()> {
                     overlay::overlay_report_latency,
                     overlay::overlay_confirm_marks,
                     overlay::overlay_dismiss_focused,
+                    notice::notice_take,
+                    notice::notice_resize,
+                    notice::notice_hover,
+                    overlay::overlay_rename_area,
                     overlay::overlay_toggle_held_focused,
                     overlay::overlay_ocr_copy_focused,
                     overlay::overlay_ocr_select_all_focused,
@@ -236,6 +246,14 @@ pub fn run() -> tauri::Result<()> {
             }
         })
         .on_window_event(|window, event| {
+            // A card's window never keeps the keyboard (ADR-0054): a click on
+            // a card hands it straight back, or placing goes deaf to `Esc`.
+            if window.label().starts_with(notice::LABEL_PREFIX)
+                && matches!(event, WindowEvent::Focused(true))
+            {
+                notice::give_focus_back(window.app_handle(), window);
+                return;
+            }
             if window.label() != overlay::WINDOW_LABEL {
                 return;
             }

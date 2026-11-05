@@ -114,17 +114,19 @@ texts! {
     MenuWatchChanges => "menu.watch.changes",
     /// That list: notify when the region stops changing.
     MenuWatchSettles => "menu.watch.settles",
+    /// Area menu: name the area.
+    MenuRename => "menu.rename",
+    /// A card's area type, for a watch area: "<name> // Watch area · changed".
+    NoticeTypeWatch => "notice.type.watch",
+    /// A card's event: the region started changing.
+    NoticeChanged => "notice.event.changed",
+    /// A card's event: the region stopped changing.
+    NoticeSettled => "notice.event.settled",
     /// Area menu: pause the area's ongoing work (`ADR-0053`). Only on a type
     /// that keeps working.
     MenuPause => "menu.pause",
     /// Area menu: resume a paused area's work (`ADR-0053`).
     MenuResume => "menu.resume",
-    /// A watch area's notification: its title.
-    WatchTitle => "watch.notify.title",
-    /// A watch area's notification: the region started changing.
-    WatchChanged => "watch.notify.changed",
-    /// A watch area's notification: the region stopped changing.
-    WatchSettled => "watch.notify.settled",
     /// Area menu: an OCR area's Behaviour list (roadmap `1.45`). The settings
     /// pane's own label, so the menu and the pane name the choice alike.
     MenuOcrBehaviour => "settings.ocr_behaviour.name",

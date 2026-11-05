@@ -145,21 +145,6 @@
       "de": "angehalten",
       "de_from": "0a1997cb"
     },
-    "watch.notify.title": {
-      "en": "UP-TAKE",
-      "de": "UP-TAKE",
-      "de_from": "3405ab74"
-    },
-    "watch.notify.changed": {
-      "en": "A watch area changed.",
-      "de": "Ein Beobachtungsbereich hat sich geändert.",
-      "de_from": "34a1d282"
-    },
-    "watch.notify.settled": {
-      "en": "A watch area stopped changing.",
-      "de": "Ein Beobachtungsbereich ist zur Ruhe gekommen.",
-      "de_from": "b777c8de"
-    },
     "menu.click_through": {
       "en": "Click-through",
       "de": "Durchklickbar",
@@ -559,6 +544,66 @@
       "en": "Help",
       "de": "Hilfe",
       "de_from": "b89df01a"
+    },
+    "settings.section.notifications": {
+      "en": "Notifications",
+      "de": "Benachrichtigungen",
+      "de_from": "381d190f"
+    },
+    "settings.notifications.name": {
+      "en": "Show notifications",
+      "de": "Benachrichtigungen anzeigen",
+      "de_from": "fae48728"
+    },
+    "settings.notices_on.name": {
+      "en": "Show cards on",
+      "de": "Karten anzeigen auf",
+      "de_from": "438d3c6c"
+    },
+    "settings.notices_on.about": {
+      "en": "The main monitor always, or the monitor of the area that raised the card.",
+      "de": "Immer auf dem Hauptbildschirm, oder auf dem Bildschirm des Bereichs, der die Karte ausgelöst hat.",
+      "de_from": "c318677b"
+    },
+    "settings.notices_on.main": {
+      "en": "Main monitor",
+      "de": "Hauptbildschirm",
+      "de_from": "cdf1e20e"
+    },
+    "settings.notices_on.area": {
+      "en": "The area's monitor",
+      "de": "Bildschirm des Bereichs",
+      "de_from": "881a5271"
+    },
+    "settings.notifications.about": {
+      "en": "UP-TAKE's own card at the top of the screen, for example when a watch area changes. Windows' notification settings do not affect it.",
+      "de": "Die eigene Karte von UP-TAKE oben am Bildschirm, zum Beispiel wenn sich ein Beobachtungsbereich ändert. Die Benachrichtigungseinstellungen von Windows wirken sich nicht darauf aus.",
+      "de_from": "d9d13b04"
+    },
+    "menu.rename": {
+      "en": "Rename…",
+      "de": "Umbenennen…",
+      "de_from": "8628af0d"
+    },
+    "rename.placeholder": {
+      "en": "Name this area",
+      "de": "Diesen Bereich benennen",
+      "de_from": "0081bba3"
+    },
+    "notice.type.watch": {
+      "en": "Watch area",
+      "de": "Beobachtungsbereich",
+      "de_from": "26172151"
+    },
+    "notice.event.changed": {
+      "en": "changed",
+      "de": "geändert",
+      "de_from": "4629e89b"
+    },
+    "notice.event.settled": {
+      "en": "stopped changing",
+      "de": "zur Ruhe gekommen",
+      "de_from": "6c2011c9"
     },
     "settings.section.startup": {
       "en": "Starting up",

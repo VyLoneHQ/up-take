@@ -79,6 +79,19 @@ pub enum HandLaunchState {
     Hidden,
 }
 
+/// Which monitor UP-TAKE's notification cards appear on (`ADR-0054`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticesOn {
+    /// The main monitor, whichever monitor the area is on. The default: the
+    /// maintainer's rig, 2026-11-05 (*"the notifications should always show
+    /// ONLY on the "main" monitor"*).
+    #[default]
+    MainMonitor,
+    /// The monitor that holds most of the area that raised the card.
+    AreasMonitor,
+}
+
 /// Which monitors a freeze covers (`ADR-0026`'s third amendment).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -154,6 +167,14 @@ pub struct Settings {
     pub start_with_windows: bool,
     /// Which state a launch by hand lands in.
     pub hand_launch_state: HandLaunchState,
+    /// Whether UP-TAKE shows its own notification cards (`ADR-0054`), such as
+    /// a watch area's. On by default: a watch area exists to tell the user,
+    /// and this card is the only way it does. Windows' notification settings
+    /// do not affect it; this does.
+    pub notifications: bool,
+    /// Which monitor the cards appear on: the main one by default, or each
+    /// area's own (his rig, 2026-11-05: *"maybe as a dedicated option"*).
+    pub notices_on: NoticesOn,
 
     // ---- Capture -------------------------------------------------------
     /// Where Save writes. `None` means `Pictures\UP-TAKE`, resolved at the
@@ -197,6 +218,8 @@ impl Default for Settings {
         Self {
             start_with_windows: false,
             hand_launch_state: HandLaunchState::Placing,
+            notifications: true,
+            notices_on: NoticesOn::MainMonitor,
             save_directory: None,
             leave_placing_after_screenshot: false,
             auto_save_screenshots: false,
@@ -304,8 +327,8 @@ pub fn save(settings: Settings) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        FILTER_RANGE, FreezeCovers, HandLaunchState, HeldPictureQuality, Language, OPACITY_RANGE,
-        OcrBehaviour, Settings,
+        FILTER_RANGE, FreezeCovers, HandLaunchState, HeldPictureQuality, Language, NoticesOn,
+        OPACITY_RANGE, OcrBehaviour, Settings,
     };
     use crate::payload_keys::{assert_keys, assert_payload_coverage};
 
@@ -317,6 +340,7 @@ mod tests {
         let settings = Settings::default();
         assert!(!settings.start_with_windows, "Q-14: off");
         assert_eq!(settings.hand_launch_state, HandLaunchState::Placing);
+        assert!(settings.notifications, "ADR-0054: on");
         assert_eq!(
             settings.save_directory, None,
             "None means Pictures\\UP-TAKE"
@@ -384,6 +408,8 @@ mod tests {
             &[
                 "start_with_windows",
                 "hand_launch_state",
+                "notifications",
+                "notices_on",
                 "save_directory",
                 "leave_placing_after_screenshot",
                 "auto_save_screenshots",
@@ -406,6 +432,14 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&FreezeCovers::ThisMonitor).unwrap_or_default(),
             "\"this_monitor\""
+        );
+        assert_eq!(
+            serde_json::to_string(&NoticesOn::MainMonitor).unwrap_or_default(),
+            "\"main_monitor\""
+        );
+        assert_eq!(
+            serde_json::to_string(&NoticesOn::AreasMonitor).unwrap_or_default(),
+            "\"areas_monitor\""
         );
         assert_eq!(
             serde_json::to_string(&HeldPictureQuality::Fast).unwrap_or_default(),
@@ -438,6 +472,10 @@ mod tests {
                 ),
                 (
                     "FreezeCovers",
+                    "a field of Settings, covered by its key table and its wire-name test",
+                ),
+                (
+                    "NoticesOn",
                     "a field of Settings, covered by its key table and its wire-name test",
                 ),
                 (

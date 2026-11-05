@@ -527,6 +527,9 @@ enum MenuAction {
     /// Choose what a watch area tells the user about (roadmap `1.58`). Radio
     /// rows like [`MenuAction::SetType`].
     SetWatch(uptake_core::watch::Watch),
+    /// Name the area (the founder, 2026-11-03): the page shows a name field
+    /// over it. On every type, since every area-raised card leads with it.
+    Rename,
     /// Pause (`true`) or resume (`false`) the area's ongoing work
     /// (`ADR-0053`). One row whose label says what it does, so the action
     /// carries the value the row switches *to*, like [`MenuAction::SetSticky`].
@@ -4703,6 +4706,9 @@ fn menu_rows(area: &overlay::AreaSummary) -> Vec<MenuRow> {
         text(Text::MenuClickThrough),
         area.input == Input::PassThrough,
     ));
+    // The founder, 2026-11-03: every area can be named, and every card an
+    // area raises leads with its name.
+    rows.push(leaf(MenuAction::Rename, text(Text::MenuRename), false));
     rows.push(leaf(MenuAction::Dismiss, text(Text::MenuDismiss), false));
     rows
 }
@@ -4822,6 +4828,10 @@ fn activate_menu_item(app: &AppHandle, hit: MenuHit, release: Point) {
         MenuAction::SetSticky(sticky) => crate::sticky::set(app, area, sticky),
         MenuAction::SetOnResize(on_resize) => crate::sticky::set_on_resize(area, on_resize),
         MenuAction::SetWatch(watch) => overlay::set_area_watch(app, area, watch),
+        MenuAction::Rename => {
+            overlay::start_rename(app, area);
+            false
+        }
         MenuAction::SetHeld(held) => overlay::set_area_held(app, area, held),
         MenuAction::Dismiss => overlay::dismiss_area(app, area),
         // Returned above, before the menu was closed.
@@ -6399,6 +6409,7 @@ mod tests {
                 "Depth",
                 "Stick to window",
                 "Click-through",
+                "Rename…",
                 "Dismiss"
             ]
         );
@@ -6601,6 +6612,7 @@ mod tests {
                     "Stick to window",
                     "On resize",
                     "Click-through",
+                    "Rename…",
                     "Dismiss"
                 ],
                 "{state:?}"
@@ -6729,6 +6741,7 @@ mod tests {
                 ("Depth", true),
                 ("Stick to window", false),
                 ("Click-through", true),
+                ("Rename…", true),
                 ("Dismiss", true),
             ]
         );

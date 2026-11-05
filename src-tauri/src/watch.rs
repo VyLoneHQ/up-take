@@ -1,6 +1,7 @@
 //! The host half of watch areas (roadmap `1.58`, `ADR-0048`): reading each
-//! watching area's region on a timer and raising a Windows notification when
-//! what it shows changes, or stops changing.
+//! watching area's region on a timer and raising UP-TAKE's own notification
+//! card (`ADR-0054`, `crate::notice`) when what it shows changes, or stops
+//! changing.
 //!
 //! The rule for *what counts* as a change is `uptake_core::watch`, which needs
 //! no screen and is tested there. This module takes the readings and says so.
@@ -551,6 +552,28 @@ fn left_out(bounds: Rect, taken: Rect, overlay_in_captures: bool) -> Vec<Rect> {
     }
 }
 
+/// The parts of a reading that lie under UP-TAKE's own windows, in the
+/// reading's pixels: `windows` in desktop pixels, cut to `taken`, the
+/// rectangle the capture returned. With *Show UP-TAKE in screen recordings*
+/// on, a notification card over a watch area is in its reading (and the
+/// settings panel, once `1.60`'s pull request lists it); those parts are
+/// unknown to the comparison rather than a change, or a card could raise the
+/// next card (`I-480`, review of `#160`, round 1).
+fn unknown_under(windows: &[Rect], taken: Rect) -> Vec<Rect> {
+    windows
+        .iter()
+        .filter_map(|window| window.intersection(taken))
+        .map(|part| {
+            Rect::new(
+                part.origin.x - taken.origin.x,
+                part.origin.y - taken.origin.y,
+                part.size.width,
+                part.size.height,
+            )
+        })
+        .collect()
+}
+
 /// Where the *watching* mark can be, in desktop pixels: the area's top right
 /// corner, [`MARK`] in size or the area's own size when that is smaller.
 ///
@@ -604,10 +627,13 @@ trait Host {
     fn end_pass(&mut self);
     /// One reading of `bounds`.
     fn capture(&mut self, bounds: Rect) -> Result<uptake_capture::CapturedRegion, String>;
+    /// Where UP-TAKE's own windows outside the overlay are, or were a moment
+    /// ago (`crate::notice::own_windows`), desktop pixels.
+    fn own_windows(&mut self) -> Vec<Rect>;
     /// A reading failed; logged once until one succeeds.
     fn trouble(&mut self, error: &str);
-    /// Raises the notification for `event`.
-    fn notify(&mut self, event: Event);
+    /// Raises the notification for `event`, for the area `id` at `bounds`.
+    fn notify(&mut self, event: Event, id: AreaId, bounds: Rect);
 }
 
 /// The app itself, and the monitor frames read in this pass.
@@ -669,14 +695,17 @@ impl Host for AppHost<'_> {
         uptake_capture::warm::compose(bounds, &self.frames, &crate::overlay::monitor_rects())
             .map_or_else(|| crate::output::capture_for_watch(bounds), Ok)
     }
+    fn own_windows(&mut self) -> Vec<Rect> {
+        crate::notice::own_windows()
+    }
     fn trouble(&mut self, error: &str) {
         crate::diagnostics::trouble(
             "watch: a reading could not be taken (said once until one is)",
             &error,
         );
     }
-    fn notify(&mut self, event: Event) {
-        notify(self.app, event);
+    fn notify(&mut self, event: Event, id: AreaId, bounds: Rect) {
+        notify(self.app, event, id, bounds);
     }
 }
 
@@ -788,7 +817,19 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
                     &mut captured.bitmap,
                     &left_out(target.bounds, captured.rect, state.1),
                 );
-                Fingerprint::of(&captured.bitmap)
+                // Only while UP-TAKE is in captures: with the setting off a
+                // card is not in the picture and what is under it is read as
+                // it is, so a change there is reported at once (review of
+                // `#160`, round 3; round 2 hid it always, which kept such a
+                // change from ever showing). A card on screen when the setting
+                // is turned off is given the new policy at once
+                // (`notice::apply_capture_policy`).
+                let hidden = if state.1 {
+                    unknown_under(&host.own_windows(), captured.rect)
+                } else {
+                    Vec::new()
+                };
+                Fingerprint::of_hiding(&captured.bitmap, &hidden)
             }
             Err(error) => {
                 if !watcher.failing {
@@ -801,7 +842,7 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
         if let Some(event) = reading.and_then(|reading| watcher.detector.observe(reading))
             && target.watch.notifies(event)
         {
-            host.notify(event);
+            host.notify(event, target.id, target.bounds);
         }
     }
     host.end_pass();
@@ -840,23 +881,33 @@ fn gate<Id: PartialEq + Copy>(
     }
 }
 
-/// Raises the Windows notification for `event`. Says which moment it was and
-/// never what the area read.
-fn notify(app: &AppHandle, event: Event) {
-    use tauri_plugin_notification::NotificationExt;
-    let body = match event {
-        Event::Changed => text(Text::WatchChanged),
-        Event::Settled => text(Text::WatchSettled),
+/// Shows UP-TAKE's own card for `event` (`ADR-0054`), on the monitor the
+/// user's setting picks for the area at `bounds` (`notice::card_monitor`). Says which moment it was and never what the area read.
+///
+/// Not a Windows toast any more: at the first real-screen test Windows
+/// accepted every toast and showed none.
+fn notify(app: &AppHandle, event: Event, id: AreaId, bounds: Rect) {
+    let (moment, label) = match event {
+        Event::Changed => ("changed", text(Text::NoticeChanged)),
+        Event::Settled => ("settled", text(Text::NoticeSettled)),
     };
-    if let Err(error) = app
-        .notification()
-        .builder()
-        .title(text(Text::WatchTitle))
-        .body(body)
-        .show()
-    {
-        crate::diagnostics::trouble("watch: the notification could not be shown", &error);
-    }
+    let name = {
+        let store = app.state::<Mutex<AreaStore>>();
+        let store = store.lock().unwrap_or_else(PoisonError::into_inner);
+        store.name(id).map(str::to_string)
+    };
+    crate::notice::show(
+        app,
+        crate::notice::Raised {
+            area: id.get(),
+            bounds,
+            name,
+            area_type: text(Text::NoticeTypeWatch),
+            tone: "watch",
+            moment,
+            event: label,
+        },
+    );
 }
 
 #[cfg(test)]
@@ -898,6 +949,9 @@ mod tests {
             held: Vec<Rect>,
             /// How many times it let them go.
             released: usize,
+            /// One of UP-TAKE's own windows on screen, and the grey it shows,
+            /// desktop pixels; listed by `own_windows`.
+            card: Option<(Rect, u8)>,
         }
 
         impl Fake {
@@ -915,6 +969,7 @@ mod tests {
                     notified: Vec::new(),
                     held: Vec::new(),
                     released: 0,
+                    card: None,
                 }
             }
         }
@@ -954,15 +1009,42 @@ mod tests {
                 let rect = bounds
                     .intersection(self.monitor)
                     .ok_or_else(|| "off screen".to_owned())?;
-                let pixels = [self.level, self.level, self.level, 255]
+                let mut pixels = [self.level, self.level, self.level, 255]
                     .repeat(usize::try_from(rect.size.width * rect.size.height).unwrap_or(0));
+                // The card, drawn into the picture as a capture would show it:
+                // only while the setting puts UP-TAKE in captures.
+                if self.state.1
+                    && let Some((card, grey)) = self.card
+                    && let Some(part) = card.intersection(rect)
+                {
+                    for y in
+                        part.origin.y..part.origin.y + i32::try_from(part.size.height).unwrap_or(0)
+                    {
+                        for x in part.origin.x
+                            ..part.origin.x + i32::try_from(part.size.width).unwrap_or(0)
+                        {
+                            let at = usize::try_from(
+                                ((y - rect.origin.y) * i32::try_from(rect.size.width).unwrap_or(0)
+                                    + (x - rect.origin.x))
+                                    * 4,
+                            )
+                            .unwrap_or(0);
+                            if let Some(pixel) = pixels.get_mut(at..at + 3) {
+                                pixel.copy_from_slice(&[grey, grey, grey]);
+                            }
+                        }
+                    }
+                }
                 let bitmap =
                     RgbaBitmap::from_pixels(Size::new(rect.size.width, rect.size.height), pixels)
                         .ok_or_else(|| "bitmap".to_owned())?;
                 Ok(CapturedRegion { rect, bitmap })
             }
+            fn own_windows(&mut self) -> Vec<Rect> {
+                self.card.map(|(card, _)| card).into_iter().collect()
+            }
             fn trouble(&mut self, _error: &str) {}
-            fn notify(&mut self, event: Event) {
+            fn notify(&mut self, event: Event, _id: AreaId, _bounds: Rect) {
                 self.notified.push(event);
             }
         }
@@ -989,6 +1071,47 @@ mod tests {
             for _ in 0..passes {
                 let _ = pass(fake, memory);
             }
+        }
+
+        /// Review of `#160`, round 1 (`I-480`): with *Show UP-TAKE in screen
+        /// recordings* on, a card over a watch area is in its reading. Its
+        /// coming, changing and going is no change, so a card cannot raise the
+        /// next card. Round 2: the same with the setting off, since a card
+        /// placed before the setting was turned off can still be in the
+        /// picture.
+        #[test]
+        fn a_card_over_a_watch_area_is_no_change_of_its_screen() {
+            let card = Rect::new(300, 100, 200, 60);
+            for in_captures in [true, false] {
+                let mut fake = Fake::new(targets(&[Rect::new(100, 100, 600, 400)]));
+                fake.state = (OverlayState::Living, in_captures);
+                let mut memory = Memory::default();
+                run(&mut fake, &mut memory, 2);
+                for grey in [30, 120, 250] {
+                    fake.card = Some((card, grey));
+                    run(&mut fake, &mut memory, 2);
+                }
+                fake.card = None;
+                run(&mut fake, &mut memory, 4);
+                assert!(fake.notified.is_empty(), "{in_captures}: its own card");
+                fake.level = 20;
+                run(&mut fake, &mut memory, 1);
+                assert_eq!(fake.notified, vec![Event::Changed], "{in_captures}");
+            }
+        }
+
+        /// Review of `#160`, round 3: with the setting off (the default) the
+        /// card is not in the picture, so what is under it is still read, and
+        /// a change there is reported at once.
+        #[test]
+        fn with_up_take_out_of_captures_a_change_under_a_card_is_seen() {
+            let mut fake = Fake::new(targets(&[Rect::new(100, 100, 600, 400)]));
+            let mut memory = Memory::default();
+            run(&mut fake, &mut memory, 2);
+            fake.card = Some((Rect::new(100, 100, 600, 400), 250));
+            fake.level = 20;
+            run(&mut fake, &mut memory, 1);
+            assert_eq!(fake.notified, vec![Event::Changed]);
         }
 
         /// The working case: a baseline, then a change of the screen notifies.
@@ -1116,7 +1239,7 @@ mod tests {
         /// emitting, naming an event by its constant or by its text.
         #[test]
         fn every_message_that_redraws_the_page_moves_the_generation() {
-            const NOT_REDRAWING: [(&str, &str); 4] = [
+            const NOT_REDRAWING: [(&str, &str); 5] = [
                 (
                     "FREEZE_REVEAL_EVENT",
                     "only shows more; a mark it reveals is confirmed after",
@@ -1130,6 +1253,10 @@ mod tests {
                     "settings: area border and wash alpha, never the mark",
                 ),
                 ("DRAWN_EVENT", "the generation itself, sent by emit_redraw"),
+                (
+                    "NOTICE_EVENT",
+                    "the notice card's own window (ADR-0054), not the overlay page",
+                ),
             ];
             const SENDS: [&str; 4] = [".emit(", "emit_to(", "emit_filter(", "Emitter::emit("];
             let floor = |text: &str, mut at: usize| {

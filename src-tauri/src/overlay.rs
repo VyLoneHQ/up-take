@@ -565,7 +565,7 @@ fn write_affinity(window: &WebviewWindow, show_in_recordings: bool) -> Result<()
 /// The one call that changes a window's display affinity. Takes a bare handle
 /// so the tests can make the same call on a window of their own.
 #[cfg(windows)]
-fn write_affinity_to(
+pub(crate) fn write_affinity_to(
     hwnd: windows_sys::Win32::Foundation::HWND,
     show_in_recordings: bool,
 ) -> Result<(), String> {
@@ -1302,6 +1302,9 @@ struct AreaPayload {
     /// answer the watcher reads by. The page draws the *watching* mark from
     /// this and from nothing else (`ADR-0048`).
     watching: bool,
+    /// The name the user gave the area, or `null` (the founder, 2026-11-03).
+    /// The page shows it on the area; every card the area raises leads with it.
+    name: Option<String>,
     /// The area's magnification (§3.4), `1.0` at natural size.
     ///
     /// **The frontend does not scale anything with this.** The magnified
@@ -1367,7 +1370,7 @@ pub(crate) const fn as_tuple(rect: Rect) -> (i32, i32, u32, u32) {
 /// A function of its own so that a test can ask what an area is sent as. The
 /// first review of sticky areas (roadmap `1.47`) sent every area as `free`
 /// from inside [`emit_areas`] and no test noticed.
-fn payload_of(area: &Area, monitors: &[Rect]) -> AreaPayload {
+fn payload_of(area: &Area, monitors: &[Rect], name: Option<&str>) -> AreaPayload {
     AreaPayload {
         id: area.id.get(),
         rect: as_tuple(area.bounds),
@@ -1379,6 +1382,7 @@ fn payload_of(area: &Area, monitors: &[Rect]) -> AreaPayload {
         watch: area.watch,
         held: area.held,
         watching: area.is_watching(),
+        name: name.map(str::to_string),
         zoom: area.zoom.factor(),
         bar: interaction::grab_bar(area.bounds, monitors).map(as_tuple),
         handles: interaction::outside_resize_handles(area.bounds)
@@ -1405,9 +1409,10 @@ pub(crate) fn emit_areas(app: &AppHandle) -> Result<(), String> {
     let monitors = monitor_rects();
     let areas = {
         let store = app.state::<Mutex<AreaStore>>();
-        lock(&store)
+        let store = lock(&store);
+        store
             .iter()
-            .map(|area| payload_of(area, &monitors))
+            .map(|area| payload_of(area, &monitors, store.name(area.id)))
             .collect()
     };
     crate::watch::emit_redraw(app, AREAS_EVENT, AreasPayload { areas })
@@ -2072,6 +2077,66 @@ pub(crate) fn move_area(app: &AppHandle, id: AreaId, bounds: Rect) -> bool {
     guard.set_bounds(id, bounds) && guard.bring_to_front(id)
 }
 
+/// The event that asks the page to show the name field over an area.
+const RENAME_EVENT: &str = "overlay://rename";
+
+/// The payload of [`RENAME_EVENT`]: which area, and its name now.
+#[derive(Serialize, Clone)]
+pub struct RenamePayload {
+    /// The area's id, for the page to place the field over it.
+    pub id: u64,
+    /// Its name now, to edit, or empty.
+    pub name: String,
+}
+
+/// The area whose name the page is editing. Kept here so the page sends only
+/// the text: it cannot name an area the menu did not ask it to.
+static RENAMING: Mutex<Option<AreaId>> = Mutex::new(None);
+
+/// Starts naming area `id` from its menu (the founder, 2026-11-03): the page
+/// shows a field over it. Naming needs the keyboard, which the overlay has
+/// while the user places areas, so it enters placing first if it is not there.
+pub(crate) fn start_rename(app: &AppHandle, id: AreaId) {
+    let name = {
+        let store = app.state::<Mutex<AreaStore>>();
+        let store = lock(&store);
+        if store.get(id).is_none() {
+            return;
+        }
+        store.name(id).unwrap_or_default().to_string()
+    };
+    *lock(&RENAMING) = Some(id);
+    if !placement::is_placing() {
+        summon(app);
+    }
+    if let Err(error) =
+        crate::watch::emit_redraw(app, RENAME_EVENT, RenamePayload { id: id.get(), name })
+    {
+        crate::diagnostics::trouble("overlay: could not open the name field", &error);
+    }
+}
+
+/// IPC surface: the page's name field was confirmed. Names the area the menu
+/// asked about, or clears its name when `name` is blank; `cancel` closes the
+/// field and changes nothing. Either way the field is done.
+#[tauri::command]
+pub fn overlay_rename_area(app: AppHandle, name: String, cancel: bool) -> Result<(), String> {
+    let Some(id) = lock(&RENAMING).take() else {
+        return Ok(());
+    };
+    if cancel {
+        return Ok(());
+    }
+    let changed = {
+        let store = app.state::<Mutex<AreaStore>>();
+        lock(&store).set_name(id, &name)
+    };
+    if changed {
+        emit_areas(&app)?;
+    }
+    Ok(())
+}
+
 /// Removes an area. Returns whether one was removed.
 pub(crate) fn dismiss_area(app: &AppHandle, id: AreaId) -> bool {
     let removed = {
@@ -2295,6 +2360,12 @@ pub(crate) fn dev_perturb_cached_scale() -> Option<(Rect, f64, f64)> {
     let now = 3.5;
     monitor.scale_factor = now;
     Some((monitor.bounds, was, now))
+}
+
+/// The cached monitors with their scale factors, for a window that is sized
+/// per monitor (the notification card, `crate::notice`).
+pub(crate) fn monitors_cached() -> Vec<Monitor> {
+    lock(&MONITOR_CACHE).clone()
 }
 
 /// The cached monitor rectangles, for snapping and containment.
@@ -3293,7 +3364,7 @@ mod tests {
             let Some(area) = store.get(id) else {
                 panic!("the area")
             };
-            let payload = payload_of(area, &[Rect::new(0, 0, 1920, 1080)]);
+            let payload = payload_of(area, &[Rect::new(0, 0, 1920, 1080)], None);
             assert_eq!(payload.sticky, state);
             assert_eq!(payload.id, id.get());
             assert_eq!(payload.rect, (10, 20, 300, 200));
@@ -3325,6 +3396,7 @@ mod tests {
                 watch: Watch::Changes,
                 held: false,
                 watching: false,
+                name: None,
                 zoom: 1.0,
                 bar: None,
                 handles: Vec::new(),
@@ -3372,6 +3444,7 @@ mod tests {
             watch: Watch::Changes,
             held: false,
             watching: false,
+            name: None,
             zoom: 1.0,
             bar: Some((0, -18, 10, 18)),
             handles: vec![(0, 0, 18, 18)],
@@ -3390,10 +3463,19 @@ mod tests {
                 "watch",
                 "held",
                 "watching",
+                "name",
                 "zoom",
                 "bar",
                 "handles",
             ],
+        );
+        assert_keys(
+            "RenamePayload",
+            &RenamePayload {
+                id: 1,
+                name: "Download watcher".to_string(),
+            },
+            &["id", "name"],
         );
         assert_keys(
             "AreasPayload",
@@ -3508,6 +3590,7 @@ mod tests {
                 "OcrSelectionPayload",
                 "FreezeHidePayload",
                 "FreezeRevealPayload",
+                "RenamePayload",
             ],
             &[],
         );

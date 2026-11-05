@@ -309,11 +309,19 @@ pub fn settings_write(app: AppHandle, settings: Settings) -> Result<(), String> 
     }
 
     #[cfg(windows)]
-    if settings.show_in_screen_recordings != previous.show_in_screen_recordings
-        && let Err(error) =
+    if settings.show_in_screen_recordings != previous.show_in_screen_recordings {
+        if let Err(error) =
             crate::overlay::apply_capture_exclusion(&app, settings.show_in_screen_recordings)
-    {
-        fail(error);
+        {
+            fail(error);
+        }
+        // The cards on screen too, or one would keep the old policy until it
+        // next moves (review of `#160`, round 2).
+        if let Err(error) =
+            crate::notice::apply_capture_policy(&app, settings.show_in_screen_recordings)
+        {
+            fail(error);
+        }
     }
 
     // The overlay repaints on this: opacity and the Filter wash are CSS

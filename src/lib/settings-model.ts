@@ -61,6 +61,9 @@ export type PaneId = (typeof PANE_IDS)[number];
 /** Where a launch by hand lands. Rust's `HandLaunchState`, on the wire. */
 export type HandLaunchState = 'placing' | 'hidden';
 
+/** Which monitor the notification cards appear on. Rust's `NoticesOn`. */
+export type NoticesOn = 'main_monitor' | 'areas_monitor';
+
 /** Which monitors a freeze covers. Rust's `FreezeCovers`, on the wire. */
 export type FreezeCovers = 'this_monitor' | 'every_monitor';
 
@@ -83,6 +86,9 @@ export type OcrBehaviour = 'in_place' | 'rendered';
 export interface Settings {
   start_with_windows: boolean;
   hand_launch_state: HandLaunchState;
+  /** UP-TAKE's own notification cards (ADR-0054). */
+  notifications: boolean;
+  notices_on: NoticesOn;
   save_directory: string | null;
   leave_placing_after_screenshot: boolean;
   auto_save_screenshots: boolean;
@@ -262,6 +268,39 @@ export function panes(
               ],
               set: (value) =>
                 with_({ hand_launch_state: value as HandLaunchState }),
+            },
+          ],
+        },
+        {
+          // ADR-0054: UP-TAKE draws its own cards, so its own switch is the
+          // only one that turns them off.
+          label: say('settings.section.notifications'),
+          rows: [
+            {
+              shape: 'toggle',
+              id: 'notifications',
+              name: say('settings.notifications.name'),
+              about: say('settings.notifications.about'),
+              value: settings.notifications,
+              set: (value) => with_({ notifications: value }),
+            },
+            {
+              shape: 'segmented',
+              id: 'notices-on',
+              name: say('settings.notices_on.name'),
+              about: say('settings.notices_on.about'),
+              value: settings.notices_on,
+              segments: [
+                {
+                  value: 'main_monitor',
+                  label: say('settings.notices_on.main'),
+                },
+                {
+                  value: 'areas_monitor',
+                  label: say('settings.notices_on.area'),
+                },
+              ],
+              set: (value) => with_({ notices_on: value as NoticesOn }),
             },
           ],
         },

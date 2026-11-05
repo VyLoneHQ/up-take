@@ -32,6 +32,8 @@ export const COVERS: readonly string[] = [
   'sticky-badge',
   'held-badge',
   'zoom-badge',
+  'name-badge',
+  'rename',
   'flash',
   'ocr',
   'ocr-status',
