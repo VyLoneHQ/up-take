@@ -1292,9 +1292,12 @@ struct AreaPayload {
     /// (roadmap `1.47`): `free`, `following` or `paused`. The page marks a
     /// sticky area and says so when it is paused.
     sticky: Sticky,
-    /// What a watch area tells the user about (roadmap `1.58`): `off`,
-    /// `changes` or `settles`.
+    /// What a watch area tells the user about (roadmap `1.58`): `changes`
+    /// or `settles`.
     watch: Watch,
+    /// Whether the user paused the area's ongoing work (`ADR-0053`). The page
+    /// says *paused* on a paused area of a type that keeps working.
+    held: bool,
     /// Whether the area reads its region now: [`Area::is_watching`], the
     /// answer the watcher reads by. The page draws the *watching* mark from
     /// this and from nothing else (`ADR-0048`).
@@ -1377,6 +1380,7 @@ fn payload_of(area: &Area, monitors: &[Rect], name: Option<&str>) -> AreaPayload
         ocr_behaviour: area.ocr_behaviour,
         sticky: area.sticky,
         watch: area.watch,
+        held: area.held,
         watching: area.is_watching(),
         name: name.map(str::to_string),
         zoom: area.zoom.factor(),
@@ -1433,6 +1437,8 @@ pub(crate) struct AreaSummary {
     pub sticky: Sticky,
     /// What a watch area watches for (roadmap `1.58`), for its Watch rows.
     pub watch: Watch,
+    /// Whether the user paused it (`ADR-0053`), for the Pause/Resume row.
+    pub held: bool,
 }
 
 impl AreaSummary {
@@ -1445,6 +1451,7 @@ impl AreaSummary {
             ocr_behaviour: area.ocr_behaviour,
             sticky: area.sticky,
             watch: area.watch,
+            held: area.held,
         }
     }
 }
@@ -1674,6 +1681,20 @@ pub(crate) fn set_area_watch(app: &AppHandle, id: AreaId, watch: Watch) -> bool 
     changed
 }
 
+/// Pauses (`true`) or resumes (`false`) an area's ongoing work (`ADR-0053`)
+/// and wakes the watcher, which sleeps while every watch area is paused.
+/// Returns whether it changed; `false` for a type with nothing to pause.
+pub(crate) fn set_area_held(app: &AppHandle, id: AreaId, held: bool) -> bool {
+    let changed = {
+        let store = app.state::<Mutex<AreaStore>>();
+        lock(&store).set_held(id, held)
+    };
+    if changed {
+        crate::watch::wake(app);
+    }
+    changed
+}
+
 /// Whether `id` is an OCR area whose text can be selected, copied or read
 /// again (`Area::text_is_live`): it reads in place and it is in sight. `false`
 /// for an area that is gone.
@@ -1739,6 +1760,12 @@ pub(crate) fn convert_area(app: &AppHandle, id: AreaId, kind: AreaType) -> bool 
     let Some((conversion, bounds)) = outcome else {
         return false;
     };
+    // Becoming a watch area starts it watching, the same as making one
+    // (`ADR-0053` decision 1), so the watcher is woken for the same reason
+    // `create_area` wakes it.
+    if conversion.changed && kind.keeps_working() {
+        crate::watch::wake(app);
+    }
     if conversion.discard_capture {
         crate::output::clear_magnification(app, id);
     }
@@ -2425,6 +2452,14 @@ pub(crate) fn create_area(
         guard.set_ocr_behaviour(id, default_behaviour);
         id
     };
+    // A type that keeps working starts working the moment it is made
+    // (`ADR-0053` decision 1), and the watcher sleeps, or has not started at
+    // all, while nothing asks to be read: without this a new watch area would
+    // say *watching* and never be read. After the store lock, like
+    // `set_area_watch`.
+    if kind.keeps_working() {
+        crate::watch::wake(app);
+    }
     // The bounds travel back with the id because the capture that follows a
     // Screenshot create needs the *stored* rectangle, not the one the caller
     // asked for. They are equal today; returning the store's answer means a
@@ -3045,6 +3080,24 @@ pub fn overlay_dismiss_focused(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// IPC surface and hook route: `P` while placing pauses the area under the
+/// cursor, or resumes it if it is paused (`ADR-0053` decision 2).
+///
+/// The same "the area under the cursor" as [`overlay_dismiss_focused`], for
+/// the same reason: the user sees which area the key acts on. Over empty
+/// overlay, or over an area whose type has nothing to pause, it does nothing.
+#[tauri::command]
+pub fn overlay_toggle_held_focused(app: AppHandle) -> Result<(), String> {
+    let Some(area) = area_under_cursor(&app)? else {
+        return Ok(());
+    };
+    if set_area_held(&app, area.id, !area.held) {
+        placement::close_menu(&app);
+        emit_areas(&app)?;
+    }
+    Ok(())
+}
+
 /// The area under the cursor, the one a key like `Delete` acts on.
 ///
 /// While the user places areas that is any area, a paused one too: placing
@@ -3340,7 +3393,8 @@ mod tests {
                 kind: "default",
                 ocr_behaviour: OcrBehaviour::InPlace,
                 sticky: state,
-                watch: Watch::Off,
+                watch: Watch::Changes,
+                held: false,
                 watching: false,
                 name: None,
                 zoom: 1.0,
@@ -3387,7 +3441,8 @@ mod tests {
             kind: "default",
             ocr_behaviour: OcrBehaviour::InPlace,
             sticky: Sticky::Paused,
-            watch: Watch::Off,
+            watch: Watch::Changes,
+            held: false,
             watching: false,
             name: None,
             zoom: 1.0,
@@ -3406,6 +3461,7 @@ mod tests {
                 "ocr_behaviour",
                 "sticky",
                 "watch",
+                "held",
                 "watching",
                 "name",
                 "zoom",
@@ -3482,6 +3538,33 @@ mod tests {
             &FreezeRevealPayload { token: 1 },
             &["token"],
         );
+    }
+
+    /// `ADR-0053` decision 1: an area that keeps working starts working when
+    /// it is made or converted, and the watcher only reads after a wake (it
+    /// is started lazily and sleeps while nothing asks to be read). So each
+    /// route that can bring such an area into being must wake it. Read from
+    /// the source because the wake starts a real thread no unit test can
+    /// watch; removing either call turns this red.
+    #[test]
+    fn every_route_that_makes_a_working_area_wakes_the_watcher() {
+        let source = include_str!("overlay.rs");
+        for name in [
+            "fn create_area(",
+            "fn convert_area(",
+            "fn set_area_held(",
+            "fn set_area_watch(",
+        ] {
+            let start = source
+                .find(name)
+                .unwrap_or_else(|| panic!("{name} is in overlay.rs"));
+            let body = &source[start..];
+            let end = body.find("\n}\n").unwrap_or(body.len());
+            assert!(
+                body[..end].contains("crate::watch::wake(app)"),
+                "{name} must wake the watcher"
+            );
+        }
     }
 
     #[test]

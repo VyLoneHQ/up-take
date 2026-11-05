@@ -391,7 +391,8 @@ describe('an area renders the badges its state earns and no others', () => {
       layer: 'auto',
       kind,
       sticky: 'free',
-      watch: 'off',
+      watch: 'changes',
+      held: false,
       watching: false,
       name: null,
       // 2 rather than some larger number because the badge turns on `> 1`; the
@@ -640,10 +641,16 @@ describe('an area renders the badges its state earns and no others', () => {
     await emit('overlay://state', state());
 
     await emit('overlay://areas', {
-      areas: [area({ kind: 'watch', watch: 'off', watching: false })],
+      areas: [
+        area({ kind: 'watch', watch: 'changes', held: true, watching: false }),
+      ],
     });
     expect(container.querySelector('.area')?.classList).toContain('watch');
     expect(container.querySelectorAll('.watch-badge')).toHaveLength(0);
+    // ADR-0053: a paused area says so where its watching mark was.
+    expect(container.querySelector('.held-badge')?.textContent?.trim()).toBe(
+      '❚❚ paused',
+    );
 
     await emit('overlay://areas', {
       areas: [area({ kind: 'watch', watch: 'changes', watching: true })],
@@ -651,6 +658,7 @@ describe('an area renders the badges its state earns and no others', () => {
     expect(container.querySelector('.watch-badge')?.textContent?.trim()).toBe(
       '● watching',
     );
+    expect(container.querySelectorAll('.held-badge')).toHaveLength(0);
 
     await emit('overlay://areas', {
       areas: [

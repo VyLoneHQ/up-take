@@ -85,10 +85,15 @@
       "de": "Beobachten",
       "de_from": "ec266ec8"
     },
-    "menu.watch.off": {
-      "en": "Off",
-      "de": "Aus",
-      "de_from": "0dc6b4aa"
+    "menu.pause": {
+      "en": "Pause",
+      "de": "Anhalten",
+      "de_from": "44f9bf2d"
+    },
+    "menu.resume": {
+      "en": "Resume",
+      "de": "Fortsetzen",
+      "de_from": "454d1d8a"
     },
     "menu.watch.changes": {
       "en": "Notify when it changes",
@@ -134,6 +139,11 @@
       "en": "watching",
       "de": "Beobachtung läuft",
       "de_from": "75a4b320"
+    },
+    "area.held": {
+      "en": "paused",
+      "de": "angehalten",
+      "de_from": "0a1997cb"
     },
     "menu.click_through": {
       "en": "Click-through",
@@ -474,6 +484,11 @@
       "en": "Throw an area away",
       "de": "Einen Bereich entfernen",
       "de_from": "b706ce83"
+    },
+    "coach.reference.pause": {
+      "en": "Pause or resume the area under the pointer",
+      "de": "Den Bereich unter dem Zeiger anhalten oder fortsetzen",
+      "de_from": "3af3d453"
     },
     "coach.reference.leave": {
       "en": "Leave placing",

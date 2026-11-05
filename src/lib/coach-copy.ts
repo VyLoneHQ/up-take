@@ -161,6 +161,7 @@ export function coachCopy(language: Language) {
         { keys: 'S F U O W', does: say('coach.reference.type') },
         { keys: 'Ctrl+Space', does: say('coach.reference.freeze') },
         { keys: 'Delete', does: say('coach.reference.remove') },
+        { keys: 'P', does: say('coach.reference.pause') },
         { keys: 'Esc', does: say('coach.reference.leave') },
       ] satisfies KeyRow[],
     },

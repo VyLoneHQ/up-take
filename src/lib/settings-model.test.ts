@@ -162,6 +162,7 @@ describe('the inventory', () => {
       'Draw an area',
       'Freeze the screen',
       'Throw an area away',
+      'Pause or resume the area under the pointer',
       'Leave placing',
     ]);
   });
