@@ -555,6 +555,26 @@
       "de": "Benachrichtigungen anzeigen",
       "de_from": "fae48728"
     },
+    "settings.notices_on.name": {
+      "en": "Show cards on",
+      "de": "Karten anzeigen auf",
+      "de_from": "438d3c6c"
+    },
+    "settings.notices_on.about": {
+      "en": "The main monitor always, or the monitor of the area that raised the card.",
+      "de": "Immer auf dem Hauptbildschirm, oder auf dem Bildschirm des Bereichs, der die Karte ausgelöst hat.",
+      "de_from": "c318677b"
+    },
+    "settings.notices_on.main": {
+      "en": "Main monitor",
+      "de": "Hauptbildschirm",
+      "de_from": "cdf1e20e"
+    },
+    "settings.notices_on.area": {
+      "en": "The area's monitor",
+      "de": "Bildschirm des Bereichs",
+      "de_from": "881a5271"
+    },
     "settings.notifications.about": {
       "en": "UP-TAKE's own card at the top of the screen, for example when a watch area changes. Windows' notification settings do not affect it.",
       "de": "Die eigene Karte von UP-TAKE oben am Bildschirm, zum Beispiel wenn sich ein Beobachtungsbereich ändert. Die Benachrichtigungseinstellungen von Windows wirken sich nicht darauf aus.",
