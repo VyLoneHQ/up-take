@@ -129,7 +129,11 @@
 //!   its dirty regions, about 2 to 3 % of the screen each. This route,
 //!   measured the same day (workspace `evidence/1.58-watch-events/`): 0.34 %
 //!   of a core for one area and 0.43 % for five on the small read, 1.69 % for
-//!   an area as large as a monitor. A busy screen held at 30 frames a second
+//!   an area as large as a monitor. **The full-size read, used while
+//!   UP-TAKE is shown in screen recordings, measured 2.49 % and 2.59 % for an
+//!   area as large as a monitor: over `quality-bars.md` §1's 2 % target per
+//!   live area, under its 5 % hard fail**, part of it the sessions'
+//!   frames, which `BUDGET` does not cover. A busy screen held at 30 frames a second
 //!   for a long time is not measured yet (`I-474`).
 //! - Earlier routes, measured in workspace `evidence/1.58-watch-cost/`: held
 //!   sessions read whole every two seconds, 0.13 % of a core for one area
@@ -174,13 +178,15 @@ use crate::strings::{Text, text};
 /// second, and before 2026-11-03 every two seconds.
 ///
 /// With nothing to wake it, it still looks again after this long: a frame the
-/// capture lost, or a change its dirty regions missed, is read at the latest
-/// then.
+/// capture lost, or a change its dirty regions missed, is read then, or after
+/// the governor's rest when a pass costs more ([`rest_after`]).
 pub const IDLE: Duration = Duration::from_secs(2);
 
 /// While a change is settling, how often it reads with no frame arriving: the
 /// calm that ends a change is only seen by reading through it, so a *stopped
-/// changing* comes at most this long after the calm it waits for.
+/// changing* comes this long after the calm it waits for, or after the
+/// governor's rest when a pass costs more than about a millisecond
+/// ([`rest_after`]).
 pub const SETTLE_POLL: Duration = Duration::from_millis(50);
 
 /// One is switched on and none can be read now (paused, the overlay hidden):
@@ -529,15 +535,23 @@ struct Watcher {
     /// that as a change (review of `#154`, round 12). Its next pass comes
     /// at least one frame interval later, since the governor always rests
     /// that long ([`rest_after`]'s floor, which its test holds), so the frame
-    /// read is newer than the reason it started again; and at most
-    /// [`FRESH_WAIT`] later when nothing rings sooner (review of `#159`,
-    /// round 1; the bound restated on the review of `#162`, round 1).
+    /// read is newer than the reason it started again; and [`FRESH_WAIT`]
+    /// later when nothing rings sooner and the governor's rest is shorter
+    /// (review of `#159`, round 1; restated on the review of `#162`, rounds 1
+    /// and 5).
     ///
     /// ⚠️ **Assumed, not measured:** that WGC, held at
     /// `WATCH_FRAME_INTERVAL`, delivers a frame within that interval of a
     /// change on screen. Nothing here probes frame age under the throttle
     /// (round 13); UP-TAKE backlog `I-474` carries it.
     fresh: bool,
+    /// The size of the picture its baseline came from. A reading can come by
+    /// another route (the small picture averaged on the GPU, the area's own
+    /// rectangle, a capture of its own), and the routes' pictures differ in
+    /// size and so in every cell; a reading of another size starts the
+    /// detector again rather than reporting the route as a change (review of
+    /// `#162`, round 5).
+    picture: Option<uptake_core::geometry::Size>,
 }
 
 /// The parts of a reading that are UP-TAKE's own drawing, in the reading's
@@ -952,6 +966,7 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
             detector: Detector::with_settle_time(target.watch.settle_time()),
             failing: false,
             fresh: true,
+            picture: None,
         });
         if watcher.target != target {
             watcher.target = target;
@@ -987,6 +1002,16 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
                 } else {
                     Vec::new()
                 };
+                let size = uptake_core::geometry::Size::new(
+                    captured.bitmap.width(),
+                    captured.bitmap.height(),
+                );
+                if watcher.picture != Some(size) {
+                    if watcher.picture.is_some() {
+                        watcher.detector = Detector::with_settle_time(target.watch.settle_time());
+                    }
+                    watcher.picture = Some(size);
+                }
                 Fingerprint::of_hiding(&captured.bitmap, &hidden)
             }
             Err(error) => {
@@ -1119,6 +1144,8 @@ mod tests {
             unready: usize,
             /// Whether each capture asked for the full picture.
             whole: Vec<bool>,
+            /// The size of the picture captures return, when not the area's.
+            picture: Option<Size>,
         }
 
         impl Fake {
@@ -1140,6 +1167,7 @@ mod tests {
                     clock: Duration::ZERO,
                     unready: 0,
                     whole: Vec::new(),
+                    picture: None,
                 }
             }
         }
@@ -1217,6 +1245,14 @@ mod tests {
                             }
                         }
                     }
+                }
+                // Another route's picture: another size, the same grey.
+                if let Some(size) = self.picture {
+                    let pixels = [self.level, self.level, self.level, 255]
+                        .repeat(usize::try_from(size.width * size.height).unwrap_or(0));
+                    let bitmap =
+                        RgbaBitmap::from_pixels(size, pixels).ok_or_else(|| "bitmap".to_owned())?;
+                    return Ok(Some(CapturedRegion { rect, bitmap }));
                 }
                 let bitmap =
                     RgbaBitmap::from_pixels(Size::new(rect.size.width, rect.size.height), pixels)
@@ -1383,6 +1419,26 @@ mod tests {
             );
             assert!(troubles.failed(b, Route::Unheld));
             assert!(!troubles.failed(b, Route::Unheld));
+        }
+
+        /// Review of `#162`, round 5: a reading by another route gives a
+        /// picture of another size, every cell different on a still screen;
+        /// the watcher starts again from it instead of reporting a change.
+        #[test]
+        fn a_reading_by_another_route_is_no_change() {
+            let mut fake = Fake::new(targets(&[Rect::new(100, 100, 600, 400)]));
+            let mut memory = Memory::default();
+            run(&mut fake, &mut memory, 3);
+            fake.picture = Some(Size::new(38, 25));
+            fake.level = 120;
+            run(&mut fake, &mut memory, 3);
+            fake.picture = None;
+            fake.level = 200;
+            run(&mut fake, &mut memory, 3);
+            assert!(fake.notified.is_empty(), "{:?}", fake.notified);
+            fake.level = 20;
+            run(&mut fake, &mut memory, 1);
+            assert_eq!(fake.notified, vec![Event::Changed], "still watching");
         }
 
         /// The governor: a pass that took `t` is followed by a rest of 49 `t`,
