@@ -1,5 +1,5 @@
 //! The host half of watch areas (roadmap `1.58`, `ADR-0048`): reading each
-//! watching area's region on a timer and raising UP-TAKE's own notification
+//! watching area's region when its screen changes and raising UP-TAKE's own notification
 //! card (`ADR-0054`, `crate::notice`) when what it shows changes, or stops
 //! changing.
 //!
@@ -25,10 +25,11 @@
 //!   logged or sent; the notification says which moment it was, never what
 //!   was read. ⚠️ **What is held in between is larger than a reading:** while
 //!   any area reads, a capture session on each monitor under one keeps that
-//!   monitor's newest frame as a GPU texture (`uptake_capture::warm`), and
-//!   each pass copies it to memory, cuts the areas out and drops the copy at
-//!   the end of the pass. Only the areas' parts are read; the whole frame is
-//!   what the session holds. `ADR-0048` forecloses a whole-screen *watcher*,
+//!   monitor's newest frame as a GPU texture (`uptake_capture::warm`). A
+//!   reading copies only its area's part on the GPU, averaged down to a
+//!   small picture or, where UP-TAKE's own drawing is left out of it, whole,
+//!   and reads back just that; the copy is dropped with the reading. Only
+//!   the areas' parts are read; the whole frame is what the session holds. `ADR-0048` forecloses a whole-screen *watcher*,
 //!   which this is not, but it is the reason a held frame stays in memory and
 //!   is never written anywhere.
 //!
@@ -121,8 +122,11 @@
 //! second (`warm::WATCH_FRAME_INTERVAL`), each reporting where it changed. A
 //! frame whose dirty regions touch a watch area wakes the thread
 //! (`warm::on_watch_frame`); any other frame wakes nobody. A reading copies
-//! only the area's own rectangle on the GPU and reads that back
-//! (`warm::watch_capture_region`), never the whole monitor. After each pass
+//! only the area's own part on the GPU, never the whole monitor: usually
+//! averaged down there to a small picture (`warm::watch_capture_small`), and
+//! read whole (`warm::watch_capture_region`) when UP-TAKE's own drawing is
+//! painted out of it, when the area spans monitors, or when the small read
+//! fails. After each pass
 //! the thread rests in proportion to what the pass cost, so it spends at most
 //! [`BUDGET`] of one core however busy the screen ([`rest_after`]).
 //!
@@ -572,9 +576,12 @@ struct Watcher {
     /// The size of the picture its baseline came from. A reading can come by
     /// another route (the small picture averaged on the GPU, the area's own
     /// rectangle, a capture of its own), and the routes' pictures differ in
-    /// size and so in every cell; a reading of another size starts the
-    /// detector again rather than reporting the route as a change (review of
-    /// `#162`, round 5).
+    /// size and so in every cell; a reading of another size re-anchors the
+    /// detector ([`Detector::rebase_at`]) rather than reporting the route as a
+    /// change, and a change under way still ends with *stopped changing*
+    /// (review of `#162`, rounds 5 and 6). A change made in the very reading
+    /// that switched route cannot be told from the switch and is not
+    /// reported.
     picture: Option<uptake_core::geometry::Size>,
 }
 
@@ -1030,13 +1037,18 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
                     captured.bitmap.width(),
                     captured.bitmap.height(),
                 );
-                if watcher.picture != Some(size) {
-                    if watcher.picture.is_some() {
-                        watcher.detector = Detector::with_settle_time(target.watch.settle_time());
+                let switched = watcher.picture.is_some_and(|was| was != size);
+                watcher.picture = Some(size);
+                let fingerprint = Fingerprint::of_hiding(&captured.bitmap, &hidden);
+                if switched {
+                    // Another route: re-anchored, not compared (round 6).
+                    if let Some(fingerprint) = fingerprint {
+                        watcher.detector.rebase_at(fingerprint, at);
                     }
-                    watcher.picture = Some(size);
+                    None
+                } else {
+                    fingerprint
                 }
-                Fingerprint::of_hiding(&captured.bitmap, &hidden)
             }
             Err(error) => {
                 if !watcher.failing {
@@ -1482,6 +1494,24 @@ mod tests {
             );
             assert!(troubles.failed(b, Route::Unheld));
             assert!(!troubles.failed(b, Route::Unheld));
+        }
+
+        /// Review of `#162`, round 6: a route switch while a change settles
+        /// still ends with *stopped changing*.
+        #[test]
+        fn a_route_switch_keeps_a_settling_change() {
+            let mut fake = Fake::new(targets_for(
+                &[Rect::new(100, 100, 600, 400)],
+                Watch::Settles,
+            ));
+            let mut memory = Memory::default();
+            run(&mut fake, &mut memory, 2);
+            fake.level = 20;
+            run(&mut fake, &mut memory, 1);
+            fake.picture = Some(Size::new(38, 25));
+            let passes = 4 * usize::try_from(Watch::Settles.settle_readings()).unwrap_or(0);
+            run(&mut fake, &mut memory, passes);
+            assert_eq!(fake.notified, vec![Event::Settled]);
         }
 
         /// Review of `#162`, round 5: a reading by another route gives a

@@ -431,6 +431,21 @@ impl Detector {
         self.changing
     }
 
+    /// The host now reads this region by another route, whose pictures cannot
+    /// be compared with the last ones (another size, so every cell differs):
+    /// `reading`, made at `at`, becomes both the baseline and the start of the
+    /// calm, and nothing is reported. A change under way stays under way, so
+    /// it still ends with [`Event::Settled`] once the region holds still
+    /// (review of `up-take` #162, rounds 5 and 6). A change made in the very
+    /// reading that switched cannot be told from the switch, and is not
+    /// reported.
+    pub fn rebase_at(&mut self, reading: Fingerprint, at: Duration) {
+        self.clock = at;
+        self.baseline = Some(reading.clone());
+        self.still_from = Some(reading);
+        self.still_since = at;
+    }
+
     /// Takes one reading [`READING_STEP`] after the last one and says whether
     /// it is a moment worth reporting.
     pub fn observe(&mut self, reading: Fingerprint) -> Option<Event> {
@@ -924,6 +939,43 @@ mod tests {
         use std::time::Duration;
         assert_eq!(Watch::Changes.settle_time(), Duration::from_millis(150));
         assert_eq!(Watch::Settles.settle_time(), Duration::from_secs(6));
+    }
+
+    /// A rebase keeps a change under way: it still ends with `Settled` after
+    /// the calm, measured from the rebase; with nothing under way it reports
+    /// nothing, and a later change is a change.
+    #[test]
+    fn a_rebase_keeps_a_change_under_way() {
+        use std::time::Duration;
+        let ms = Duration::from_millis;
+        let mut detector = Detector::with_settle_time(Watch::Settles.settle_time());
+        detector.observe_at(print(&grey(64, 64, 40)), ms(0));
+        assert_eq!(
+            detector.observe_at(print(&grey(64, 64, 200)), ms(500)),
+            Some(Event::Changed)
+        );
+        let other = print(&grey(32, 20, 90));
+        detector.rebase_at(other.clone(), ms(1_000));
+        assert!(detector.is_settling(), "still under way");
+        assert_eq!(
+            detector.observe_at(other.clone(), ms(6_500)),
+            None,
+            "5.5 s calm"
+        );
+        assert_eq!(
+            detector.observe_at(other.clone(), ms(7_000)),
+            Some(Event::Settled),
+            "6 s after the rebase"
+        );
+        let mut calm = Detector::with_settle_time(Watch::Changes.settle_time());
+        calm.observe_at(print(&grey(64, 64, 40)), ms(0));
+        calm.rebase_at(other.clone(), ms(100));
+        assert!(!calm.is_settling());
+        assert_eq!(calm.observe_at(other, ms(200)), None);
+        assert_eq!(
+            calm.observe_at(print(&grey(32, 20, 220)), ms(300)),
+            Some(Event::Changed)
+        );
     }
 
     /// Hiding marks every cell the rectangle touches and no other.
