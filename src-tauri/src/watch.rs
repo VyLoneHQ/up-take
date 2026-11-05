@@ -103,10 +103,14 @@
 //! is in every reading, and only the border and the mark are left out.**
 //! The largest other part, Placement's darkened edges, comes and goes with
 //! the overlay state, so every watcher starts again from a fresh baseline
-//! when the state changes (review of `#154`, round 2). What is left: a
-//! menu, a selection box or another area's flash drawn over a watched
-//! region while the user works there can count as a change. The setting
-//! is off by default.
+//! when the state changes (review of `#154`, round 2). The area's name label
+//! comes and goes with its name, so a rename starts its watcher again too
+//! ([`Target::label`], `I-480`). What is left: a menu, a selection box or
+//! another area's flash drawn over a watched region while the user works
+//! there can count as a change. A notification card or the settings panel
+//! over one does not: UP-TAKE lists where its own windows are and a reading
+//! leaves their cells out of the comparison ([`unknown_under`], `I-480`).
+//! The setting is off by default.
 //!
 //! # Cost
 //!
@@ -149,7 +153,7 @@ use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter, Manager};
-use uptake_core::area::{AreaId, AreaStore, AreaType};
+use uptake_core::area::{Area, AreaId, AreaStore, AreaType};
 use uptake_core::geometry::Rect;
 use uptake_core::watch::{Detector, Event, Fingerprint, Watch, leave_out};
 
@@ -249,11 +253,35 @@ fn wait(timeout: Option<Duration>) {
 }
 
 /// One area to read: where, and what for.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Target {
     id: AreaId,
     bounds: Rect,
     watch: Watch,
+    /// The name UP-TAKE draws inside the area, as [`label_of`] keeps it. With
+    /// *Show UP-TAKE in screen recordings* on, that label is in the reading,
+    /// so a new name is new pixels: the watcher starts again from a fresh
+    /// baseline rather than reporting its own label as a change (`I-480`).
+    label: u64,
+}
+
+/// What [`Target::label`] keeps of an area's name: enough to tell a new name
+/// from the old one.
+fn label_of(name: Option<&str>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    name.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// The target an area is read as.
+fn target_of(store: &AreaStore, area: &Area) -> Target {
+    Target {
+        id: area.id,
+        bounds: area.bounds,
+        watch: area.watch,
+        label: label_of(store.name(area.id)),
+    }
 }
 
 /// What the store says now: the areas to read, and whether any watch area is
@@ -268,23 +296,19 @@ fn look(app: &AppHandle) -> (Vec<Target>, bool) {
     let targets = store
         .iter()
         .filter(|area| area.is_watching())
-        .map(|area| Target {
-            id: area.id,
-            bounds: area.bounds,
-            watch: area.watch,
-        })
+        .map(|area| target_of(&store, area))
         .collect();
     (targets, switched_on)
 }
 
 /// Whether `target` is still what the store holds and still reads: switched
-/// on, unmoved, not paused. Checked right before its capture.
+/// on, unmoved, not renamed, not paused. Checked right before its capture.
 fn still_watching(app: &AppHandle, target: Target) -> bool {
     let store = app.state::<Mutex<AreaStore>>();
     let store = store.lock().unwrap_or_else(PoisonError::into_inner);
-    store.get(target.id).is_some_and(|area| {
-        area.is_watching() && area.bounds == target.bounds && area.watch == target.watch
-    })
+    store
+        .get(target.id)
+        .is_some_and(|area| area.is_watching() && target_of(&store, area) == target)
 }
 
 fn overlay_state(app: &AppHandle) -> OverlayState {
@@ -555,8 +579,8 @@ fn left_out(bounds: Rect, taken: Rect, overlay_in_captures: bool) -> Vec<Rect> {
 /// The parts of a reading that lie under UP-TAKE's own windows, in the
 /// reading's pixels: `windows` in desktop pixels, cut to `taken`, the
 /// rectangle the capture returned. With *Show UP-TAKE in screen recordings*
-/// on, a notification card over a watch area is in its reading (and the
-/// settings panel, once `1.60`'s pull request lists it); those parts are
+/// on, a notification card or the settings panel over a watch area is in its
+/// reading; those parts are
 /// unknown to the comparison rather than a change, or a card could raise the
 /// next card (`I-480`, review of `#160`, round 1).
 fn unknown_under(windows: &[Rect], taken: Rect) -> Vec<Rect> {
@@ -1062,9 +1086,48 @@ mod tests {
                         id,
                         bounds: *bounds,
                         watch,
+                        label: crate::watch::label_of(None),
                     })
                 })
                 .collect()
+        }
+
+        /// The founder's rig, 2026-11-03 (`I-480`): with *Show UP-TAKE in
+        /// screen recordings* on, renaming a watch area told him it changed,
+        /// because its new label is new pixels in the reading. A renamed area
+        /// is a new target, read from a fresh baseline: the label is not a
+        /// change, and a real change after it still is.
+        #[test]
+        fn renaming_a_watch_area_is_not_a_change_of_its_screen() {
+            let mut store = AreaStore::new();
+            let bounds = Rect::new(100, 100, 600, 400);
+            let Some(id) = store.create(AreaType::Watch, bounds) else {
+                panic!("an area");
+            };
+            let target = |store: &AreaStore| {
+                store
+                    .get(id)
+                    .map(|area| crate::watch::target_of(store, area))
+                    .unwrap_or_else(|| panic!("the area"))
+            };
+            let before = target(&store);
+            assert!(store.set_name(id, "Download"));
+            let renamed = target(&store);
+            assert_ne!(before, renamed, "a new name is a new target");
+            assert!(!store.set_name(id, "Download"), "unchanged");
+            assert_eq!(renamed, target(&store), "the same name is not");
+
+            let mut fake = Fake::new(vec![before]);
+            let mut memory = Memory::default();
+            run(&mut fake, &mut memory, 2);
+            // The rename: the label's pixels arrive with the new target.
+            fake.targets = vec![renamed];
+            fake.level = 20;
+            run(&mut fake, &mut memory, 4);
+            assert!(fake.notified.is_empty(), "its own label is no change");
+            fake.level = 200;
+            run(&mut fake, &mut memory, 1);
+            assert_eq!(fake.notified, vec![Event::Changed], "still watching");
         }
 
         fn run(fake: &mut Fake, memory: &mut Memory, passes: usize) {
@@ -1239,7 +1302,7 @@ mod tests {
         /// emitting, naming an event by its constant or by its text.
         #[test]
         fn every_message_that_redraws_the_page_moves_the_generation() {
-            const NOT_REDRAWING: [(&str, &str); 5] = [
+            const NOT_REDRAWING: [(&str, &str); 6] = [
                 (
                     "FREEZE_REVEAL_EVENT",
                     "only shows more; a mark it reveals is confirmed after",
@@ -1256,6 +1319,10 @@ mod tests {
                 (
                     "NOTICE_EVENT",
                     "the notice card's own window (ADR-0054), not the overlay page",
+                ),
+                (
+                    "PANEL_EVENT",
+                    "the settings panel's own window (1.60), not the overlay page",
                 ),
             ];
             const SENDS: [&str; 4] = [".emit(", "emit_to(", "emit_filter(", "Emitter::emit("];

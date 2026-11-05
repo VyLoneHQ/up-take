@@ -530,6 +530,8 @@ enum MenuAction {
     /// Name the area (the founder, 2026-11-03): the page shows a name field
     /// over it. On every type, since every area-raised card leads with it.
     Rename,
+    /// Open the area's settings panel (roadmap `1.60`).
+    Settings,
     /// Pause (`true`) or resume (`false`) the area's ongoing work
     /// (`ADR-0053`). One row whose label says what it does, so the action
     /// carries the value the row switches *to*, like [`MenuAction::SetSticky`].
@@ -2153,6 +2155,10 @@ enum PlacementKey {
     /// area read when nothing is selected, and in Living the key is only ours
     /// because something is.
     CopySelection,
+    /// `Esc` in Living while a settings panel is open: closes it, as `Esc`
+    /// closes it while placing (review of `#161`, round 2). Taken from the
+    /// program under the pointer only while the panel is open.
+    ClosePanel,
 }
 
 /// The virtual key of `C`, which copy is matched on in either mode.
@@ -2165,6 +2171,16 @@ const VK_C: u32 = 0x43;
 /// hook watches every key typed anywhere on the machine; the selection is the
 /// only reason one chord is borrowed, so the moment it is cleared the chord is
 /// the app's again.
+/// `Esc` in Living: the panel's, only while one is open; otherwise the
+/// program under the pointer keeps it. Pure, so it is tested.
+const fn living_escape(panel_open: bool) -> Option<PlacementKey> {
+    if panel_open {
+        Some(PlacementKey::ClosePanel)
+    } else {
+        None
+    }
+}
+
 const fn living_key(
     vk: u32,
     ctrl: bool,
@@ -2287,8 +2303,8 @@ fn key_action(
         return KeyAction::Swallow;
     }
     let in_mode = |key: PlacementKey| match mode {
-        Mode::Placement => key != PlacementKey::CopySelection,
-        Mode::Living => key == PlacementKey::CopySelection,
+        Mode::Placement => !matches!(key, PlacementKey::CopySelection | PlacementKey::ClosePanel),
+        Mode::Living => matches!(key, PlacementKey::CopySelection | PlacementKey::ClosePanel),
         Mode::Hidden => false,
     };
     match key {
@@ -2316,6 +2332,10 @@ fn act_on(app: &AppHandle, key: PlacementKey) {
         PlacementKey::SelectAll => overlay::overlay_ocr_select_all_focused(app.clone()),
         PlacementKey::CopySelection => {
             overlay::ocr_copy_selection(app);
+            Ok(())
+        }
+        PlacementKey::ClosePanel => {
+            crate::panel::close(app);
             Ok(())
         }
     };
@@ -2400,6 +2420,9 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
                     let (ctrl, alt, win) = modifiers();
                     let showing = ctrl && !alt && !win && selection_showing();
                     living_key(vk, ctrl, alt, win, showing)
+                }
+                Mode::Living if vk == u32::from(VK_ESCAPE) => {
+                    living_escape(crate::panel::is_open())
                 }
                 Mode::Living | Mode::Hidden => None,
             };
@@ -2567,8 +2590,12 @@ fn exit_on_main_thread() {
     *lock(&ARMED) = None;
     // The menu belongs to a visible overlay: leaving with it still on screen
     // would draw a control over a hidden window that nothing could ever click.
+    // The settings panel likewise: the hooks that close it on a press outside
+    // or on Esc go with this mode, so left open it could be closed only by
+    // its own x (review of `#161`, round 3).
     if let Some(app) = APP.get() {
         close_menu(app);
+        crate::panel::close(app);
     }
     if LEFT_PENDING.load(Ordering::SeqCst) || RIGHT_PENDING.load(Ordering::SeqCst) {
         WANT_TEARDOWN.store(true, Ordering::SeqCst);
@@ -2937,9 +2964,31 @@ fn handle_mouse(wparam: WPARAM, lparam: LPARAM) -> bool {
     // owns the mouse", but that was always shorthand for "UP-TAKE is the topmost
     // thing". When it demonstrably is not, swallowing the click is the same
     // mistake in either mode.
-    if matches!(wparam as u32, WM_LBUTTONDOWN | WM_RBUTTONDOWN) && shadowed_by_another_window(point)
-    {
-        return false;
+    //
+    // **The settings panel is asked by position, not by z-order** (roadmap
+    // 1.60): when the overlay takes focus it rises above the panel, and the
+    // z-order walk then answered "ours", so every press on the panel was
+    // swallowed and none of its controls worked (the founder's rig,
+    // 2026-11-03). The overlay never takes clicks itself, so a press let
+    // through here lands on the panel wherever it sits in the z-order.
+    if matches!(wparam as u32, WM_LBUTTONDOWN | WM_RBUTTONDOWN) {
+        if crate::panel::takes_press(point) {
+            return false;
+        }
+        let shadowed = shadowed_by_another_window(point);
+        // A press outside an open settings panel closes it, in either mode and
+        // on any window (the founder's rig, 2026-11-05). While placing, a
+        // press on the overlay is left to `classify_press`, which closes it
+        // and does nothing else; anywhere else the press also goes on to what
+        // it landed on.
+        if press_closes_panel_here(mode() == Mode::Placement, shadowed)
+            && let Some(app) = APP.get()
+        {
+            let _ = crate::panel::close_on_press(app, point);
+        }
+        if shadowed {
+            return false;
+        }
     }
     match wparam as u32 {
         WM_LBUTTONDOWN => match mode() {
@@ -3070,7 +3119,7 @@ fn handle_mouse(wparam: WPARAM, lparam: LPARAM) -> bool {
                 // when a zoomable area is actually under the cursor, which is
                 // the only case where the answer changes anything, and the
                 // guard's own comment stays true.
-                if shadowed_by_another_window(point) {
+                if crate::panel::takes_press(point) || shadowed_by_another_window(point) {
                     return false;
                 }
                 let notches = wheel_notches(area.id.get(), info.mouseData);
@@ -3089,7 +3138,10 @@ fn handle_mouse(wparam: WPARAM, lparam: LPARAM) -> bool {
                 && crate::first_run::hit(point).is_none()
                 && let Some(app) = APP.get()
             {
-                open_menu(app, point);
+                match right_click_opens(ctrl_held()) {
+                    RightClick::Menu => open_menu(app, point),
+                    RightClick::Panel => open_panel(app, point),
+                }
             }
             maybe_finish_teardown();
             true
@@ -3667,6 +3719,11 @@ fn classify_press(point: Point) -> Gesture {
         if close_menu(app) {
             return Gesture::Inert;
         }
+        // A press outside an open settings panel closes it, the way a press
+        // outside the menu closes the menu, and does nothing else (1.60).
+        if crate::panel::close_on_press(app, point) {
+            return Gesture::Inert;
+        }
         // The first-run coach (roadmap 1.18) is above every area and all empty
         // overlay, and below an open menu, which the lines above have already
         // dealt with. A press on it never starts a drag.
@@ -4041,7 +4098,7 @@ pub(crate) const fn captures_on_create(kind: AreaType) -> bool {
 ///
 /// Exhaustive rather than a `_` arm, so a ninth `AreaType` fails to compile
 /// here instead of defaulting to either answer.
-fn conversion_label(kind: AreaType) -> Option<&'static str> {
+pub(crate) fn conversion_label(kind: AreaType) -> Option<&'static str> {
     use crate::strings::{Text, text};
     match kind {
         AreaType::Default => Some(text(Text::MenuTypeDefault)),
@@ -4289,6 +4346,54 @@ fn pointer_target(app: &AppHandle, point: Point) -> Option<overlay::AreaSummary>
         Mode::Placement => overlay::area_at(app, point),
         Mode::Living => overlay::interactive_area_at(app, point),
         Mode::Hidden => None,
+    }
+}
+
+/// Whether the hook itself closes an open settings panel on a press outside
+/// it: always, except a press on the overlay while placing, which
+/// `classify_press` takes (closing the panel and doing nothing else).
+const fn press_closes_panel_here(placing: bool, shadowed: bool) -> bool {
+    !placing || shadowed
+}
+
+/// What a right-click on an area opens (roadmap `1.60`, the founder's choice
+/// of 2026-11-05: *"Keep both, but use the new version as the default,
+/// ctrl+right-click should open the "legacy" (the other menu) version"*).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RightClick {
+    /// The area's settings panel.
+    Panel,
+    /// The area menu of before the panel.
+    Menu,
+}
+
+/// [`RightClick`]'s rule: Ctrl held opens the menu, anything else the panel.
+const fn right_click_opens(ctrl: bool) -> RightClick {
+    if ctrl {
+        RightClick::Menu
+    } else {
+        RightClick::Panel
+    }
+}
+
+/// Whether Ctrl is down now. Asked of the key state as it is, not of the
+/// thread's message queue, since this runs inside the mouse hook.
+fn ctrl_held() -> bool {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL};
+    // SAFETY: reads the key state only.
+    unsafe { GetAsyncKeyState(i32::from(VK_CONTROL)) < 0 }
+}
+
+/// Opens the settings panel for whatever is under `point`, on the
+/// same target as the menu ([`pointer_target`], which the press that claimed
+/// the click also used). Closes any open menu either way, and with no area
+/// under `point` the click has nothing to act on.
+fn open_panel(app: &AppHandle, point: Point) {
+    close_menu(app);
+    match pointer_target(app, point) {
+        Some(area) => crate::panel::open(app, area.id, point),
+        // A right-click on no area closes an open panel, as a left one does.
+        None => crate::panel::close(app),
     }
 }
 
@@ -4708,6 +4813,11 @@ fn menu_rows(area: &overlay::AreaSummary) -> Vec<MenuRow> {
     ));
     // The founder, 2026-11-03: every area can be named, and every card an
     // area raises leads with its name.
+    // The area's settings panel: the founder's way in to everything an area
+    // can be set to (roadmap 1.60). Right-click opens it directly now; in
+    // this menu, reached with Ctrl+right-click, the row is a second way in. With the bottom group,
+    // so Copy and Save still lead a screenshot's menu.
+    rows.push(leaf(MenuAction::Settings, text(Text::MenuSettings), false));
     rows.push(leaf(MenuAction::Rename, text(Text::MenuRename), false));
     rows.push(leaf(MenuAction::Dismiss, text(Text::MenuDismiss), false));
     rows
@@ -4830,6 +4940,10 @@ fn activate_menu_item(app: &AppHandle, hit: MenuHit, release: Point) {
         MenuAction::SetWatch(watch) => overlay::set_area_watch(app, area, watch),
         MenuAction::Rename => {
             overlay::start_rename(app, area);
+            false
+        }
+        MenuAction::Settings => {
+            crate::panel::open(app, area, release);
             false
         }
         MenuAction::SetHeld(held) => overlay::set_area_held(app, area, held),
@@ -5008,6 +5122,21 @@ mod tests {
         assert_eq!(
             living_key(u32::from(super::VK_ESCAPE), false, false, false, true),
             None
+        );
+        // Esc is taken in Living only to close an open settings panel
+        // (review of `#161`, round 2).
+        assert_eq!(super::living_escape(true), Some(PlacementKey::ClosePanel));
+        assert_eq!(super::living_escape(false), None);
+        let close = Some(PlacementKey::ClosePanel);
+        assert_eq!(
+            super::key_action(super::Mode::Living, close, true, false, false),
+            super::KeyAction::Act(PlacementKey::ClosePanel),
+            "taken in Living"
+        );
+        assert_eq!(
+            super::key_action(super::Mode::Placement, close, true, false, false),
+            super::KeyAction::Pass,
+            "placing has Esc for it already"
         );
 
         assert_eq!(
@@ -6409,6 +6538,7 @@ mod tests {
                 "Depth",
                 "Stick to window",
                 "Click-through",
+                "Settings…",
                 "Rename…",
                 "Dismiss"
             ]
@@ -6612,6 +6742,7 @@ mod tests {
                     "Stick to window",
                     "On resize",
                     "Click-through",
+                    "Settings…",
                     "Rename…",
                     "Dismiss"
                 ],
@@ -6741,10 +6872,88 @@ mod tests {
                 ("Depth", true),
                 ("Stick to window", false),
                 ("Click-through", true),
+                ("Settings…", true),
                 ("Rename…", true),
                 ("Dismiss", true),
             ]
         );
+    }
+
+    /// The founder's rig, 2026-11-05: a click outside the settings panel
+    /// closes it, in Living and on another window too, not only on the
+    /// overlay while placing.
+    #[test]
+    fn a_press_outside_the_panel_closes_it_everywhere() {
+        use super::press_closes_panel_here;
+        assert!(press_closes_panel_here(false, false), "Living");
+        assert!(
+            press_closes_panel_here(false, true),
+            "Living, another window"
+        );
+        assert!(
+            press_closes_panel_here(true, true),
+            "placing, another window"
+        );
+        assert!(
+            !press_closes_panel_here(true, false),
+            "placing: classify_press"
+        );
+        let source = include_str!("placement.rs");
+        let classify = fn_body(source, "fn classify_press(point: Point) -> Gesture {");
+        assert!(classify.contains("crate::panel::close_on_press(app, point)"));
+        // Within the press block itself: the close comes before the press is
+        // let through to another window (review of `#161`, round 1: the
+        // first version split at any later `if shadowed {` and stayed green
+        // with the two swapped).
+        let start = source
+            .find("        if crate::panel::takes_press(point) {")
+            .unwrap_or(usize::MAX);
+        let block = source
+            .get(start..)
+            .and_then(|rest| rest.split("    match wparam as u32 {").next())
+            .unwrap_or_default();
+        let close = block.find("crate::panel::close_on_press(app, point)");
+        let through = block.find("if shadowed {");
+        assert!(
+            close.is_some() && through.is_some(),
+            "both are in the block"
+        );
+        assert!(
+            close < through,
+            "the hook closes it before letting the press through"
+        );
+        // Hover opens nothing any more (the same day).
+        assert!(!source.contains(concat!("crate::panel::", "on_", "hover")));
+    }
+
+    /// Review of `#161`, round 3: leaving to Hidden closes the panel with the
+    /// menu, since the hooks that would close it go with that mode.
+    #[test]
+    fn leaving_to_hidden_closes_the_panel_with_the_menu() {
+        let body = fn_body(include_str!("placement.rs"), "fn exit_on_main_thread() {");
+        let menu = body.find("close_menu(app);");
+        let panel = body.find("crate::panel::close(app);");
+        assert!(menu.is_some() && panel.is_some(), "both are closed");
+        let teardown = body.find("teardown_now()").unwrap_or(usize::MAX);
+        assert!(panel < Some(teardown), "before the hooks go");
+    }
+
+    /// Roadmap `1.60`, the founder's choice of 2026-11-05: right-click opens
+    /// the settings panel, Ctrl+right-click the menu of before.
+    #[test]
+    fn right_click_opens_the_panel_and_ctrl_right_click_the_menu() {
+        use super::{RightClick, right_click_opens};
+        assert_eq!(right_click_opens(false), RightClick::Panel);
+        assert_eq!(right_click_opens(true), RightClick::Menu);
+        // The release asks the rule with the real key state, and the panel
+        // opens on the menu's own target. Held by source: the hook runs on a
+        // real Windows hook no test can drive.
+        let source = include_str!("placement.rs");
+        assert!(source.contains("match right_click_opens(ctrl_held()) {"));
+        let body = fn_body(source, "fn open_panel(app: &AppHandle, point: Point) {");
+        assert!(body.contains("pointer_target(app, point)"));
+        assert!(body.contains("Some(area) => crate::panel::open(app, area.id, point)"));
+        assert!(body.contains("None => crate::panel::close(app)"));
     }
 
     /// `open_menu` needs an `AppHandle`, so this reads its source, with the

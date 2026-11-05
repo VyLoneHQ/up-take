@@ -112,8 +112,10 @@ const SITES = [
   {
     name: 'CHANGELOG.md entry',
     source: changelogMd,
-    // "- Four area types, chosen from the area's own right-click menu."
-    pattern: /\b(\w+) area types, chosen from\b/i,
+    // "- Six area types, chosen in the area's own settings, which a right-click
+    // opens beside it" (until 2026-11-05: "chosen from the area's own
+    // right-click menu").
+    pattern: /\b(\w+) area types, chosen in\b/i,
     complement: false,
   },
   {

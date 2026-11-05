@@ -888,6 +888,14 @@ pub fn escape(app: &AppHandle) {
     if placement::close_menu(app) {
         return;
     }
+    // An open settings panel is closed first, as the menu is: the panel does
+    // not hold the keyboard while placing, so Esc reaches the overlay, and
+    // leaving placing with the panel still up was the defect (review of
+    // `#161`, round 2).
+    if crate::panel::is_open() {
+        crate::panel::close(app);
+        return;
+    }
     if placement::is_dragging() {
         placement::cancel_drag();
         drive(
@@ -1415,8 +1423,11 @@ pub(crate) fn emit_areas(app: &AppHandle) -> Result<(), String> {
             .map(|area| payload_of(area, &monitors, store.name(area.id)))
             .collect()
     };
-    crate::watch::emit_redraw(app, AREAS_EVENT, AreasPayload { areas })
-        .map_err(|e| format!("Could not emit overlay areas: {e}"))
+    let sent = crate::watch::emit_redraw(app, AREAS_EVENT, AreasPayload { areas })
+        .map_err(|e| format!("Could not emit overlay areas: {e}"));
+    // The settings panel follows its area, and closes when it goes (1.60).
+    crate::panel::refresh(app);
+    sent
 }
 
 /// What a hit-test resolves to: the identity and the menu-relevant properties
