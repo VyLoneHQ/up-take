@@ -1963,10 +1963,6 @@ fn pump_hover(app: &AppHandle, state: &mut PumpState) {
     // side: leaving Living with a chrome-only hover live must re-emit even when
     // the id has not moved, or the frontend keeps drawing the control alone.
     if (state.hovered_area, state.hovered_chrome_only) != (hovered_area, false) {
-        // Resting on an area while placing opens its settings panel (1.60).
-        if state.hovered_area != hovered_area {
-            crate::panel::on_hover(app, hovered_area, point);
-        }
         (state.hovered_area, state.hovered_chrome_only) = (hovered_area, false);
         let _ = crate::watch::emit_redraw(
             app,
@@ -2950,10 +2946,24 @@ fn handle_mouse(wparam: WPARAM, lparam: LPARAM) -> bool {
     // swallowed and none of its controls worked (the founder's rig,
     // 2026-11-03). The overlay never takes clicks itself, so a press let
     // through here lands on the panel wherever it sits in the z-order.
-    if matches!(wparam as u32, WM_LBUTTONDOWN | WM_RBUTTONDOWN)
-        && (crate::panel::takes_press(point) || shadowed_by_another_window(point))
-    {
-        return false;
+    if matches!(wparam as u32, WM_LBUTTONDOWN | WM_RBUTTONDOWN) {
+        if crate::panel::takes_press(point) {
+            return false;
+        }
+        let shadowed = shadowed_by_another_window(point);
+        // A press outside an open settings panel closes it, in either mode and
+        // on any window (the founder's rig, 2026-11-05). While placing, a
+        // press on the overlay is left to `classify_press`, which closes it
+        // and does nothing else; anywhere else the press also goes on to what
+        // it landed on.
+        if press_closes_panel_here(mode() == Mode::Placement, shadowed)
+            && let Some(app) = APP.get()
+        {
+            let _ = crate::panel::close_on_press(app, point);
+        }
+        if shadowed {
+            return false;
+        }
     }
     match wparam as u32 {
         WM_LBUTTONDOWN => match mode() {
@@ -4314,6 +4324,13 @@ fn pointer_target(app: &AppHandle, point: Point) -> Option<overlay::AreaSummary>
     }
 }
 
+/// Whether the hook itself closes an open settings panel on a press outside
+/// it: always, except a press on the overlay while placing, which
+/// `classify_press` takes (closing the panel and doing nothing else).
+const fn press_closes_panel_here(placing: bool, shadowed: bool) -> bool {
+    !placing || shadowed
+}
+
 /// What a right-click on an area opens (roadmap `1.60`, the founder's choice
 /// of 2026-11-05: *"Keep both, but use the new version as the default,
 /// ctrl+right-click should open the "legacy" (the other menu) version"*).
@@ -4348,8 +4365,10 @@ fn ctrl_held() -> bool {
 /// under `point` the click has nothing to act on.
 fn open_panel(app: &AppHandle, point: Point) {
     close_menu(app);
-    if let Some(area) = pointer_target(app, point) {
-        crate::panel::open(app, area.id, true, point);
+    match pointer_target(app, point) {
+        Some(area) => crate::panel::open(app, area.id, point),
+        // A right-click on no area closes an open panel, as a left one does.
+        None => crate::panel::close(app),
     }
 }
 
@@ -4899,7 +4918,7 @@ fn activate_menu_item(app: &AppHandle, hit: MenuHit, release: Point) {
             false
         }
         MenuAction::Settings => {
-            crate::panel::open(app, area, true, release);
+            crate::panel::open(app, area, release);
             false
         }
         MenuAction::SetHeld(held) => overlay::set_area_held(app, area, held),
@@ -6820,6 +6839,43 @@ mod tests {
         );
     }
 
+    /// The founder's rig, 2026-11-05: a click outside the settings panel
+    /// closes it, in Living and on another window too, not only on the
+    /// overlay while placing.
+    #[test]
+    fn a_press_outside_the_panel_closes_it_everywhere() {
+        use super::press_closes_panel_here;
+        assert!(press_closes_panel_here(false, false), "Living");
+        assert!(
+            press_closes_panel_here(false, true),
+            "Living, another window"
+        );
+        assert!(
+            press_closes_panel_here(true, true),
+            "placing, another window"
+        );
+        assert!(
+            !press_closes_panel_here(true, false),
+            "placing: classify_press"
+        );
+        let source = include_str!("placement.rs");
+        let classify = fn_body(source, "fn classify_press(point: Point) -> Gesture {");
+        assert!(classify.contains("crate::panel::close_on_press(app, point)"));
+        let hook = source
+            .split("if press_closes_panel_here(mode() == Mode::Placement, shadowed)")
+            .nth(1)
+            .unwrap_or_default();
+        assert!(
+            hook.split("if shadowed {")
+                .next()
+                .unwrap_or_default()
+                .contains("crate::panel::close_on_press(app, point)"),
+            "the hook closes it before letting the press through"
+        );
+        // Hover opens nothing any more (the same day).
+        assert!(!source.contains(concat!("crate::panel::", "on_", "hover")));
+    }
+
     /// Roadmap `1.60`, the founder's choice of 2026-11-05: right-click opens
     /// the settings panel, Ctrl+right-click the menu of before.
     #[test]
@@ -6834,7 +6890,8 @@ mod tests {
         assert!(source.contains("match right_click_opens(ctrl_held()) {"));
         let body = fn_body(source, "fn open_panel(app: &AppHandle, point: Point) {");
         assert!(body.contains("pointer_target(app, point)"));
-        assert!(body.contains("crate::panel::open(app, area.id, true, point)"));
+        assert!(body.contains("Some(area) => crate::panel::open(app, area.id, point)"));
+        assert!(body.contains("None => crate::panel::close(app)"));
     }
 
     /// `open_menu` needs an `AppHandle`, so this reads its source, with the

@@ -1000,7 +1000,6 @@ fn apply(app: &AppHandle, state: OverlayState) -> Result<(), String> {
 /// the focus indicator needs in Placement.
 fn emit_state(app: &AppHandle, state: OverlayState) -> Result<(), String> {
     // An unpinned settings panel lives only while placing (1.60).
-    crate::panel::on_state(app, state == OverlayState::Placement);
     let window = overlay_window(app)?;
     // The real virtual-desktop origin travels with **every** state, not just
     // Placement. Living draws the persistent area borders and converts them to

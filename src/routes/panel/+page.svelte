@@ -16,8 +16,7 @@ import { isLanguage, type Language, text } from '$lib/strings';
 import { TONES, toneOf } from '$lib/tones';
 
 // The area settings panel (roadmap 1.60). Rust shows this window beside its
-// area; this page draws the area's settings and sets them. A click into it
-// pins it open; Esc closes it.
+// area; this page draws the area's settings and sets them. Esc closes it.
 
 const NAME_LIMIT = 40;
 
@@ -48,10 +47,6 @@ async function load(): Promise<void> {
   view = next;
   await tick();
   report();
-}
-
-function pin(): void {
-  void invoke('panel_pin').catch(() => {});
 }
 
 function close(): void {
@@ -156,12 +151,10 @@ onMount(() => {
 
 {#if view}
   {@const tone = TONES[toneOf(view.kind)]}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="panel"
     style="--tone: {tone}"
     bind:this={shell}
-    onpointerdown={pin}
   >
     <header>
       <span class="swatch" aria-hidden="true"></span>
@@ -185,7 +178,6 @@ onMount(() => {
         bind:value={name}
         onfocus={() => {
           editing = true;
-          pin();
         }}
         onblur={saveName}
         onkeydown={onNameKey}

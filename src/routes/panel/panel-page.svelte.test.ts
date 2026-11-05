@@ -101,9 +101,7 @@ const WATCH = {
 function lastSet() {
   return vi
     .mocked(invoke)
-    .mock.calls.filter(
-      ([command]) => command !== 'panel_resize' && command !== 'panel_pin',
-    )
+    .mock.calls.filter(([command]) => command !== 'panel_resize')
     .at(-1);
 }
 

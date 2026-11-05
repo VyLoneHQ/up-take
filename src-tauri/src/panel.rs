@@ -11,17 +11,17 @@
 //!
 //! # How it opens and closes
 //!
-//! - **Right-click, in either mode:** opens it pinned. **Ctrl+right-click**
-//!   opens the area menu of before instead (`placement::RightClick`, his
-//!   choice of 2026-11-05), which keeps *Dismiss* and *Settings…*.
-//! - **Hover, while placing only:** resting the pointer on an area for
-//!   [`HOVER_OPEN`] opens it. It closes once the pointer has been off both the
-//!   area and the panel for [`HOVER_CLOSE`]. Not in Living: a watch area sits
-//!   over something the user works in, and a panel appearing whenever the
-//!   pointer crosses it would cover that work (agreed with the founder).
-//! - **Pinned:** by right-click, the menu's *Settings…*, or a click into a
-//!   hover panel. A pinned panel stays until `Esc`, its ×, a click elsewhere
-//!   while placing, the area going, or placing ending.
+//! - **Right-click on an area, in either mode,** or the menu's *Settings…*.
+//!   **Ctrl+right-click** opens the area menu of before instead
+//!   (`placement::RightClick`, his choice of 2026-11-05), which keeps
+//!   *Dismiss* and *Settings…*.
+//! - **Not on hover** (his rig, 2026-11-05: *"hovering over an area
+//!   shouldn't open the settings menu anymore, only a right-click should"*;
+//!   until then resting on an area while placing opened it).
+//! - **It closes** on `Esc`, its ×, a press anywhere outside it in either
+//!   mode, a right-click on no area, or its area going (his rig, 2026-11-05:
+//!   *"clicking outside the settings menu should close it"*; until then only
+//!   a press on the overlay while placing did).
 //!
 //! # Where it goes
 //!
@@ -38,9 +38,7 @@
 //! and closing gives it back to the overlay while placing, or placing would go
 //! deaf to `Esc` (the bug found with the cards, `notice::give_focus_back`).
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
-use std::time::Duration;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
@@ -54,13 +52,6 @@ pub const LABEL: &str = "area-panel";
 
 /// The event that tells the page its area changed and to read it again.
 const PANEL_EVENT: &str = "panel://changed";
-
-/// How long the pointer rests on an area before its panel opens.
-pub const HOVER_OPEN: Duration = Duration::from_millis(400);
-
-/// How long the pointer may be off both the area and its panel before an
-/// unpinned panel closes.
-pub const HOVER_CLOSE: Duration = Duration::from_millis(300);
 
 /// The window's width in logical pixels, the page's 12px margin on each side
 /// included (room for the shadow); its height is the page's.
@@ -80,17 +71,11 @@ struct Open {
     pointer: Point,
     /// The page's height, logical pixels.
     height: f64,
-    /// Stays until closed on purpose, not when the pointer leaves.
-    pinned: bool,
     /// Where it was placed last, physical pixels.
     rect: Rect,
 }
 
 static OPEN: Mutex<Option<Open>> = Mutex::new(None);
-
-/// Counts every hover change, so a delayed open or close fires only if
-/// nothing moved on since it was scheduled.
-static HOVER_TICKET: AtomicU64 = AtomicU64::new(0);
 
 fn open_now() -> Option<Open> {
     *OPEN.lock().unwrap_or_else(PoisonError::into_inner)
@@ -268,24 +253,14 @@ fn view(store: &AreaStore, id: AreaId, can_stick: bool, on_resize: OnResize) -> 
     })
 }
 
-fn area_by_raw(app: &AppHandle, raw: u64) -> Option<(AreaId, Rect)> {
-    let store = app.state::<Mutex<AreaStore>>();
-    let store = store.lock().unwrap_or_else(PoisonError::into_inner);
-    store
-        .iter()
-        .find(|area| area.id.get() == raw)
-        .map(|area| (area.id, area.bounds))
-}
-
-/// Opens the panel for `area`, `pinned` or not, with the pointer at
-/// `pointer`. Replaces any panel already open.
-pub fn open(app: &AppHandle, area: AreaId, pinned: bool, pointer: Point) {
+/// Opens the panel for `area`, with the pointer at `pointer`. Replaces any
+/// panel already open.
+pub fn open(app: &AppHandle, area: AreaId, pointer: Point) {
     let height = open_now().map_or(FIRST_HEIGHT, |open| open.height);
     *OPEN.lock().unwrap_or_else(PoisonError::into_inner) = Some(Open {
         area,
         pointer,
         height,
-        pinned,
         rect: Rect::new(0, 0, 0, 0),
     });
     let app_main = app.clone();
@@ -454,94 +429,6 @@ pub fn refresh(app: &AppHandle) {
     });
 }
 
-/// The overlay changed state: a panel lives only while placing... unless it
-/// is pinned, which the area menu also offers in Living.
-pub fn on_state(app: &AppHandle, placing: bool) {
-    if !placing && open_now().is_some_and(|open| !open.pinned) {
-        close(app);
-    }
-}
-
-/// The pointer's hover changed while placing: `hovered` is the area under it,
-/// if any. Opens a panel after a rest, and watches an unpinned one for the
-/// pointer leaving both the area and the panel.
-pub fn on_hover(app: &AppHandle, hovered: Option<u64>, pointer: Point) {
-    let ticket = HOVER_TICKET.fetch_add(1, Ordering::SeqCst) + 1;
-    let Some(raw) = hovered else {
-        return;
-    };
-    // The pointer is on the panel, over whatever area lies under it: that is
-    // using the panel, not asking for another one.
-    if open_now().is_some_and(|open| open.rect.contains(pointer)) {
-        return;
-    }
-    if open_now().is_some_and(|open| open.area.get() == raw) {
-        return;
-    }
-    if open_now().is_some_and(|open| open.pinned) {
-        return;
-    }
-    let app = app.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(HOVER_OPEN);
-        if HOVER_TICKET.load(Ordering::SeqCst) != ticket || !crate::placement::is_placing() {
-            return;
-        }
-        if crate::placement::area_in_gesture().is_some() {
-            return;
-        }
-        if open_now().is_some_and(|open| cursor().is_some_and(|point| open.rect.contains(point))) {
-            return;
-        }
-        let Some((id, _)) = area_by_raw(&app, raw) else {
-            return;
-        };
-        open(&app, id, false, pointer);
-        watch_leaving(app, id);
-    });
-}
-
-/// Closes an unpinned panel once the pointer has been off both its area and
-/// the panel for [`HOVER_CLOSE`]. Ends when the panel closes, is pinned, or
-/// shows another area.
-fn watch_leaving(app: AppHandle, area: AreaId) {
-    std::thread::spawn(move || {
-        let step = Duration::from_millis(100);
-        let mut away = Duration::ZERO;
-        loop {
-            std::thread::sleep(step);
-            let Some(open) = open_now() else { return };
-            if open.area != area || open.pinned {
-                return;
-            }
-            let bounds = area_by_raw(&app, area.get()).map(|(_, bounds)| bounds);
-            let inside = cursor().is_some_and(|point| {
-                open.rect.contains(point) || bounds.is_some_and(|bounds| bounds.contains(point))
-            });
-            away = if inside { Duration::ZERO } else { away + step };
-            if away >= HOVER_CLOSE {
-                close(&app);
-                return;
-            }
-        }
-    });
-}
-
-/// The pointer, physical virtual-desktop pixels.
-fn cursor() -> Option<Point> {
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::Foundation::POINT;
-        use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
-        let mut point = POINT { x: 0, y: 0 };
-        // SAFETY: writes the cursor position into a local.
-        let ok = unsafe { GetCursorPos(&mut point) };
-        (ok != 0).then(|| Point::new(point.x, point.y))
-    }
-    #[cfg(not(windows))]
-    None
-}
-
 /// Whether a press at `point` is the panel's: inside the open panel. Asked by
 /// the placement hook before anything else, by position rather than z-order
 /// (see the hook), so the panel's controls work wherever it sits in the stack.
@@ -572,9 +459,10 @@ pub fn raise(app: &AppHandle) {
     let _ = app;
 }
 
-/// A press while placing: one outside an open pinned panel closes it, the way
-/// a press outside the menu closes the menu. Returns whether it closed one,
-/// in which case the press does nothing else.
+/// A press outside an open panel closes it, the way a press outside the menu
+/// closes the menu. Returns whether it closed one; while placing, the press
+/// then does nothing else (`placement::classify_press`), and elsewhere it
+/// goes on to whatever it landed on (`placement`'s hook).
 pub fn close_on_press(app: &AppHandle, point: Point) -> bool {
     match open_now() {
         Some(open) if !open.rect.contains(point) => {
@@ -700,14 +588,6 @@ pub fn panel_resize(app: AppHandle, height: f64) {
         let _ = app.run_on_main_thread(move || {
             let _ = present(&app_main);
         });
-    }
-}
-
-/// IPC surface: the user clicked into the panel; it stays until closed.
-#[tauri::command]
-pub fn panel_pin() {
-    if let Some(open) = OPEN.lock().unwrap_or_else(PoisonError::into_inner).as_mut() {
-        open.pinned = true;
     }
 }
 
@@ -889,8 +769,15 @@ mod tests {
         assert_eq!(
             hook.matches("crate::panel::takes_press(point) || shadowed_by_another_window(point)")
                 .count(),
-            2
+            1,
+            "the release's check"
         );
+        // The press's check: the panel first, then the z-order.
+        let at = |needle: &str| hook.find(needle).unwrap_or(usize::MAX);
+        let panel = at("        if crate::panel::takes_press(point) {
+            return false;");
+        assert!(panel < usize::MAX, "the press asks the panel");
+        assert!(panel < at("        let shadowed = shadowed_by_another_window(point);"));
     }
 
     /// The founder's rig, 2026-11-03 (`I-478`): the ×, `Esc` and a press
