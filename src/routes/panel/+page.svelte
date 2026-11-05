@@ -1,7 +1,7 @@
 <script lang="ts">
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { onMount } from 'svelte';
+import { onMount, tick } from 'svelte';
 import {
   isPanelView,
   PANEL_EVENT,
@@ -34,9 +34,16 @@ async function load(): Promise<void> {
     view = null;
     return;
   }
+  // Rust starts every panel it opens at a first guess, and this page outlives
+  // the panel (its window is hidden, not closed), so an unchanged height still
+  // has to be said once after every read: reporting only changes left the
+  // second panel at the guess, cut off below its watch buttons (I-479).
+  sent = 0;
   // A name being typed is not overwritten by a refresh of the same area.
   if (!editing || view?.id !== next.id) name = next.name ?? '';
   view = next;
+  await tick();
+  report();
 }
 
 function pin(): void {
