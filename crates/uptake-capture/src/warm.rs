@@ -72,9 +72,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use uptake_core::bitmap::RgbaBitmap;
 use uptake_core::geometry::{Point, Rect, Size};
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_TEXTURE2D_DESC,
-    D3D11_USAGE, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING, ID3D11Device, ID3D11DeviceContext,
-    ID3D11Multithread, ID3D11Texture2D,
+    D3D11_BOX, D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE,
+    D3D11_TEXTURE2D_DESC, D3D11_USAGE, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING, ID3D11Device,
+    ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D,
 };
 use windows::core::Interface;
 use windows_capture::capture::{Context, GraphicsCaptureApiHandler};
@@ -176,6 +176,10 @@ struct Slot {
     /// fidelity bar); watch areas hold [`WATCH_FRAME_INTERVAL`], half their
     /// reading interval, since a busy screen costs per frame.
     min_interval: Option<std::time::Duration>,
+    /// Whether this is a watch area's session: it reports dirty regions, and
+    /// a frame whose dirty regions touch a watch area rings the watcher
+    /// ([`on_watch_frame`], the event-driven watch area).
+    watch: bool,
 }
 
 impl Slot {
@@ -388,6 +392,7 @@ fn hold(
             unservable: AtomicBool::new(false),
             ever_retained: AtomicBool::new(false),
             min_interval,
+            watch: std::ptr::eq(held, &WATCH_SESSIONS),
         });
         // The pump publishes its id before the slot joins `SESSIONS`, so
         // `thread_id` is never "not yet" for a slot a reader can reach. It can
@@ -640,18 +645,54 @@ fn capture_monitor_in(list: &Mutex<Vec<Arc<Slot>>>, monitor: Rect) -> Option<Cap
 /// video playing, unthrottled; these are throttled to [`WATCH_FRAME_INTERVAL`].
 static WATCH_SESSIONS: Mutex<Vec<Arc<Slot>>> = Mutex::new(Vec::new());
 
-/// The least time between frames for a watch area's session: a quarter of a
-/// second, half the watcher's reading interval (UP-TAKE `watch::INTERVAL`,
-/// which asserts it at compile time). Half, so a frame read is never older
-/// than half a reading, and a region that keeps changing gives every reading
-/// a new frame: one frame read twice would count as a still reading, and a
-/// moving video would re-arm between frames (review of `#159`, round 1). It
-/// was one second while readings came every two seconds.
-/// ⚠️ That a frame does arrive within this interval of a change is WGC's
-/// documented intent, not measured here; nor is the cost of four frames a
-/// second on a busy screen (UP-TAKE backlog `I-474`). A still screen sends no
-/// frames, so its cost does not change.
-pub const WATCH_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+/// The least time between frames for a watch area's session: about 30 a
+/// second. The watcher is event-driven (the maintainer's design of
+/// 2026-11-05: as responsive as possible without costing UP-TAKE or the PC):
+/// a frame that touches a watch area wakes it, so this bounds how soon a
+/// change is seen (one frame, about 33 ms) and how many frames a busy screen
+/// sends, each copied on the GPU (`retain`). A still screen sends none. What
+/// the watcher reads is capped separately, by its own cost (the governor in
+/// UP-TAKE's `watch.rs`).
+/// ⚠️ The GPU and CPU cost of 30 frames a second on a busy screen is not
+/// measured yet (UP-TAKE backlog `I-474`).
+pub const WATCH_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);
+
+/// The watch areas, desktop pixels, as [`watch_hold`] was last given them: a
+/// frame whose dirty regions touch none of them wakes nobody.
+static WATCH_REGIONS: Mutex<Vec<Rect>> = Mutex::new(Vec::new());
+
+/// What a frame that touches a watch area calls: UP-TAKE's watcher sets it
+/// ([`on_watch_frame`]). A plain function, called on the session's pump
+/// thread, so it must only signal and return.
+static WATCH_WAKER: Mutex<Option<fn()>> = Mutex::new(None);
+
+/// Sets what a frame touching a watch area calls (see [`WATCH_WAKER`]).
+pub fn on_watch_frame(waker: fn()) {
+    *WATCH_WAKER.lock().unwrap_or_else(PoisonError::into_inner) = Some(waker);
+}
+
+fn ring_watcher() {
+    let waker = *WATCH_WAKER.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(waker) = waker {
+        waker();
+    }
+}
+
+/// Whether a frame that changed `dirty` (desktop pixels) may have changed
+/// one of `regions`. `None` (the frame said nothing about where it changed)
+/// and an empty list both count as touching: an unknown is read rather than
+/// missed.
+#[must_use]
+pub fn touches_a_watch_area(dirty: Option<&[Rect]>, regions: &[Rect]) -> bool {
+    match dirty {
+        None | Some([]) => !regions.is_empty(),
+        Some(dirty) => dirty.iter().any(|part| {
+            regions
+                .iter()
+                .any(|region| part.intersection(*region).is_some())
+        }),
+    }
+}
 
 /// Holds a session on every monitor that any of `regions` overlaps, and on no
 /// other, keeping sessions already held for them. Returns how many are held.
@@ -668,12 +709,149 @@ pub fn watch_hold(regions: &[Rect]) -> usize {
                 .any(|region| region.intersection(monitor.bounds).is_some())
         })
         .collect();
+    *WATCH_REGIONS.lock().unwrap_or_else(PoisonError::into_inner) = regions.to_vec();
     hold(&WATCH_SESSIONS, wanted, Some(WATCH_FRAME_INTERVAL))
 }
 
 /// Stops every watch area's session. Safe when none is held.
 pub fn watch_release() {
+    WATCH_REGIONS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clear();
     let _ = stop_in(&WATCH_SESSIONS, || true);
+}
+
+/// `region` read from the watch sessions' newest frames, copying on the GPU
+/// only the part of each monitor it covers and reading back only that, never
+/// the whole monitor (a whole frame is about 33 MB on a 4K screen, the bulk
+/// of a reading's cost). The rectangle and its transparent black off every
+/// monitor are [`compose`]'s, so the two routes give the same picture.
+///
+/// `Ok(None)` while a monitor it covers has no frame held yet (a session
+/// warming up): nothing to read this time, the watcher waits for the next
+/// frame. `Err` when a monitor it covers cannot be held at all, so the
+/// caller takes [`crate::capture_region`].
+///
+/// # Errors
+///
+/// When the region is off the desktop, or a monitor it covers cannot be held.
+pub fn watch_capture_region(
+    region: Rect,
+    desktop: &[Rect],
+) -> Result<Option<CapturedRegion>, String> {
+    let (first, rest) = desktop
+        .split_first()
+        .ok_or_else(|| "no monitors".to_string())?;
+    let bounding = rest.iter().fold(*first, |all, monitor| all.union(*monitor));
+    let taken = region
+        .intersection(bounding)
+        .ok_or_else(|| "off the desktop".to_string())?;
+    let sessions = WATCH_SESSIONS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    let Some(mut bitmap) = RgbaBitmap::transparent(taken.size) else {
+        return Err("an empty picture".into());
+    };
+    for monitor in desktop {
+        let Some(part) = taken.intersection(*monitor) else {
+            continue;
+        };
+        let Some(slot) = sessions.iter().find(|slot| slot.bounds == *monitor) else {
+            return Ok(None);
+        };
+        if slot.is_unservable() {
+            return Err("a monitor the watch area covers cannot be held".into());
+        }
+        let Some(pixels) = read_box(slot, part) else {
+            return Ok(None);
+        };
+        let x = u32::try_from(part.origin.x - taken.origin.x).map_err(|e| e.to_string())?;
+        let y = u32::try_from(part.origin.y - taken.origin.y).map_err(|e| e.to_string())?;
+        if !crate::blit::blit(&mut bitmap, x, y, &pixels, part.size) {
+            return Err("the part did not fit the picture".into());
+        }
+    }
+    Ok(Some(CapturedRegion {
+        rect: taken,
+        bitmap,
+    }))
+}
+
+/// `part` (desktop pixels, inside the slot's monitor) of the slot's newest
+/// frame, RGBA8 top-down: a GPU copy of just that box into a staging texture
+/// its size, then one small readback. `None` with no frame held, or a frame
+/// whose size no longer matches the monitor.
+fn read_box(slot: &Slot, part: Rect) -> Option<Vec<u8>> {
+    let guard = slot.retained.lock().unwrap_or_else(PoisonError::into_inner);
+    let retained = guard.as_ref()?;
+    if retained.size != slot.bounds.size {
+        return None;
+    }
+    let source = box_in(slot.bounds, retained.size, part)?;
+    let mut desc = D3D11_TEXTURE2D_DESC::default();
+    // SAFETY: fills `desc` from a live texture.
+    unsafe { retained.live.GetDesc(&mut desc) };
+    desc.Width = part.size.width;
+    desc.Height = part.size.height;
+    // SAFETY: the context's own device; no preconditions.
+    let device = unsafe { retained.context.GetDevice() }.ok()?;
+    let staging = create_texture(
+        &device,
+        &desc,
+        D3D11_USAGE_STAGING,
+        D3D11_CPU_ACCESS_READ.0.cast_unsigned(),
+    )
+    .ok()?;
+    // SAFETY: the same format by construction; the box lies inside the source
+    // (`box_in`) and fits the destination exactly.
+    unsafe {
+        retained.context.CopySubresourceRegion(
+            &staging,
+            0,
+            0,
+            0,
+            0,
+            &retained.live,
+            0,
+            Some(&source),
+        );
+    }
+    let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+    // SAFETY: as in `readback`.
+    unsafe {
+        retained
+            .context
+            .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+    }
+    .ok()?;
+    let mapped_len = mapped.DepthPitch as usize;
+    // SAFETY: as in `readback`: valid until `Unmap`, its length D3D11's own.
+    let mapped_bytes = unsafe { std::slice::from_raw_parts(mapped.pData.cast::<u8>(), mapped_len) };
+    let packed = pack_rows(mapped_bytes, mapped.RowPitch as usize, part.size);
+    // SAFETY: unmaps exactly what was mapped above.
+    unsafe { retained.context.Unmap(&staging, 0) };
+    packed
+}
+
+/// The texture box `part` (desktop pixels) covers on a monitor at `monitor`
+/// whose frame is `frame` in size, or `None` when it is empty or does not
+/// lie wholly inside the frame. Apart, so the arithmetic is tested.
+fn box_in(monitor: Rect, frame: Size, part: Rect) -> Option<D3D11_BOX> {
+    let left = u32::try_from(part.origin.x - monitor.origin.x).ok()?;
+    let top = u32::try_from(part.origin.y - monitor.origin.y).ok()?;
+    let right = left.checked_add(part.size.width)?;
+    let bottom = top.checked_add(part.size.height)?;
+    (part.size.width > 0 && part.size.height > 0 && right <= frame.width && bottom <= frame.height)
+        .then_some(D3D11_BOX {
+            left,
+            top,
+            front: 0,
+            right,
+            bottom,
+            back: 1,
+        })
 }
 
 /// The newest frame held for watch areas on `monitor`, or `None` (not held,
@@ -868,7 +1046,32 @@ impl GraphicsCaptureApiHandler for Warm {
             capture_control.stop();
             return Ok(());
         }
-        retain(&self.flags.slot, frame).inspect_err(|_| capture_control.stop())
+        retain(&self.flags.slot, frame).inspect_err(|_| capture_control.stop())?;
+        if self.flags.slot.watch {
+            // Read where the frame changed, after the frame is retained, so
+            // the watcher that wakes on this reads this frame or a newer one.
+            let dirty = frame.dirty_regions().ok().map(|regions| {
+                regions
+                    .into_iter()
+                    .map(|region| {
+                        Rect::new(
+                            self.flags.slot.bounds.origin.x + region.x,
+                            self.flags.slot.bounds.origin.y + region.y,
+                            u32::try_from(region.width).unwrap_or(0),
+                            u32::try_from(region.height).unwrap_or(0),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            });
+            let regions = WATCH_REGIONS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            if touches_a_watch_area(dirty.as_deref(), &regions) {
+                ring_watcher();
+            }
+        }
+        Ok(())
     }
 
     fn on_closed(&mut self) -> Result<(), Self::Error> {
@@ -1094,7 +1297,16 @@ fn spawn_session(slot: Arc<Slot>) -> bool {
                 MinimumUpdateIntervalSettings::Default,
                 MinimumUpdateIntervalSettings::Custom,
             ),
-            DirtyRegionSettings::Default,
+            // A watch session reports where each frame changed, so a frame
+            // that touched no watch area wakes nobody (measured 2026-11-05 on
+            // the maintainer's primary monitor, Windows build 26200: every
+            // frame carried its regions, about 3 % of the screen per frame on
+            // an ordinary desktop). Freeze's keep WGC's default.
+            if slot.watch {
+                DirtyRegionSettings::ReportOnly
+            } else {
+                DirtyRegionSettings::Default
+            },
             ColorFormat::Rgba8,
             WarmFlags {
                 slot: Arc::clone(&slot),
@@ -1152,6 +1364,63 @@ mod tests {
     fn pixel(region: &CapturedRegion, x: u32, y: u32) -> [u8; 4] {
         let i = ((y * region.rect.size.width + x) * 4) as usize;
         region.bitmap.pixels()[i..i + 4].try_into().unwrap()
+    }
+
+    /// The event-driven watch area (2026-11-05): a frame wakes the watcher
+    /// only when where it changed touches a watch area; a frame that says
+    /// nothing about where counts as touching, and with no watch area
+    /// nothing is woken.
+    #[test]
+    fn only_a_frame_that_touches_a_watch_area_wakes_the_watcher() {
+        let areas = [Rect::new(100, 100, 200, 100), Rect::new(2000, 0, 50, 50)];
+        let elsewhere = [Rect::new(0, 0, 50, 50), Rect::new(400, 400, 10, 10)];
+        assert!(!touches_a_watch_area(Some(&elsewhere), &areas));
+        let edge = [Rect::new(299, 199, 5, 5)];
+        assert!(touches_a_watch_area(Some(&edge), &areas));
+        let second = [Rect::new(0, 0, 1, 1), Rect::new(2040, 40, 30, 30)];
+        assert!(touches_a_watch_area(Some(&second), &areas));
+        let beside = [Rect::new(300, 100, 10, 10)];
+        assert!(
+            !touches_a_watch_area(Some(&beside), &areas),
+            "touching edges"
+        );
+        assert!(touches_a_watch_area(None, &areas), "unknown is read");
+        assert!(touches_a_watch_area(Some(&[]), &areas), "unknown is read");
+        assert!(!touches_a_watch_area(None, &[]), "nothing to watch");
+    }
+
+    /// The GPU box for a part of a monitor: monitor-relative, and refused
+    /// when it is empty or leaves the frame.
+    #[test]
+    fn the_box_read_back_is_the_part_on_its_monitor() {
+        let monitor = Rect::new(-1920, 0, 1920, 1080);
+        let size = Size::new(1920, 1080);
+        let found = box_in(monitor, size, Rect::new(-1820, 50, 300, 200)).unwrap();
+        assert_eq!(
+            (
+                found.left,
+                found.top,
+                found.right,
+                found.bottom,
+                found.front,
+                found.back
+            ),
+            (100, 50, 400, 250, 0, 1)
+        );
+        assert!(
+            box_in(monitor, size, Rect::new(-100, 0, 200, 10)).is_none(),
+            "past the edge"
+        );
+        assert!(
+            box_in(monitor, size, Rect::new(-2000, 0, 10, 10)).is_none(),
+            "before it"
+        );
+        assert!(
+            box_in(monitor, size, Rect::new(-100, 0, 0, 10)).is_none(),
+            "empty"
+        );
+        let whole = box_in(monitor, size, monitor).unwrap();
+        assert_eq!((whole.right, whole.bottom), (1920, 1080));
     }
 
     /// A watch area across two monitors is put together from both frames,
@@ -1332,6 +1601,7 @@ mod tests {
             unservable: AtomicBool::new(false),
             ever_retained: AtomicBool::new(false),
             min_interval: None,
+            watch: false,
         })
     }
 

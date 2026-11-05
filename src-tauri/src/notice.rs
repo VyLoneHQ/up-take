@@ -388,7 +388,7 @@ static OWN_WINDOWS: Mutex<Vec<OwnWindow>> = Mutex::new(Vec::new());
 
 /// How long a window's old place stays listed after it moves or hides: a
 /// reading's frame can be older than the move by up to
-/// `uptake_capture::warm::WATCH_FRAME_INTERVAL` (a quarter of a second), and
+/// `uptake_capture::warm::WATCH_FRAME_INTERVAL` (about 33 ms), and
 /// a reading takes a moment more. A second leaves room for both.
 const GONE_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
 
