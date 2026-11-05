@@ -196,10 +196,12 @@ const _: () = assert!(
     "a fresh baseline must wait for two frames"
 );
 
-/// The share of one core the watcher may spend: `quality-bars.md` §1's 2 %
-/// per live area, for all of them together. After each pass it rests until its
-/// own time is no more than this share ([`rest_after`]), so a busy screen
-/// under a watch area costs at most this, and a quiet one far less.
+/// The share of one core the watcher's own thread may spend: `quality-bars.md`
+/// §1's 2 % per live area, for all of them together. After each pass it rests
+/// until its own time is no more than this share ([`rest_after`]). The held
+/// sessions' frames cost on top of it, outside the governor: about 0.3 to
+/// 0.4 % of a core measured at 30 frames a second (workspace
+/// `evidence/1.58-watch-events/`).
 pub const BUDGET: f64 = 0.02;
 
 /// How long to rest after a pass that took `spent`: long enough that the pass
@@ -447,6 +449,9 @@ pub fn confirm(state: OverlayState, marks: Vec<(u64, Rect)>, generation: u64) {
         generation,
         at: Instant::now(),
     });
+    // A mark just seen is an area that can read now: wake the watcher rather
+    // than leave it to its next look (review of `#162`, round 1).
+    ring();
 }
 
 /// Whether the latest confirmation, as of `now`, says `target`'s mark is seen.
@@ -517,11 +522,12 @@ struct Watcher {
     /// made before it. A baseline taken in the pass that started a watcher
     /// again (the overlay state changed, the setting flipped, a move ended)
     /// could still show what came before, and the next reading would report
-    /// that as a change (review of `#154`, round 12). Its next pass
-    /// comes [`FRESH_WAIT`] later at the latest, two frame intervals, so the
-    /// frame is newer than the reason it started again: a compile-time
-    /// assertion beside [`FRESH_WAIT`] keeps it so (review of `#159`, round
-    /// 1).
+    /// that as a change (review of `#154`, round 12). Its next pass comes
+    /// at least one frame interval later, since the governor always rests
+    /// that long ([`rest_after`]'s floor, which its test holds), so the frame
+    /// read is newer than the reason it started again; and at most
+    /// [`FRESH_WAIT`] later when nothing rings sooner (review of `#159`,
+    /// round 1; the bound restated on the review of `#162`, round 1).
     ///
     /// ⚠️ **Assumed, not measured:** that WGC, held at
     /// `WATCH_FRAME_INTERVAL`, delivers a frame within that interval of a
@@ -854,8 +860,12 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
         match gate(target.id, now == state, [moving, gesture_now], still, shown) {
             Gate::Stop => break,
             Gate::Skip => {
-                // Not read, and read again from a fresh baseline.
+                // Not read, and read again from a fresh baseline: soon, since
+                // what it waits for (the page's word on its mark, a move
+                // ending) rings nothing reliably, and a change made in the
+                // wait would become its baseline (review of `#162`, round 1).
                 watchers.remove(&target.id);
+                soon = Some(FRESH_WAIT);
                 continue;
             }
             Gate::Read => {}
@@ -1030,6 +1040,8 @@ mod tests {
             clock: Duration,
             /// How many more captures find no frame held yet.
             unready: usize,
+            /// Whether each capture asked for the full picture.
+            whole: Vec<bool>,
         }
 
         impl Fake {
@@ -1050,6 +1062,7 @@ mod tests {
                     card: None,
                     clock: Duration::ZERO,
                     unready: 0,
+                    whole: Vec::new(),
                 }
             }
         }
@@ -1088,9 +1101,10 @@ mod tests {
             fn capture(
                 &mut self,
                 bounds: Rect,
-                _whole: bool,
+                whole: bool,
             ) -> Result<Option<CapturedRegion>, String> {
                 self.captured.push(bounds);
+                self.whole.push(whole);
                 if self.unready > 0 {
                     self.unready -= 1;
                     return Ok(None);
@@ -1240,6 +1254,36 @@ mod tests {
                 Some(LOOK),
                 "hidden"
             );
+        }
+
+        /// A reading asks for the full picture exactly when UP-TAKE's own
+        /// drawing is in captures, since it is painted out of the full-size
+        /// picture first; otherwise the small one averaged down on the GPU
+        /// will do (review of `#162`, round 1: no test held the routing).
+        #[test]
+        fn a_reading_asks_for_the_full_picture_only_when_drawing_is_left_out() {
+            for in_captures in [false, true] {
+                let mut fake = Fake::new(targets(&[Rect::new(100, 100, 600, 400)]));
+                fake.state = (OverlayState::Living, in_captures);
+                let mut memory = Memory::default();
+                run(&mut fake, &mut memory, 3);
+                assert!(!fake.whole.is_empty(), "read");
+                assert!(
+                    fake.whole.iter().all(|&whole| whole == in_captures),
+                    "{in_captures}"
+                );
+            }
+        }
+
+        /// Review of `#162`, round 1: an area skipped by its gate (its mark not
+        /// yet confirmed, say) is looked at again soon, not after the idle
+        /// wait, or a change made meanwhile becomes its baseline.
+        #[test]
+        fn an_area_waiting_for_its_mark_is_looked_at_again_soon() {
+            use super::super::FRESH_WAIT;
+            let mut fake = Fake::new(targets(&[Rect::new(100, 100, 600, 400)]));
+            fake.seen = false;
+            assert_eq!(pass(&mut fake, &mut Memory::default()), Some(FRESH_WAIT));
         }
 
         /// The governor: a pass that took `t` is followed by a rest of 49 `t`,

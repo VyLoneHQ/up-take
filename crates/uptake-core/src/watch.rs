@@ -144,14 +144,16 @@ pub const CELL_DELTA: u8 = 6;
 pub const STILL_DELTA: u8 = 2;
 
 /// How many readings in a row must match before a region that was changing
-/// counts as settled, for *Notify when it stops changing*. With the host
-/// reading every half second, twelve is six seconds of stillness: long enough
-/// that a progress bar pausing between chunks is not reported as finished.
+/// counts as settled, for *Notify when it stops changing*, at
+/// [`READING_STEP`]: six seconds of stillness ([`Watch::settle_time`]), long
+/// enough that a progress bar pausing between chunks is not reported as
+/// finished. The event-driven host measures it in time, at no fixed rate.
 /// (Three readings at two seconds until 2026-11-03: the same six seconds.)
 pub const SETTLE_READINGS: u32 = 12;
 
-/// How many still readings re-arm *Notify when it changes* after a change:
-/// one second at the host's half-second reading. Until 2026-11-03 this mode
+/// How many still readings re-arm *Notify when it changes* after a change, at
+/// [`READING_STEP`] (one second): the count [`Detector::observe`] uses. The
+/// event-driven host re-arms after [`REARM_TIME`] instead. Until 2026-11-03 this mode
 /// waited the full [`SETTLE_READINGS`] too, so at the maintainer's rig a
 /// second change within six seconds of the first was never reported. This
 /// mode reports change, not completion, so a short calm is enough.
@@ -350,7 +352,7 @@ pub enum Event {
     /// The region was still and now differs from its last reading.
     Changed,
     /// The region had been changing and has now held still for the
-    /// detector's settle count of readings ([`Watch::settle_readings`]).
+    /// detector's settle time ([`Watch::settle_time`]).
     Settled,
 }
 
@@ -359,11 +361,11 @@ pub enum Event {
 /// Two comparisons, one for each moment. **A change starts** when a reading
 /// differs by more than [`CELL_DELTA`] from the *baseline*, the reading the
 /// region was last still at, so a slow change adds up until it counts. **A
-/// change ends** when the settle count of readings in a row
-/// ([`Watch::settle_readings`]: [`REARM_READINGS`] for *Notify when it
-/// changes*, [`SETTLE_READINGS`] for *Notify when it stops changing*) each
-/// differ by no more than [`STILL_DELTA`] from the first reading of that
-/// still run; the last becomes the new baseline, wherever the region stopped.
+/// change ends** when the region has held still for the settle time
+/// ([`Watch::settle_time`]: [`REARM_TIME`] for *Notify when it changes*, six
+/// seconds for *Notify when it stops changing*), every reading in that time
+/// within [`STILL_DELTA`] of the first reading of the still run; the last
+/// becomes the new baseline, wherever the region stopped.
 /// Each is reported once, so a video under a watch area raises one
 /// notification while it plays, not one a reading.
 #[derive(Debug, Clone)]

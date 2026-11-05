@@ -173,8 +173,8 @@ struct Slot {
     ever_retained: AtomicBool,
     /// The least time between two frames the compositor sends this session,
     /// or `None` for WGC's default. Freeze holds `None` (frame age is its
-    /// fidelity bar); watch areas hold [`WATCH_FRAME_INTERVAL`], half their
-    /// reading interval, since a busy screen costs per frame.
+    /// fidelity bar); watch areas hold [`WATCH_FRAME_INTERVAL`], about 30
+    /// frames a second, since a busy screen costs per frame.
     min_interval: Option<std::time::Duration>,
     /// Whether this is a watch area's session: it reports dirty regions, and
     /// a frame whose dirty regions touch a watch area rings the watcher
@@ -764,7 +764,7 @@ pub fn watch_capture_region(
         if slot.is_unservable() {
             return Err("a monitor the watch area covers cannot be held".into());
         }
-        let Some(pixels) = read_box(slot, part) else {
+        let Some(pixels) = read_box(slot, part)? else {
             return Ok(None);
         };
         let x = u32::try_from(part.origin.x - taken.origin.x).map_err(|e| e.to_string())?;
@@ -783,27 +783,33 @@ pub fn watch_capture_region(
 /// frame, RGBA8 top-down: a GPU copy of just that box into a staging texture
 /// its size, then one small readback. `None` with no frame held, or a frame
 /// whose size no longer matches the monitor.
-fn read_box(slot: &Slot, part: Rect) -> Option<Vec<u8>> {
+///
+/// `Ok(None)` with no frame held yet, or a frame whose size no longer matches
+/// the monitor (the session rebuilds): nothing to read this time. `Err` when a
+/// GPU step fails, so the caller falls back and says so, rather than taking a
+/// lasting fault for a session still warming up (review of `#162`, round 1).
+fn read_box(slot: &Slot, part: Rect) -> Result<Option<Vec<u8>>, String> {
     let guard = slot.retained.lock().unwrap_or_else(PoisonError::into_inner);
-    let retained = guard.as_ref()?;
+    let Some(retained) = guard.as_ref() else {
+        return Ok(None);
+    };
     if retained.size != slot.bounds.size {
-        return None;
+        return Ok(None);
     }
-    let source = box_in(slot.bounds, retained.size, part)?;
+    let source = box_in(slot.bounds, retained.size, part).ok_or("the box leaves the frame")?;
     let mut desc = D3D11_TEXTURE2D_DESC::default();
     // SAFETY: fills `desc` from a live texture.
     unsafe { retained.live.GetDesc(&mut desc) };
     desc.Width = part.size.width;
     desc.Height = part.size.height;
     // SAFETY: the context's own device; no preconditions.
-    let device = unsafe { retained.context.GetDevice() }.ok()?;
+    let device = unsafe { retained.context.GetDevice() }.map_err(|e| e.to_string())?;
     let staging = create_texture(
         &device,
         &desc,
         D3D11_USAGE_STAGING,
         D3D11_CPU_ACCESS_READ.0.cast_unsigned(),
-    )
-    .ok()?;
+    )?;
     // SAFETY: the same format by construction; the box lies inside the source
     // (`box_in`) and fits the destination exactly.
     unsafe {
@@ -825,7 +831,7 @@ fn read_box(slot: &Slot, part: Rect) -> Option<Vec<u8>> {
             .context
             .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
     }
-    .ok()?;
+    .map_err(|e| e.to_string())?;
     let mapped_len = mapped.DepthPitch as usize;
     // SAFETY: as in `readback`: valid until `Unmap`, its length D3D11's own.
     let mapped_bytes = unsafe { std::slice::from_raw_parts(mapped.pData.cast::<u8>(), mapped_len) };
@@ -833,6 +839,8 @@ fn read_box(slot: &Slot, part: Rect) -> Option<Vec<u8>> {
     // SAFETY: unmaps exactly what was mapped above.
     unsafe { retained.context.Unmap(&staging, 0) };
     packed
+        .map(Some)
+        .ok_or_else(|| "the mapped picture was short".to_string())
 }
 
 /// The mip level of a `size` picture to read back for a fingerprint: the

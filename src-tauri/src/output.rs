@@ -613,14 +613,15 @@ fn capture_bitmap(app: &AppHandle, bounds: Rect, split: &mut Split) -> Result<Rg
 /// One reading for a watch area (roadmap `1.58`) by a capture of its own:
 /// `bounds` captured live. **The fallback, not the usual route**: a reading
 /// comes from the watch areas' held sessions (`watch.rs`, `AppHost::capture`),
-/// and this runs only while a session warms up or on a monitor WGC cannot
-/// hold. Never the frozen still or the frame held since a press: a watch area
+/// and this runs only on a monitor WGC cannot hold, or when reading a held
+/// session's frame fails on the GPU; a session still warming up is waited
+/// for instead. Never the frozen still or the frame held since a press: a watch area
 /// compares the screen with itself over time.
 ///
 /// ⚠️ **The one capture here that does NOT step UP-TAKE's drawing aside**
 /// ([`crate::overlay::capture_aside`]). With *Show UP-TAKE in screen
 /// recordings* on, stepping aside hides the area's border and its *watching*
-/// mark for the length of every reading, twice a second: the mark would
+/// mark for the length of every reading: the mark would
 /// blink out exactly while the area reads, which `ADR-0048`'s *Revisit if*
 /// names (review of `#154`, round 1). So the drawing stays in the picture and
 /// the watcher leaves it out of the comparison (`uptake_core::watch::leave_out`).
