@@ -39,12 +39,12 @@ Until then it is written by hand.
   live view; an OCR area that reads the text under it, shows what it read in place, and puts
   that text on the clipboard so it can be pasted straight into something else; and a watch area
   that shows a Windows notification when the screen under it starts changing, or stops. A watch
-  area starts watching the moment it is made, and `P` or its menu pauses and resumes it. The
+  area starts watching the moment it is made, and `P` or *Pause* in its settings pauses and resumes it. The
   installer carries the OCR runtime and the models; they are not in this repository, and three
   checksummed scripts fetch them before a build can bundle them. (This said "two" scripts until
   2026-09-08; there are three, one each for the runtime, the detector and the recogniser.)
-- Sticky areas. Any area can be told from its menu to follow the window under it. It moves with
-  that window. When the window is resized the area scales with it, and its menu offers three other
+- Sticky areas. Any area can be told in its settings to follow the window under it. It moves with
+  that window. When the window is resized the area scales with it, and its settings offer three other
   answers: scale only its position, keep its distance from the nearest corner, or keep its distance
   from the top left corner. While the window is minimised or closed the area is hidden. It is still
   there when you place areas, dimmed and marked "Paused", so you can free it, move it or remove it.

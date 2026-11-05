@@ -2590,8 +2590,12 @@ fn exit_on_main_thread() {
     *lock(&ARMED) = None;
     // The menu belongs to a visible overlay: leaving with it still on screen
     // would draw a control over a hidden window that nothing could ever click.
+    // The settings panel likewise: the hooks that close it on a press outside
+    // or on Esc go with this mode, so left open it could be closed only by
+    // its own x (review of `#161`, round 3).
     if let Some(app) = APP.get() {
         close_menu(app);
+        crate::panel::close(app);
     }
     if LEFT_PENDING.load(Ordering::SeqCst) || RIGHT_PENDING.load(Ordering::SeqCst) {
         WANT_TEARDOWN.store(true, Ordering::SeqCst);
@@ -6920,6 +6924,18 @@ mod tests {
         );
         // Hover opens nothing any more (the same day).
         assert!(!source.contains(concat!("crate::panel::", "on_", "hover")));
+    }
+
+    /// Review of `#161`, round 3: leaving to Hidden closes the panel with the
+    /// menu, since the hooks that would close it go with that mode.
+    #[test]
+    fn leaving_to_hidden_closes_the_panel_with_the_menu() {
+        let body = fn_body(include_str!("placement.rs"), "fn exit_on_main_thread() {");
+        let menu = body.find("close_menu(app);");
+        let panel = body.find("crate::panel::close(app);");
+        assert!(menu.is_some() && panel.is_some(), "both are closed");
+        let teardown = body.find("teardown_now()").unwrap_or(usize::MAX);
+        assert!(panel < Some(teardown), "before the hooks go");
     }
 
     /// Roadmap `1.60`, the founder's choice of 2026-11-05: right-click opens
