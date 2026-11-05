@@ -620,7 +620,7 @@ fn capture_bitmap(app: &AppHandle, bounds: Rect, split: &mut Split) -> Result<Rg
 /// ⚠️ **The one capture here that does NOT step UP-TAKE's drawing aside**
 /// ([`crate::overlay::capture_aside`]). With *Show UP-TAKE in screen
 /// recordings* on, stepping aside hides the area's border and its *watching*
-/// mark for the length of every reading, every two seconds: the mark would
+/// mark for the length of every reading, twice a second: the mark would
 /// blink out exactly while the area reads, which `ADR-0048`'s *Revisit if*
 /// names (review of `#154`, round 1). So the drawing stays in the picture and
 /// the watcher leaves it out of the comparison (`uptake_core::watch::leave_out`).

@@ -173,9 +173,8 @@ struct Slot {
     ever_retained: AtomicBool,
     /// The least time between two frames the compositor sends this session,
     /// or `None` for WGC's default. Freeze holds `None` (frame age is its
-    /// fidelity bar); watch areas hold [`WATCH_FRAME_INTERVAL`], since a
-    /// reading every two seconds gains nothing from fresher frames and a busy
-    /// screen costs per frame.
+    /// fidelity bar); watch areas hold [`WATCH_FRAME_INTERVAL`], half their
+    /// reading interval, since a busy screen costs per frame.
     min_interval: Option<std::time::Duration>,
 }
 
@@ -641,11 +640,18 @@ fn capture_monitor_in(list: &Mutex<Vec<Arc<Slot>>>, monitor: Rect) -> Option<Cap
 /// video playing, unthrottled; these are throttled to [`WATCH_FRAME_INTERVAL`].
 static WATCH_SESSIONS: Mutex<Vec<Arc<Slot>>> = Mutex::new(Vec::new());
 
-/// The least time between frames for a watch area's session. Readings come
-/// every two seconds, so a frame up to a second old is as good as a new one.
+/// The least time between frames for a watch area's session: a quarter of a
+/// second, half the watcher's reading interval (UP-TAKE `watch::INTERVAL`,
+/// which asserts it at compile time). Half, so a frame read is never older
+/// than half a reading, and a region that keeps changing gives every reading
+/// a new frame: one frame read twice would count as a still reading, and a
+/// moving video would re-arm between frames (review of `#159`, round 1). It
+/// was one second while readings came every two seconds.
 /// ⚠️ That a frame does arrive within this interval of a change is WGC's
-/// documented intent, not measured here (UP-TAKE backlog `I-474`).
-pub const WATCH_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+/// documented intent, not measured here; nor is the cost of four frames a
+/// second on a busy screen (UP-TAKE backlog `I-474`). A still screen sends no
+/// frames, so its cost does not change.
+pub const WATCH_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Holds a session on every monitor that any of `regions` overlaps, and on no
 /// other, keeping sessions already held for them. Returns how many are held.
