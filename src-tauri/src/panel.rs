@@ -244,7 +244,10 @@ pub fn close(app: &AppHandle) {
     let _ = app.run_on_main_thread(move || {
         if let Some(window) = app_main.get_webview_window(LABEL) {
             let had_keyboard = window.is_focused().unwrap_or(false);
-            hide_window(&window);
+            // Shown by a raw `ShowWindow`, so hidden by one (`I-478`).
+            if let Err(error) = crate::notice::hide_shown(&window) {
+                crate::diagnostics::trouble("panel: could not close", &error);
+            }
             if had_keyboard
                 && crate::placement::is_placing()
                 && let Some(overlay) = app_main.get_webview_window(crate::overlay::WINDOW_LABEL)
@@ -355,23 +358,6 @@ fn show_on_top(hwnd: windows_sys::Win32::Foundation::HWND) {
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         );
     }
-}
-
-/// Hides the window the way [`show_on_top`] showed it: with `ShowWindow`
-/// itself. tao's own hide does nothing here, because tao hides a window only
-/// when its own record says it is visible, and a window shown by a raw
-/// `ShowWindow` is still hidden in that record (`I-478`, measured by a drill
-/// against tao 0.37.1: the window stayed visible after `set_visible(false)`).
-fn hide_window(window: &tauri::WebviewWindow) {
-    #[cfg(windows)]
-    if let Ok(hwnd) = window.hwnd() {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, ShowWindow};
-        // SAFETY: `hwnd` is this process's live panel window; this only hides
-        // it.
-        unsafe { ShowWindow(hwnd.0, SW_HIDE) };
-        return;
-    }
-    let _ = window.hide();
 }
 
 /// The areas changed: re-place the panel and have its page read its area
@@ -718,27 +704,18 @@ mod tests {
     /// The founder's rig, 2026-11-03 (`I-478`): the ×, `Esc` and a press
     /// elsewhere all left the panel open. The window is shown by a raw
     /// `ShowWindow`, which tao does not see, so tao's own hide did nothing.
-    /// Every hide goes through `hide_window`, whose only tao hide is the
-    /// fallback for a window with no handle; held by source because no test
+    /// Every hide goes through `notice::hide_shown`, which hides with
+    /// `ShowWindow` (its own test holds that); held by source because no test
     /// here can run a tao window.
     #[test]
     fn the_panel_is_hidden_the_way_it_was_shown() {
         let source = include_str!("panel.rs");
         let code = source.split("#[cfg(test)]").next().unwrap_or_default();
+        assert_eq!(code.matches(".hide()").count(), 0, "no tao hide");
         assert_eq!(
-            code.matches(".hide()").count(),
-            1,
-            "only hide_window's fallback"
+            code.matches("crate::notice::hide_shown(&window)").count(),
+            1
         );
-        let at = |needle: &str| code.find(needle).unwrap_or(usize::MAX);
-        let (helper, raw, fallback) = (
-            at("fn hide_window("),
-            at("ShowWindow(hwnd.0, SW_HIDE)"),
-            at("let _ = window.hide();"),
-        );
-        assert!(fallback < usize::MAX, "the fallback is there");
-        assert!(helper < raw && raw < fallback, "the raw hide comes first");
-        assert!(code.contains("hide_window(&window);"));
     }
 
     #[test]
