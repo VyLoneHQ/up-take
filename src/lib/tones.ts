@@ -25,3 +25,22 @@ export const TONES: Record<Tone, string> = {
 export function isTone(value: unknown): value is Tone {
   return typeof value === 'string' && value in TONES;
 }
+
+/**
+ * The legend colour of an area type, by its wire name (`overlay.rs`
+ * `type_name`): the settings panel and the cards are drawn in it.
+ */
+export function toneOf(kind: string): Tone {
+  switch (kind) {
+    case 'watch':
+      return 'watch';
+    case 'filter':
+      return 'filter';
+    case 'upscale':
+      return 'upscale';
+    case 'ocr':
+      return 'text';
+    default:
+      return 'accent';
+  }
+}

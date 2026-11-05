@@ -31,19 +31,20 @@ Until then it is written by hand.
 - System tray icon and menu, and a single-instance guard.
 - Areas: drag to create, then move, resize and dismiss them. Areas live until dismissed or until the
   app exits, and do not survive a restart.
-- Six area types, chosen from the area's own right-click menu. A plain pinned region; a screenshot
+- Six area types, chosen in the area's own settings, which a right-click opens beside it
+  (Ctrl+right-click opens the area's menu instead). A plain pinned region; a screenshot
   area that captures what is under it and keeps the still, which Copy and Save export; a filter
   area that tints what is underneath and lets clicks pass through to it; an upscale area that
   sharpens the piece of screen under it in place, without magnifying it, as a still rather than a
   live view; an OCR area that reads the text under it, shows what it read in place, and puts
   that text on the clipboard so it can be pasted straight into something else; and a watch area
   that shows a Windows notification when the screen under it starts changing, or stops. A watch
-  area starts watching the moment it is made, and `P` or its menu pauses and resumes it. The
+  area starts watching the moment it is made, and `P` or *Pause* in its settings pauses and resumes it. The
   installer carries the OCR runtime and the models; they are not in this repository, and three
   checksummed scripts fetch them before a build can bundle them. (This said "two" scripts until
   2026-09-08; there are three, one each for the runtime, the detector and the recogniser.)
-- Sticky areas. Any area can be told from its menu to follow the window under it. It moves with
-  that window. When the window is resized the area scales with it, and its menu offers three other
+- Sticky areas. Any area can be told in its settings to follow the window under it. It moves with
+  that window. When the window is resized the area scales with it, and its settings offer three other
   answers: scale only its position, keep its distance from the nearest corner, or keep its distance
   from the top left corner. While the window is minimised or closed the area is hidden. It is still
   there when you place areas, dimmed and marked "Paused", so you can free it, move it or remove it.
