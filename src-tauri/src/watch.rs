@@ -578,8 +578,8 @@ fn left_out(bounds: Rect, taken: Rect, overlay_in_captures: bool) -> Vec<Rect> {
 /// The parts of a reading that lie under UP-TAKE's own windows, in the
 /// reading's pixels: `windows` in desktop pixels, cut to `taken`, the
 /// rectangle the capture returned. With *Show UP-TAKE in screen recordings*
-/// on, a notification card over a watch area is in its reading (and the
-/// settings panel, once `1.60`'s pull request lists it); those parts are
+/// on, a notification card or the settings panel over a watch area is in its
+/// reading; those parts are
 /// unknown to the comparison rather than a change, or a card could raise the
 /// next card (`I-480`, review of `#160`, round 1).
 fn unknown_under(windows: &[Rect], taken: Rect) -> Vec<Rect> {

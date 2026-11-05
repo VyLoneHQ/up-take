@@ -333,8 +333,8 @@ pub(crate) fn hide_shown(window: &tauri::WebviewWindow) -> Result<(), String> {
         .map_err(|error| format!("could not hide the notice window: {error}"))
 }
 
-/// *Show UP-TAKE in screen recordings* changed: gives every card window on
-/// screen the new capture policy at once (review of `#160`, round 2). Each
+/// *Show UP-TAKE in screen recordings* changed: gives every card window and
+/// the settings panel on screen the new capture policy at once (review of `#160`, round 2). Each
 /// card is given the policy when it is placed, so without this a card on
 /// screen at the change kept the old one: in recordings after the user turned
 /// that off, until the stack next moved.
@@ -346,7 +346,7 @@ pub fn apply_capture_policy(app: &AppHandle, show_in_recordings: bool) -> Result
     use windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible;
     let mut failed = Vec::new();
     for (label, window) in app.webview_windows() {
-        if !label.starts_with(LABEL_PREFIX) {
+        if !(label.starts_with(LABEL_PREFIX) || label == crate::panel::LABEL) {
             continue;
         }
         let Ok(hwnd) = window.hwnd() else {
@@ -370,9 +370,8 @@ pub fn apply_capture_policy(app: &AppHandle, show_in_recordings: bool) -> Result
     }
 }
 
-/// One of UP-TAKE's own windows outside the overlay (today the card stacks;
-/// the settings panel joins in `1.60`'s pull request): where it is, or where
-/// it was and since when.
+/// One of UP-TAKE's own windows outside the overlay (a card stack, the
+/// settings panel): where it is, or where it was and since when.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct OwnWindow {
     label: String,
@@ -830,7 +829,7 @@ mod tests {
             .nth(1)
             .and_then(|rest| rest.split("\n}\n").next())
             .unwrap_or_default();
-        assert!(body.contains("label.starts_with(LABEL_PREFIX)"));
+        assert!(body.contains("label.starts_with(LABEL_PREFIX) || label == crate::panel::LABEL"));
         assert!(body.contains("IsWindowVisible(hwnd.0) } == 0"));
         assert!(body.contains("write_affinity_to(hwnd.0, show_in_recordings)"));
     }
