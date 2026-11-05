@@ -671,8 +671,15 @@ trait Host {
     /// The pass is over: drop what it read.
     fn end_pass(&mut self);
     /// One reading of `bounds`, or `None` while a monitor it covers has no
-    /// frame held yet (nothing to read this time).
-    fn capture(&mut self, bounds: Rect) -> Result<Option<uptake_capture::CapturedRegion>, String>;
+    /// frame held yet (nothing to read this time). `whole`: the reading needs
+    /// the full picture, since UP-TAKE's own drawing is in captures and is
+    /// painted out of it; otherwise it may be a small picture averaged down
+    /// on the GPU, which is all a fingerprint needs.
+    fn capture(
+        &mut self,
+        bounds: Rect,
+        whole: bool,
+    ) -> Result<Option<uptake_capture::CapturedRegion>, String>;
     /// The time a reading is made at, on a clock that only moves forward, for
     /// the detector's calm (`Detector::observe_at`). Asked once a pass.
     fn now(&mut self) -> Duration;
@@ -721,13 +728,24 @@ impl Host for AppHost<'_> {
     fn monitors(&mut self) -> Vec<Rect> {
         crate::overlay::monitor_rects()
     }
-    fn capture(&mut self, bounds: Rect) -> Result<Option<uptake_capture::CapturedRegion>, String> {
-        // Only the area's own rectangle, copied on the GPU from the held
+    fn capture(
+        &mut self,
+        bounds: Rect,
+        whole: bool,
+    ) -> Result<Option<uptake_capture::CapturedRegion>, String> {
+        let desktop = crate::overlay::monitor_rects();
+        // Averaged down on the GPU and read back at about 16 x 16, so a
+        // read costs about the same for any area size: when nothing has to
+        // be painted out and the area is on one monitor.
+        if !whole && let Ok(small) = uptake_capture::warm::watch_capture_small(bounds, &desktop) {
+            return Ok(small);
+        }
+        // Otherwise only the area's own rectangle, copied on the GPU from the held
         // sessions and read back alone. A monitor whose session is still
         // warming up has nothing to read yet; one that cannot be held at all
         // falls back to a capture of its own, which the governor then paces
         // by what it costs.
-        match uptake_capture::warm::watch_capture_region(bounds, &crate::overlay::monitor_rects()) {
+        match uptake_capture::warm::watch_capture_region(bounds, &desktop) {
             Ok(read) => Ok(read),
             Err(_) => crate::output::capture_for_watch(bounds).map(Some),
         }
@@ -858,7 +876,7 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
             soon = Some(FRESH_WAIT);
             continue;
         }
-        let reading = match host.capture(target.bounds) {
+        let reading = match host.capture(target.bounds, state.1) {
             Ok(None) => {
                 // No frame held yet for a monitor it covers: try again soon.
                 soon = Some(FRESH_WAIT);
@@ -1067,7 +1085,11 @@ mod tests {
                 self.clock += uptake_core::watch::READING_STEP;
                 self.clock
             }
-            fn capture(&mut self, bounds: Rect) -> Result<Option<CapturedRegion>, String> {
+            fn capture(
+                &mut self,
+                bounds: Rect,
+                _whole: bool,
+            ) -> Result<Option<CapturedRegion>, String> {
                 self.captured.push(bounds);
                 if self.unready > 0 {
                     self.unready -= 1;

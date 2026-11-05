@@ -835,6 +835,150 @@ fn read_box(slot: &Slot, part: Rect) -> Option<Vec<u8>> {
     packed
 }
 
+/// The mip level of a `size` picture to read back for a fingerprint: the
+/// smallest whose sides are both still at least `least`, or level 0 when the
+/// picture is already narrower or shorter than that. Each level halves the
+/// last, rounding down, as D3D11 sizes a mip chain.
+#[must_use]
+pub fn fingerprint_level(size: Size, least: u32) -> u32 {
+    let mut level = 0;
+    let (mut width, mut height) = (size.width, size.height);
+    while width / 2 >= least && height / 2 >= least {
+        width /= 2;
+        height /= 2;
+        level += 1;
+    }
+    level
+}
+
+/// `region` as a small picture for a fingerprint, averaged down on the GPU:
+/// the area's box is copied into a texture with a mip chain, the GPU averages
+/// it (`GenerateMips`), and only the smallest level with both sides at least
+/// [`uptake_core::watch::GRID`] is read back ([`fingerprint_level`]), so a
+/// read costs about the same for any area size. The picture's `rect` is the
+/// region; its bitmap is the level's size, not the region's.
+///
+/// Only for a region on one monitor, read without anything left out (the
+/// reading's caller paints UP-TAKE's own drawing out of a full picture when
+/// it is in captures). `Ok(None)` while that monitor has no frame held yet;
+/// `Err` when it cannot be held, or the region is on more than one monitor.
+///
+/// # Errors
+///
+/// As above, and when a GPU step fails.
+pub fn watch_capture_small(
+    region: Rect,
+    desktop: &[Rect],
+) -> Result<Option<CapturedRegion>, String> {
+    let mut on = desktop
+        .iter()
+        .filter(|monitor| monitor.intersection(region).is_some());
+    let monitor = *on.next().ok_or("off the desktop")?;
+    if on.next().is_some() || monitor.intersection(region) != Some(region) {
+        return Err("not wholly on one monitor".into());
+    }
+    let sessions = WATCH_SESSIONS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    let Some(slot) = sessions.iter().find(|slot| slot.bounds == monitor) else {
+        return Ok(None);
+    };
+    if slot.is_unservable() {
+        return Err("the monitor cannot be held".into());
+    }
+    let Some((size, pixels)) = shrink_box(slot, region)? else {
+        return Ok(None);
+    };
+    let bitmap = RgbaBitmap::from_pixels(size, pixels).ok_or("a picture of the wrong size")?;
+    Ok(Some(CapturedRegion {
+        rect: region,
+        bitmap,
+    }))
+}
+
+/// [`watch_capture_small`]'s GPU work on one monitor's newest frame.
+fn shrink_box(slot: &Slot, part: Rect) -> Result<Option<(Size, Vec<u8>)>, String> {
+    use windows::Win32::Graphics::Direct3D11::{
+        D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_RESOURCE_MISC_GENERATE_MIPS,
+        ID3D11ShaderResourceView,
+    };
+    let guard = slot.retained.lock().unwrap_or_else(PoisonError::into_inner);
+    let Some(retained) = guard.as_ref() else {
+        return Ok(None);
+    };
+    if retained.size != slot.bounds.size {
+        return Ok(None);
+    }
+    let source = box_in(slot.bounds, retained.size, part).ok_or("the box leaves the frame")?;
+    let level = fingerprint_level(part.size, uptake_core::watch::GRID);
+    let mut desc = D3D11_TEXTURE2D_DESC::default();
+    // SAFETY: fills `desc` from a live texture.
+    unsafe { retained.live.GetDesc(&mut desc) };
+    // SAFETY: the context's own device; no preconditions.
+    let device = unsafe { retained.context.GetDevice() }.map_err(|e| e.to_string())?;
+    let mut chain = desc;
+    chain.Width = part.size.width;
+    chain.Height = part.size.height;
+    chain.MipLevels = level + 1;
+    chain.ArraySize = 1;
+    chain.Usage = D3D11_USAGE_DEFAULT;
+    chain.BindFlags = (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0).cast_unsigned();
+    chain.CPUAccessFlags = 0;
+    chain.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS.0.cast_unsigned();
+    let mut mips: Option<ID3D11Texture2D> = None;
+    // SAFETY: a valid description and out-pointer; no initial data.
+    unsafe { device.CreateTexture2D(&chain, None, Some(&mut mips)) }.map_err(|e| e.to_string())?;
+    let mips = mips.ok_or("no mip texture")?;
+    let mut view: Option<ID3D11ShaderResourceView> = None;
+    // SAFETY: the texture was made with shader-resource binding.
+    unsafe { device.CreateShaderResourceView(&mips, None, Some(&mut view)) }
+        .map_err(|e| e.to_string())?;
+    let view = view.ok_or("no view")?;
+    // SAFETY: the same format by construction; the box lies inside the source
+    // (`box_in`) and fits level 0 exactly; then the GPU fills the levels.
+    unsafe {
+        retained
+            .context
+            .CopySubresourceRegion(&mips, 0, 0, 0, 0, &retained.live, 0, Some(&source));
+        retained.context.GenerateMips(&view);
+    }
+    let size = Size::new(
+        (part.size.width >> level).max(1),
+        (part.size.height >> level).max(1),
+    );
+    let mut small = desc;
+    small.Width = size.width;
+    small.Height = size.height;
+    let staging = create_texture(
+        &device,
+        &small,
+        D3D11_USAGE_STAGING,
+        D3D11_CPU_ACCESS_READ.0.cast_unsigned(),
+    )?;
+    // SAFETY: level `level` of `mips` is `size` exactly and of the same format.
+    unsafe {
+        retained
+            .context
+            .CopySubresourceRegion(&staging, 0, 0, 0, 0, &mips, level, None);
+    }
+    let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+    // SAFETY: as in `readback`.
+    unsafe {
+        retained
+            .context
+            .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+    }
+    .map_err(|e| e.to_string())?;
+    let mapped_len = mapped.DepthPitch as usize;
+    // SAFETY: as in `readback`: valid until `Unmap`, its length D3D11's own.
+    let mapped_bytes = unsafe { std::slice::from_raw_parts(mapped.pData.cast::<u8>(), mapped_len) };
+    let packed = pack_rows(mapped_bytes, mapped.RowPitch as usize, size);
+    // SAFETY: unmaps exactly what was mapped above.
+    unsafe { retained.context.Unmap(&staging, 0) };
+    Ok(packed.map(|pixels| (size, pixels)))
+}
+
 /// The texture box `part` (desktop pixels) covers on a monitor at `monitor`
 /// whose frame is `frame` in size, or `None` when it is empty or does not
 /// lie wholly inside the frame. Apart, so the arithmetic is tested.
@@ -1387,6 +1531,23 @@ mod tests {
         assert!(touches_a_watch_area(None, &areas), "unknown is read");
         assert!(touches_a_watch_area(Some(&[]), &areas), "unknown is read");
         assert!(!touches_a_watch_area(None, &[]), "nothing to watch");
+    }
+
+    /// The level read back for a fingerprint: the smallest still at least
+    /// 16 on both sides, so the grid keeps its 16 x 16 cells.
+    #[test]
+    fn the_level_read_back_keeps_the_grid() {
+        assert_eq!(fingerprint_level(Size::new(600, 400), 16), 4, "37 x 25");
+        assert_eq!(fingerprint_level(Size::new(1920, 1080), 16), 6, "30 x 16");
+        assert_eq!(fingerprint_level(Size::new(32, 32), 16), 1);
+        assert_eq!(fingerprint_level(Size::new(31, 400), 16), 0, "narrow");
+        assert_eq!(fingerprint_level(Size::new(10, 10), 16), 0, "small");
+        for (w, h) in [(600, 400), (1920, 1080), (3840, 2160), (17, 900)] {
+            let level = fingerprint_level(Size::new(w, h), 16);
+            let (lw, lh) = (w >> level, h >> level);
+            assert!(level == 0 || (lw >= 16 && lh >= 16), "{w} x {h}");
+            assert!(lw / 2 < 16 || lh / 2 < 16, "{w} x {h}: the smallest");
+        }
     }
 
     /// The GPU box for a part of a monitor: monitor-relative, and refused
