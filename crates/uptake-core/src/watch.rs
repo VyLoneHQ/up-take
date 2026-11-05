@@ -255,8 +255,8 @@ const fn luma(r: u8, g: u8, b: u8) -> u8 {
 pub enum Event {
     /// The region was still and now differs from its last reading.
     Changed,
-    /// The region had been changing and has now matched itself for
-    /// [`SETTLE_READINGS`] readings in a row.
+    /// The region had been changing and has now held still for the
+    /// detector's settle count of readings ([`Watch::settle_readings`]).
     Settled,
 }
 
@@ -265,11 +265,13 @@ pub enum Event {
 /// Two comparisons, one for each moment. **A change starts** when a reading
 /// differs by more than [`CELL_DELTA`] from the *baseline*, the reading the
 /// region was last still at, so a slow change adds up until it counts. **A
-/// change ends** when [`SETTLE_READINGS`] readings in a row each differ from
-/// the reading just before by no more than [`STILL_DELTA`]; that reading
-/// becomes the new baseline, wherever the region stopped. Each is reported
-/// once, so a video under a watch area raises one notification and not one
-/// every two seconds.
+/// change ends** when the settle count of readings in a row
+/// ([`Watch::settle_readings`]: [`REARM_READINGS`] for *Notify when it
+/// changes*, [`SETTLE_READINGS`] for *Notify when it stops changing*) each
+/// differ by no more than [`STILL_DELTA`] from the first reading of that
+/// still run; the last becomes the new baseline, wherever the region stopped.
+/// Each is reported once, so a video under a watch area raises one
+/// notification while it plays, not one a reading.
 #[derive(Debug, Clone)]
 pub struct Detector {
     baseline: Option<Fingerprint>,

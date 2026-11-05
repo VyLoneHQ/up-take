@@ -85,7 +85,8 @@
 //! - a change between the check and the frame read back, a few milliseconds,
 //!   is not seen by the check;
 //! - the frame is a held session's newest, which can be up to
-//!   `warm::WATCH_FRAME_INTERVAL` (one second) older than the check, and can
+//!   `warm::WATCH_FRAME_INTERVAL` (a quarter of a second) older than the
+//!   check, and can
 //!   come from between the page's layout and its paint (rounds 12 and 20). A
 //!   watcher made or started again waits one pass before its first reading
 //!   ([`Watcher`]), which keeps such a frame out of a baseline, not out of
@@ -158,6 +159,17 @@ use crate::strings::{Text, text};
 /// readings was missed). Held sessions measured 0.13 % of a core at two
 /// seconds; four times the readings is re-measured before release (`I-474`).
 pub const INTERVAL: Duration = Duration::from_millis(500);
+
+// A reading uses a held session's newest frame, so frames must come at least
+// twice per reading: a frame up to one reading old could reach a fresh
+// baseline ([`Watcher::fresh`]), and one frame read twice counts as a still
+// reading, which re-arms *Notify when it changes* in the middle of a moving
+// region (review of `#159`, round 1: the reading interval went to 500 ms
+// while the frame throttle stayed at one second).
+const _: () = assert!(
+    INTERVAL.as_nanos() >= 2 * uptake_capture::warm::WATCH_FRAME_INTERVAL.as_nanos(),
+    "a watch reading must see at least two frame intervals"
+);
 
 /// How wide a band along each edge of the area is left out of a reading, in
 /// physical pixels: the border, 1.5 CSS pixels, at up to 250 % scaling.
@@ -457,7 +469,10 @@ struct Watcher {
     /// again (the overlay state changed, the setting flipped, a move ended)
     /// could still show what came before, and the next reading would report
     /// that as a change (review of `#154`, round 12). One [`INTERVAL`] later
-    /// the frame should be newer than the reason it started again.
+    /// the frame should be newer than the reason it started again, which
+    /// holds only while [`INTERVAL`] is at least twice the frame interval: a
+    /// compile-time assertion beside [`INTERVAL`] keeps it so (review of
+    /// `#159`, round 1).
     ///
     /// ⚠️ **Assumed, not measured:** that WGC, held at
     /// `WATCH_FRAME_INTERVAL`, delivers a frame within that interval of a
