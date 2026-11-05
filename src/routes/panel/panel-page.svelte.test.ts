@@ -101,7 +101,10 @@ const WATCH = {
 function lastSet() {
   return vi
     .mocked(invoke)
-    .mock.calls.filter(([command]) => command !== 'panel_resize')
+    .mock.calls.filter(
+      ([command]) =>
+        command !== 'panel_resize' && command !== 'panel_return_keyboard',
+    )
     .at(-1);
 }
 
@@ -206,4 +209,46 @@ test('a panel opened again reports its height again (I-479)', async () => {
   expect(resizes()).toEqual([
     ['panel_resize', { height: PANEL_HEIGHT + MARGINS }],
   ]);
+});
+
+// Review of #161, round 1: a click outside closed the panel before the name
+// field lost focus, and a name saved only then was dropped or could land on
+// another area. It is saved as it is typed, by the area's own id.
+test('a name is saved as it is typed, for its own area', async () => {
+  render(Page);
+  await settle();
+  const field = document.querySelector('input') as HTMLInputElement;
+  field.focus();
+  field.value = 'Do';
+  field.dispatchEvent(new Event('input', { bubbles: true }));
+  await settle();
+  expect(lastSet()).toEqual(['panel_set_name', { id: 1, name: 'Do' }]);
+  field.value = 'Download';
+  field.dispatchEvent(new Event('input', { bubbles: true }));
+  await settle();
+  expect(lastSet()).toEqual(['panel_set_name', { id: 1, name: 'Download' }]);
+});
+
+// Review of #161, round 1: a click on a panel button activated the panel, and
+// placing went deaf to its keys. Each control hands the keyboard back; typing
+// a name does not.
+test('using a control gives the keyboard back, typing a name does not', async () => {
+  render(Page);
+  await settle();
+  const returns = () =>
+    vi
+      .mocked(invoke)
+      .mock.calls.filter(([command]) => command === 'panel_return_keyboard')
+      .length;
+  const field = document.querySelector('input') as HTMLInputElement;
+  field.value = 'x';
+  field.dispatchEvent(new Event('input', { bubbles: true }));
+  await settle();
+  expect(returns()).toBe(0);
+  button('Always on top').click();
+  expect(returns()).toBe(1);
+  button('Notify when it stops changing').click();
+  expect(returns()).toBe(2);
+  switchNamed('Click-through').click();
+  expect(returns()).toBe(3);
 });

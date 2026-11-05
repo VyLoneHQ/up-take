@@ -34,9 +34,12 @@
 //! Its own window, not part of the overlay: the placement hook hands a press to
 //! any window above the overlay at that point (`placement::window_above`), so
 //! the panel's controls are ordinary controls, a text field included. Shown
-//! without taking the keyboard; a click into it does take it (to type a name),
-//! and closing gives it back to the overlay while placing, or placing would go
-//! deaf to `Esc` (the bug found with the cards, `notice::give_focus_back`).
+//! without taking the keyboard. A click into it does take it; while placing,
+//! using any control gives it straight back to the overlay
+//! ([`panel_return_keyboard`], review of `#161`, round 1), so only the name
+//! field keeps it, to be typed into, and closing gives it back too, or placing
+//! would go deaf to its keys (the bug found with the cards,
+//! `notice::give_focus_back`).
 
 use std::sync::{Mutex, PoisonError};
 
@@ -474,14 +477,19 @@ pub fn raise(app: &AppHandle) {
     if open_now().is_none() {
         return;
     }
-    #[cfg(windows)]
-    if let Some(window) = app.get_webview_window(LABEL)
-        && let Ok(hwnd) = window.hwnd()
-    {
-        show_on_top(hwnd.0);
-    }
-    #[cfg(not(windows))]
-    let _ = app;
+    // From the overlay's focus event, inside tao's message handling: posted,
+    // like every other piece of window work here (review of `#161`, round 1).
+    let app_main = app.clone();
+    later(app, move || {
+        #[cfg(windows)]
+        if let Some(window) = app_main.get_webview_window(LABEL)
+            && let Ok(hwnd) = window.hwnd()
+        {
+            show_on_top(hwnd.0);
+        }
+        #[cfg(not(windows))]
+        let _ = app_main;
+    });
 }
 
 /// A press outside an open panel closes it, the way a press outside the menu
@@ -624,18 +632,45 @@ pub fn panel_close(app: AppHandle) {
 
 /// IPC surface: names the open area, or clears its name when `name` is blank.
 #[tauri::command]
-pub fn panel_set_name(app: AppHandle, name: String) -> Result<(), String> {
-    let renamed = with_open_area(|id| {
+pub fn panel_set_name(app: AppHandle, id: u64, name: String) -> Result<(), String> {
+    // By the area's own id, not "the open panel's": the page saves as the
+    // user types, and a save that arrives after a click outside closed the
+    // panel, or after another area's panel opened, must still name the area
+    // it was typed for (review of `#161`, round 1).
+    let renamed = {
         let store = app.state::<Mutex<AreaStore>>();
-        store
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .set_name(id, &name)
-    });
-    if renamed == Some(true) {
+        let mut store = store.lock().unwrap_or_else(PoisonError::into_inner);
+        let found = store
+            .iter()
+            .find(|area| area.id.get() == id)
+            .map(|area| area.id);
+        found.is_some_and(|area| store.set_name(area, &name))
+    };
+    if renamed {
         changed(&app)?;
     }
     Ok(())
+}
+
+/// IPC surface: a control in the panel was used. While placing, the keyboard
+/// goes back to the overlay, where the placing keys are read: a click on a
+/// panel button activates the panel, and placing would otherwise go deaf to
+/// every key but `Esc` until the panel closed (review of `#161`, round 1).
+/// The name field alone keeps the keyboard, to be typed into.
+#[tauri::command]
+pub fn panel_return_keyboard(app: AppHandle) {
+    if !crate::placement::is_placing() {
+        return;
+    }
+    let app_main = app.clone();
+    later(&app, move || {
+        if let Some(panel) = app_main.get_webview_window(LABEL)
+            && panel.is_focused().unwrap_or(false)
+            && let Some(overlay) = app_main.get_webview_window(crate::overlay::WINDOW_LABEL)
+        {
+            let _ = overlay.set_focus();
+        }
+    });
 }
 
 /// IPC surface: what the open watch area tells the user about.
@@ -838,29 +873,58 @@ mod tests {
 
     /// The maintainer's rig, 2026-11-05: a right-click inside a watch area in
     /// Living ended the app (tao's paint assertion), because the hook showed
-    /// and hid the panel window inside tao's own message handling. Every
-    /// piece of window work in this file goes through `later`, which posts it
-    /// as an event; held by source, as no test here can run the hook.
+    /// and hid the panel window inside tao's own message handling. Every call
+    /// that shows, hides or places the window sits inside a `later` closure,
+    /// which posts it as an event; `present` and `show_on_top` themselves are
+    /// only reached that way. Held by source, as no test here runs the hook.
+    /// Review of `#161`, round 1: the first version counted
+    /// `run_on_main_thread` calls and stayed green with `present` called
+    /// directly.
     #[test]
     fn the_panel_window_is_never_touched_inside_the_hook() {
         let source = include_str!("panel.rs");
         let code = source.split("#[cfg(test)]").next().unwrap_or_default();
-        let calls = code.matches(concat!(".run_on_main", "_thread(")).count();
-        assert_eq!(calls, 1, "only inside `later`");
-        let helper = code
-            .split("fn later(app: &AppHandle")
-            .nth(1)
-            .and_then(|rest| {
-                rest.split(
-                    "
-}
-",
-                )
-                .next()
-            })
-            .unwrap_or_default();
-        assert!(helper.contains("std::thread::Builder::new()"));
-        assert!(helper.contains(concat!("app.run_on_main", "_thread(work)")));
+        assert_eq!(
+            code.matches(concat!(".run_on_main", "_thread(")).count(),
+            1,
+            "only inside `later`"
+        );
+        let calls = [
+            concat!("present", "(&"),
+            concat!("hide_", "shown(&window)"),
+            concat!("show_on_", "top(hwnd.0)"),
+            concat!(".set_", "focus()"),
+        ];
+        let mut inside: Option<&str> = None;
+        let mut checked = 0;
+        for line in code.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("fn ") || trimmed.starts_with("pub fn ") {
+                inside = Some(
+                    if trimmed.contains("fn present(") || trimmed.contains("fn show_on_top(") {
+                        "window fn"
+                    } else {
+                        "fn"
+                    },
+                );
+            } else if trimmed.contains("later(") && !trimmed.starts_with("///") {
+                inside = Some("later");
+            }
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            for call in calls {
+                if line.contains(call) {
+                    checked += 1;
+                    assert!(
+                        matches!(inside, Some("later" | "window fn")),
+                        "`{}` outside `later`",
+                        line.trim()
+                    );
+                }
+            }
+        }
+        assert!(checked >= 6, "the calls were found ({checked})");
     }
 
     #[test]

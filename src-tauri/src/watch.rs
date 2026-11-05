@@ -107,9 +107,10 @@
 //! comes and goes with its name, so a rename starts its watcher again too
 //! ([`Target::label`], `I-480`). What is left: a menu, a selection box or
 //! another area's flash drawn over a watched region while the user works
-//! there can count as a change, and so can a notification card or the
-//! settings panel over one (`I-480`'s second half, open). The setting is off
-//! by default.
+//! there can count as a change. A notification card or the settings panel
+//! over one does not: UP-TAKE lists where its own windows are and a reading
+//! leaves their cells out of the comparison ([`unknown_under`], `I-480`).
+//! The setting is off by default.
 //!
 //! # Cost
 //!

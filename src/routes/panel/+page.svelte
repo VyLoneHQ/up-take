@@ -53,23 +53,41 @@ function close(): void {
   void invoke('panel_close').catch(() => {});
 }
 
+// Saved as it is typed, with the area's own id: a click outside closes the
+// panel before the field loses focus, and a save sent only then was dropped,
+// or could name another area whose panel opened meanwhile (review of #161,
+// round 1).
 function saveName(): void {
+  if (view)
+    void invoke('panel_set_name', { id: view.id, name }).catch(() => {});
+}
+
+function endEditing(): void {
   editing = false;
-  void invoke('panel_set_name', { name }).catch(() => {});
+  saveName();
+}
+
+/** After a control was used: placing gets the keyboard back (review of
+ * #161, round 1). The name field alone keeps it. */
+function done(): void {
+  void invoke('panel_return_keyboard').catch(() => {});
 }
 
 function setWatch(watch: PanelWatch): void {
   void invoke('panel_set_watch', { watch }).catch(() => {});
+  done();
 }
 
 function setHeld(held: boolean): void {
   void invoke('panel_set_held', { held }).catch(() => {});
+  done();
 }
 
 // The menu's other rows (roadmap 1.60, second slice): each calls the command
 // that runs what the matching menu row runs.
 function set(command: string, args: Record<string, unknown>): void {
   void invoke(command, args).catch(() => {});
+  done();
 }
 
 const depthLabel: Record<PanelDepth, string> = {
@@ -96,7 +114,7 @@ function onSwitchKey(event: KeyboardEvent, flip: () => void): void {
 function onNameKey(event: KeyboardEvent): void {
   if (event.key === 'Enter') {
     event.preventDefault();
-    saveName();
+    endEditing();
     (event.currentTarget as HTMLInputElement).blur();
   }
 }
@@ -104,7 +122,7 @@ function onNameKey(event: KeyboardEvent): void {
 function onKeydown(event: KeyboardEvent): void {
   if (event.key === 'Escape') {
     event.preventDefault();
-    if (editing) saveName();
+    if (editing) endEditing();
     close();
   }
 }
@@ -179,7 +197,8 @@ onMount(() => {
         onfocus={() => {
           editing = true;
         }}
-        onblur={saveName}
+        oninput={saveName}
+        onblur={endEditing}
         onkeydown={onNameKey}
       />
     </label>

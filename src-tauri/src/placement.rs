@@ -530,7 +530,7 @@ enum MenuAction {
     /// Name the area (the founder, 2026-11-03): the page shows a name field
     /// over it. On every type, since every area-raised card leads with it.
     Rename,
-    /// Open the area's settings panel, pinned (roadmap `1.60`).
+    /// Open the area's settings panel (roadmap `1.60`).
     Settings,
     /// Pause (`true`) or resume (`false`) the area's ongoing work
     /// (`ADR-0053`). One row whose label says what it does, so the action
@@ -4336,7 +4336,7 @@ const fn press_closes_panel_here(placing: bool, shadowed: bool) -> bool {
 /// ctrl+right-click should open the "legacy" (the other menu) version"*).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RightClick {
-    /// The area's settings panel, pinned.
+    /// The area's settings panel.
     Panel,
     /// The area menu of before the panel.
     Menu,
@@ -4359,7 +4359,7 @@ fn ctrl_held() -> bool {
     unsafe { GetAsyncKeyState(i32::from(VK_CONTROL)) < 0 }
 }
 
-/// Opens the settings panel, pinned, for whatever is under `point`, on the
+/// Opens the settings panel for whatever is under `point`, on the
 /// same target as the menu ([`pointer_target`], which the press that claimed
 /// the click also used). Closes any open menu either way, and with no area
 /// under `point` the click has nothing to act on.
@@ -4789,8 +4789,8 @@ fn menu_rows(area: &overlay::AreaSummary) -> Vec<MenuRow> {
     // The founder, 2026-11-03: every area can be named, and every card an
     // area raises leads with its name.
     // The area's settings panel: the founder's way in to everything an area
-    // can be set to (roadmap 1.60). Until the menu's rows move into the
-    // panel, this row is how right-click reaches it. With the bottom group,
+    // can be set to (roadmap 1.60). Right-click opens it directly now; in
+    // this menu, reached with Ctrl+right-click, the row is a second way in. With the bottom group,
     // so Copy and Save still lead a screenshot's menu.
     rows.push(leaf(MenuAction::Settings, text(Text::MenuSettings), false));
     rows.push(leaf(MenuAction::Rename, text(Text::MenuRename), false));
@@ -6861,15 +6861,25 @@ mod tests {
         let source = include_str!("placement.rs");
         let classify = fn_body(source, "fn classify_press(point: Point) -> Gesture {");
         assert!(classify.contains("crate::panel::close_on_press(app, point)"));
-        let hook = source
-            .split("if press_closes_panel_here(mode() == Mode::Placement, shadowed)")
-            .nth(1)
+        // Within the press block itself: the close comes before the press is
+        // let through to another window (review of `#161`, round 1: the
+        // first version split at any later `if shadowed {` and stayed green
+        // with the two swapped).
+        let start = source
+            .find("        if crate::panel::takes_press(point) {")
+            .unwrap_or(usize::MAX);
+        let block = source
+            .get(start..)
+            .and_then(|rest| rest.split("    match wparam as u32 {").next())
             .unwrap_or_default();
+        let close = block.find("crate::panel::close_on_press(app, point)");
+        let through = block.find("if shadowed {");
         assert!(
-            hook.split("if shadowed {")
-                .next()
-                .unwrap_or_default()
-                .contains("crate::panel::close_on_press(app, point)"),
+            close.is_some() && through.is_some(),
+            "both are in the block"
+        );
+        assert!(
+            close < through,
             "the hook closes it before letting the press through"
         );
         // Hover opens nothing any more (the same day).
