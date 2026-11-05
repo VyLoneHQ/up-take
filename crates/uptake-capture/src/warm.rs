@@ -72,9 +72,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use uptake_core::bitmap::RgbaBitmap;
 use uptake_core::geometry::{Point, Rect, Size};
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_TEXTURE2D_DESC,
-    D3D11_USAGE, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING, ID3D11Device, ID3D11DeviceContext,
-    ID3D11Multithread, ID3D11Texture2D,
+    D3D11_BOX, D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE,
+    D3D11_TEXTURE2D_DESC, D3D11_USAGE, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING, ID3D11Device,
+    ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D,
 };
 use windows::core::Interface;
 use windows_capture::capture::{Context, GraphicsCaptureApiHandler};
@@ -173,9 +173,13 @@ struct Slot {
     ever_retained: AtomicBool,
     /// The least time between two frames the compositor sends this session,
     /// or `None` for WGC's default. Freeze holds `None` (frame age is its
-    /// fidelity bar); watch areas hold [`WATCH_FRAME_INTERVAL`], half their
-    /// reading interval, since a busy screen costs per frame.
+    /// fidelity bar); watch areas hold [`WATCH_FRAME_INTERVAL`], about 30
+    /// frames a second, since a busy screen costs per frame.
     min_interval: Option<std::time::Duration>,
+    /// Whether this is a watch area's session: it reports dirty regions, and
+    /// a frame whose dirty regions touch a watch area rings the watcher
+    /// ([`on_watch_frame`], the event-driven watch area).
+    watch: bool,
 }
 
 impl Slot {
@@ -388,6 +392,7 @@ fn hold(
             unservable: AtomicBool::new(false),
             ever_retained: AtomicBool::new(false),
             min_interval,
+            watch: std::ptr::eq(held, &WATCH_SESSIONS),
         });
         // The pump publishes its id before the slot joins `SESSIONS`, so
         // `thread_id` is never "not yet" for a slot a reader can reach. It can
@@ -640,18 +645,74 @@ fn capture_monitor_in(list: &Mutex<Vec<Arc<Slot>>>, monitor: Rect) -> Option<Cap
 /// video playing, unthrottled; these are throttled to [`WATCH_FRAME_INTERVAL`].
 static WATCH_SESSIONS: Mutex<Vec<Arc<Slot>>> = Mutex::new(Vec::new());
 
-/// The least time between frames for a watch area's session: a quarter of a
-/// second, half the watcher's reading interval (UP-TAKE `watch::INTERVAL`,
-/// which asserts it at compile time). Half, so a frame read is never older
-/// than half a reading, and a region that keeps changing gives every reading
-/// a new frame: one frame read twice would count as a still reading, and a
-/// moving video would re-arm between frames (review of `#159`, round 1). It
-/// was one second while readings came every two seconds.
-/// ⚠️ That a frame does arrive within this interval of a change is WGC's
-/// documented intent, not measured here; nor is the cost of four frames a
-/// second on a busy screen (UP-TAKE backlog `I-474`). A still screen sends no
-/// frames, so its cost does not change.
-pub const WATCH_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+/// The least time between frames for a watch area's session: about 30 a
+/// second. The watcher is event-driven (the maintainer's design of
+/// 2026-11-05: as responsive as possible without costing UP-TAKE or the PC):
+/// a frame that touches a watch area wakes it, so this bounds how soon a
+/// change is seen (one frame, about 33 ms) and how many frames a busy screen
+/// sends, each copied on the GPU (`retain`). A still screen sends none. What
+/// the watcher reads is capped separately, by its own cost (the governor in
+/// UP-TAKE's `watch.rs`).
+/// ⚠️ The GPU and CPU cost of 30 frames a second on a busy screen is not
+/// measured yet (UP-TAKE backlog `I-474`).
+pub const WATCH_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);
+
+/// The watch areas, desktop pixels, as [`watch_hold`] was last given them: a
+/// frame whose dirty regions touch none of them wakes nobody.
+static WATCH_REGIONS: Mutex<Vec<Rect>> = Mutex::new(Vec::new());
+
+/// What a frame that touches a watch area calls: UP-TAKE's watcher sets it
+/// ([`on_watch_frame`]). A plain function, called on the session's pump
+/// thread, so it must only signal and return.
+static WATCH_WAKER: Mutex<Option<fn()>> = Mutex::new(None);
+
+/// Sets what a frame touching a watch area calls (see [`WATCH_WAKER`]).
+pub fn on_watch_frame(waker: fn()) {
+    *WATCH_WAKER.lock().unwrap_or_else(PoisonError::into_inner) = Some(waker);
+}
+
+fn ring_watcher() {
+    let waker = *WATCH_WAKER.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(waker) = waker {
+        waker();
+    }
+}
+
+/// What the watch reads answer when a monitor the area covers cannot be
+/// held by WGC at all: expected on such a monitor, not a GPU fault; the
+/// caller reads by a capture of its own.
+pub const UNSERVABLE: &str = "a monitor the watch area covers cannot be held";
+
+/// What [`watch_capture_small`] answers for a region across monitors or off
+/// one: not a fault, the caller reads the region whole instead.
+pub const NOT_ON_ONE_MONITOR: &str = "not wholly on one monitor";
+
+/// Whether this Windows build can report where a capture frame changed
+/// (`GraphicsCaptureSession.DirtyRegionMode`). Asked once; an error reads as
+/// no.
+fn dirty_regions_supported() -> bool {
+    static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SUPPORTED.get_or_init(|| {
+        windows_capture::graphics_capture_api::GraphicsCaptureApi::is_dirty_region_supported()
+            .unwrap_or(false)
+    })
+}
+
+/// Whether a frame that changed `dirty` (desktop pixels) may have changed
+/// one of `regions`. `None` (the frame said nothing about where it changed)
+/// and an empty list both count as touching: an unknown is read rather than
+/// missed.
+#[must_use]
+pub fn touches_a_watch_area(dirty: Option<&[Rect]>, regions: &[Rect]) -> bool {
+    match dirty {
+        None | Some([]) => !regions.is_empty(),
+        Some(dirty) => dirty.iter().any(|part| {
+            regions
+                .iter()
+                .any(|region| part.intersection(*region).is_some())
+        }),
+    }
+}
 
 /// Holds a session on every monitor that any of `regions` overlaps, and on no
 /// other, keeping sessions already held for them. Returns how many are held.
@@ -668,17 +729,351 @@ pub fn watch_hold(regions: &[Rect]) -> usize {
                 .any(|region| region.intersection(monitor.bounds).is_some())
         })
         .collect();
+    *WATCH_REGIONS.lock().unwrap_or_else(PoisonError::into_inner) = regions.to_vec();
     hold(&WATCH_SESSIONS, wanted, Some(WATCH_FRAME_INTERVAL))
 }
 
 /// Stops every watch area's session. Safe when none is held.
 pub fn watch_release() {
+    WATCH_REGIONS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clear();
     let _ = stop_in(&WATCH_SESSIONS, || true);
 }
 
-/// The newest frame held for watch areas on `monitor`, or `None` (not held,
-/// still warming up, or the monitor changed): the caller takes
-/// [`crate::capture_region`] instead.
+/// `region` read from the watch sessions' newest frames, copying on the GPU
+/// only the part of each monitor it covers and reading back only that, never
+/// the whole monitor (a whole frame is about 33 MB on a 4K screen, the bulk
+/// of a reading's cost). The rectangle and its transparent black off every
+/// monitor are [`compose`]'s, so the two routes give the same picture.
+///
+/// `Ok(None)` while a monitor it covers has no frame held yet (a session
+/// warming up): nothing to read this time, the watcher waits for the next
+/// frame. `Err` when a monitor it covers cannot be held at all, so the
+/// caller takes [`crate::capture_region`].
+///
+/// # Errors
+///
+/// When the region is off the desktop, or a monitor it covers cannot be held.
+pub fn watch_capture_region(
+    region: Rect,
+    desktop: &[Rect],
+) -> Result<Option<CapturedRegion>, String> {
+    let (first, rest) = desktop
+        .split_first()
+        .ok_or_else(|| "no monitors".to_string())?;
+    let bounding = rest.iter().fold(*first, |all, monitor| all.union(*monitor));
+    let taken = region
+        .intersection(bounding)
+        .ok_or_else(|| "off the desktop".to_string())?;
+    let sessions = WATCH_SESSIONS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    let Some(mut bitmap) = RgbaBitmap::transparent(taken.size) else {
+        return Err("an empty picture".into());
+    };
+    for monitor in desktop {
+        let Some(part) = taken.intersection(*monitor) else {
+            continue;
+        };
+        let Some(slot) = sessions.iter().find(|slot| slot.bounds == *monitor) else {
+            return Ok(None);
+        };
+        if slot.is_unservable() {
+            return Err(UNSERVABLE.into());
+        }
+        let Some(pixels) = read_box(slot, part)? else {
+            return Ok(None);
+        };
+        let x = u32::try_from(part.origin.x - taken.origin.x).map_err(|e| e.to_string())?;
+        let y = u32::try_from(part.origin.y - taken.origin.y).map_err(|e| e.to_string())?;
+        if !crate::blit::blit(&mut bitmap, x, y, &pixels, part.size) {
+            return Err("the part did not fit the picture".into());
+        }
+    }
+    Ok(Some(CapturedRegion {
+        rect: taken,
+        bitmap,
+    }))
+}
+
+/// `part` (desktop pixels, inside the slot's monitor) of the slot's newest
+/// frame, RGBA8 top-down: a GPU copy of just that box into a staging texture
+/// its size, then one small readback. `None` with no frame held, or a frame
+/// whose size no longer matches the monitor.
+///
+/// `Ok(None)` with no frame held yet, or a frame whose size no longer matches
+/// the monitor (the session rebuilds): nothing to read this time. `Err` when a
+/// GPU step fails, so the caller falls back and says so, rather than taking a
+/// lasting fault for a session still warming up (review of `#162`, round 1).
+fn read_box(slot: &Slot, part: Rect) -> Result<Option<Vec<u8>>, String> {
+    let guard = slot.retained.lock().unwrap_or_else(PoisonError::into_inner);
+    let Some(retained) = guard.as_ref() else {
+        return Ok(None);
+    };
+    if retained.size != slot.bounds.size {
+        return Ok(None);
+    }
+    let source = box_in(slot.bounds, retained.size, part).ok_or("the box leaves the frame")?;
+    let mut desc = D3D11_TEXTURE2D_DESC::default();
+    // SAFETY: fills `desc` from a live texture.
+    unsafe { retained.live.GetDesc(&mut desc) };
+    desc.Width = part.size.width;
+    desc.Height = part.size.height;
+    // SAFETY: the context's own device; no preconditions.
+    let device = unsafe { retained.context.GetDevice() }.map_err(|e| e.to_string())?;
+    let staging = create_texture(
+        &device,
+        &desc,
+        D3D11_USAGE_STAGING,
+        D3D11_CPU_ACCESS_READ.0.cast_unsigned(),
+    )?;
+    // SAFETY: the same format by construction; the box lies inside the source
+    // (`box_in`) and fits the destination exactly.
+    unsafe {
+        retained.context.CopySubresourceRegion(
+            &staging,
+            0,
+            0,
+            0,
+            0,
+            &retained.live,
+            0,
+            Some(&source),
+        );
+    }
+    let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+    // SAFETY: as in `readback`.
+    unsafe {
+        retained
+            .context
+            .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+    }
+    .map_err(|e| e.to_string())?;
+    let mapped_len = mapped.DepthPitch as usize;
+    // SAFETY: as in `readback`: valid until `Unmap`, its length D3D11's own.
+    let mapped_bytes = unsafe { std::slice::from_raw_parts(mapped.pData.cast::<u8>(), mapped_len) };
+    let packed = pack_rows(mapped_bytes, mapped.RowPitch as usize, part.size);
+    // SAFETY: unmaps exactly what was mapped above.
+    unsafe { retained.context.Unmap(&staging, 0) };
+    packed
+        .map(Some)
+        .ok_or_else(|| "the mapped picture was short".to_string())
+}
+
+/// The mip level of a `size` picture to read back for a fingerprint: the
+/// smallest whose sides are both still at least `least`, or level 0 when the
+/// picture is already narrower or shorter than that. Each level halves the
+/// last, rounding down, as D3D11 sizes a mip chain.
+#[must_use]
+pub fn fingerprint_level(size: Size, least: u32) -> u32 {
+    let mut level = 0;
+    let (mut width, mut height) = (size.width, size.height);
+    while width / 2 >= least && height / 2 >= least {
+        width /= 2;
+        height /= 2;
+        level += 1;
+    }
+    level
+}
+
+/// `region` as a small picture for a fingerprint, averaged down on the GPU:
+/// the area's box is copied into a texture with a mip chain, the GPU averages
+/// it (`GenerateMips`), and only the smallest level with both sides at least
+/// [`uptake_core::watch::GRID`] is read back ([`fingerprint_level`]), so a
+/// read costs about the same for any area size. The picture's `rect` is the
+/// region; its bitmap is the level's size, not the region's.
+///
+/// Only for a region on one monitor, read without anything left out (the
+/// reading's caller paints UP-TAKE's own drawing out of a full picture when
+/// it is in captures). `Ok(None)` while that monitor has no frame held yet;
+/// `Err` when it cannot be held, or the region is on more than one monitor.
+///
+/// # Errors
+///
+/// As above, and when a GPU step fails.
+pub fn watch_capture_small(
+    region: Rect,
+    desktop: &[Rect],
+) -> Result<Option<CapturedRegion>, String> {
+    let mut on = desktop
+        .iter()
+        .filter(|monitor| monitor.intersection(region).is_some());
+    let monitor = *on.next().ok_or("off the desktop")?;
+    if on.next().is_some() || monitor.intersection(region) != Some(region) {
+        return Err(NOT_ON_ONE_MONITOR.into());
+    }
+    let sessions = WATCH_SESSIONS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    let Some(slot) = sessions.iter().find(|slot| slot.bounds == monitor) else {
+        return Ok(None);
+    };
+    if slot.is_unservable() {
+        return Err(UNSERVABLE.into());
+    }
+    let Some((size, pixels)) = shrink_box(slot, region)? else {
+        return Ok(None);
+    };
+    let bitmap = RgbaBitmap::from_pixels(size, pixels).ok_or("a picture of the wrong size")?;
+    Ok(Some(CapturedRegion {
+        rect: region,
+        bitmap,
+    }))
+}
+
+/// [`watch_capture_small`]'s GPU work on one monitor's newest frame.
+fn shrink_box(slot: &Slot, part: Rect) -> Result<Option<(Size, Vec<u8>)>, String> {
+    let guard = slot.retained.lock().unwrap_or_else(PoisonError::into_inner);
+    let Some(retained) = guard.as_ref() else {
+        return Ok(None);
+    };
+    if retained.size != slot.bounds.size {
+        return Ok(None);
+    }
+    let source = box_in(slot.bounds, retained.size, part).ok_or("the box leaves the frame")?;
+    // SAFETY: the context's own device; no preconditions.
+    let device = unsafe { retained.context.GetDevice() }.map_err(|e| e.to_string())?;
+    average_box(
+        &device,
+        &retained.context,
+        &retained.live,
+        &source,
+        part.size,
+    )
+    .map(Some)
+}
+
+/// The size of the mip chain's first level for a picture of `size` averaged
+/// down `level` times: each side rounded up to a whole number of
+/// `2^level`, so every halving is exact and every pixel is weighed. A side
+/// halved with rounding down, as D3D11 sizes a chain, gives some pixels no
+/// weight at all: on a 1080p area a fifth of the rows, one band 56 pixels
+/// tall, never reached the fingerprint (review of `#162`, round 4).
+#[must_use]
+pub fn padded_for_level(size: Size, level: u32) -> Size {
+    let unit = 1_u32 << level;
+    let up = |side: u32| side.div_ceil(unit).saturating_mul(unit);
+    Size::new(up(size.width), up(size.height))
+}
+
+/// `source_box` of `source` (a texture of the frame's format), averaged down
+/// on the GPU to the smallest level still at least [`uptake_core::watch::GRID`]
+/// on both sides ([`fingerprint_level`]), and read back, RGBA8 top-down, with
+/// its size. Level 0 is padded to [`padded_for_level`] and cleared to black
+/// before the box is copied in, so the averaging weighs every pixel of the
+/// box equally; the padding is the same black in every reading, so it never
+/// differs.
+fn average_box(
+    device: &ID3D11Device,
+    context: &ID3D11DeviceContext,
+    source: &ID3D11Texture2D,
+    source_box: &D3D11_BOX,
+    size: Size,
+) -> Result<(Size, Vec<u8>), String> {
+    use windows::Win32::Graphics::Direct3D11::{
+        D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_RESOURCE_MISC_GENERATE_MIPS,
+        ID3D11RenderTargetView, ID3D11ShaderResourceView,
+    };
+    let level = fingerprint_level(size, uptake_core::watch::GRID);
+    let padded = padded_for_level(size, level);
+    let mut desc = D3D11_TEXTURE2D_DESC::default();
+    // SAFETY: fills `desc` from a live texture.
+    unsafe { source.GetDesc(&mut desc) };
+    let mut chain = desc;
+    chain.Width = padded.width;
+    chain.Height = padded.height;
+    chain.MipLevels = level + 1;
+    chain.ArraySize = 1;
+    chain.Usage = D3D11_USAGE_DEFAULT;
+    chain.BindFlags = (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0).cast_unsigned();
+    chain.CPUAccessFlags = 0;
+    chain.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS.0.cast_unsigned();
+    let mut mips: Option<ID3D11Texture2D> = None;
+    // SAFETY: a valid description and out-pointer; no initial data.
+    unsafe { device.CreateTexture2D(&chain, None, Some(&mut mips)) }.map_err(|e| e.to_string())?;
+    let mips = mips.ok_or("no mip texture")?;
+    let mut target: Option<ID3D11RenderTargetView> = None;
+    // SAFETY: the texture was made with render-target binding; the default
+    // view is its first level.
+    unsafe { device.CreateRenderTargetView(&mips, None, Some(&mut target)) }
+        .map_err(|e| e.to_string())?;
+    let target = target.ok_or("no target view")?;
+    let mut view: Option<ID3D11ShaderResourceView> = None;
+    // SAFETY: the texture was made with shader-resource binding.
+    unsafe { device.CreateShaderResourceView(&mips, None, Some(&mut view)) }
+        .map_err(|e| e.to_string())?;
+    let view = view.ok_or("no view")?;
+    // SAFETY: the views belong to `mips`; the box lies inside the source
+    // (the caller's `box_in`) and fits inside level 0 at its corner, which is
+    // the same format; then the GPU fills the levels.
+    unsafe {
+        context.ClearRenderTargetView(&target, &[0.0, 0.0, 0.0, 1.0]);
+        context.CopySubresourceRegion(&mips, 0, 0, 0, 0, source, 0, Some(source_box));
+        context.GenerateMips(&view);
+    }
+    let small_size = Size::new(
+        (padded.width >> level).max(1),
+        (padded.height >> level).max(1),
+    );
+    let mut small = desc;
+    small.Width = small_size.width;
+    small.Height = small_size.height;
+    let staging = create_texture(
+        device,
+        &small,
+        D3D11_USAGE_STAGING,
+        D3D11_CPU_ACCESS_READ.0.cast_unsigned(),
+    )?;
+    // SAFETY: level `level` of `mips` is `small_size` exactly, same format.
+    unsafe {
+        context.CopySubresourceRegion(&staging, 0, 0, 0, 0, &mips, level, None);
+    }
+    let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+    // SAFETY: as in `readback`.
+    unsafe { context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)) }
+        .map_err(|e| e.to_string())?;
+    let mapped_len = mapped.DepthPitch as usize;
+    // SAFETY: as in `readback`: valid until `Unmap`, its length D3D11's own.
+    let mapped_bytes = unsafe { std::slice::from_raw_parts(mapped.pData.cast::<u8>(), mapped_len) };
+    let packed = pack_rows(mapped_bytes, mapped.RowPitch as usize, small_size);
+    // SAFETY: unmaps exactly what was mapped above.
+    unsafe { context.Unmap(&staging, 0) };
+    // A short mapping is a fault, as in `read_box`, not "no frame yet"
+    // (review of `#162`, round 3).
+    packed
+        .map(|pixels| (small_size, pixels))
+        .ok_or_else(|| "the mapped picture was short".to_string())
+}
+
+/// The texture box `part` (desktop pixels) covers on a monitor at `monitor`
+/// whose frame is `frame` in size, or `None` when it is empty or does not
+/// lie wholly inside the frame. Apart, so the arithmetic is tested.
+fn box_in(monitor: Rect, frame: Size, part: Rect) -> Option<D3D11_BOX> {
+    let left = u32::try_from(part.origin.x - monitor.origin.x).ok()?;
+    let top = u32::try_from(part.origin.y - monitor.origin.y).ok()?;
+    let right = left.checked_add(part.size.width)?;
+    let bottom = top.checked_add(part.size.height)?;
+    (part.size.width > 0 && part.size.height > 0 && right <= frame.width && bottom <= frame.height)
+        .then_some(D3D11_BOX {
+            left,
+            top,
+            front: 0,
+            right,
+            bottom,
+            back: 1,
+        })
+}
+
+/// The newest frame held for watch areas on `monitor`, whole, or `None` (not
+/// held, still warming up, or the monitor changed). **Not the watcher's
+/// route since the event-driven watch area** (`up-take` #162), which reads
+/// each area alone from the GPU ([`watch_capture_small`],
+/// [`watch_capture_region`]); kept for the examples that measure the
+/// whole-frame route.
 #[must_use]
 pub fn watch_capture_monitor(monitor: Rect) -> Option<CapturedRegion> {
     capture_monitor_in(&WATCH_SESSIONS, monitor)
@@ -690,11 +1085,13 @@ pub fn watch_capture_monitor(monitor: Rect) -> Option<CapturedRegion> {
 /// and pixels on no frame are transparent black (`plan.rs`). `None` when
 /// `region` overlaps no frame, or a cut fails.
 ///
-/// **The same rectangle as `capture_region` on purpose.** A reading falls back
-/// to `capture_region` while a session warms up, so the two routes meet in one
-/// watcher; a picture of a different size would move every cell of the
-/// fingerprint and notify on a still screen (review of `#154`, round 12, when
-/// this clamped to the frames instead).
+/// **The same rectangle as `capture_region` on purpose**, and
+/// [`watch_capture_region`] keeps it too: a reading falls back to
+/// `capture_region` on a monitor that cannot be held, so the routes meet in
+/// one watcher, and a picture of a different size would move every cell of
+/// the fingerprint and notify on a still screen (review of `#154`, round 12).
+/// Not on the watcher's route since `up-take` #162; it states the rectangle
+/// in a form the tests check without a desktop.
 ///
 /// A pure function, so the way a watch area spanning two monitors is put
 /// together is tested without a desktop.
@@ -868,7 +1265,32 @@ impl GraphicsCaptureApiHandler for Warm {
             capture_control.stop();
             return Ok(());
         }
-        retain(&self.flags.slot, frame).inspect_err(|_| capture_control.stop())
+        retain(&self.flags.slot, frame).inspect_err(|_| capture_control.stop())?;
+        if self.flags.slot.watch {
+            // Read where the frame changed, after the frame is retained, so
+            // the watcher that wakes on this reads this frame or a newer one.
+            let dirty = frame.dirty_regions().ok().map(|regions| {
+                regions
+                    .into_iter()
+                    .map(|region| {
+                        Rect::new(
+                            self.flags.slot.bounds.origin.x + region.x,
+                            self.flags.slot.bounds.origin.y + region.y,
+                            u32::try_from(region.width).unwrap_or(0),
+                            u32::try_from(region.height).unwrap_or(0),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            });
+            let regions = WATCH_REGIONS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            if touches_a_watch_area(dirty.as_deref(), &regions) {
+                ring_watcher();
+            }
+        }
+        Ok(())
     }
 
     fn on_closed(&mut self) -> Result<(), Self::Error> {
@@ -1094,7 +1516,21 @@ fn spawn_session(slot: Arc<Slot>) -> bool {
                 MinimumUpdateIntervalSettings::Default,
                 MinimumUpdateIntervalSettings::Custom,
             ),
-            DirtyRegionSettings::Default,
+            // A watch session reports where each frame changed, so a frame
+            // that touched no watch area wakes nobody (measured 2026-11-05 on
+            // the maintainer's primary monitor, Windows build 26200: every
+            // frame carried its regions, about 3 % of the screen per frame on
+            // an ordinary desktop). Freeze's keep WGC's default.
+            // Only where Windows has the API: the library refuses to start a
+            // session that asks for it on a build without it, and the README
+            // sets the floor at build 19041 (review of `#162`, round 2).
+            // Without it a frame says nothing about where it changed, and
+            // every frame counts as touching (`touches_a_watch_area`).
+            if slot.watch && dirty_regions_supported() {
+                DirtyRegionSettings::ReportOnly
+            } else {
+                DirtyRegionSettings::Default
+            },
             ColorFormat::Rgba8,
             WarmFlags {
                 slot: Arc::clone(&slot),
@@ -1152,6 +1588,216 @@ mod tests {
     fn pixel(region: &CapturedRegion, x: u32, y: u32) -> [u8; 4] {
         let i = ((y * region.rect.size.width + x) * 4) as usize;
         region.bitmap.pixels()[i..i + 4].try_into().unwrap()
+    }
+
+    /// The event-driven watch area (2026-11-05): a frame wakes the watcher
+    /// only when where it changed touches a watch area; a frame that says
+    /// nothing about where counts as touching, and with no watch area
+    /// nothing is woken.
+    #[test]
+    fn only_a_frame_that_touches_a_watch_area_wakes_the_watcher() {
+        let areas = [Rect::new(100, 100, 200, 100), Rect::new(2000, 0, 50, 50)];
+        let elsewhere = [Rect::new(0, 0, 50, 50), Rect::new(400, 400, 10, 10)];
+        assert!(!touches_a_watch_area(Some(&elsewhere), &areas));
+        let edge = [Rect::new(299, 199, 5, 5)];
+        assert!(touches_a_watch_area(Some(&edge), &areas));
+        let second = [Rect::new(0, 0, 1, 1), Rect::new(2040, 40, 30, 30)];
+        assert!(touches_a_watch_area(Some(&second), &areas));
+        let beside = [Rect::new(300, 100, 10, 10)];
+        assert!(
+            !touches_a_watch_area(Some(&beside), &areas),
+            "touching edges"
+        );
+        assert!(touches_a_watch_area(None, &areas), "unknown is read");
+        assert!(touches_a_watch_area(Some(&[]), &areas), "unknown is read");
+        assert!(!touches_a_watch_area(None, &[]), "nothing to watch");
+    }
+
+    /// The level read back for a fingerprint: the smallest still at least
+    /// 16 on both sides, so the grid keeps its 16 x 16 cells.
+    #[test]
+    fn the_level_read_back_keeps_the_grid() {
+        assert_eq!(fingerprint_level(Size::new(600, 400), 16), 4, "37 x 25");
+        assert_eq!(fingerprint_level(Size::new(1920, 1080), 16), 6, "30 x 16");
+        assert_eq!(fingerprint_level(Size::new(32, 32), 16), 1);
+        assert_eq!(fingerprint_level(Size::new(31, 400), 16), 0, "narrow");
+        assert_eq!(fingerprint_level(Size::new(10, 10), 16), 0, "small");
+        for (w, h) in [(600, 400), (1920, 1080), (3840, 2160), (17, 900)] {
+            let level = fingerprint_level(Size::new(w, h), 16);
+            let (lw, lh) = (w >> level, h >> level);
+            assert!(level == 0 || (lw >= 16 && lh >= 16), "{w} x {h}");
+            assert!(lw / 2 < 16 || lh / 2 < 16, "{w} x {h}: the smallest");
+        }
+    }
+
+    /// Review of `#162`, round 2: dirty regions are asked for only where
+    /// Windows has them; the library refuses a session that asks without.
+    #[test]
+    fn dirty_regions_are_asked_for_only_where_windows_has_them() {
+        let source = include_str!("warm.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or_default();
+        assert!(code.contains("if slot.watch && dirty_regions_supported() {"));
+        assert_eq!(
+            code.matches(concat!("DirtyRegionSettings::", "ReportOnly"))
+                .count(),
+            1
+        );
+    }
+
+    /// Review of `#162`, round 4: rounding each halving down left whole bands
+    /// of an area out of the GPU's average (on a 1080p area a fifth of the
+    /// rows). With level 0 padded to whole steps, every row and column of the
+    /// area changes the picture read back. Run on WARP, Windows' software
+    /// device, so it needs no GPU; the bands checked are the ones the review
+    /// measured on hardware, and lines at the edges.
+    #[test]
+    fn every_row_and_column_reaches_the_gpu_average() {
+        use windows::Win32::Foundation::HMODULE;
+        use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_WARP;
+        use windows::Win32::Graphics::Direct3D11::{
+            D3D11_CREATE_DEVICE_FLAG, D3D11_SDK_VERSION, D3D11_SUBRESOURCE_DATA, D3D11CreateDevice,
+        };
+        use windows::Win32::Graphics::Dxgi::Common::{
+            DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC,
+        };
+
+        assert_eq!(
+            padded_for_level(Size::new(600, 400), 4),
+            Size::new(608, 400)
+        );
+        assert_eq!(
+            padded_for_level(Size::new(1920, 1080), 6),
+            Size::new(1920, 1088)
+        );
+        assert_eq!(padded_for_level(Size::new(10, 10), 0), Size::new(10, 10));
+
+        let mut device = None;
+        let mut context = None;
+        // SAFETY: valid out-pointers; WARP needs no adapter.
+        unsafe {
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_WARP,
+                HMODULE::default(),
+                D3D11_CREATE_DEVICE_FLAG(0),
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                Some(&mut context),
+            )
+        }
+        .unwrap();
+        let (device, context) = (device.unwrap(), context.unwrap());
+        let read = |size: Size, line: Option<(bool, u32)>| -> Vec<u8> {
+            let (w, h) = (size.width as usize, size.height as usize);
+            let mut pixels = [120_u8, 120, 120, 255].repeat(w * h);
+            if let Some((row, at)) = line {
+                for i in 0..if row { w } else { h } {
+                    let (x, y) = if row {
+                        (i, at as usize)
+                    } else {
+                        (at as usize, i)
+                    };
+                    pixels[(y * w + x) * 4..(y * w + x) * 4 + 3].copy_from_slice(&[255, 255, 255]);
+                }
+            }
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: size.width,
+                Height: size.height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Usage: D3D11_USAGE_DEFAULT,
+                ..Default::default()
+            };
+            let data = D3D11_SUBRESOURCE_DATA {
+                pSysMem: pixels.as_ptr().cast(),
+                SysMemPitch: size.width * 4,
+                SysMemSlicePitch: 0,
+            };
+            let mut texture = None;
+            // SAFETY: a valid description with initial data of its size.
+            unsafe { device.CreateTexture2D(&desc, Some(&data), Some(&mut texture)) }.unwrap();
+            let texture = texture.unwrap();
+            let whole = D3D11_BOX {
+                left: 0,
+                top: 0,
+                front: 0,
+                right: size.width,
+                bottom: size.height,
+                back: 1,
+            };
+            average_box(&device, &context, &texture, &whole, size)
+                .unwrap()
+                .1
+        };
+        let cases: [(Size, bool, &[u32]); 2] = [
+            (
+                Size::new(600, 400),
+                false,
+                &[0, 288, 291, 295, 304, 308, 311, 599],
+            ),
+            (
+                Size::new(1920, 1080),
+                true,
+                &[
+                    0, 256, 263, 320, 384, 400, 452, 480, 512, 530, 567, 600, 620, 690, 820, 1079,
+                ],
+            ),
+        ];
+        for (size, rows, lines) in cases {
+            let flat = read(size, None);
+            for &at in lines {
+                let lit = read(size, Some((rows, at)));
+                assert_ne!(
+                    lit,
+                    flat,
+                    "{}x{}: {} {at} does not reach the average",
+                    size.width,
+                    size.height,
+                    if rows { "row" } else { "column" }
+                );
+            }
+        }
+    }
+
+    /// The GPU box for a part of a monitor: monitor-relative, and refused
+    /// when it is empty or leaves the frame.
+    #[test]
+    fn the_box_read_back_is_the_part_on_its_monitor() {
+        let monitor = Rect::new(-1920, 0, 1920, 1080);
+        let size = Size::new(1920, 1080);
+        let found = box_in(monitor, size, Rect::new(-1820, 50, 300, 200)).unwrap();
+        assert_eq!(
+            (
+                found.left,
+                found.top,
+                found.right,
+                found.bottom,
+                found.front,
+                found.back
+            ),
+            (100, 50, 400, 250, 0, 1)
+        );
+        assert!(
+            box_in(monitor, size, Rect::new(-100, 0, 200, 10)).is_none(),
+            "past the edge"
+        );
+        assert!(
+            box_in(monitor, size, Rect::new(-2000, 0, 10, 10)).is_none(),
+            "before it"
+        );
+        assert!(
+            box_in(monitor, size, Rect::new(-100, 0, 0, 10)).is_none(),
+            "empty"
+        );
+        let whole = box_in(monitor, size, monitor).unwrap();
+        assert_eq!((whole.right, whole.bottom), (1920, 1080));
     }
 
     /// A watch area across two monitors is put together from both frames,
@@ -1332,6 +1978,7 @@ mod tests {
             unservable: AtomicBool::new(false),
             ever_retained: AtomicBool::new(false),
             min_interval: None,
+            watch: false,
         })
     }
 

@@ -50,7 +50,9 @@ windows-sys = { workspace = true, features = [
 # interfaces windows-capture hands out — and those are `windows` types, so the
 # version must resolve to the same one it uses or they are not the same types.
 windows = { workspace = true, features = [
+  "Win32_Graphics_Direct3D",
   "Win32_Graphics_Direct3D11",
+  "Win32_Graphics_Dxgi",
   "Win32_Graphics_Dxgi_Common",
 ] }
 

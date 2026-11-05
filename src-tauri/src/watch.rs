@@ -1,5 +1,5 @@
 //! The host half of watch areas (roadmap `1.58`, `ADR-0048`): reading each
-//! watching area's region on a timer and raising UP-TAKE's own notification
+//! watching area's region when its screen changes and raising UP-TAKE's own notification
 //! card (`ADR-0054`, `crate::notice`) when what it shows changes, or stops
 //! changing.
 //!
@@ -25,10 +25,11 @@
 //!   logged or sent; the notification says which moment it was, never what
 //!   was read. ⚠️ **What is held in between is larger than a reading:** while
 //!   any area reads, a capture session on each monitor under one keeps that
-//!   monitor's newest frame as a GPU texture (`uptake_capture::warm`), and
-//!   each pass copies it to memory, cuts the areas out and drops the copy at
-//!   the end of the pass. Only the areas' parts are read; the whole frame is
-//!   what the session holds. `ADR-0048` forecloses a whole-screen *watcher*,
+//!   monitor's newest frame as a GPU texture (`uptake_capture::warm`). A
+//!   reading copies only its area's part on the GPU, averaged down to a
+//!   small picture or, where UP-TAKE's own drawing is left out of it, whole,
+//!   and reads back just that; the copy is dropped with the reading. Only
+//!   the areas' parts are read; the whole frame is what the session holds. `ADR-0048` forecloses a whole-screen *watcher*,
 //!   which this is not, but it is the reason a held frame stays in memory and
 //!   is never written anywhere.
 //!
@@ -86,7 +87,7 @@
 //! - a change between the check and the frame read back, a few milliseconds,
 //!   is not seen by the check;
 //! - the frame is a held session's newest, which can be up to
-//!   `warm::WATCH_FRAME_INTERVAL` (a quarter of a second) older than the
+//!   `warm::WATCH_FRAME_INTERVAL` (about 33 ms) older than the
 //!   check, and can
 //!   come from between the page's layout and its paint (rounds 12 and 20). A
 //!   watcher made or started again waits one pass before its first reading
@@ -114,38 +115,54 @@
 //!
 //! # Cost
 //!
-//! **Readings come from capture sessions held on the monitors under watching
-//! areas** (`uptake_capture::warm::watch_hold`), each sent at most four frames
-//! a second (`warm::WATCH_FRAME_INTERVAL`); a pass reads each monitor's frame once and cuts every area out
-//! of it (`warm::compose`). The founder's choice, 2026-10-31 (UP-TAKE backlog
-//! `I-474`), after the measurement in workspace `evidence/1.58-watch-cost/`:
+//! **Event-driven, the maintainer's design of 2026-11-05** (UP-TAKE roadmap
+//! `1.58`, *as responsive as possible without impacting UP-TAKE and PC
+//! performance*). Capture sessions are held on the monitors under watching
+//! areas (`uptake_capture::warm::watch_hold`), at most about 30 frames a
+//! second (`warm::WATCH_FRAME_INTERVAL`), each reporting where it changed. A
+//! frame whose dirty regions touch a watch area wakes the thread
+//! (`warm::on_watch_frame`); any other frame wakes nobody. A reading copies
+//! only the area's own part on the GPU, never the whole monitor: usually
+//! averaged down there to a small picture (`warm::watch_capture_small`), and
+//! read whole (`warm::watch_capture_region`) when UP-TAKE's own drawing is
+//! painted out of it, when the area spans monitors, or when the small read
+//! fails. After each pass
+//! the thread rests in proportion to what the pass cost, so it spends at most
+//! [`BUDGET`] of one core however busy the screen ([`rest_after`]).
 //!
-//! - **This route: 0.13 % of a core for one area and for five**, read every
-//!   two seconds on a still screen; not re-measured at [`INTERVAL`] (`I-474`).
-//! - The first route, a capture built per reading, cost 7.3 % for one area
-//!   and 16.5 % for five, against `quality-bars.md` section 1's 2 % per live
-//!   area (hard fail 5 %).
-//! - ⚠️ **A busy screen under a held session is not measured for this
-//!   route.** `ADR-0026` measured an unthrottled one at +1.33 points with
-//!   video playing; these are throttled to four frames a second.
+//! - **A still screen sends no frames and costs nothing**; the thread looks
+//!   again every [`IDLE`] in case a change was missed.
+//! - **Measured so far:** on the maintainer's primary monitor (Windows build
+//!   26200) an ordinary desktop sent 3 to 11 frames a second, every one with
+//!   its dirty regions, about 2 to 3 % of the screen each. This route,
+//!   measured the same day (workspace `evidence/1.58-watch-events/`): 0.34 %
+//!   of a core for one area and 0.43 % for five on the small read, 1.69 % for
+//!   an area as large as a monitor. **The full-size read, used while
+//!   UP-TAKE is shown in screen recordings, measured 2.49 % and 2.59 % for an
+//!   area as large as a monitor: over `quality-bars.md` §1's 2 % target per
+//!   live area, under its 5 % hard fail**, part of it the sessions'
+//!   frames, which `BUDGET` does not cover. A busy screen held at 30 frames a second
+//!   for a long time is not measured yet (`I-474`).
+//! - Earlier routes, measured in workspace `evidence/1.58-watch-cost/`: held
+//!   sessions read whole every two seconds, 0.13 % of a core for one area
+//!   and for five on a still screen; a capture built per reading, 7.3 % for
+//!   one area. That second route is now only the fallback for a monitor WGC
+//!   cannot hold, which the governor paces by its cost.
 //!
 //! The sessions are let go whenever nothing can be read (switched off,
-//! paused, overlay hidden). For about a third of a second after they are
-//! taken, and on a monitor WGC cannot hold, a reading falls back to one
-//! capture of its own (`output.rs`, `capture_for_watch`), at the old cost
-//! per reading: 7.3 % of a core was measured at a reading every two
-//! seconds, and readings now come four times as often, so a monitor WGC
-//! cannot hold costs about four times that (not measured, `I-474`).
+//! paused, overlay hidden).
 //!
 //! # The thread
 //!
 //! One thread, started the first time any area is switched to watching and
 //! never stopped. While no watch area is switched on it waits on a condition
 //! variable and costs nothing; [`wake`] is what moves it. While one is
-//! switched on, it looks once per [`INTERVAL`], whether or not that area can
-//! be read now: a paused sticky area follows its window again, or the overlay
-//! comes back, with nothing to wake the thread, so it has to look. Round 1 of
-//! the review of `#154` found it asleep for good after a pause.
+//! switched on but none can be read, it looks once per [`LOOK`]: a paused
+//! sticky area follows its window again, or the overlay comes back, with
+//! nothing to wake the thread, so it has to look. Round 1 of the review of
+//! `#154` found it asleep for good after a pause. While a change is settling
+//! it reads every [`SETTLE_POLL`], frames or not, since the calm that ends a
+//! change sends no frames.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -161,23 +178,59 @@ use crate::overlay_state::OverlayState;
 
 use crate::strings::{Text, text};
 
-/// How often a watching area reads its region: twice a second since
-/// 2026-11-03, when two seconds proved too slow at the maintainer's rig (a
-/// switch could wait two seconds to be seen, and a switch and back between two
-/// readings was missed). Held sessions measured 0.13 % of a core at two
-/// seconds; four times the readings is re-measured before release (`I-474`).
-pub const INTERVAL: Duration = Duration::from_millis(500);
+/// **The watcher is event-driven** (the maintainer's design of 2026-11-05: *as
+/// responsive as possible without impacting UP-TAKE and PC performance*). It
+/// sleeps until a frame whose dirty regions touch a watch area arrives
+/// (`uptake_capture::warm::on_watch_frame`), so a change is seen within about a
+/// frame, and a still screen costs nothing. Until then it read every half
+/// second, and before 2026-11-03 every two seconds.
+///
+/// With nothing to wake it, it still looks again after this long: a frame the
+/// capture lost, or a change its dirty regions missed, is read then, or after
+/// the governor's rest when a pass costs more ([`rest_after`]).
+pub const IDLE: Duration = Duration::from_secs(2);
 
-// A reading uses a held session's newest frame, so frames must come at least
-// twice per reading: a frame up to one reading old could reach a fresh
-// baseline ([`Watcher::fresh`]), and one frame read twice counts as a still
-// reading, which re-arms *Notify when it changes* in the middle of a moving
-// region (review of `#159`, round 1: the reading interval went to 500 ms
-// while the frame throttle stayed at one second).
+/// While a change is settling, how often it reads with no frame arriving: the
+/// calm that ends a change is only seen by reading through it, so a *stopped
+/// changing* comes this long after the calm it waits for, or after the
+/// governor's rest when a pass costs more than about a millisecond
+/// ([`rest_after`]).
+pub const SETTLE_POLL: Duration = Duration::from_millis(50);
+
+/// One is switched on and none can be read now (paused, the overlay hidden):
+/// how soon it looks again, since nothing wakes the thread when that changes.
+pub const LOOK: Duration = Duration::from_millis(500);
+
+/// With nothing ringing sooner, how long until a watcher made or started
+/// again reads, and until one whose monitor has no frame held yet, or whose
+/// mark the page has not confirmed, is looked at again. A frame or the page's
+/// word can end the wait earlier; the bound that keeps a fresh baseline newer
+/// than the reason it started again is the governor's one-frame floor
+/// ([`Watcher::fresh`], [`rest_after`]), not this.
+pub const FRESH_WAIT: Duration = Duration::from_millis(66);
+
 const _: () = assert!(
-    INTERVAL.as_nanos() >= 2 * uptake_capture::warm::WATCH_FRAME_INTERVAL.as_nanos(),
-    "a watch reading must see at least two frame intervals"
+    FRESH_WAIT.as_nanos() >= 2 * uptake_capture::warm::WATCH_FRAME_INTERVAL.as_nanos(),
+    "the wait with nothing ringing spans at least two frames"
 );
+
+/// The share of one core the watcher's own thread may spend: `quality-bars.md`
+/// §1's 2 % per live area, for all of them together. After each pass it rests
+/// until its own time is no more than this share ([`rest_after`]). The held
+/// sessions' frames cost on top of it, outside the governor: about 0.3 to
+/// 0.4 % of a core measured at 30 frames a second (workspace
+/// `evidence/1.58-watch-events/`).
+pub const BUDGET: f64 = 0.02;
+
+/// How long to rest after a pass that took `spent`: long enough that the pass
+/// was at most [`BUDGET`] of the time, and never less than a frame. Measured
+/// on the wall clock, which counts waits on the GPU as spent: it errs on the
+/// side of reading less.
+#[must_use]
+pub fn rest_after(spent: Duration) -> Duration {
+    let share = spent.mul_f64(1.0 / BUDGET - 1.0);
+    share.max(uptake_capture::warm::WATCH_FRAME_INTERVAL)
+}
 
 /// How wide a band along each edge of the area is left out of a reading, in
 /// physical pixels: the border, 1.5 CSS pixels, at up to 250 % scaling.
@@ -229,6 +282,14 @@ pub fn wake(app: &AppHandle) {
             ),
         }
     }
+    RINGING.notify_one();
+}
+
+/// Rung by a frame that touched a watch area (`warm::on_watch_frame`), on the
+/// capture's own thread: it only signals.
+fn ring() {
+    let mut bell = bell();
+    bell.rung = true;
     RINGING.notify_one();
 }
 
@@ -426,6 +487,9 @@ pub fn confirm(state: OverlayState, marks: Vec<(u64, Rect)>, generation: u64) {
         generation,
         at: Instant::now(),
     });
+    // A mark just seen is an area that can read now: wake the watcher rather
+    // than leave it to its next look (review of `#162`, round 1).
+    ring();
 }
 
 /// Whether the latest confirmation, as of `now`, says `target`'s mark is seen.
@@ -461,7 +525,7 @@ enum Next {
     /// No watch area is switched on: wait for [`wake`], however long.
     Sleep,
     /// One is switched on and none can be read now (paused, or the overlay
-    /// is hidden): look again in [`INTERVAL`], because nothing wakes the
+    /// is hidden): look again in [`LOOK`], because nothing wakes the
     /// thread when that changes.
     Look,
     /// Read the readable ones.
@@ -487,7 +551,7 @@ struct Watcher {
     detector: Detector,
     /// Whether the last reading failed, so a failure that lasts (an area left
     /// on a monitor that was unplugged) is logged once and not every
-    /// [`INTERVAL`].
+    /// pass.
     failing: bool,
     /// Made, or started again, in this pass: it reads from the next pass on.
     ///
@@ -496,17 +560,29 @@ struct Watcher {
     /// made before it. A baseline taken in the pass that started a watcher
     /// again (the overlay state changed, the setting flipped, a move ended)
     /// could still show what came before, and the next reading would report
-    /// that as a change (review of `#154`, round 12). One [`INTERVAL`] later
-    /// the frame should be newer than the reason it started again, which
-    /// holds only while [`INTERVAL`] is at least twice the frame interval: a
-    /// compile-time assertion beside [`INTERVAL`] keeps it so (review of
-    /// `#159`, round 1).
+    /// that as a change (review of `#154`, round 12). Its next pass comes
+    /// at least one frame interval later, since the governor always rests
+    /// that long ([`rest_after`]'s floor, which its test holds), so the frame
+    /// read is newer than the reason it started again; and [`FRESH_WAIT`]
+    /// later when nothing rings sooner and the governor's rest is shorter
+    /// (review of `#159`, round 1; restated on the review of `#162`, rounds 1
+    /// and 5).
     ///
     /// ⚠️ **Assumed, not measured:** that WGC, held at
     /// `WATCH_FRAME_INTERVAL`, delivers a frame within that interval of a
     /// change on screen. Nothing here probes frame age under the throttle
     /// (round 13); UP-TAKE backlog `I-474` carries it.
     fresh: bool,
+    /// The size of the picture its baseline came from. A reading can come by
+    /// another route (the small picture averaged on the GPU, the area's own
+    /// rectangle, a capture of its own), and the routes' pictures differ in
+    /// size and so in every cell; a reading of another size re-anchors the
+    /// detector ([`Detector::rebase_at`]) rather than reporting the route as a
+    /// change, and a change under way still ends with *stopped changing*
+    /// (review of `#162`, rounds 5 and 6). A change made in the very reading
+    /// that switched route cannot be told from the switch and is not
+    /// reported.
+    picture: Option<uptake_core::geometry::Size>,
 }
 
 /// The parts of a reading that are UP-TAKE's own drawing, in the reading's
@@ -649,8 +725,19 @@ trait Host {
     fn release(&mut self);
     /// The pass is over: drop what it read.
     fn end_pass(&mut self);
-    /// One reading of `bounds`.
-    fn capture(&mut self, bounds: Rect) -> Result<uptake_capture::CapturedRegion, String>;
+    /// One reading of `bounds`, or `None` while a monitor it covers has no
+    /// frame held yet (nothing to read this time). `whole`: the reading needs
+    /// the full picture, since UP-TAKE's own drawing is in captures and is
+    /// painted out of it; otherwise it may be a small picture averaged down
+    /// on the GPU, which is all a fingerprint needs.
+    fn capture(
+        &mut self,
+        bounds: Rect,
+        whole: bool,
+    ) -> Result<Option<uptake_capture::CapturedRegion>, String>;
+    /// The time a reading is made at, on a clock that only moves forward, for
+    /// the detector's calm (`Detector::observe_at`). Asked once a pass.
+    fn now(&mut self) -> Duration;
     /// Where UP-TAKE's own windows outside the overlay are, or were a moment
     /// ago (`crate::notice::own_windows`), desktop pixels.
     fn own_windows(&mut self) -> Vec<Rect>;
@@ -660,11 +747,62 @@ trait Host {
     fn notify(&mut self, event: Event, id: AreaId, bounds: Rect);
 }
 
-/// The app itself, and the monitor frames read in this pass.
+/// How an area was read from a held session, for [`Troubles`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Route {
+    /// Averaged down on the GPU (`warm::watch_capture_small`).
+    Small,
+    /// Its own rectangle from the GPU (`warm::watch_capture_region`).
+    Region,
+    /// A monitor it covers cannot be held: read by a capture of its own.
+    Unheld,
+}
+
+/// Which areas are failing on which route, so a lasting fault is logged once
+/// for that area and route, and again only after that same read has
+/// succeeded (review of `#162`, rounds 1 to 3: first nothing was logged, then
+/// one flag for every area and route let any success re-arm it, and a fault
+/// confined to one route logged on every reading).
+#[derive(Debug, Default)]
+struct Troubles {
+    failing: std::collections::HashSet<(Rect, Route)>,
+}
+
+impl Troubles {
+    /// The read of `bounds` by `route` failed: whether to log it.
+    fn failed(&mut self, bounds: Rect, route: Route) -> bool {
+        self.failing.insert((bounds, route))
+    }
+
+    /// The read of `bounds` by `route` worked.
+    fn worked(&mut self, bounds: Rect, route: Route) {
+        self.failing.remove(&(bounds, route));
+    }
+}
+
+/// The app itself.
 struct AppHost<'a> {
     app: &'a AppHandle,
-    /// Each monitor's frame, read once a pass however many areas it holds.
-    frames: Vec<uptake_capture::CapturedRegion>,
+    /// The origin of [`Host::now`].
+    started: Instant,
+    /// Reads that are failing, logged once each.
+    troubles: Troubles,
+}
+
+impl AppHost<'_> {
+    fn failed(&mut self, bounds: Rect, route: Route, error: &str) {
+        if self.troubles.failed(bounds, route) {
+            let what = match route {
+                Route::Unheld => {
+                    "watch: a monitor this area covers cannot be held, so it is read by a capture of its own (said once)"
+                }
+                Route::Small | Route::Region => {
+                    "watch: reading this area from a held capture session failed; reading it another way (said once until that read works again)"
+                }
+            };
+            crate::diagnostics::trouble(what, &error);
+        }
+    }
 }
 
 impl Host for AppHost<'_> {
@@ -672,15 +810,14 @@ impl Host for AppHost<'_> {
         look(self.app)
     }
     fn hold(&mut self, regions: &[Rect]) {
-        self.frames.clear();
         let _ = uptake_capture::warm::watch_hold(regions);
     }
     fn release(&mut self) {
-        self.frames.clear();
         uptake_capture::warm::watch_release();
     }
-    fn end_pass(&mut self) {
-        self.frames.clear();
+    fn end_pass(&mut self) {}
+    fn now(&mut self) -> Duration {
+        self.started.elapsed()
     }
     fn state(&mut self) -> (OverlayState, bool) {
         (overlay_state(self.app), in_captures())
@@ -697,27 +834,48 @@ impl Host for AppHost<'_> {
     fn monitors(&mut self) -> Vec<Rect> {
         crate::overlay::monitor_rects()
     }
-    fn capture(&mut self, bounds: Rect) -> Result<uptake_capture::CapturedRegion, String> {
-        // From the held sessions: each monitor's frame read once a pass, the
-        // area cut out of it. A monitor whose session is still warming up
-        // (about a third of a second after `hold`), or could not be held,
-        // falls back to one capture of its own for this reading.
-        for monitor in crate::overlay::monitor_rects() {
-            if monitor.intersection(bounds).is_none()
-                || self
-                    .frames
-                    .iter()
-                    .any(|frame| frame.rect.intersection(monitor) == Some(monitor))
-            {
-                continue;
-            }
-            match uptake_capture::warm::watch_capture_monitor(monitor) {
-                Some(frame) => self.frames.push(frame),
-                None => return crate::output::capture_for_watch(bounds),
+    fn capture(
+        &mut self,
+        bounds: Rect,
+        whole: bool,
+    ) -> Result<Option<uptake_capture::CapturedRegion>, String> {
+        let desktop = crate::overlay::monitor_rects();
+        // Averaged down on the GPU and read back at about 16 x 16, so a
+        // read costs about the same for any area size: when nothing has to
+        // be painted out and the area is on one monitor.
+        if !whole {
+            match uptake_capture::warm::watch_capture_small(bounds, &desktop) {
+                Ok(small) => {
+                    self.troubles.worked(bounds, Route::Small);
+                    return Ok(small);
+                }
+                // Spanning monitors is not a fault: the region read below.
+                Err(error) if error == uptake_capture::warm::NOT_ON_ONE_MONITOR => {}
+                // Nor is a monitor that cannot be held: said once below.
+                Err(error) if error == uptake_capture::warm::UNSERVABLE => {}
+                Err(error) => self.failed(bounds, Route::Small, &error),
             }
         }
-        uptake_capture::warm::compose(bounds, &self.frames, &crate::overlay::monitor_rects())
-            .map_or_else(|| crate::output::capture_for_watch(bounds), Ok)
+        // Otherwise only the area's own rectangle, copied on the GPU from the held
+        // sessions and read back alone. A monitor whose session is still
+        // warming up has nothing to read yet; one that cannot be held at all
+        // falls back to a capture of its own, which the governor then paces
+        // by what it costs.
+        match uptake_capture::warm::watch_capture_region(bounds, &desktop) {
+            Ok(read) => {
+                self.troubles.worked(bounds, Route::Region);
+                Ok(read)
+            }
+            Err(error) => {
+                let route = if error == uptake_capture::warm::UNSERVABLE {
+                    Route::Unheld
+                } else {
+                    Route::Region
+                };
+                self.failed(bounds, route, &error);
+                crate::output::capture_for_watch(bounds).map(Some)
+            }
+        }
     }
     fn own_windows(&mut self) -> Vec<Rect> {
         crate::notice::own_windows()
@@ -747,12 +905,19 @@ struct Memory {
 fn run(app: &AppHandle) {
     let mut host = AppHost {
         app,
-        frames: Vec::new(),
+        started: Instant::now(),
+        troubles: Troubles::default(),
     };
     let mut memory = Memory::default();
+    uptake_capture::warm::on_watch_frame(ring);
     loop {
+        let began = Instant::now();
         let timeout = pass(&mut host, &mut memory);
-        wait(timeout);
+        // The governor: rest in proportion to what the pass cost, and let the
+        // frames that arrive meanwhile ring once for all of them.
+        let rest = rest_after(began.elapsed());
+        std::thread::sleep(rest);
+        wait(timeout.map(|timeout| timeout.saturating_sub(rest)));
     }
 }
 
@@ -783,7 +948,7 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
         Next::Look => {
             watchers.clear();
             host.release();
-            return Some(INTERVAL);
+            return Some(LOOK);
         }
         Next::Read => {}
     }
@@ -794,6 +959,10 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
             .collect::<Vec<_>>(),
     );
     let moving: Option<AreaId> = host.in_gesture();
+    let at = host.now();
+    // What the next wait must be at most: a watcher waiting for its first
+    // frame, or a change settling, cannot wait for the next event.
+    let mut soon: Option<Duration> = None;
     watchers.retain(|id, _| Some(*id) != moving && targets.iter().any(|target| target.id == *id));
     for target in targets {
         // Asked again right before each capture, not only once a pass: a
@@ -813,29 +982,40 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
         match gate(target.id, now == state, [moving, gesture_now], still, shown) {
             Gate::Stop => break,
             Gate::Skip => {
-                // Not read, and read again from a fresh baseline.
+                // Not read, and read again from a fresh baseline: soon, since
+                // what it waits for (the page's word on its mark, a move
+                // ending) rings nothing reliably, and a change made in the
+                // wait would become its baseline (review of `#162`, round 1).
                 watchers.remove(&target.id);
+                soon = Some(FRESH_WAIT);
                 continue;
             }
             Gate::Read => {}
         }
         let watcher = watchers.entry(target.id).or_insert_with(|| Watcher {
             target,
-            detector: Detector::with_settle(target.watch.settle_readings()),
+            detector: Detector::with_settle_time(target.watch.settle_time()),
             failing: false,
             fresh: true,
+            picture: None,
         });
         if watcher.target != target {
             watcher.target = target;
-            watcher.detector = Detector::with_settle(target.watch.settle_readings());
+            watcher.detector = Detector::with_settle_time(target.watch.settle_time());
             watcher.fresh = true;
         }
         if watcher.fresh {
             watcher.fresh = false;
+            soon = Some(FRESH_WAIT);
             continue;
         }
-        let reading = match host.capture(target.bounds) {
-            Ok(mut captured) => {
+        let reading = match host.capture(target.bounds, state.1) {
+            Ok(None) => {
+                // No frame held yet for a monitor it covers: try again soon.
+                soon = Some(FRESH_WAIT);
+                continue;
+            }
+            Ok(Some(mut captured)) => {
                 watcher.failing = false;
                 leave_out(
                     &mut captured.bitmap,
@@ -853,7 +1033,22 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
                 } else {
                     Vec::new()
                 };
-                Fingerprint::of_hiding(&captured.bitmap, &hidden)
+                let size = uptake_core::geometry::Size::new(
+                    captured.bitmap.width(),
+                    captured.bitmap.height(),
+                );
+                let switched = watcher.picture.is_some_and(|was| was != size);
+                watcher.picture = Some(size);
+                let fingerprint = Fingerprint::of_hiding(&captured.bitmap, &hidden);
+                if switched {
+                    // Another route: re-anchored, not compared (round 6).
+                    if let Some(fingerprint) = fingerprint {
+                        watcher.detector.rebase_at(fingerprint, at);
+                    }
+                    None
+                } else {
+                    fingerprint
+                }
             }
             Err(error) => {
                 if !watcher.failing {
@@ -863,14 +1058,17 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
                 None
             }
         };
-        if let Some(event) = reading.and_then(|reading| watcher.detector.observe(reading))
+        if let Some(event) = reading.and_then(|reading| watcher.detector.observe_at(reading, at))
             && target.watch.notifies(event)
         {
             host.notify(event, target.id, target.bounds);
         }
+        if watcher.detector.is_settling() {
+            soon = Some(soon.map_or(SETTLE_POLL, |wait| wait.min(SETTLE_POLL)));
+        }
     }
     host.end_pass();
-    Some(INTERVAL)
+    Some(soon.unwrap_or(IDLE))
 }
 
 /// What the loop does with one area right before its capture.
@@ -976,6 +1174,14 @@ mod tests {
             /// One of UP-TAKE's own windows on screen, and the grey it shows,
             /// desktop pixels; listed by `own_windows`.
             card: Option<(Rect, u8)>,
+            /// The clock `now` gives: one reading step a pass.
+            clock: Duration,
+            /// How many more captures find no frame held yet.
+            unready: usize,
+            /// Whether each capture asked for the full picture.
+            whole: Vec<bool>,
+            /// The size of the picture captures return, when not the area's.
+            picture: Option<Size>,
         }
 
         impl Fake {
@@ -994,6 +1200,10 @@ mod tests {
                     held: Vec::new(),
                     released: 0,
                     card: None,
+                    clock: Duration::ZERO,
+                    unready: 0,
+                    whole: Vec::new(),
+                    picture: None,
                 }
             }
         }
@@ -1025,8 +1235,21 @@ mod tests {
                 self.released += 1;
             }
             fn end_pass(&mut self) {}
-            fn capture(&mut self, bounds: Rect) -> Result<CapturedRegion, String> {
+            fn now(&mut self) -> Duration {
+                self.clock += uptake_core::watch::READING_STEP;
+                self.clock
+            }
+            fn capture(
+                &mut self,
+                bounds: Rect,
+                whole: bool,
+            ) -> Result<Option<CapturedRegion>, String> {
                 self.captured.push(bounds);
+                self.whole.push(whole);
+                if self.unready > 0 {
+                    self.unready -= 1;
+                    return Ok(None);
+                }
                 if let Some(state) = self.state_after_capture.take() {
                     self.state = state;
                 }
@@ -1059,10 +1282,18 @@ mod tests {
                         }
                     }
                 }
+                // Another route's picture: another size, the same grey.
+                if let Some(size) = self.picture {
+                    let pixels = [self.level, self.level, self.level, 255]
+                        .repeat(usize::try_from(size.width * size.height).unwrap_or(0));
+                    let bitmap =
+                        RgbaBitmap::from_pixels(size, pixels).ok_or_else(|| "bitmap".to_owned())?;
+                    return Ok(Some(CapturedRegion { rect, bitmap }));
+                }
                 let bitmap =
                     RgbaBitmap::from_pixels(Size::new(rect.size.width, rect.size.height), pixels)
                         .ok_or_else(|| "bitmap".to_owned())?;
-                Ok(CapturedRegion { rect, bitmap })
+                Ok(Some(CapturedRegion { rect, bitmap }))
             }
             fn own_windows(&mut self) -> Vec<Rect> {
                 self.card.map(|(card, _)| card).into_iter().collect()
@@ -1175,6 +1406,148 @@ mod tests {
             fake.level = 20;
             run(&mut fake, &mut memory, 1);
             assert_eq!(fake.notified, vec![Event::Changed]);
+        }
+
+        /// The event-driven loop (2026-11-05): after a pass it waits for the
+        /// next frame, at most [`IDLE`]; [`FRESH_WAIT`] while a watcher waits
+        /// for its first frame; [`SETTLE_POLL`] while a change settles, since
+        /// the calm sends no frames; [`LOOK`] while nothing can be read.
+        #[test]
+        fn each_pass_says_how_long_the_next_may_wait() {
+            use super::super::{FRESH_WAIT, IDLE, LOOK, SETTLE_POLL};
+            let mut fake = Fake::new(targets(&[Rect::new(100, 100, 600, 400)]));
+            let mut memory = Memory::default();
+            assert_eq!(pass(&mut fake, &mut memory), Some(FRESH_WAIT), "new");
+            fake.unready = 1;
+            assert_eq!(
+                pass(&mut fake, &mut memory),
+                Some(FRESH_WAIT),
+                "no frame yet"
+            );
+            assert_eq!(pass(&mut fake, &mut memory), Some(IDLE), "baseline, calm");
+            fake.level = 20;
+            assert_eq!(pass(&mut fake, &mut memory), Some(SETTLE_POLL), "changed");
+            assert_eq!(fake.notified, vec![Event::Changed]);
+            // The fake clock steps half a second a pass, longer than the
+            // re-arm: the next pass ends the change.
+            assert_eq!(pass(&mut fake, &mut memory), Some(IDLE), "settled");
+            fake.seen = false;
+            fake.still = false;
+            fake.targets.clear();
+            assert_eq!(pass(&mut fake, &mut memory), None, "nothing switched on");
+            let mut fake = Fake::new(targets(&[Rect::new(100, 100, 600, 400)]));
+            fake.state = (OverlayState::Hidden, false);
+            assert_eq!(
+                pass(&mut fake, &mut Memory::default()),
+                Some(LOOK),
+                "hidden"
+            );
+        }
+
+        /// A reading asks for the full picture exactly when UP-TAKE's own
+        /// drawing is in captures, since it is painted out of the full-size
+        /// picture first; otherwise the small one averaged down on the GPU
+        /// will do (review of `#162`, round 1: no test held the routing).
+        #[test]
+        fn a_reading_asks_for_the_full_picture_only_when_drawing_is_left_out() {
+            for in_captures in [false, true] {
+                let mut fake = Fake::new(targets(&[Rect::new(100, 100, 600, 400)]));
+                fake.state = (OverlayState::Living, in_captures);
+                let mut memory = Memory::default();
+                run(&mut fake, &mut memory, 3);
+                assert!(!fake.whole.is_empty(), "read");
+                assert!(
+                    fake.whole.iter().all(|&whole| whole == in_captures),
+                    "{in_captures}"
+                );
+            }
+        }
+
+        /// Review of `#162`, round 1: an area skipped by its gate (its mark not
+        /// yet confirmed, say) is looked at again soon, not after the idle
+        /// wait, or a change made meanwhile becomes its baseline.
+        #[test]
+        fn an_area_waiting_for_its_mark_is_looked_at_again_soon() {
+            use super::super::FRESH_WAIT;
+            let mut fake = Fake::new(targets(&[Rect::new(100, 100, 600, 400)]));
+            fake.seen = false;
+            assert_eq!(pass(&mut fake, &mut Memory::default()), Some(FRESH_WAIT));
+        }
+
+        /// Review of `#162`, round 3: a failing read is logged once for its
+        /// area and route, not again until that same read works; another
+        /// area's success, or another route's, does not re-arm it.
+        #[test]
+        fn a_failing_read_is_logged_once_per_area_and_route() {
+            use super::super::{Route, Troubles};
+            let (a, b) = (Rect::new(0, 0, 10, 10), Rect::new(50, 0, 10, 10));
+            let mut troubles = Troubles::default();
+            assert!(troubles.failed(a, Route::Small), "first: logged");
+            troubles.worked(a, Route::Region);
+            troubles.worked(b, Route::Small);
+            assert!(!troubles.failed(a, Route::Small), "not re-armed by others");
+            assert!(troubles.failed(a, Route::Region), "another route: its own");
+            troubles.worked(a, Route::Small);
+            assert!(
+                troubles.failed(a, Route::Small),
+                "after it worked: logged again"
+            );
+            assert!(troubles.failed(b, Route::Unheld));
+            assert!(!troubles.failed(b, Route::Unheld));
+        }
+
+        /// Review of `#162`, round 6: a route switch while a change settles
+        /// still ends with *stopped changing*.
+        #[test]
+        fn a_route_switch_keeps_a_settling_change() {
+            let mut fake = Fake::new(targets_for(
+                &[Rect::new(100, 100, 600, 400)],
+                Watch::Settles,
+            ));
+            let mut memory = Memory::default();
+            run(&mut fake, &mut memory, 2);
+            fake.level = 20;
+            run(&mut fake, &mut memory, 1);
+            fake.picture = Some(Size::new(38, 25));
+            let passes = 4 * usize::try_from(Watch::Settles.settle_readings()).unwrap_or(0);
+            run(&mut fake, &mut memory, passes);
+            assert_eq!(fake.notified, vec![Event::Settled]);
+        }
+
+        /// Review of `#162`, round 5: a reading by another route gives a
+        /// picture of another size, every cell different on a still screen;
+        /// the watcher starts again from it instead of reporting a change.
+        #[test]
+        fn a_reading_by_another_route_is_no_change() {
+            let mut fake = Fake::new(targets(&[Rect::new(100, 100, 600, 400)]));
+            let mut memory = Memory::default();
+            run(&mut fake, &mut memory, 3);
+            fake.picture = Some(Size::new(38, 25));
+            fake.level = 120;
+            run(&mut fake, &mut memory, 3);
+            fake.picture = None;
+            fake.level = 200;
+            run(&mut fake, &mut memory, 3);
+            assert!(fake.notified.is_empty(), "{:?}", fake.notified);
+            fake.level = 20;
+            run(&mut fake, &mut memory, 1);
+            assert_eq!(fake.notified, vec![Event::Changed], "still watching");
+        }
+
+        /// The governor: a pass that took `t` is followed by a rest of 49 `t`,
+        /// so the watcher spends at most 2 % of a core, and never less than a
+        /// frame.
+        #[test]
+        fn the_watcher_rests_in_proportion_to_what_it_spent() {
+            use super::super::{BUDGET, rest_after};
+            let frame = uptake_capture::warm::WATCH_FRAME_INTERVAL;
+            assert_eq!(rest_after(Duration::ZERO), frame);
+            assert_eq!(rest_after(Duration::from_micros(100)), frame);
+            let spent = Duration::from_millis(10);
+            let rest = rest_after(spent);
+            assert_eq!(rest, Duration::from_millis(490));
+            let share = spent.as_secs_f64() / (spent + rest).as_secs_f64();
+            assert!((share - BUDGET).abs() < 1e-9);
         }
 
         /// The working case: a baseline, then a change of the screen notifies.

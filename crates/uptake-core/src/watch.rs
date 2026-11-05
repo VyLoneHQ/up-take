@@ -33,6 +33,8 @@
 //! two; it is a first value, chosen on arithmetic and not yet tried on a real
 //! screen.
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 
 use crate::bitmap::RgbaBitmap;
@@ -72,6 +74,17 @@ impl Watch {
         }
     }
 
+    /// How long a calm ends a change for this choice, for the event-driven
+    /// host: [`REARM_TIME`] re-arms *changes*, and [`SETTLE_READINGS`]
+    /// readings at [`READING_STEP`] (six seconds) call something finished.
+    #[must_use]
+    pub fn settle_time(self) -> Duration {
+        match self {
+            Self::Changes => REARM_TIME,
+            _ => READING_STEP * self.settle_readings(),
+        }
+    }
+
     /// Whether `event` is the one this choice asked to be told about.
     #[must_use]
     pub const fn notifies(self, event: Event) -> bool {
@@ -81,6 +94,13 @@ impl Watch {
         )
     }
 }
+
+/// The time [`Detector::observe`] takes to pass between two readings, and so
+/// the unit the settle counts are given in. The host reads when a frame
+/// touches the area (the event-driven watch area, 2026-11-05), at no fixed
+/// rate, and gives each reading its real time ([`Detector::observe_at`]), so
+/// a calm is measured in time, whatever the rate.
+pub const READING_STEP: Duration = Duration::from_millis(500);
 
 /// The grid a reading is summarised into: at most this many cells across and
 /// down. A region narrower or shorter than this gets one cell per pixel on
@@ -124,18 +144,29 @@ pub const CELL_DELTA: u8 = 6;
 pub const STILL_DELTA: u8 = 2;
 
 /// How many readings in a row must match before a region that was changing
-/// counts as settled, for *Notify when it stops changing*. With the host
-/// reading every half second, twelve is six seconds of stillness: long enough
-/// that a progress bar pausing between chunks is not reported as finished.
+/// counts as settled, for *Notify when it stops changing*, at
+/// [`READING_STEP`]: six seconds of stillness ([`Watch::settle_time`]), long
+/// enough that a progress bar pausing between chunks is not reported as
+/// finished. The event-driven host measures it in time, at no fixed rate.
 /// (Three readings at two seconds until 2026-11-03: the same six seconds.)
 pub const SETTLE_READINGS: u32 = 12;
 
-/// How many still readings re-arm *Notify when it changes* after a change:
-/// one second at the host's half-second reading. Until 2026-11-03 this mode
+/// How many still readings re-arm *Notify when it changes* after a change, at
+/// [`READING_STEP`] (one second): the count [`Detector::observe`] uses. The
+/// event-driven host re-arms after [`REARM_TIME`] instead. Until 2026-11-03 this mode
 /// waited the full [`SETTLE_READINGS`] too, so at the maintainer's rig a
 /// second change within six seconds of the first was never reported. This
 /// mode reports change, not completion, so a short calm is enough.
 pub const REARM_READINGS: u32 = 2;
+
+/// How long a calm re-arms *Notify when it changes* for the event-driven
+/// host. The maintainer's rig, 2026-11-05: a region switched back and forth
+/// faster than a second notified only once, and he asked for every change
+/// (*"as responsive and realtime as possible"*). A sixth of a second is long
+/// enough for a change's own redraw to finish, so one change is one
+/// notification, and short enough for a hand toggling something to be seen
+/// every time. The count above is the same rule at half-second readings.
+pub const REARM_TIME: Duration = Duration::from_millis(150);
 
 /// One reading, summarised: the average brightness of each cell of a grid laid
 /// over the region.
@@ -321,7 +352,7 @@ pub enum Event {
     /// The region was still and now differs from its last reading.
     Changed,
     /// The region had been changing and has now held still for the
-    /// detector's settle count of readings ([`Watch::settle_readings`]).
+    /// detector's settle time ([`Watch::settle_time`]).
     Settled,
 }
 
@@ -330,11 +361,11 @@ pub enum Event {
 /// Two comparisons, one for each moment. **A change starts** when a reading
 /// differs by more than [`CELL_DELTA`] from the *baseline*, the reading the
 /// region was last still at, so a slow change adds up until it counts. **A
-/// change ends** when the settle count of readings in a row
-/// ([`Watch::settle_readings`]: [`REARM_READINGS`] for *Notify when it
-/// changes*, [`SETTLE_READINGS`] for *Notify when it stops changing*) each
-/// differ by no more than [`STILL_DELTA`] from the first reading of that
-/// still run; the last becomes the new baseline, wherever the region stopped.
+/// change ends** when the region has held still for the settle time
+/// ([`Watch::settle_time`]: [`REARM_TIME`] for *Notify when it changes*, six
+/// seconds for *Notify when it stops changing*), every reading in that time
+/// within [`STILL_DELTA`] of the first reading of the still run; the last
+/// becomes the new baseline, wherever the region stopped.
 /// Each is reported once, so a video under a watch area raises one
 /// notification while it plays, not one a reading.
 #[derive(Debug, Clone)]
@@ -343,11 +374,17 @@ pub struct Detector {
     /// The first reading of the current still run. Stillness is measured
     /// against it, not only against the reading before, so a change too slow
     /// to show between two readings still adds up and keeps the run from
-    /// counting as still (which matters more at a half-second reading).
+    /// counting as still (which matters more the more often the host reads:
+    /// up to every 50 ms while a change settles).
     still_from: Option<Fingerprint>,
     changing: bool,
-    still: u32,
-    settle: u32,
+    /// When `still_from` was read: the calm is measured from it.
+    still_since: Duration,
+    /// How long a calm ends a change.
+    settle: Duration,
+    /// The time [`Self::observe`] gives a reading: [`READING_STEP`] after
+    /// the last one.
+    clock: Duration,
 }
 
 impl Default for Detector {
@@ -366,20 +403,63 @@ impl Detector {
     }
 
     /// A detector whose change ends after `settle` still readings (at least
-    /// one): [`Watch::settle_readings`] for the area's choice.
+    /// one) at [`READING_STEP`]: [`Watch::settle_readings`] for the area's
+    /// choice.
     #[must_use]
     pub fn with_settle(settle: u32) -> Self {
+        Self::with_settle_time(READING_STEP * settle.max(1))
+    }
+
+    /// A detector whose change ends after `settle` of calm:
+    /// [`Watch::settle_time`] for the area's choice.
+    #[must_use]
+    pub fn with_settle_time(settle: Duration) -> Self {
         Self {
             baseline: None,
             still_from: None,
             changing: false,
-            still: 0,
-            settle: settle.max(1),
+            still_since: Duration::ZERO,
+            settle,
+            clock: Duration::ZERO,
         }
     }
 
-    /// Takes one reading and says whether it is a moment worth reporting.
+    /// Whether a change is under way, so the host must keep reading while the
+    /// screen is still, or the calm that ends it is never seen.
+    #[must_use]
+    pub const fn is_settling(&self) -> bool {
+        self.changing
+    }
+
+    /// The host now reads this region by another route, whose pictures cannot
+    /// be compared with the last ones (another size, so every cell differs):
+    /// `reading`, made at `at`, becomes both the baseline and the start of the
+    /// calm, and nothing is reported. A change under way stays under way, so
+    /// it still ends with [`Event::Settled`] once the region holds still
+    /// (review of `up-take` #162, rounds 5 and 6). A change made in the very
+    /// reading that switched cannot be told from the switch, and is not
+    /// reported.
+    pub fn rebase_at(&mut self, reading: Fingerprint, at: Duration) {
+        self.clock = at;
+        self.baseline = Some(reading.clone());
+        self.still_from = Some(reading);
+        self.still_since = at;
+    }
+
+    /// Takes one reading [`READING_STEP`] after the last one and says whether
+    /// it is a moment worth reporting.
     pub fn observe(&mut self, reading: Fingerprint) -> Option<Event> {
+        let at = self.clock + READING_STEP;
+        self.observe_at(reading, at)
+    }
+
+    /// Takes one reading made at `at` (any clock that only moves forward,
+    /// the same for every reading) and says whether it is a moment worth
+    /// reporting. A change ends once the region has held still for the
+    /// settle time, so the host reads again while a change is settling,
+    /// frames or not.
+    pub fn observe_at(&mut self, reading: Fingerprint, at: Duration) -> Option<Event> {
+        self.clock = at;
         for known in [&mut self.baseline, &mut self.still_from]
             .into_iter()
             .flatten()
@@ -396,8 +476,8 @@ impl Detector {
                 return None;
             }
             self.changing = true;
-            self.still = 0;
             self.still_from = Some(reading);
+            self.still_since = at;
             return Some(Event::Changed);
         }
         let moved = self
@@ -405,16 +485,14 @@ impl Detector {
             .as_ref()
             .map_or(u8::MAX, |from| from.moved(&reading));
         if moved > STILL_DELTA {
-            self.still = 0;
             self.still_from = Some(reading);
+            self.still_since = at;
             return None;
         }
-        self.still += 1;
-        if self.still < self.settle {
+        if at.saturating_sub(self.still_since) < self.settle {
             return None;
         }
         self.changing = false;
-        self.still = 0;
         // A cell the settling reading could not see keeps the old baseline's
         // value: what was under a card when the region settled is the last
         // thing known there, so a change made under the card shows once the
@@ -784,6 +862,120 @@ mod tests {
         let under = with_patch(moved, (0, 0, 64, 16), 220);
         assert_eq!(detector.observe(hiding(&under, &[card])), None);
         assert_eq!(detector.observe(print(&under)), Some(Event::Changed));
+    }
+
+    /// The event-driven watcher reads at no fixed rate: a calm is measured in
+    /// time. Readings every 50 ms re-arm *changes* after [`REARM_TIME`] of
+    /// calm, not after two readings, and one reading long after the last
+    /// still ends a *stops changing* by itself.
+    #[test]
+    fn a_calm_is_measured_in_time_whatever_the_rate() {
+        use super::REARM_TIME;
+        use std::time::Duration;
+        let ms = Duration::from_millis;
+        let mut detector = Detector::with_settle_time(Watch::Changes.settle_time());
+        let still = grey(64, 64, 40);
+        let moved = grey(64, 64, 200);
+        assert_eq!(detector.observe_at(print(&still), ms(0)), None);
+        assert_eq!(
+            detector.observe_at(print(&moved), ms(50)),
+            Some(Event::Changed)
+        );
+        assert!(detector.is_settling());
+        assert_eq!(detector.observe_at(print(&moved), ms(100)), None);
+        assert_eq!(
+            detector.observe_at(print(&moved), ms(150)),
+            None,
+            "100 ms calm"
+        );
+        assert_eq!(
+            detector.observe_at(print(&moved), ms(50) + REARM_TIME),
+            Some(Event::Settled)
+        );
+        assert!(!detector.is_settling());
+
+        let mut detector = Detector::with_settle_time(Watch::Settles.settle_time());
+        detector.observe_at(print(&still), ms(0));
+        detector.observe_at(print(&moved), ms(10));
+        assert_eq!(detector.observe_at(print(&moved), ms(20)), None);
+        assert_eq!(
+            detector.observe_at(print(&moved), ms(10) + Watch::Settles.settle_time()),
+            Some(Event::Settled)
+        );
+    }
+
+    /// The maintainer's rig, 2026-11-05: icons switched on and off by hand,
+    /// faster than once a second, notified only the first time. Read the way
+    /// the event-driven host reads (on each change, then every 50 ms while it
+    /// settles), every switch is a change.
+    #[test]
+    fn a_region_switched_back_and_forth_reports_every_switch() {
+        use std::time::Duration;
+        let shown = with_patch(grey(64, 64, 30), (8, 24, 48, 16), 220);
+        let empty = grey(64, 64, 30);
+        let mut detector = Detector::with_settle_time(Watch::Changes.settle_time());
+        let mut changes = 0;
+        let mut at = 0_u64;
+        detector.observe_at(print(&empty), Duration::from_millis(at));
+        for switch in 0..10 {
+            let picture = if switch % 2 == 0 { &shown } else { &empty };
+            // A switch every 300 ms: the read on the frame, then the polls.
+            for _ in 0..6 {
+                at += 50;
+                if detector.observe_at(print(picture), Duration::from_millis(at))
+                    == Some(Event::Changed)
+                {
+                    changes += 1;
+                }
+            }
+        }
+        assert_eq!(changes, 10);
+    }
+
+    /// *Stops changing* keeps its six seconds; *changes* re-arms after a
+    /// sixth of a second (the maintainer's rig, 2026-11-05).
+    #[test]
+    fn the_settle_times_are_the_counts_at_half_a_second() {
+        use std::time::Duration;
+        assert_eq!(Watch::Changes.settle_time(), Duration::from_millis(150));
+        assert_eq!(Watch::Settles.settle_time(), Duration::from_secs(6));
+    }
+
+    /// A rebase keeps a change under way: it still ends with `Settled` after
+    /// the calm, measured from the rebase; with nothing under way it reports
+    /// nothing, and a later change is a change.
+    #[test]
+    fn a_rebase_keeps_a_change_under_way() {
+        use std::time::Duration;
+        let ms = Duration::from_millis;
+        let mut detector = Detector::with_settle_time(Watch::Settles.settle_time());
+        detector.observe_at(print(&grey(64, 64, 40)), ms(0));
+        assert_eq!(
+            detector.observe_at(print(&grey(64, 64, 200)), ms(500)),
+            Some(Event::Changed)
+        );
+        let other = print(&grey(32, 20, 90));
+        detector.rebase_at(other.clone(), ms(1_000));
+        assert!(detector.is_settling(), "still under way");
+        assert_eq!(
+            detector.observe_at(other.clone(), ms(6_500)),
+            None,
+            "5.5 s calm"
+        );
+        assert_eq!(
+            detector.observe_at(other.clone(), ms(7_000)),
+            Some(Event::Settled),
+            "6 s after the rebase"
+        );
+        let mut calm = Detector::with_settle_time(Watch::Changes.settle_time());
+        calm.observe_at(print(&grey(64, 64, 40)), ms(0));
+        calm.rebase_at(other.clone(), ms(100));
+        assert!(!calm.is_settling());
+        assert_eq!(calm.observe_at(other, ms(200)), None);
+        assert_eq!(
+            calm.observe_at(print(&grey(32, 20, 220)), ms(300)),
+            Some(Event::Changed)
+        );
     }
 
     /// Hiding marks every cell the rectangle touches and no other.
