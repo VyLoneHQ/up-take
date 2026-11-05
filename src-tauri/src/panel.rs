@@ -302,6 +302,9 @@ fn present(app: &AppHandle) -> Result<(), String> {
             .build()
             .map_err(|error| format!("could not make the panel window: {error}"))?,
     };
+    // Listed before it is drawn there, so a watch reading leaves it out of its
+    // comparison (`I-480`); `notice::hide_shown` takes it off the list.
+    crate::notice::own_window_at(LABEL, rect);
     window
         .set_size(tauri::PhysicalSize::new(rect.size.width, rect.size.height))
         .map_err(|error| format!("could not size the panel: {error}"))?;
@@ -716,6 +719,20 @@ mod tests {
             code.matches("crate::notice::hide_shown(&window)").count(),
             1
         );
+    }
+
+    /// `I-480`: with *Show UP-TAKE in screen recordings* on, the panel over a
+    /// watch area is in its reading; it is listed where it is shown, before
+    /// it is drawn there, so the reading leaves it out. Held by source, as no
+    /// test here can run its window.
+    #[test]
+    fn the_panel_is_listed_where_it_is_shown() {
+        let source = include_str!("panel.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or_default();
+        let at = |needle: &str| code.find(needle).unwrap_or(usize::MAX);
+        let listed = at("crate::notice::own_window_at(LABEL, rect);");
+        assert!(listed < usize::MAX, "listed");
+        assert!(listed < at(".set_size(tauri::PhysicalSize::new(rect.size.width"));
     }
 
     #[test]
