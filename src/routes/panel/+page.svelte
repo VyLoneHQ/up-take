@@ -3,8 +3,12 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { onMount, tick } from 'svelte';
 import {
+  DEPTHS,
   isPanelView,
+  ON_RESIZE,
   PANEL_EVENT,
+  type PanelDepth,
+  type PanelOnResize,
   type PanelView,
   type PanelWatch,
 } from '$lib/panel';
@@ -65,6 +69,33 @@ function setWatch(watch: PanelWatch): void {
 
 function setHeld(held: boolean): void {
   void invoke('panel_set_held', { held }).catch(() => {});
+}
+
+// The menu's other rows (roadmap 1.60, second slice): each calls the command
+// that runs what the matching menu row runs.
+function set(command: string, args: Record<string, unknown>): void {
+  void invoke(command, args).catch(() => {});
+}
+
+const depthLabel: Record<PanelDepth, string> = {
+  front: 'menu.depth.front',
+  auto: 'menu.depth.auto',
+  back: 'menu.depth.back',
+};
+
+const onResizeLabel: Record<PanelOnResize, string> = {
+  scale: 'menu.on_resize.scale',
+  scale_position: 'menu.on_resize.scale_position',
+  corner: 'menu.on_resize.corner',
+  top_left: 'menu.on_resize.top_left',
+};
+
+/** A switch toggled from the keyboard as well as by a click. */
+function onSwitchKey(event: KeyboardEvent, flip: () => void): void {
+  if (event.key === ' ' || event.key === 'Enter') {
+    event.preventDefault();
+    flip();
+  }
 }
 
 function onNameKey(event: KeyboardEvent): void {
@@ -161,6 +192,42 @@ onMount(() => {
       />
     </label>
 
+    <div class="field">
+      <span class="label">{text(language, 'menu.area_type')}</span>
+      <div class="choice wrap" role="radiogroup">
+        {#each view.kinds as kind (kind)}
+          <button
+            type="button"
+            role="radio"
+            aria-checked={view.kind === kind}
+            class:on={view.kind === kind}
+            onclick={() => set('panel_set_type', { kind })}
+            >{text(language, `kind.${kind}` as never)}</button
+          >
+        {/each}
+      </div>
+    </div>
+
+    {#if view.ocr}
+      <div class="field">
+        <span class="label"
+          >{text(language, 'settings.ocr_behaviour.name')}</span
+        >
+        <div class="choice" role="radiogroup">
+          {#each ['in_place', 'rendered'] as const as behaviour (behaviour)}
+            <button
+              type="button"
+              role="radio"
+              aria-checked={view.ocr === behaviour}
+              class:on={view.ocr === behaviour}
+              onclick={() => set('panel_set_ocr', { behaviour })}
+              >{text(language, `settings.ocr_behaviour.${behaviour}`)}</button
+            >
+          {/each}
+        </div>
+      </div>
+    {/if}
+
     {#if view.watch}
       <div class="field">
         <span class="label">{text(language, 'menu.watch')}</span>
@@ -195,6 +262,99 @@ onMount(() => {
         <span aria-hidden="true">{view.held ? '▶' : '❚❚'}</span>
         {text(language, view.held ? 'menu.resume' : 'menu.pause')}
       </button>
+    {/if}
+
+    <div class="rule" aria-hidden="true"></div>
+
+    <div class="field">
+      <span class="label">{text(language, 'menu.depth')}</span>
+      <div class="choice" role="radiogroup">
+        {#each DEPTHS as depth (depth)}
+          <button
+            type="button"
+            role="radio"
+            aria-checked={view.depth === depth}
+            class:on={view.depth === depth}
+            onclick={() => set('panel_set_depth', { depth })}
+            >{text(language, depthLabel[depth] as never)}</button
+          >
+        {/each}
+      </div>
+    </div>
+
+    <div
+      class="toggle"
+      class:on={view.sticky}
+      class:disabled={!view.can_stick}
+      role="switch"
+      tabindex={view.can_stick ? 0 : -1}
+      aria-checked={view.sticky}
+      aria-disabled={!view.can_stick}
+      onclick={() => {
+        if (view?.can_stick) set('panel_set_sticky', { sticky: !view.sticky });
+      }}
+      onkeydown={(event) =>
+        onSwitchKey(event, () => {
+          if (view?.can_stick)
+            set('panel_set_sticky', { sticky: !view.sticky });
+        })}
+    >
+      <span>{text(language, 'menu.sticky')}</span>
+      <span class="switch" aria-hidden="true"></span>
+    </div>
+
+    {#if view.on_resize}
+      <div class="field sub">
+        <span class="label">{text(language, 'menu.on_resize')}</span>
+        <div class="choice wrap" role="radiogroup">
+          {#each ON_RESIZE as onResize (onResize)}
+            <button
+              type="button"
+              role="radio"
+              aria-checked={view.on_resize === onResize}
+              class:on={view.on_resize === onResize}
+              onclick={() =>
+                set('panel_set_on_resize', { onResize })}
+              >{text(language, onResizeLabel[onResize] as never)}</button
+            >
+          {/each}
+        </div>
+      </div>
+    {/if}
+
+    <div
+      class="toggle"
+      class:on={view.click_through}
+      role="switch"
+      tabindex="0"
+      aria-checked={view.click_through}
+      onclick={() =>
+        set('panel_set_click_through', { on: !view?.click_through })}
+      onkeydown={(event) =>
+        onSwitchKey(event, () =>
+          set('panel_set_click_through', { on: !view?.click_through }),
+        )}
+    >
+      <span>{text(language, 'menu.click_through')}</span>
+      <span class="switch" aria-hidden="true"></span>
+    </div>
+
+    {#if view.capture}
+      <div class="rule" aria-hidden="true"></div>
+      <div class="actions">
+        <button
+          type="button"
+          class="act"
+          onclick={() => set('panel_export', { save: false })}
+          >{text(language, 'menu.copy')}</button
+        >
+        <button
+          type="button"
+          class="act"
+          onclick={() => set('panel_export', { save: true })}
+          >{text(language, 'menu.save_image')}</button
+        >
+      </div>
     {/if}
   </div>
 {/if}
@@ -352,5 +512,105 @@ input:focus {
 .hold.held {
   border-color: rgba(var(--tone), 0.6);
   color: rgba(var(--tone), 1);
+}
+
+/* The menu's other rows (second slice), as in the mock he approved on
+   2026-11-05. */
+.choice.wrap {
+  flex-wrap: wrap;
+}
+
+.choice.wrap button {
+  flex: 0 1 auto;
+}
+
+.rule {
+  height: 1px;
+  margin: 0 -12px;
+  background: rgba(235, 238, 240, 0.08);
+}
+
+.toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.toggle.disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.toggle:focus {
+  outline: none;
+}
+
+.toggle:focus-visible {
+  outline: 1px solid rgba(var(--tone), 0.8);
+  outline-offset: 2px;
+}
+
+.switch {
+  position: relative;
+  width: 26px;
+  height: 14px;
+  border-radius: 7px;
+  background: rgba(235, 238, 240, 0.16);
+  transition: background-color 120ms ease-out;
+}
+
+.switch::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: rgba(235, 238, 240, 0.85);
+  transition: transform 120ms ease-out;
+}
+
+.toggle.on .switch {
+  background: rgba(var(--tone), 0.6);
+}
+
+.toggle.on .switch::after {
+  transform: translateX(12px);
+  background: rgba(235, 238, 240, 0.96);
+}
+
+.sub {
+  padding-left: 10px;
+  border-left: 1px solid rgba(235, 238, 240, 0.08);
+}
+
+.actions {
+  display: flex;
+  gap: 4px;
+}
+
+.act {
+  flex: 1;
+  padding: 5px 8px;
+  border: 1px solid rgba(235, 238, 240, 0.16);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(235, 238, 240, 0.85);
+  font: inherit;
+  cursor: pointer;
+}
+
+.act:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .switch,
+  .switch::after {
+    transition: none;
+  }
 }
 </style>

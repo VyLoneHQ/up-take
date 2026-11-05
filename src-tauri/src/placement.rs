@@ -3103,7 +3103,10 @@ fn handle_mouse(wparam: WPARAM, lparam: LPARAM) -> bool {
                 && crate::first_run::hit(point).is_none()
                 && let Some(app) = APP.get()
             {
-                open_menu(app, point);
+                match right_click_opens(ctrl_held()) {
+                    RightClick::Menu => open_menu(app, point),
+                    RightClick::Panel => open_panel(app, point),
+                }
             }
             maybe_finish_teardown();
             true
@@ -4060,7 +4063,7 @@ pub(crate) const fn captures_on_create(kind: AreaType) -> bool {
 ///
 /// Exhaustive rather than a `_` arm, so a ninth `AreaType` fails to compile
 /// here instead of defaulting to either answer.
-fn conversion_label(kind: AreaType) -> Option<&'static str> {
+pub(crate) fn conversion_label(kind: AreaType) -> Option<&'static str> {
     use crate::strings::{Text, text};
     match kind {
         AreaType::Default => Some(text(Text::MenuTypeDefault)),
@@ -4308,6 +4311,45 @@ fn pointer_target(app: &AppHandle, point: Point) -> Option<overlay::AreaSummary>
         Mode::Placement => overlay::area_at(app, point),
         Mode::Living => overlay::interactive_area_at(app, point),
         Mode::Hidden => None,
+    }
+}
+
+/// What a right-click on an area opens (roadmap `1.60`, the founder's choice
+/// of 2026-11-05: *"Keep both, but use the new version as the default,
+/// ctrl+right-click should open the "legacy" (the other menu) version"*).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RightClick {
+    /// The area's settings panel, pinned.
+    Panel,
+    /// The area menu of before the panel.
+    Menu,
+}
+
+/// [`RightClick`]'s rule: Ctrl held opens the menu, anything else the panel.
+const fn right_click_opens(ctrl: bool) -> RightClick {
+    if ctrl {
+        RightClick::Menu
+    } else {
+        RightClick::Panel
+    }
+}
+
+/// Whether Ctrl is down now. Asked of the key state as it is, not of the
+/// thread's message queue, since this runs inside the mouse hook.
+fn ctrl_held() -> bool {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL};
+    // SAFETY: reads the key state only.
+    unsafe { GetAsyncKeyState(i32::from(VK_CONTROL)) < 0 }
+}
+
+/// Opens the settings panel, pinned, for whatever is under `point`, on the
+/// same target as the menu ([`pointer_target`], which the press that claimed
+/// the click also used). Closes any open menu either way, and with no area
+/// under `point` the click has nothing to act on.
+fn open_panel(app: &AppHandle, point: Point) {
+    close_menu(app);
+    if let Some(area) = pointer_target(app, point) {
+        crate::panel::open(app, area.id, true, point);
     }
 }
 
@@ -6776,6 +6818,23 @@ mod tests {
                 ("Dismiss", true),
             ]
         );
+    }
+
+    /// Roadmap `1.60`, the founder's choice of 2026-11-05: right-click opens
+    /// the settings panel, Ctrl+right-click the menu of before.
+    #[test]
+    fn right_click_opens_the_panel_and_ctrl_right_click_the_menu() {
+        use super::{RightClick, right_click_opens};
+        assert_eq!(right_click_opens(false), RightClick::Panel);
+        assert_eq!(right_click_opens(true), RightClick::Menu);
+        // The release asks the rule with the real key state, and the panel
+        // opens on the menu's own target. Held by source: the hook runs on a
+        // real Windows hook no test can drive.
+        let source = include_str!("placement.rs");
+        assert!(source.contains("match right_click_opens(ctrl_held()) {"));
+        let body = fn_body(source, "fn open_panel(app: &AppHandle, point: Point) {");
+        assert!(body.contains("pointer_target(app, point)"));
+        assert!(body.contains("crate::panel::open(app, area.id, true, point)"));
     }
 
     /// `open_menu` needs an `AppHandle`, so this reads its source, with the

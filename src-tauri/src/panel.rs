@@ -1,21 +1,27 @@
 //! The area settings panel (roadmap `1.60`, the founder's design of
 //! 2026-11-03).
 //!
-//! Each area's own settings, in a small panel beside it: today its name, and
-//! for a watch area what it tells the user about and whether it is paused;
-//! later what a watch area looks for, its tolerance and its reactions
-//! (`1.61` to `1.63`).
+//! Each area's own settings, in a small panel beside it: its name, its type,
+//! the type's own settings (what a watch area tells the user about, how an
+//! OCR area shows what it read), Pause, its depth, sticking to a window and
+//! what it does on a resize, click-through, and Copy and Save image for a
+//! screenshot: every row of the area menu but *Dismiss* (the founder's
+//! approval of 2026-11-05). Later what a watch area looks for, its tolerance
+//! and its reactions (`1.61` to `1.63`).
 //!
 //! # How it opens and closes
 //!
+//! - **Right-click, in either mode:** opens it pinned. **Ctrl+right-click**
+//!   opens the area menu of before instead (`placement::RightClick`, his
+//!   choice of 2026-11-05), which keeps *Dismiss* and *Settings…*.
 //! - **Hover, while placing only:** resting the pointer on an area for
 //!   [`HOVER_OPEN`] opens it. It closes once the pointer has been off both the
 //!   area and the panel for [`HOVER_CLOSE`]. Not in Living: a watch area sits
 //!   over something the user works in, and a panel appearing whenever the
 //!   pointer crosses it would cover that work (agreed with the founder).
-//! - **Pinned:** opened from the area menu's *Settings…*, or by a click into a
-//!   hover panel. A pinned panel stays until `Esc`, a click elsewhere while
-//!   placing, the area going, or placing ending.
+//! - **Pinned:** by right-click, the menu's *Settings…*, or a click into a
+//!   hover panel. A pinned panel stays until `Esc`, its ×, a click elsewhere
+//!   while placing, the area going, or placing ending.
 //!
 //! # Where it goes
 //!
@@ -38,8 +44,9 @@ use std::time::Duration;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
-use uptake_core::area::{AreaId, AreaStore, AreaType};
+use uptake_core::area::{AreaId, AreaStore, AreaType, Input, Layer, OcrBehaviour};
 use uptake_core::geometry::{Monitor, Point, Rect};
+use uptake_core::sticky::OnResize;
 use uptake_core::watch::Watch;
 
 /// The panel window's label. `capabilities/panel.json` grants it.
@@ -188,16 +195,76 @@ pub struct PanelView {
     pub watch: Option<Watch>,
     /// Whether it is paused; `null` for a type with nothing to pause.
     pub held: Option<bool>,
+    /// The types it can be turned into, by wire name, in the menu's order
+    /// (`placement::conversion_label` decides which, as for the menu).
+    pub kinds: Vec<&'static str>,
+    /// How an OCR area shows what it read; `null` for another type.
+    pub ocr: Option<OcrBehaviour>,
+    /// Its depth tier: [`depth_name`].
+    pub depth: &'static str,
+    /// Whether it follows the window under it (roadmap `1.47`).
+    pub sticky: bool,
+    /// Whether there is a window under it to stick to; the switch is greyed
+    /// out when there is not and the area is free, as the menu row is.
+    pub can_stick: bool,
+    /// What a sticky area does when its window is resized; `null` when free.
+    pub on_resize: Option<OnResize>,
+    /// Whether clicks pass through it to what is underneath.
+    pub click_through: bool,
+    /// Whether it holds a capture to copy or save (a screenshot area).
+    pub capture: bool,
 }
 
-fn view(store: &AreaStore, id: AreaId) -> Option<PanelView> {
+/// A depth tier's wire name, as the page names it.
+#[must_use]
+pub const fn depth_name(layer: Layer) -> &'static str {
+    match layer {
+        Layer::Front => "front",
+        Layer::Auto => "auto",
+        Layer::Back => "back",
+    }
+}
+
+/// The tier a wire name names, if any.
+#[must_use]
+pub fn depth_named(name: &str) -> Option<Layer> {
+    [Layer::Front, Layer::Auto, Layer::Back]
+        .into_iter()
+        .find(|layer| depth_name(*layer) == name)
+}
+
+/// The type a wire name names, among those an area can be turned into.
+#[must_use]
+pub fn kind_named(name: &str) -> Option<AreaType> {
+    convertible().find(|kind| crate::overlay::type_name(*kind) == name)
+}
+
+/// The types an area can be turned into, in the menu's order.
+fn convertible() -> impl Iterator<Item = AreaType> {
+    AreaType::ALL
+        .into_iter()
+        .filter(|kind| crate::placement::conversion_label(*kind).is_some())
+}
+
+/// What the page shows for `id`; `can_stick` and `on_resize` are asked of
+/// the app by the caller, which holds no store lock while it does.
+fn view(store: &AreaStore, id: AreaId, can_stick: bool, on_resize: OnResize) -> Option<PanelView> {
     let area = store.get(id)?;
+    let sticky = area.sticky.is_sticky();
     Some(PanelView {
         id: id.get(),
         kind: crate::overlay::type_name(area.kind),
         name: store.name(id).map(str::to_string),
         watch: (area.kind == AreaType::Watch).then_some(area.watch),
         held: area.kind.keeps_working().then_some(area.held),
+        kinds: convertible().map(crate::overlay::type_name).collect(),
+        ocr: (area.kind == AreaType::Ocr).then_some(area.ocr_behaviour),
+        depth: depth_name(area.layer),
+        sticky,
+        can_stick: sticky || can_stick,
+        on_resize: sticky.then_some(on_resize),
+        click_through: area.input == Input::PassThrough,
+        capture: area.kind == AreaType::Screenshot,
     })
 }
 
@@ -531,9 +598,88 @@ fn changed(app: &AppHandle) -> Result<(), String> {
 #[must_use]
 pub fn panel_view(app: AppHandle) -> Option<PanelView> {
     let open = open_now()?;
+    // Asked before the store is locked: both take locks of their own.
+    let can_stick =
+        crate::overlay::area_bounds(&app, open.area).is_some_and(crate::sticky::can_stick);
+    let on_resize = crate::sticky::on_resize_of(open.area);
     let store = app.state::<Mutex<AreaStore>>();
     let store = store.lock().unwrap_or_else(PoisonError::into_inner);
-    view(&store, open.area)
+    view(&store, open.area, can_stick, on_resize)
+}
+
+/// Applies `act` to the open area and, when it changed something, tells
+/// every page the areas changed, as a menu row does.
+fn set_open(app: &AppHandle, act: impl FnOnce(AreaId) -> bool) -> Result<(), String> {
+    if with_open_area(act) == Some(true) {
+        changed(app)?;
+    }
+    Ok(())
+}
+
+/// IPC surface: turns the open area into the type `kind` names (the menu's
+/// *Area type* rows, roadmap `1.27`).
+#[tauri::command]
+pub fn panel_set_type(app: AppHandle, kind: String) -> Result<(), String> {
+    let kind = kind_named(&kind).ok_or_else(|| format!("not a type an area becomes: {kind}"))?;
+    set_open(&app, |id| crate::overlay::convert_area(&app, id, kind))
+}
+
+/// IPC surface: how the open OCR area shows what it read (`1.45`).
+#[tauri::command]
+pub fn panel_set_ocr(app: AppHandle, behaviour: OcrBehaviour) -> Result<(), String> {
+    set_open(&app, |id| {
+        crate::overlay::set_area_ocr_behaviour(&app, id, behaviour)
+    })
+}
+
+/// IPC surface: the open area's depth tier (`ADR-0013`).
+#[tauri::command]
+pub fn panel_set_depth(app: AppHandle, depth: String) -> Result<(), String> {
+    let layer = depth_named(&depth).ok_or_else(|| format!("not a depth: {depth}"))?;
+    set_open(&app, |id| crate::overlay::set_area_layer(&app, id, layer))
+}
+
+/// IPC surface: makes the open area follow the window under it, or frees it
+/// (`1.47`).
+#[tauri::command]
+pub fn panel_set_sticky(app: AppHandle, sticky: bool) -> Result<(), String> {
+    set_open(&app, |id| crate::sticky::set(&app, id, sticky))
+}
+
+/// IPC surface: what the open sticky area does when its window is resized.
+#[tauri::command]
+pub fn panel_set_on_resize(app: AppHandle, on_resize: OnResize) -> Result<(), String> {
+    set_open(&app, |id| crate::sticky::set_on_resize(id, on_resize))
+}
+
+/// IPC surface: whether clicks pass through the open area (V-7).
+#[tauri::command]
+pub fn panel_set_click_through(app: AppHandle, on: bool) -> Result<(), String> {
+    let input = if on {
+        Input::PassThrough
+    } else {
+        Input::Interactive
+    };
+    set_open(&app, |id| crate::overlay::set_area_input(&app, id, input))
+}
+
+/// IPC surface: copies the open screenshot area's capture, or saves it to
+/// `Pictures\UP-TAKE\` (`save`), on a thread of its own as the menu does.
+#[tauri::command]
+pub fn panel_export(app: AppHandle, save: bool) {
+    let Some(id) = with_open_area(|id| id) else {
+        return;
+    };
+    let Some(bounds) = crate::overlay::area_bounds(&app, id) else {
+        return;
+    };
+    std::thread::spawn(move || {
+        if save {
+            crate::output::save_to_file(&app, id, bounds);
+        } else {
+            crate::output::copy_to_clipboard(&app, id, bounds);
+        }
+    });
 }
 
 /// IPC surface: the page's height, logical pixels; re-places the panel.
@@ -673,10 +819,53 @@ mod tests {
                 name: Some("Download watcher".to_string()),
                 watch: Some(Watch::Changes),
                 held: Some(false),
+                kinds: vec!["default", "watch"],
+                ocr: None,
+                depth: "auto",
+                sticky: true,
+                can_stick: true,
+                on_resize: Some(uptake_core::sticky::OnResize::Corner),
+                click_through: false,
+                capture: false,
             },
-            &["id", "kind", "name", "watch", "held"],
+            &[
+                "id",
+                "kind",
+                "name",
+                "watch",
+                "held",
+                "kinds",
+                "ocr",
+                "depth",
+                "sticky",
+                "can_stick",
+                "on_resize",
+                "click_through",
+                "capture",
+            ],
         );
         assert_payload_coverage("panel.rs", include_str!("panel.rs"), &["PanelView"], &[]);
+    }
+
+    /// The page sends depths and types by wire name; each name the panel
+    /// shows comes back to what it names, and nothing else is accepted.
+    #[test]
+    fn depths_and_types_cross_by_their_wire_names() {
+        use super::{depth_name, depth_named, kind_named};
+        use uptake_core::area::{AreaType, Layer};
+        for layer in [Layer::Front, Layer::Auto, Layer::Back] {
+            assert_eq!(depth_named(depth_name(layer)), Some(layer));
+        }
+        assert_eq!(depth_named("top"), None);
+        for kind in AreaType::ALL {
+            let offered = crate::placement::conversion_label(kind).is_some();
+            assert_eq!(
+                kind_named(crate::overlay::type_name(kind)) == Some(kind),
+                offered,
+                "{kind:?}: the panel offers what the menu offers"
+            );
+        }
+        assert_eq!(kind_named("nonsense"), None);
     }
 
     /// The founder's rig, 2026-11-03: presses on the panel were swallowed. A

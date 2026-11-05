@@ -13,9 +13,17 @@
  */
 
 import { invoke } from '@tauri-apps/api/core';
-import { render } from '@testing-library/svelte';
+import { cleanup, render } from '@testing-library/svelte';
 import { tick } from 'svelte';
-import { afterAll, beforeAll, beforeEach, expect, test, vi } from 'vitest';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  expect,
+  test,
+  vi,
+} from 'vitest';
 
 const handlers = new Map<string, () => void>();
 
@@ -63,17 +71,109 @@ afterAll(() => {
     Object.defineProperty(HTMLElement.prototype, 'offsetHeight', original);
 });
 
+afterEach(() => cleanup());
+
 beforeEach(() => {
   handlers.clear();
   replies.clear();
   vi.mocked(invoke).mockClear();
+  replies.set('panel_view', WATCH);
+});
+
+/** A watch area, free, on the menu's default depth. */
+const WATCH = {
+  id: 1,
+  kind: 'watch',
+  name: null,
+  watch: 'changes',
+  held: false,
+  kinds: ['default', 'screenshot', 'filter', 'upscale', 'ocr', 'watch'],
+  ocr: null,
+  depth: 'auto',
+  sticky: false,
+  can_stick: true,
+  on_resize: null,
+  click_through: false,
+  capture: false,
+};
+
+/** The last command the page sent other than its height. */
+function lastSet() {
+  return vi
+    .mocked(invoke)
+    .mock.calls.filter(
+      ([command]) => command !== 'panel_resize' && command !== 'panel_pin',
+    )
+    .at(-1);
+}
+
+function button(name: string): HTMLElement {
+  const found = [...document.querySelectorAll<HTMLElement>('button')].find(
+    (candidate) => candidate.textContent?.trim() === name,
+  );
+  if (!found) throw new Error(`no button "${name}"`);
+  return found;
+}
+
+function switchNamed(name: string): HTMLElement {
+  const found = [
+    ...document.querySelectorAll<HTMLElement>('[role="switch"]'),
+  ].find((candidate) => candidate.textContent?.trim() === name);
+  if (!found) throw new Error(`no switch "${name}"`);
+  return found;
+}
+
+// Roadmap 1.60, second slice: the menu's rows, in the panel he approved on
+// 2026-11-05. Each control sends the command that runs the menu row's action.
+test('each of the menu rows sends its own command', async () => {
+  render(Page);
+  await settle();
+  button('Screenshot').click();
+  expect(lastSet()).toEqual(['panel_set_type', { kind: 'screenshot' }]);
+  button('Always on top').click();
+  expect(lastSet()).toEqual(['panel_set_depth', { depth: 'front' }]);
+  switchNamed('Stick to window').click();
+  expect(lastSet()).toEqual(['panel_set_sticky', { sticky: true }]);
+  switchNamed('Click-through').click();
+  expect(lastSet()).toEqual(['panel_set_click_through', { on: true }]);
+  // The panel offers no Dismiss: an area has its own close control, and
+  // Ctrl+right-click keeps the menu that has one (his choice).
+  expect(
+    [...document.querySelectorAll('button')].some(
+      (candidate) => candidate.textContent?.trim() === 'Dismiss',
+    ),
+  ).toBe(false);
+});
+
+test('a type shows only its own rows', async () => {
   replies.set('panel_view', {
-    id: 1,
-    kind: 'watch',
-    name: null,
-    watch: 'changes',
-    held: false,
+    ...WATCH,
+    kind: 'screenshot',
+    watch: null,
+    held: null,
+    sticky: true,
+    on_resize: 'corner',
+    capture: true,
   });
+  render(Page);
+  await settle();
+  expect(document.body.textContent).not.toContain('Notify when it changes');
+  expect(document.body.textContent).not.toContain('Pause');
+  button('Keep top left').click();
+  expect(lastSet()).toEqual(['panel_set_on_resize', { onResize: 'top_left' }]);
+  button('Copy').click();
+  expect(lastSet()).toEqual(['panel_export', { save: false }]);
+  button('Save image').click();
+  expect(lastSet()).toEqual(['panel_export', { save: true }]);
+});
+
+test('with no window to stick to, the switch does nothing', async () => {
+  replies.set('panel_view', { ...WATCH, can_stick: false });
+  render(Page);
+  await settle();
+  vi.mocked(invoke).mockClear();
+  switchNamed('Stick to window').click();
+  expect(lastSet()).toBeUndefined();
 });
 
 async function settle() {
