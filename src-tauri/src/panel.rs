@@ -253,6 +253,31 @@ fn view(store: &AreaStore, id: AreaId, can_stick: bool, on_resize: OnResize) -> 
     })
 }
 
+/// Runs `work` on the main thread **after** the current message is handled,
+/// never inside it.
+///
+/// `run_on_main_thread` runs its work at once when called on the main
+/// thread, and the placement hook that opens and closes the panel runs on
+/// the main thread inside tao's own message loop. Showing or hiding the
+/// window there made Windows send its messages re-entrantly, and tao's
+/// assertion in its paint handler (`flush_paint_messages`) ended the app:
+/// the maintainer's rig, 2026-11-05, a right-click inside a watch area in
+/// Living. Posting from a short-lived thread queues the work as an event, so
+/// the hook returns first.
+fn later(app: &AppHandle, work: impl FnOnce() + Send + 'static) {
+    let app = app.clone();
+    let posted = std::thread::Builder::new()
+        .name("uptake-panel-post".into())
+        .spawn(move || {
+            if let Err(error) = app.run_on_main_thread(work) {
+                crate::diagnostics::trouble("panel: window work not scheduled", &error);
+            }
+        });
+    if let Err(error) = posted {
+        crate::diagnostics::trouble("panel: window work not posted", &error);
+    }
+}
+
 /// Opens the panel for `area`, with the pointer at `pointer`. Replaces any
 /// panel already open.
 pub fn open(app: &AppHandle, area: AreaId, pointer: Point) {
@@ -264,7 +289,7 @@ pub fn open(app: &AppHandle, area: AreaId, pointer: Point) {
         rect: Rect::new(0, 0, 0, 0),
     });
     let app_main = app.clone();
-    let _ = app.run_on_main_thread(move || {
+    later(app, move || {
         if let Err(error) = present(&app_main) {
             crate::diagnostics::trouble("panel: could not open", &error);
         }
@@ -283,7 +308,7 @@ pub fn close(app: &AppHandle) {
         return;
     }
     let app_main = app.clone();
-    let _ = app.run_on_main_thread(move || {
+    later(app, move || {
         if let Some(window) = app_main.get_webview_window(LABEL) {
             let had_keyboard = window.is_focused().unwrap_or(false);
             // Shown by a raw `ShowWindow`, so hidden by one (`I-478`).
@@ -422,7 +447,7 @@ pub fn refresh(app: &AppHandle) {
         return;
     }
     let app_main = app.clone();
-    let _ = app.run_on_main_thread(move || {
+    later(app, move || {
         if let Err(error) = present(&app_main) {
             crate::diagnostics::trouble("panel: could not follow its area", &error);
         }
@@ -585,7 +610,7 @@ pub fn panel_resize(app: AppHandle, height: f64) {
     };
     if resized {
         let app_main = app.clone();
-        let _ = app.run_on_main_thread(move || {
+        later(&app, move || {
             let _ = present(&app_main);
         });
     }
@@ -809,6 +834,33 @@ mod tests {
         let listed = at("crate::notice::own_window_at(LABEL, rect);");
         assert!(listed < usize::MAX, "listed");
         assert!(listed < at(".set_size(tauri::PhysicalSize::new(rect.size.width"));
+    }
+
+    /// The maintainer's rig, 2026-11-05: a right-click inside a watch area in
+    /// Living ended the app (tao's paint assertion), because the hook showed
+    /// and hid the panel window inside tao's own message handling. Every
+    /// piece of window work in this file goes through `later`, which posts it
+    /// as an event; held by source, as no test here can run the hook.
+    #[test]
+    fn the_panel_window_is_never_touched_inside_the_hook() {
+        let source = include_str!("panel.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or_default();
+        let calls = code.matches(concat!(".run_on_main", "_thread(")).count();
+        assert_eq!(calls, 1, "only inside `later`");
+        let helper = code
+            .split("fn later(app: &AppHandle")
+            .nth(1)
+            .and_then(|rest| {
+                rest.split(
+                    "
+}
+",
+                )
+                .next()
+            })
+            .unwrap_or_default();
+        assert!(helper.contains("std::thread::Builder::new()"));
+        assert!(helper.contains(concat!("app.run_on_main", "_thread(work)")));
     }
 
     #[test]
