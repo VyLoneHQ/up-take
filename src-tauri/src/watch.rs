@@ -179,7 +179,7 @@ pub const IDLE: Duration = Duration::from_secs(2);
 /// While a change is settling, how often it reads with no frame arriving: the
 /// calm that ends a change is only seen by reading through it, so a *stopped
 /// changing* comes at most this long after the calm it waits for.
-pub const SETTLE_POLL: Duration = Duration::from_millis(100);
+pub const SETTLE_POLL: Duration = Duration::from_millis(50);
 
 /// One is switched on and none can be read now (paused, the overlay hidden):
 /// how soon it looks again, since nothing wakes the thread when that changes.
@@ -1226,13 +1226,12 @@ mod tests {
             fake.level = 20;
             assert_eq!(pass(&mut fake, &mut memory), Some(SETTLE_POLL), "changed");
             assert_eq!(fake.notified, vec![Event::Changed]);
-            // The fake clock steps half a second a pass: one second of calm
-            // is two passes after the change.
-            assert_eq!(pass(&mut fake, &mut memory), Some(SETTLE_POLL), "settling");
+            // The fake clock steps half a second a pass, longer than the
+            // re-arm: the next pass ends the change.
             assert_eq!(
                 pass(&mut fake, &mut memory),
                 Some(IDLE),
-                "settled after 1 s"
+                "settled"
             );
             fake.seen = false;
             fake.still = false;

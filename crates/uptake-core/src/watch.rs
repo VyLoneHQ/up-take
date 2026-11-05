@@ -76,11 +76,15 @@ impl Watch {
         }
     }
 
-    /// How long a calm ends a change for this choice:
-    /// [`Self::settle_readings`] readings at [`READING_STEP`].
+    /// How long a calm ends a change for this choice, for the event-driven
+    /// host: [`REARM_TIME`] re-arms *changes*, and [`SETTLE_READINGS`]
+    /// readings at [`READING_STEP`] (six seconds) call something finished.
     #[must_use]
     pub fn settle_time(self) -> Duration {
-        READING_STEP * self.settle_readings()
+        match self {
+            Self::Changes => REARM_TIME,
+            _ => READING_STEP * self.settle_readings(),
+        }
     }
 
     /// Whether `event` is the one this choice asked to be told about.
@@ -154,6 +158,15 @@ pub const SETTLE_READINGS: u32 = 12;
 /// second change within six seconds of the first was never reported. This
 /// mode reports change, not completion, so a short calm is enough.
 pub const REARM_READINGS: u32 = 2;
+
+/// How long a calm re-arms *Notify when it changes* for the event-driven
+/// host. The maintainer's rig, 2026-11-05: a region switched back and forth
+/// faster than a second notified only once, and he asked for every change
+/// (*"as responsive and realtime as possible"*). A sixth of a second is long
+/// enough for a change's own redraw to finish, so one change is one
+/// notification, and short enough for a hand toggling something to be seen
+/// every time. The count above is the same rule at half-second readings.
+pub const REARM_TIME: Duration = Duration::from_millis(150);
 
 /// One reading, summarised: the average brightness of each cell of a grid laid
 /// over the region.
@@ -840,11 +853,12 @@ mod tests {
     }
 
     /// The event-driven watcher reads at no fixed rate: a calm is measured in
-    /// time. Readings every 50 ms do not re-arm *changes* after two still
-    /// readings (a tenth of a second) but after one second, and a reading
-    /// long after the last still holds it to one second, not one reading.
+    /// time. Readings every 50 ms re-arm *changes* after [`REARM_TIME`] of
+    /// calm, not after two readings, and one reading long after the last
+    /// still ends a *stops changing* by itself.
     #[test]
     fn a_calm_is_measured_in_time_whatever_the_rate() {
+        use super::REARM_TIME;
         use std::time::Duration;
         let ms = Duration::from_millis;
         let mut detector = Detector::with_settle_time(Watch::Changes.settle_time());
@@ -856,20 +870,18 @@ mod tests {
             Some(Event::Changed)
         );
         assert!(detector.is_settling());
-        let mut events = Vec::new();
-        let mut at = 50;
-        while at < 1_000 {
-            at += 50;
-            events.extend(detector.observe_at(print(&moved), ms(at)));
-        }
-        assert_eq!(events, vec![], "less than a second of calm");
+        assert_eq!(detector.observe_at(print(&moved), ms(100)), None);
         assert_eq!(
-            detector.observe_at(print(&moved), ms(1_050)),
+            detector.observe_at(print(&moved), ms(150)),
+            None,
+            "100 ms calm"
+        );
+        assert_eq!(
+            detector.observe_at(print(&moved), ms(50) + REARM_TIME),
             Some(Event::Settled)
         );
         assert!(!detector.is_settling());
 
-        // One reading a long while later ends the change by itself.
         let mut detector = Detector::with_settle_time(Watch::Settles.settle_time());
         detector.observe_at(print(&still), ms(0));
         detector.observe_at(print(&moved), ms(10));
@@ -880,11 +892,40 @@ mod tests {
         );
     }
 
-    /// The counts keep their meaning at the old half-second step.
+    /// The maintainer's rig, 2026-11-05: icons switched on and off by hand,
+    /// faster than once a second, notified only the first time. Read the way
+    /// the event-driven host reads (on each change, then every 50 ms while it
+    /// settles), every switch is a change.
+    #[test]
+    fn a_region_switched_back_and_forth_reports_every_switch() {
+        use std::time::Duration;
+        let shown = with_patch(grey(64, 64, 30), (8, 24, 48, 16), 220);
+        let empty = grey(64, 64, 30);
+        let mut detector = Detector::with_settle_time(Watch::Changes.settle_time());
+        let mut changes = 0;
+        let mut at = 0_u64;
+        detector.observe_at(print(&empty), Duration::from_millis(at));
+        for switch in 0..10 {
+            let picture = if switch % 2 == 0 { &shown } else { &empty };
+            // A switch every 300 ms: the read on the frame, then the polls.
+            for _ in 0..6 {
+                at += 50;
+                if detector.observe_at(print(picture), Duration::from_millis(at))
+                    == Some(Event::Changed)
+                {
+                    changes += 1;
+                }
+            }
+        }
+        assert_eq!(changes, 10);
+    }
+
+    /// *Stops changing* keeps its six seconds; *changes* re-arms after a
+    /// sixth of a second (the maintainer's rig, 2026-11-05).
     #[test]
     fn the_settle_times_are_the_counts_at_half_a_second() {
         use std::time::Duration;
-        assert_eq!(Watch::Changes.settle_time(), Duration::from_secs(1));
+        assert_eq!(Watch::Changes.settle_time(), Duration::from_millis(150));
         assert_eq!(Watch::Settles.settle_time(), Duration::from_secs(6));
     }
 
