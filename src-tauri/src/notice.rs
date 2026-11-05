@@ -1,7 +1,9 @@
 //! UP-TAKE's own notification cards (`ADR-0054`).
 //!
 //! A watch area that notices a change says so in a card drawn by UP-TAKE, at
-//! the top centre of the monitor the area is on. Not a Windows toast: at the
+//! the top centre of the main monitor, or of the area's own monitor if the
+//! user chose that (`card_monitor`, `ADR-0054`'s amendment of 2026-11-05).
+//! Not a Windows toast: at the
 //! first real-screen test (2026-11-03) Windows accepted every toast and showed
 //! none, and toasts are off on some PCs altogether. The cards show whatever
 //! Windows' notification settings are, and follow UP-TAKE's own *Show

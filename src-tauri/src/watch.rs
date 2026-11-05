@@ -905,8 +905,8 @@ fn gate<Id: PartialEq + Copy>(
     }
 }
 
-/// Shows UP-TAKE's own card for `event` (`ADR-0054`), on the monitor of the
-/// area at `bounds`. Says which moment it was and never what the area read.
+/// Shows UP-TAKE's own card for `event` (`ADR-0054`), on the monitor the
+/// user's setting picks for the area at `bounds` (`notice::card_monitor`). Says which moment it was and never what the area read.
 ///
 /// Not a Windows toast any more: at the first real-screen test Windows
 /// accepted every toast and showed none.
