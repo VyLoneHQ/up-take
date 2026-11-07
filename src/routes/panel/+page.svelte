@@ -103,6 +103,11 @@ function setTuning(change: Partial<PanelTuning>): void {
 const number = (value: number): string =>
   value.toLocaleString(language, { maximumFractionDigits: 1 });
 
+// How far along its slider a step sits, 0 at the first and 1 at the last.
+function at(step: number, steps: readonly number[]): string {
+  return String(steps.length > 1 ? step / (steps.length - 1) : 0);
+}
+
 /** A duration as the panel says it: ms under a second, s, or min. */
 function duration(ms: number): string {
   if (ms >= 60_000)
@@ -354,6 +359,7 @@ onMount(() => {
             max={CALM_STEPS_MS.length - 1}
             step="1"
             value={nearestStep(CALM_STEPS_MS, tuning.calm_ms)}
+            style:--at={at(nearestStep(CALM_STEPS_MS, tuning.calm_ms), CALM_STEPS_MS)}
             oninput={(event) =>
               setTuning({
                 calm_ms: CALM_STEPS_MS[Number(event.currentTarget.value)] ?? 150,
@@ -364,7 +370,7 @@ onMount(() => {
       {/if}
       <div class="field">
         <span class="label">{text(language, 'panel.watch.gap')}</span>
-        <div class="choice wrap" role="radiogroup">
+        <div class="choice row" role="radiogroup">
           {#each GAPS_MS as gap}
             <button
               type="button"
@@ -393,6 +399,7 @@ onMount(() => {
           max={SAMPLE_STEPS_MS.length - 1}
           step="1"
           value={nearestStep(SAMPLE_STEPS_MS, tuning.sample_ms)}
+          style:--at={at(nearestStep(SAMPLE_STEPS_MS, tuning.sample_ms), SAMPLE_STEPS_MS)}
           oninput={(event) =>
             setTuning({
               sample_ms: SAMPLE_STEPS_MS[Number(event.currentTarget.value)] ?? 0,
@@ -666,10 +673,48 @@ input:focus {
 
 /* The menu's other rows (second slice), as in the mock he approved on
    2026-11-05. */
+/* Drawn here rather than left to the system control, whose thumb stops
+   short of both ends: at the lowest step the thumb sits flush with the
+   start, at the highest flush with the end (his rig pass, 2026-11-07).
+   --at is the step as a share of the way, 0 to 1; the fill ends under
+   the thumb's centre. */
 input[type='range'] {
+  appearance: none;
+  -webkit-appearance: none;
+  display: block;
   width: 100%;
+  height: 16px;
   margin: 2px 0 0;
-  accent-color: rgb(var(--tone));
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+input[type='range']::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 3px;
+  background: linear-gradient(
+    to right,
+    rgba(var(--tone), 0.9) calc(8px + (100% - 16px) * var(--at, 0)),
+    rgba(235, 238, 240, 0.16) calc(8px + (100% - 16px) * var(--at, 0))
+  );
+}
+
+input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -5px;
+  border: 0;
+  border-radius: 50%;
+  background: rgb(var(--tone));
+}
+
+input[type='range']:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 3px rgba(var(--tone), 0.35);
 }
 
 .label .value {
@@ -684,6 +729,13 @@ input[type='range'] {
 
 .choice.wrap button {
   flex: 0 1 auto;
+}
+
+/* One row however long the words: each button as wide as its text. */
+.choice.row button {
+  flex: 1 1 auto;
+  padding: 5px 4px;
+  white-space: nowrap;
 }
 
 .rule {
