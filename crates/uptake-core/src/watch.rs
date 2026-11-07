@@ -1103,7 +1103,7 @@ mod tests {
             detector.observe_at(print(&empty), Duration::ZERO);
             for frame in 1..=99_u64 {
                 let at = frame * 33;
-                // Switched every 100 ms: twenty switches in two seconds.
+                // Switched every 100 ms for 3.3 s: 32 switches, ten a second.
                 let picture = if (at / 100) % 2 == 0 { &empty } else { &shown };
                 if detector.observe_at(print(picture), Duration::from_millis(at))
                     == Some(Event::Changed)
