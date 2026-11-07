@@ -346,6 +346,136 @@ const fn luma(r: u8, g: u8, b: u8) -> u8 {
     (weighted / 1000) as u8
 }
 
+/// Which of an area's events become a notification card (roadmap `1.65`,
+/// the maintainer's choice of 2026-11-07).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Notify {
+    /// No card. The area still watches, and its events still count.
+    Never,
+    /// One card per burst: the first event after [`Tuning::calm_ms`] without
+    /// one.
+    Once,
+    /// A card, or a count on the card already shown, for every event.
+    #[default]
+    Each,
+}
+
+/// How a watch area reads and reports, set per area in its panel (roadmap
+/// `1.65`, the maintainer's choices of 2026-11-07). Kept in milliseconds so
+/// it crosses to the page as plain numbers; [`Self::clamped`] keeps each in
+/// its range, whatever the page sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Tuning {
+    /// Which events become a card.
+    pub notify: Notify,
+    /// For [`Notify::Once`]: how long without an event ends a burst, so the
+    /// next event notifies again. His wish: *"the option to set a custom
+    /// calm (reset) duration"*.
+    pub calm_ms: u32,
+    /// The minimum gap after an event before the next may fire; `0` is no
+    /// limit. An event inside the gap is dropped, not delayed.
+    pub gap_ms: u32,
+    /// The least time between two readings (the sampling rate); `0` is
+    /// realtime, every frame that touches the area, up to about 30 a second.
+    pub sample_ms: u32,
+}
+
+impl Default for Tuning {
+    fn default() -> Self {
+        Self {
+            notify: Notify::Each,
+            calm_ms: 150,
+            gap_ms: 0,
+            sample_ms: 0,
+        }
+    }
+}
+
+/// [`Tuning::calm_ms`]'s range.
+pub const CALM_MS: (u32, u32) = (50, 10_000);
+/// [`Tuning::gap_ms`]'s longest: a minute.
+pub const GAP_MS_MAX: u32 = 60_000;
+/// [`Tuning::sample_ms`]'s longest: one reading every five seconds.
+pub const SAMPLE_MS_MAX: u32 = 5_000;
+
+impl Tuning {
+    /// `self` with every value in its range.
+    #[must_use]
+    pub fn clamped(self) -> Self {
+        Self {
+            notify: self.notify,
+            calm_ms: self.calm_ms.clamp(CALM_MS.0, CALM_MS.1),
+            gap_ms: self.gap_ms.min(GAP_MS_MAX),
+            sample_ms: self.sample_ms.min(SAMPLE_MS_MAX),
+        }
+    }
+
+    /// How long after a reading at `last` the next may be taken, at `at`:
+    /// `None` when it may be taken now.
+    #[must_use]
+    pub fn sample_wait(self, last: Option<Duration>, at: Duration) -> Option<Duration> {
+        let step = Duration::from_millis(u64::from(self.sample_ms));
+        let since = at.saturating_sub(last?);
+        (since < step).then(|| step - since)
+    }
+}
+
+/// What [`EventGate::admit`] made of one event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Admitted {
+    /// The event fires: it was outside the minimum gap.
+    pub fires: bool,
+    /// It fires and becomes a card.
+    pub notifies: bool,
+}
+
+/// Applies an area's [`Tuning`] to the events its [`Detector`] reports: the
+/// minimum gap, then the notification choice. One per area.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EventGate {
+    /// When the last event fired.
+    fired: Option<Duration>,
+    /// When the last event arrived, fired or not: a burst is measured on
+    /// what the screen did, not on what the gap let through.
+    arrived: Option<Duration>,
+    /// Whether the current burst has had its card.
+    noticed: bool,
+}
+
+impl EventGate {
+    /// One event at `at` (a clock that only moves forward).
+    pub fn admit(&mut self, tuning: Tuning, at: Duration) -> Admitted {
+        let tuning = tuning.clamped();
+        let calm = Duration::from_millis(u64::from(tuning.calm_ms));
+        if self
+            .arrived
+            .is_none_or(|last| at.saturating_sub(last) >= calm)
+        {
+            self.noticed = false;
+        }
+        self.arrived = Some(at);
+        let gap = Duration::from_millis(u64::from(tuning.gap_ms));
+        if self.fired.is_some_and(|last| at.saturating_sub(last) < gap) {
+            return Admitted {
+                fires: false,
+                notifies: false,
+            };
+        }
+        self.fired = Some(at);
+        let notifies = match tuning.notify {
+            Notify::Never => false,
+            Notify::Each => true,
+            Notify::Once => !std::mem::replace(&mut self.noticed, true),
+        };
+        Admitted {
+            fires: true,
+            notifies,
+        }
+    }
+}
+
 /// One of the two moments a watch area can report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
@@ -1094,5 +1224,133 @@ mod tests {
             .filter_map(|(at, &is)| is.then_some(at))
             .collect();
         assert_eq!(marked, vec![17, 18, 19]);
+    }
+}
+
+#[cfg(test)]
+mod tuning_tests {
+    use super::{Admitted, EventGate, Notify, Tuning};
+    use std::time::Duration;
+
+    const fn ms(value: u64) -> Duration {
+        Duration::from_millis(value)
+    }
+
+    /// Feeds events at `times` (ms) and returns which fired and which
+    /// notified.
+    fn run(tuning: Tuning, times: &[u64]) -> (Vec<u64>, Vec<u64>) {
+        let mut gate = EventGate::default();
+        let (mut fired, mut noticed) = (Vec::new(), Vec::new());
+        for &at in times {
+            let Admitted { fires, notifies } = gate.admit(tuning, ms(at));
+            if fires {
+                fired.push(at);
+            }
+            if notifies {
+                noticed.push(at);
+            }
+        }
+        (fired, noticed)
+    }
+
+    /// Every change at ten a second.
+    const BURST: [u64; 6] = [0, 100, 200, 300, 400, 500];
+
+    #[test]
+    fn the_default_fires_and_notifies_every_event() {
+        assert_eq!(Tuning::default().notify, Notify::Each);
+        let (fired, noticed) = run(Tuning::default(), &BURST);
+        assert_eq!(fired, BURST);
+        assert_eq!(noticed, BURST);
+    }
+
+    #[test]
+    fn never_fires_and_shows_no_card() {
+        let tuning = Tuning {
+            notify: Notify::Never,
+            ..Tuning::default()
+        };
+        let (fired, noticed) = run(tuning, &BURST);
+        assert_eq!(fired, BURST);
+        assert!(noticed.is_empty());
+    }
+
+    /// Once: one card per burst, a burst ending after the chosen calm.
+    #[test]
+    fn once_is_one_card_per_burst_with_his_calm() {
+        let tuning = Tuning {
+            notify: Notify::Once,
+            calm_ms: 150,
+            ..Tuning::default()
+        };
+        // A burst at ten a second, a calm of 400 ms, a second burst.
+        let times = [0, 100, 200, 600, 700];
+        assert_eq!(run(tuning, &times).1, vec![0, 600]);
+        // With a calm of a second, the 400 ms pause does not end the burst.
+        let long = Tuning {
+            calm_ms: 1_000,
+            ..tuning
+        };
+        assert_eq!(run(long, &times).1, vec![0]);
+    }
+
+    /// The minimum gap drops what arrives inside it, and a steady stream
+    /// fires once per gap.
+    #[test]
+    fn the_gap_drops_events_inside_it() {
+        let tuning = Tuning {
+            gap_ms: 1_000,
+            ..Tuning::default()
+        };
+        let times: Vec<u64> = (0..=25).map(|n| n * 100).collect();
+        let (fired, noticed) = run(tuning, &times);
+        assert_eq!(fired, vec![0, 1_000, 2_000]);
+        assert_eq!(noticed, fired);
+    }
+
+    /// A burst is what the screen did: events the gap dropped still keep a
+    /// burst going, so Once does not notify again just because the gap let
+    /// one through.
+    #[test]
+    fn once_counts_the_burst_from_every_event_not_only_fired_ones() {
+        let tuning = Tuning {
+            notify: Notify::Once,
+            calm_ms: 150,
+            gap_ms: 1_000,
+            ..Tuning::default()
+        };
+        let times: Vec<u64> = (0..=25).map(|n| n * 100).collect();
+        let (fired, noticed) = run(tuning, &times);
+        assert_eq!(fired, vec![0, 1_000, 2_000]);
+        assert_eq!(noticed, vec![0]);
+    }
+
+    #[test]
+    fn values_from_the_page_are_kept_in_range() {
+        let wild = Tuning {
+            notify: Notify::Each,
+            calm_ms: 0,
+            gap_ms: u32::MAX,
+            sample_ms: u32::MAX,
+        }
+        .clamped();
+        assert_eq!(wild.calm_ms, super::CALM_MS.0);
+        assert_eq!(wild.gap_ms, super::GAP_MS_MAX);
+        assert_eq!(wild.sample_ms, super::SAMPLE_MS_MAX);
+    }
+
+    /// The sampling rate: realtime never waits; a slower rate waits out
+    /// what is left of its step.
+    #[test]
+    fn the_sampling_rate_spaces_readings() {
+        let realtime = Tuning::default();
+        assert_eq!(realtime.sample_wait(Some(ms(1_000)), ms(1_001)), None);
+        let slow = Tuning {
+            sample_ms: 500,
+            ..Tuning::default()
+        };
+        assert_eq!(slow.sample_wait(None, ms(0)), None);
+        assert_eq!(slow.sample_wait(Some(ms(1_000)), ms(1_200)), Some(ms(300)));
+        assert_eq!(slow.sample_wait(Some(ms(1_000)), ms(1_500)), None);
     }
 }

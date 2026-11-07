@@ -56,7 +56,7 @@ use serde::{Deserialize, Serialize};
 use crate::geometry::{Point, Rect, Size};
 use crate::interaction;
 use crate::sticky::Sticky;
-use crate::watch::Watch;
+use crate::watch::{Tuning, Watch};
 
 /// A stable identity for an area, unique within the [`AreaStore`] that issued
 /// it.
@@ -724,6 +724,12 @@ pub struct Area {
     /// holding an area does not stop it following its window (`ADR-0053`
     /// decision 4), and a sticky pause does not change what the user chose.
     pub held: bool,
+    /// How a watch area reads and reports (roadmap `1.65`): its sampling
+    /// rate, the minimum gap between its events, and which become a card.
+    /// [`Tuning::default`] at creation and after every conversion, like
+    /// [`Self::watch`].
+    #[serde(default)]
+    pub tuning: Tuning,
 }
 
 /// The capture an area's own contents are made of: which rectangle of screen to
@@ -1065,6 +1071,7 @@ impl AreaStore {
             sticky: Sticky::default(),
             watch: Watch::default(),
             held: false,
+            tuning: Tuning::default(),
         };
         let index = self.top_of_tier(area.layer);
         self.areas.insert(index, area);
@@ -1231,6 +1238,21 @@ impl AreaStore {
         }
     }
 
+    /// Sets how a watch area reads and reports (roadmap `1.65`), each value
+    /// kept in its range ([`Tuning::clamped`]). Returns whether it CHANGED;
+    /// `false` for an unknown id as well, and for any area that is not a
+    /// watch area.
+    pub fn set_tuning(&mut self, id: AreaId, tuning: Tuning) -> bool {
+        let tuning = tuning.clamped();
+        match self.area_mut(id) {
+            Some(area) if area.kind == AreaType::Watch && area.tuning != tuning => {
+                area.tuning = tuning;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Pauses (`true`) or resumes (`false`) an area's ongoing work
     /// (`ADR-0053` decision 2). Returns whether it CHANGED; `false` for an
     /// unknown id as well, and for an area whose type does not
@@ -1308,6 +1330,7 @@ impl AreaStore {
         // carry a choice or a pause made before, out of sight of the menu.
         area.watch = Watch::default();
         area.held = false;
+        area.tuning = Tuning::default();
         // THE NEW TYPE'S DEFAULT, not `NATURAL`, and the difference only shows
         // on a type that is born magnified. ⚠️ **There is none as of roadmap
         // 1.29**, so today this is exactly `NATURAL` for every type and the
@@ -1804,6 +1827,22 @@ mod tests {
             store.get(watch).map(|area| area.watch),
             Some(Watch::Settles)
         );
+        // Its tuning (roadmap `1.65`): a watch area's only, kept in range.
+        let quiet = crate::watch::Tuning {
+            notify: crate::watch::Notify::Once,
+            calm_ms: 0,
+            ..crate::watch::Tuning::default()
+        };
+        assert!(
+            !store.set_tuning(plain, quiet),
+            "a Default area has no tuning"
+        );
+        assert!(store.set_tuning(watch, quiet));
+        assert!(!store.set_tuning(watch, quiet), "no change, so false");
+        assert_eq!(
+            store.get(watch).map(|area| area.tuning),
+            Some(quiet.clamped())
+        );
         // Converted away while paused, then back: watching for changes again.
         assert!(store.set_held(watch, true));
         assert!(store.set_kind(watch, AreaType::Default).is_some());
@@ -1813,6 +1852,11 @@ mod tests {
             store.get(watch).map(|area| (area.watch, area.held)),
             Some((Watch::Changes, false)),
             "converted back, it starts afresh and carries no old choice or pause"
+        );
+        assert_eq!(
+            store.get(watch).map(|area| area.tuning),
+            Some(crate::watch::Tuning::default()),
+            "nor its old tuning"
         );
         assert_eq!(store.get(watch).map(Area::is_watching), Some(true));
         // A paused sticky watch area does not read, and reads again when it
@@ -2696,6 +2740,7 @@ mod tests {
             sticky: Sticky::Free,
             watch: crate::watch::Watch::Changes,
             held: false,
+            tuning: crate::watch::Tuning::default(),
         };
         assert_eq!(
             area.retake(),
@@ -2813,6 +2858,7 @@ mod tests {
             sticky: Sticky::Free,
             watch: crate::watch::Watch::Changes,
             held: false,
+            tuning: crate::watch::Tuning::default(),
         };
         // A hypothetical second zooming type inherits the factor, so both sides
         // answer with the same rectangle and the same treatment: equal, so
