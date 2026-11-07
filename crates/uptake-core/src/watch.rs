@@ -366,8 +366,16 @@ pub enum Event {
 /// seconds for *Notify when it stops changing*), every reading in that time
 /// within [`STILL_DELTA`] of the first reading of the still run; the last
 /// becomes the new baseline, wherever the region stopped.
-/// Each is reported once, so a video under a watch area raises one
-/// notification while it plays, not one a reading.
+///
+/// **A detector made for *Notify when it changes* ([`Self::for_watch`])
+/// also reports every further step while a change is under way**: a reading
+/// that differs by more than [`CELL_DELTA`] from the one the region last held
+/// is another [`Event::Changed`] (the maintainer's choice of 2026-11-07, after
+/// his rig pass: about ten changes a second notified once, since the
+/// [`REARM_TIME`] calm never came). The host reads at most once a frame, so
+/// that is at most one a frame, and a video under the area counts up its card
+/// while it plays. A step smaller than [`CELL_DELTA`] (a fade, a slow bar)
+/// adds nothing. Any other detector reports a change once and its end once.
 #[derive(Debug, Clone)]
 pub struct Detector {
     baseline: Option<Fingerprint>,
@@ -382,6 +390,9 @@ pub struct Detector {
     still_since: Duration,
     /// How long a calm ends a change.
     settle: Duration,
+    /// Whether each further full step of a change under way is reported too
+    /// ([`Self::for_watch`] with [`Watch::Changes`]).
+    every_step: bool,
     /// The time [`Self::observe`] gives a reading: [`READING_STEP`] after
     /// the last one.
     clock: Duration,
@@ -420,7 +431,19 @@ impl Detector {
             changing: false,
             still_since: Duration::ZERO,
             settle,
+            every_step: false,
             clock: Duration::ZERO,
+        }
+    }
+
+    /// The detector an area set to `watch` reads with: its settle time
+    /// ([`Watch::settle_time`]), and for [`Watch::Changes`] every full step
+    /// of a change reported, not only its start.
+    #[must_use]
+    pub fn for_watch(watch: Watch) -> Self {
+        Self {
+            every_step: watch == Watch::Changes,
+            ..Self::with_settle_time(watch.settle_time())
         }
     }
 
@@ -487,7 +510,9 @@ impl Detector {
         if moved > STILL_DELTA {
             self.still_from = Some(reading);
             self.still_since = at;
-            return None;
+            // A full step from what the region last held: another change,
+            // for an area that asked to hear of every one.
+            return (self.every_step && moved > CELL_DELTA).then_some(Event::Changed);
         }
         if at.saturating_sub(self.still_since) < self.settle {
             return None;
@@ -930,6 +955,80 @@ mod tests {
             }
         }
         assert_eq!(changes, 10);
+    }
+
+    /// The maintainer's rig pass of 2026-11-07: about ten changes a second
+    /// notified once, since the region never held still for [`REARM_TIME`].
+    /// Read once a frame (33 ms), as the host does while frames arrive, an
+    /// area set to *Notify when it changes* reports every switch; the old
+    /// rule, still what a plain detector does, reports the first only.
+    #[test]
+    fn ten_switches_a_second_are_ten_changes_a_second() {
+        use super::REARM_TIME;
+        use std::time::Duration;
+        let shown = with_patch(grey(64, 64, 30), (8, 24, 48, 16), 220);
+        let empty = grey(64, 64, 30);
+        let count = |mut detector: Detector| {
+            let mut changes = 0;
+            detector.observe_at(print(&empty), Duration::ZERO);
+            for frame in 1..=99_u64 {
+                let at = frame * 33;
+                // Switched every 100 ms: twenty switches in two seconds.
+                let picture = if (at / 100) % 2 == 0 { &empty } else { &shown };
+                if detector.observe_at(print(picture), Duration::from_millis(at))
+                    == Some(Event::Changed)
+                {
+                    changes += 1;
+                }
+            }
+            changes
+        };
+        assert!(
+            REARM_TIME > Duration::from_millis(100),
+            "the old calm never comes"
+        );
+        assert_eq!(count(Detector::for_watch(Watch::Changes)), 32);
+        assert_eq!(
+            count(Detector::with_settle_time(Watch::Changes.settle_time())),
+            1
+        );
+    }
+
+    /// A fade under an area set to *Notify when it changes*, a few levels a
+    /// frame, is one change, not one a frame: only a full step counts again.
+    #[test]
+    fn a_fade_is_one_change() {
+        use std::time::Duration;
+        let mut detector = Detector::for_watch(Watch::Changes);
+        let mut changes = 0;
+        for frame in 0..=40_u8 {
+            let picture = grey(64, 64, 20 + frame * 5);
+            if detector.observe_at(
+                print(&picture),
+                Duration::from_millis(u64::from(frame) * 33),
+            ) == Some(Event::Changed)
+            {
+                changes += 1;
+            }
+        }
+        assert_eq!(changes, 1);
+    }
+
+    /// *Notify when it stops changing* is not told of every step: its
+    /// detector reports one start and one end, as before.
+    #[test]
+    fn stops_changing_is_not_told_of_every_step() {
+        use std::time::Duration;
+        let (a, b) = (print(&grey(64, 64, 10)), print(&grey(64, 64, 200)));
+        let mut detector = Detector::for_watch(Watch::Settles);
+        let mut reported = Vec::new();
+        detector.observe_at(a.clone(), Duration::ZERO);
+        for frame in 1..=30_u64 {
+            let picture = if frame % 2 == 0 { &a } else { &b };
+            reported
+                .extend(detector.observe_at(picture.clone(), Duration::from_millis(frame * 33)));
+        }
+        assert_eq!(reported, vec![Event::Changed]);
     }
 
     /// *Stops changing* keeps its six seconds; *changes* re-arms after a

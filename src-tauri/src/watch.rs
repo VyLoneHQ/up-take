@@ -994,14 +994,14 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
         }
         let watcher = watchers.entry(target.id).or_insert_with(|| Watcher {
             target,
-            detector: Detector::with_settle_time(target.watch.settle_time()),
+            detector: Detector::for_watch(target.watch),
             failing: false,
             fresh: true,
             picture: None,
         });
         if watcher.target != target {
             watcher.target = target;
-            watcher.detector = Detector::with_settle_time(target.watch.settle_time());
+            watcher.detector = Detector::for_watch(target.watch);
             watcher.fresh = true;
         }
         if watcher.fresh {
