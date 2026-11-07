@@ -9,6 +9,7 @@ describe('the area settings panel (roadmap 1.60)', () => {
     name: null,
     watch: 'changes',
     held: false,
+    tuning: { notify: 'each', calm_ms: 150, gap_ms: 0, sample_ms: 0 },
     kinds: ['default', 'screenshot', 'watch'],
     ocr: null,
     depth: 'auto',
@@ -29,6 +30,7 @@ describe('the area settings panel (roadmap 1.60)', () => {
         kind: 'ocr',
         watch: null,
         held: null,
+        tuning: null,
         ocr: 'rendered',
         sticky: true,
         on_resize: 'top_left',
@@ -41,6 +43,7 @@ describe('the area settings panel (roadmap 1.60)', () => {
 
   it('drops a view missing or mangling any of the menu rows it holds', () => {
     for (const key of [
+      'tuning',
       'kinds',
       'ocr',
       'depth',
@@ -58,6 +61,15 @@ describe('the area settings panel (roadmap 1.60)', () => {
     expect(isPanelView({ ...watch, depth: 'top' })).toBe(false);
     expect(isPanelView({ ...watch, ocr: 'aloud' })).toBe(false);
     expect(isPanelView({ ...watch, on_resize: 'stretch' })).toBe(false);
+    expect(
+      isPanelView({ ...watch, tuning: { ...watch.tuning, notify: 'always' } }),
+    ).toBe(false);
+    expect(
+      isPanelView({ ...watch, tuning: { ...watch.tuning, gap_ms: -1 } }),
+    ).toBe(false);
+    expect(
+      isPanelView({ ...watch, tuning: { ...watch.tuning, sample_ms: '0' } }),
+    ).toBe(false);
   });
 
   it('draws each type in its legend colour', () => {
@@ -67,5 +79,23 @@ describe('the area settings panel (roadmap 1.60)', () => {
     expect(toneOf('ocr')).toBe('text');
     expect(toneOf('screenshot')).toBe('accent');
     expect(toneOf('default')).toBe('accent');
+  });
+});
+
+describe("a watch area's tuning (roadmap 1.65)", () => {
+  it('shows the step nearest to what Rust kept', async () => {
+    const { CALM_STEPS_MS, SAMPLE_STEPS_MS, nearestStep } = await import(
+      './panel'
+    );
+    expect(nearestStep(CALM_STEPS_MS, 150)).toBe(2);
+    expect(nearestStep(CALM_STEPS_MS, 160)).toBe(2);
+    expect(nearestStep(SAMPLE_STEPS_MS, 0)).toBe(SAMPLE_STEPS_MS.length - 1);
+    expect(nearestStep(SAMPLE_STEPS_MS, 5_000)).toBe(0);
+  });
+
+  it('runs the sampling slider from every five seconds to realtime', async () => {
+    const { SAMPLE_STEPS_MS } = await import('./panel');
+    expect(SAMPLE_STEPS_MS[0]).toBe(5_000);
+    expect(SAMPLE_STEPS_MS.at(-1)).toBe(0);
   });
 });

@@ -1692,6 +1692,24 @@ pub(crate) fn set_area_watch(app: &AppHandle, id: AreaId, watch: Watch) -> bool 
     changed
 }
 
+/// Sets how a watch area reads and reports (roadmap `1.65`) and wakes the
+/// watcher, which reads the new tuning on its next look. Returns whether it
+/// changed.
+pub(crate) fn set_area_tuning(
+    app: &AppHandle,
+    id: AreaId,
+    tuning: uptake_core::watch::Tuning,
+) -> bool {
+    let changed = {
+        let store = app.state::<Mutex<AreaStore>>();
+        lock(&store).set_tuning(id, tuning)
+    };
+    if changed {
+        crate::watch::wake(app);
+    }
+    changed
+}
+
 /// Pauses (`true`) or resumes (`false`) an area's ongoing work (`ADR-0053`)
 /// and wakes the watcher, which sleeps while every watch area is paused.
 /// Returns whether it changed; `false` for a type with nothing to pause.

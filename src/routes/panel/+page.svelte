@@ -3,16 +3,29 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { onMount, tick } from 'svelte';
 import {
+  CALM_STEPS_MS,
   DEPTHS,
+  GAPS_MS,
   isPanelView,
+  NOTIFY,
+  nearestStep,
   ON_RESIZE,
   PANEL_EVENT,
   type PanelDepth,
+  type PanelNotify,
   type PanelOnResize,
+  type PanelTuning,
   type PanelView,
   type PanelWatch,
+  SAMPLE_STEPS_MS,
 } from '$lib/panel';
-import { isLanguage, type Language, text } from '$lib/strings';
+import {
+  fill,
+  isLanguage,
+  type Language,
+  type TextKey,
+  text,
+} from '$lib/strings';
 import { TONES, toneOf } from '$lib/tones';
 
 // The area settings panel (roadmap 1.60). Rust shows this window beside its
@@ -78,6 +91,42 @@ function setWatch(watch: PanelWatch): void {
   done();
 }
 
+// A watch area's tuning (roadmap 1.65): sent whole, with one value changed;
+// Rust keeps each in its range.
+function setTuning(change: Partial<PanelTuning>): void {
+  if (!view?.tuning) return;
+  const tuning = { ...view.tuning, ...change };
+  view.tuning = tuning;
+  void invoke('panel_set_tuning', { tuning }).catch(() => {});
+}
+
+const number = (value: number): string =>
+  value.toLocaleString(language, { maximumFractionDigits: 1 });
+
+// How far along its slider a step sits, 0 at the first and 1 at the last.
+function at(step: number, steps: readonly number[]): string {
+  return String(steps.length > 1 ? step / (steps.length - 1) : 0);
+}
+
+/** A duration as the panel says it: ms under a second, s, or min. */
+function duration(ms: number): string {
+  if (ms >= 60_000)
+    return fill(language, 'panel.watch.minutes', { n: number(ms / 60_000) });
+  if (ms >= 1_000)
+    return fill(language, 'panel.watch.seconds', { n: number(ms / 1_000) });
+  return fill(language, 'panel.watch.ms', { n: number(ms) });
+}
+
+/** A sampling step as the panel says it. */
+function rate(ms: number): string {
+  if (ms === 0) return text(language, 'panel.watch.sample.realtime');
+  if (ms >= 1_000)
+    return fill(language, 'panel.watch.every_seconds', {
+      n: number(ms / 1_000),
+    });
+  return fill(language, 'panel.watch.per_second', { n: number(1_000 / ms) });
+}
+
 function setHeld(held: boolean): void {
   void invoke('panel_set_held', { held }).catch(() => {});
   done();
@@ -89,6 +138,12 @@ function set(command: string, args: Record<string, unknown>): void {
   void invoke(command, args).catch(() => {});
   done();
 }
+
+const notifyLabel: Record<PanelNotify, TextKey> = {
+  never: 'panel.watch.notify.never',
+  once: 'panel.watch.notify.once',
+  each: 'panel.watch.notify.each',
+};
 
 const depthLabel: Record<PanelDepth, string> = {
   front: 'menu.depth.front',
@@ -271,6 +326,87 @@ onMount(() => {
           >
         </div>
       </div>
+    {/if}
+
+    {#if view.tuning}
+      {@const tuning = view.tuning}
+      <div class="field">
+        <span class="label">{text(language, 'panel.watch.notify')}</span>
+        <div class="choice" role="radiogroup">
+          {#each NOTIFY as notify}
+            <button
+              type="button"
+              role="radio"
+              aria-checked={tuning.notify === notify}
+              class:on={tuning.notify === notify}
+              onclick={() => {
+                setTuning({ notify });
+                done();
+              }}>{text(language, notifyLabel[notify])}</button
+            >
+          {/each}
+        </div>
+      </div>
+      {#if tuning.notify === 'once'}
+        <label class="field">
+          <span class="label"
+            >{text(language, 'panel.watch.calm')}
+            <span class="value">{duration(tuning.calm_ms)}</span></span
+          >
+          <input
+            type="range"
+            min="0"
+            max={CALM_STEPS_MS.length - 1}
+            step="1"
+            value={nearestStep(CALM_STEPS_MS, tuning.calm_ms)}
+            style:--at={at(nearestStep(CALM_STEPS_MS, tuning.calm_ms), CALM_STEPS_MS)}
+            oninput={(event) =>
+              setTuning({
+                calm_ms: CALM_STEPS_MS[Number(event.currentTarget.value)] ?? 150,
+              })}
+            onchange={done}
+          />
+        </label>
+      {/if}
+      <div class="field">
+        <span class="label">{text(language, 'panel.watch.gap')}</span>
+        <div class="choice row" role="radiogroup">
+          {#each GAPS_MS as gap}
+            <button
+              type="button"
+              role="radio"
+              aria-checked={tuning.gap_ms === gap}
+              class:on={tuning.gap_ms === gap}
+              onclick={() => {
+                setTuning({ gap_ms: gap });
+                done();
+              }}
+              >{gap === 0
+                ? text(language, 'panel.watch.gap.none')
+                : duration(gap)}</button
+            >
+          {/each}
+        </div>
+      </div>
+      <label class="field">
+        <span class="label"
+          >{text(language, 'panel.watch.sample')}
+          <span class="value">{rate(tuning.sample_ms)}</span></span
+        >
+        <input
+          type="range"
+          min="0"
+          max={SAMPLE_STEPS_MS.length - 1}
+          step="1"
+          value={nearestStep(SAMPLE_STEPS_MS, tuning.sample_ms)}
+          style:--at={at(nearestStep(SAMPLE_STEPS_MS, tuning.sample_ms), SAMPLE_STEPS_MS)}
+          oninput={(event) =>
+            setTuning({
+              sample_ms: SAMPLE_STEPS_MS[Number(event.currentTarget.value)] ?? 0,
+            })}
+          onchange={done}
+        />
+      </label>
     {/if}
 
     {#if view.held !== null}
@@ -537,12 +673,69 @@ input:focus {
 
 /* The menu's other rows (second slice), as in the mock he approved on
    2026-11-05. */
+/* Drawn here rather than left to the system control, whose thumb stops
+   short of both ends: at the lowest step the thumb sits flush with the
+   start, at the highest flush with the end (his rig pass, 2026-11-07).
+   --at is the step as a share of the way, 0 to 1; the fill ends under
+   the thumb's centre. */
+input[type='range'] {
+  appearance: none;
+  -webkit-appearance: none;
+  display: block;
+  width: 100%;
+  height: 16px;
+  margin: 2px 0 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+input[type='range']::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 3px;
+  background: linear-gradient(
+    to right,
+    rgba(var(--tone), 0.9) calc(8px + (100% - 16px) * var(--at, 0)),
+    rgba(235, 238, 240, 0.16) calc(8px + (100% - 16px) * var(--at, 0))
+  );
+}
+
+input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -5px;
+  border: 0;
+  border-radius: 50%;
+  background: rgb(var(--tone));
+}
+
+input[type='range']:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 3px rgba(var(--tone), 0.35);
+}
+
+.label .value {
+  float: right;
+  color: rgba(var(--tone), 1);
+  font-variant-numeric: tabular-nums;
+}
+
 .choice.wrap {
   flex-wrap: wrap;
 }
 
 .choice.wrap button {
   flex: 0 1 auto;
+}
+
+/* One row however long the words: each button as wide as its text. */
+.choice.row button {
+  flex: 1 1 auto;
+  padding: 5px 4px;
+  white-space: nowrap;
 }
 
 .rule {
