@@ -73,9 +73,11 @@ export const SAMPLE_RANGE: SliderRange = {
 };
 
 /** The tolerance slider, in thousandths of the area: any change on the
- * left to half the area on the right (his *"from any pixel to half the
- * area"*), in steps of a tenth of a percent. */
-export const SHARE_RANGE: SliderRange = { min: 0, max: 500, fine: 1 };
+ * left to the whole area on the right, in steps of 1% and 10% with Ctrl
+ * (the maintainer's rig pass, 2026-11-10: *"Make the default increment
+ * (step-size) 1%"*, and the range from the lowest valid value to the
+ * highest). */
+export const SHARE_RANGE: SliderRange = { min: 0, max: 1_000, fine: 10 };
 
 /** The "stops changing" slider, in ms of stillness: 0.1 s to 30 s, in steps
  * of 10 ms (2026-11-10). */

@@ -203,10 +203,10 @@ test("a watch area's tolerance runs from any change to half the area (1.61)", as
   share.dispatchEvent(new Event('input', { bubbles: true }));
   expect(lastSet()).toEqual([
     'panel_set_tuning',
-    { tuning: { ...base, share_permille: 500 } },
+    { tuning: { ...base, share_permille: 1_000 } },
   ]);
   await settle();
-  expect(document.body.textContent).toContain('50% of the area');
+  expect(document.body.textContent).toContain('100% of the area');
 });
 
 test('stops changing shows its own calm, and only for that choice', async () => {
@@ -226,25 +226,25 @@ test('a slider moves in fine steps, and ten times that with Ctrl held', async ()
   const share = document.querySelectorAll<HTMLInputElement>(
     'input[type="range"]',
   )[0];
-  expect(share.step).toBe('1');
+  expect(share.step).toBe('10');
   share.dispatchEvent(
     new PointerEvent('pointerdown', { bubbles: true, ctrlKey: true }),
   );
   await settle();
-  expect(share.step).toBe('10');
+  expect(share.step).toBe('100');
   share.dispatchEvent(
     new PointerEvent('pointermove', { bubbles: true, ctrlKey: false }),
   );
   await settle();
-  expect(share.step).toBe('1');
-  share.value = '37';
+  expect(share.step).toBe('10');
+  share.value = '370';
   share.dispatchEvent(new Event('input', { bubbles: true }));
   expect(lastSet()).toEqual([
     'panel_set_tuning',
-    { tuning: { ...WATCH.tuning, share_permille: 37 } },
+    { tuning: { ...WATCH.tuning, share_permille: 370 } },
   ]);
   await settle();
-  expect(document.body.textContent).toContain('3.7% of the area');
+  expect(document.body.textContent).toContain('37% of the area');
 });
 
 test('a type shows only its own rows', async () => {

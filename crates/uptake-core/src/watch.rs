@@ -529,7 +529,7 @@ pub struct Tuning {
     /// The tolerance (roadmap `1.61`, the maintainer's choice of
     /// 2026-11-03): the share of the area, in thousandths, that must change
     /// before it counts. `0` is *any change* (one [`CELL`]), the default;
-    /// [`SHARE_PERMILLE_MAX`] is half the area. The same share decides when
+    /// [`SHARE_PERMILLE_MAX`] is the whole area. The same share decides when
     /// a change has ended: the region is still once fewer cells than that
     /// are still moving, so a caret blinking inside a larger tolerance
     /// neither starts a change nor keeps one from settling.
@@ -560,9 +560,11 @@ pub const CALM_MS: (u32, u32) = (50, 10_000);
 pub const GAP_MS_MAX: u32 = 60_000;
 /// [`Tuning::sample_ms`]'s longest: one reading every five seconds.
 pub const SAMPLE_MS_MAX: u32 = 5_000;
-/// [`Tuning::share_permille`]'s largest: half the area, the top of his
-/// slider (*"from any pixel to half the area"*).
-pub const SHARE_PERMILLE_MAX: u16 = 500;
+/// [`Tuning::share_permille`]'s largest: the whole area. Half the area until
+/// 2026-11-10, his first word (*"from any pixel to half the area"*), until
+/// his rig pass that day: *"A slider range must always provide as much
+/// flexibility as possible, lowest valid value to highest valid value"*.
+pub const SHARE_PERMILLE_MAX: u16 = 1_000;
 /// [`Tuning::settle_ms`]'s range: a tenth of a second to half a minute.
 pub const SETTLE_MS: (u32, u32) = (100, 30_000);
 
@@ -1028,18 +1030,24 @@ mod tests {
     }
 
     /// The tolerance counts cells: at half the area, a change to under half
-    /// the cells is not a change and one to half of them is.
+    /// the cells is not a change and one to half of them is; at the whole
+    /// area only a change to all of it counts.
     #[test]
     fn the_tolerance_is_a_share_of_the_cells() {
         // 64 by 64: 16 by 16 cells; half the area is the top 32 pixel rows.
         let before = grey(64, 64, 100);
         let three_rows = with_patch(before.clone(), (0, 0, 64, 24), 200);
         let four_rows = with_patch(before.clone(), (0, 0, 64, 32), 200);
-        let half = super::SHARE_PERMILLE_MAX;
+        let half = 500;
         assert!(!print(&before).differs_by(&print(&three_rows), CELL_DELTA, half));
         assert!(print(&before).differs_by(&print(&four_rows), CELL_DELTA, half));
-        // Above half is held at half.
-        assert!(print(&before).differs_by(&print(&four_rows), CELL_DELTA, 999));
+        // At the whole area, half is not enough and all of it is; above the
+        // whole area is held at the whole area.
+        let all = super::SHARE_PERMILLE_MAX;
+        assert!(!print(&before).differs_by(&print(&four_rows), CELL_DELTA, all));
+        let everything = with_patch(before.clone(), (0, 0, 64, 64), 200);
+        assert!(print(&before).differs_by(&print(&everything), CELL_DELTA, all));
+        assert!(print(&before).differs_by(&print(&everything), CELL_DELTA, u16::MAX));
     }
 
     /// Review of `#168`, round 2: a part-cell counts for the pixels it
@@ -1068,7 +1076,7 @@ mod tests {
         // Hide the bottom half: 32 known cells, 16 of them changed.
         let hide = [Rect::new(0, 32, 64, 32)];
         let (a, b) = (hiding(&before, &hide), hiding(&after, &hide));
-        assert!(a.differs_by(&b, CELL_DELTA, super::SHARE_PERMILLE_MAX));
+        assert!(a.differs_by(&b, CELL_DELTA, 500));
     }
 
     /// A new line of text: a dark band across most of the region's width.
