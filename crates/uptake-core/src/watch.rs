@@ -201,6 +201,11 @@ pub struct Fingerprint {
     /// area's own border, would itself read as a change when such a window
     /// comes or goes, since the black is not in every reading.
     hidden: Vec<bool>,
+    /// How many of the region's pixels the last column and the last row of
+    /// cells hold, across and down: [`CELL`] where the region's side is a
+    /// multiple of it, less where it is not. A cell's weight in the
+    /// tolerance is the pixels it holds (review of `#168`, round 2).
+    edge: (u32, u32),
 }
 
 impl Fingerprint {
@@ -330,11 +335,17 @@ impl Fingerprint {
                 u8::try_from((average * shown + seen / 2) / seen).unwrap_or(u8::MAX)
             })
             .collect();
+        let last = |region: u32, cells: u32| {
+            region
+                .saturating_sub((cells - 1).saturating_mul(CELL))
+                .clamp(1, CELL)
+        };
         Some(Self {
             columns,
             rows,
             cells,
             hidden: vec![false; (columns * rows) as usize],
+            edge: (last(region.width, columns), last(region.height, rows)),
         })
     }
 
@@ -365,29 +376,54 @@ impl Fingerprint {
         self.differs_by(other, CELL_DELTA, 0)
     }
 
-    /// Whether enough cells moved by more than `delta` levels between `self`
-    /// and `other`: at least `share_permille` thousandths of the cells both
-    /// know, rounded up, and always at least one. A changed grid (the area
-    /// was resized) always differs.
+    /// Whether enough of the region moved by more than `delta` levels
+    /// between `self` and `other`: the cells that moved hold at least
+    /// `share_permille` thousandths of the pixels in the cells both know,
+    /// and at least one cell moved. Each cell weighs the pixels it holds, so
+    /// a part-cell at the region's edge counts for its part (review of
+    /// `#168`, round 2: counted as a whole cell, a 1 by 8 edge on a 9 by 8
+    /// area passed *half the area*). A changed grid (the area was resized)
+    /// always differs.
     #[must_use]
     pub fn differs_by(&self, other: &Self, delta: u8, share_permille: u16) -> bool {
-        if (self.columns, self.rows) != (other.columns, other.rows) {
+        if (self.columns, self.rows, self.edge) != (other.columns, other.rows, other.edge) {
             return true;
         }
-        let (mut known, mut moved) = (0_usize, 0_usize);
-        for ((&a, &b), (&a_hidden, &b_hidden)) in self
+        let (mut known, mut moved) = (0_u64, 0_u64);
+        for (at, ((&a, &b), (&a_hidden, &b_hidden))) in self
             .cells
             .iter()
             .zip(&other.cells)
             .zip(self.hidden.iter().zip(&other.hidden))
+            .enumerate()
         {
             if a_hidden || b_hidden {
                 continue;
             }
-            known += 1;
-            moved += usize::from(a.abs_diff(b) > delta);
+            let weight = self.weight(at);
+            known += weight;
+            if a.abs_diff(b) > delta {
+                moved += weight;
+            }
         }
-        moved > 0 && moved >= needed(known, share_permille)
+        moved > 0 && moved * 1000 >= known * u64::from(share_permille.min(SHARE_PERMILLE_MAX))
+    }
+
+    /// How many of the region's pixels cell `at` holds.
+    fn weight(&self, at: usize) -> u64 {
+        let at = at as u32;
+        let (column, row) = (at % self.columns, at / self.columns);
+        let across = if column + 1 == self.columns {
+            self.edge.0
+        } else {
+            CELL
+        };
+        let down = if row + 1 == self.rows {
+            self.edge.1
+        } else {
+            CELL
+        };
+        u64::from(across) * u64::from(down)
     }
 
     /// How many cells across and down.
@@ -412,13 +448,6 @@ fn cell_on(at: u32, side: u32, region: u32, cells: u32) -> u32 {
         (u64::from(at) * u64::from(cells) / u64::from(side.max(1))) as u32
     };
     cell.min(cells.saturating_sub(1))
-}
-
-/// How many of `known` cells must move for a share of `share_permille`
-/// thousandths to count: the share rounded up, and at least one.
-fn needed(known: usize, share_permille: u16) -> usize {
-    let share = usize::from(share_permille.min(SHARE_PERMILLE_MAX));
-    known.saturating_mul(share).div_ceil(1000).max(1)
 }
 
 /// Paints `parts` of `bitmap` black, so they take no part in a comparison.
@@ -970,11 +999,25 @@ mod tests {
         let half = super::SHARE_PERMILLE_MAX;
         assert!(!print(&before).differs_by(&print(&three_rows), CELL_DELTA, half));
         assert!(print(&before).differs_by(&print(&four_rows), CELL_DELTA, half));
-        // Rounded up, and never less than one cell.
-        assert_eq!(super::needed(64, 1), 1);
-        assert_eq!(super::needed(64, 0), 1);
-        assert_eq!(super::needed(9_600, 1), 10);
-        assert_eq!(super::needed(1_000, 999), 500, "clamped to half");
+        // Above half is held at half.
+        assert!(print(&before).differs_by(&print(&four_rows), CELL_DELTA, 999));
+    }
+
+    /// Review of `#168`, round 2: a part-cell counts for the pixels it
+    /// holds. On a 9 by 8 area (one 8 by 8 cell and one 1 by 8), changing
+    /// the 1 by 8 edge is 8 of 72 pixels: a change at *any change*, not at
+    /// half the area, nor at a tenth.
+    #[test]
+    fn a_part_cell_weighs_what_it_holds() {
+        let before = grey(9, 8, 100);
+        let edge = with_patch(before.clone(), (8, 0, 1, 8), 200);
+        assert!(print(&before).differs(&print(&edge)));
+        assert!(!print(&before).differs_by(&print(&edge), CELL_DELTA, 500));
+        assert!(!print(&before).differs_by(&print(&edge), CELL_DELTA, 112));
+        assert!(print(&before).differs_by(&print(&edge), CELL_DELTA, 111));
+        // The whole 8 by 8 cell is 64 of 72: past half.
+        let body = with_patch(before.clone(), (0, 0, 8, 8), 200);
+        assert!(print(&before).differs_by(&print(&body), CELL_DELTA, 500));
     }
 
     /// Cells under a window of UP-TAKE's own count toward neither side of
