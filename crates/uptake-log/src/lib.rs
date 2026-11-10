@@ -105,17 +105,17 @@ const TARGET: &str = "up-take";
 ///
 /// **Why.** The log is UTF-8 without a BOM, and Windows PowerShell 5.1's
 /// `Get-Content`, the terminal the maintainer reads it in, decodes it as
-/// CP1252: an em dash came out as `â€"` and a section sign as `Â§` (observed
-/// 2026-09-07). The budget lines say `—` and `§1`, and a Windows error message
-/// or a profile path can carry any letter. A BOM would fix PowerShell and can
-/// break a tool that parses the file, so the line itself is made ASCII, at the
-/// one place every line passes, rather than by keeping every caller's text
-/// ASCII by hand.
+/// CP1252: an em dash came out as `â€”` and a section sign as `Â§` (observed
+/// 2026-09-07). The budget lines say an em dash (U+2014) and `§1`, and a
+/// Windows error message or a profile path can carry any letter. A BOM would
+/// fix PowerShell and can break a tool that parses the file, so the line itself
+/// is made ASCII, at the one place every line passes, rather than by keeping
+/// every caller's text ASCII by hand.
 ///
-/// Typographic marks become their ASCII spelling (`—` is `--`, `§` is
-/// `section`, `×` is `x`), German letters their usual transliteration (`ä` is
-/// `ae`, `ß` is `ss`), and anything else its code point, `\u{..}`, so nothing
-/// is silently lost.
+/// Typographic marks become their ASCII spelling (an em dash, U+2014, is `--`,
+/// `§` is `section`, `×` is `x`), German letters their usual transliteration
+/// (`ä` is `ae`, `ß` is `ss`), and anything else its code point, `\u{..}`, so
+/// nothing is silently lost.
 struct Ascii<'a>(&'a dyn fmt::Display);
 
 impl fmt::Display for Ascii<'_> {
@@ -352,7 +352,7 @@ pub fn measurement(line: &str) {
 mod tests {
     use super::*;
 
-    /// `I-390`: what the maintainer's terminal showed as `â€"` and `Â§`
+    /// `I-390`: what the maintainer's terminal showed as `â€”` and `Â§`
     /// reaches the log as ASCII, and nothing is dropped.
     #[test]
     fn a_log_line_is_ascii_whatever_it_was_given() {
