@@ -2094,6 +2094,25 @@ mod tests {
             assert!(fake.notified.is_empty(), "no card");
         }
 
+        /// The maintainer's rig, 2026-11-10: *Notify when it stops changing*
+        /// said nothing. A bar grows across a 600 by 400 area for five
+        /// seconds and stops: one notification, that it settled.
+        #[test]
+        fn a_bar_that_fills_and_stops_says_it_settled() {
+            let list = targets_for(&[Rect::new(100, 100, 600, 400)], Watch::Settles);
+            let mut fake = Fake::new(list);
+            let mut memory = Memory::default();
+            run(&mut fake, &mut memory, 2);
+            for step in 1..=10_u32 {
+                fake.patch = Some((Rect::new(120, 280, 40 * step, 20), 20));
+                run(&mut fake, &mut memory, 1);
+            }
+            assert!(fake.notified.is_empty(), "nothing while it moves");
+            let settle = usize::try_from(Watch::Settles.settle_readings()).unwrap_or(usize::MAX);
+            run(&mut fake, &mut memory, settle + 2);
+            assert_eq!(fake.notified, vec![Event::Settled]);
+        }
+
         /// Roadmap `1.61`: the host reads with the area's own tolerance. A
         /// 16 by 16 change on a 600 by 400 area (4 of its 3,750 cells) is a
         /// change at *any change*, and none at one percent of the area.

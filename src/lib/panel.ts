@@ -32,35 +32,67 @@ export interface PanelTuning {
 /** The minimum gaps the panel offers, in ms: none, 0.1 s, 1 s, 10 s, 1 min. */
 export const GAPS_MS: readonly number[] = [0, 100, 1_000, 10_000, 60_000];
 
-/** The calm slider's steps, in ms, shortest first. */
-export const CALM_STEPS_MS: readonly number[] = [
-  50, 100, 150, 250, 500, 1_000, 2_000, 5_000, 10_000,
-];
+/** A slider over a whole range of values (the maintainer, 2026-11-10:
+ * *"smaller increments and the full range of values adjustable"*): every
+ * `fine` step from `min` to `max`, and ten times that while Ctrl is held.
+ * `reversed` runs the values from `max` on the left to `min` on the right. */
+export interface SliderRange {
+  min: number;
+  max: number;
+  fine: number;
+  reversed?: boolean;
+}
 
-/** The sampling slider's steps, in ms between readings, slowest first so
- * the slider runs from every five seconds on the left to realtime (0) on
- * the right. */
-export const SAMPLE_STEPS_MS: readonly number[] = [
-  5_000, 4_000, 3_000, 2_000, 1_500, 1_000, 750, 500, 250, 100, 0,
-];
+/** How many fine steps one step is while Ctrl is held. */
+export const COARSE = 10;
 
-/** The tolerance slider's steps, in thousandths of the area: any change
- * on the left, half the area on the right (his *"from any pixel to half the
- * area"*). */
-export const SHARE_STEPS_PERMILLE: readonly number[] = [
-  0, 1, 2, 5, 10, 20, 50, 100, 200, 300, 500,
-];
+/** The calm slider, in ms: 50 ms to 10 s in steps of 10 ms. */
+export const CALM_RANGE: SliderRange = { min: 50, max: 10_000, fine: 10 };
 
-/** The index of the step closest to `value`, for a slider showing a value
- * Rust kept that the steps may not hold exactly. */
-export function nearestStep(steps: readonly number[], value: number): number {
-  let best = 0;
-  steps.forEach((step, index) => {
-    if (Math.abs(step - value) < Math.abs((steps[best] ?? 0) - value)) {
-      best = index;
-    }
-  });
-  return best;
+/** The sampling slider, in ms between readings: every five seconds on the
+ * left to realtime (0) on the right, in steps of 10 ms. */
+export const SAMPLE_RANGE: SliderRange = {
+  min: 0,
+  max: 5_000,
+  fine: 10,
+  reversed: true,
+};
+
+/** The tolerance slider, in thousandths of the area: any change on the
+ * left to half the area on the right (his *"from any pixel to half the
+ * area"*), in steps of a tenth of a percent. */
+export const SHARE_RANGE: SliderRange = { min: 0, max: 500, fine: 1 };
+
+/** The input's own bounds for `range`: a reversed range runs its position
+ * from 0 on the left. */
+export function track(range: SliderRange): { min: number; max: number } {
+  return range.reversed
+    ? { min: 0, max: range.max - range.min }
+    : { min: range.min, max: range.max };
+}
+
+/** The input's step: fine, or ten times fine while Ctrl is held. */
+export function stepOf(range: SliderRange, coarse: boolean): number {
+  return coarse ? range.fine * COARSE : range.fine;
+}
+
+/** Where `value` sits on the input, kept in range. */
+export function toPosition(range: SliderRange, value: number): number {
+  const kept = Math.min(range.max, Math.max(range.min, value));
+  return range.reversed ? range.max - kept : kept;
+}
+
+/** The value at input position `position`, kept in range. */
+export function fromPosition(range: SliderRange, position: number): number {
+  const value = range.reversed ? range.max - position : position;
+  return Math.min(range.max, Math.max(range.min, Math.round(value)));
+}
+
+/** How far along the track `value` sits, 0 at the left and 1 at the right,
+ * for the drawn fill. */
+export function fraction(range: SliderRange, value: number): number {
+  const { min, max } = track(range);
+  return max > min ? (toPosition(range, value) - min) / (max - min) : 0;
 }
 
 const isCount = (value: unknown): value is number =>

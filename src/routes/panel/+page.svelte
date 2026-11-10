@@ -3,12 +3,13 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { onMount, tick } from 'svelte';
 import {
-  CALM_STEPS_MS,
+  CALM_RANGE,
   DEPTHS,
+  fraction,
+  fromPosition,
   GAPS_MS,
   isPanelView,
   NOTIFY,
-  nearestStep,
   ON_RESIZE,
   PANEL_EVENT,
   type PanelDepth,
@@ -17,8 +18,12 @@ import {
   type PanelTuning,
   type PanelView,
   type PanelWatch,
-  SAMPLE_STEPS_MS,
-  SHARE_STEPS_PERMILLE,
+  SAMPLE_RANGE,
+  SHARE_RANGE,
+  type SliderRange,
+  stepOf,
+  toPosition,
+  track,
 } from '$lib/panel';
 import {
   fill,
@@ -104,9 +109,22 @@ function setTuning(change: Partial<PanelTuning>): void {
 const number = (value: number): string =>
   value.toLocaleString(language, { maximumFractionDigits: 1 });
 
-// How far along its slider a step sits, 0 at the first and 1 at the last.
-function at(step: number, steps: readonly number[]): string {
-  return String(steps.length > 1 ? step / (steps.length - 1) : 0);
+// Whether Ctrl is held on a slider, for its ten-times step (the maintainer,
+// 2026-11-10): read from every pointer and key event the slider gets, so it
+// follows Ctrl pressed or let go in the middle of a drag.
+let coarse = $state(false);
+function followCtrl(event: PointerEvent | KeyboardEvent): void {
+  coarse = event.ctrlKey;
+}
+
+// One slider's input attributes for `range` at `value`.
+function slider(range: SliderRange, value: number) {
+  return {
+    ...track(range),
+    step: stepOf(range, coarse),
+    value: toPosition(range, value),
+    at: String(fraction(range, value)),
+  };
 }
 
 /** A duration as the panel says it: ms under a second, s, or min. */
@@ -339,6 +357,9 @@ onMount(() => {
 
     {#if view.tuning}
       {@const tuning = view.tuning}
+      {@const s = slider(SHARE_RANGE, tuning.share_permille)}
+      {@const c = slider(CALM_RANGE, tuning.calm_ms)}
+      {@const r = slider(SAMPLE_RANGE, tuning.sample_ms)}
       <label class="field">
         <span class="label"
           >{text(language, 'panel.watch.share')}
@@ -346,18 +367,20 @@ onMount(() => {
         >
         <input
           type="range"
-          min="0"
-          max={SHARE_STEPS_PERMILLE.length - 1}
-          step="1"
-          value={nearestStep(SHARE_STEPS_PERMILLE, tuning.share_permille)}
-          style:--at={at(
-            nearestStep(SHARE_STEPS_PERMILLE, tuning.share_permille),
-            SHARE_STEPS_PERMILLE,
-          )}
+          min={s.min}
+          max={s.max}
+          step={s.step}
+          value={s.value}
+          style:--at={s.at}
+          onpointerdown={followCtrl}
+          onpointermove={followCtrl}
+          onkeydown={followCtrl}
           oninput={(event) =>
             setTuning({
-              share_permille:
-                SHARE_STEPS_PERMILLE[Number(event.currentTarget.value)] ?? 0,
+              share_permille: fromPosition(
+                SHARE_RANGE,
+                Number(event.currentTarget.value),
+              ),
             })}
           onchange={done}
         />
@@ -387,14 +410,20 @@ onMount(() => {
           >
           <input
             type="range"
-            min="0"
-            max={CALM_STEPS_MS.length - 1}
-            step="1"
-            value={nearestStep(CALM_STEPS_MS, tuning.calm_ms)}
-            style:--at={at(nearestStep(CALM_STEPS_MS, tuning.calm_ms), CALM_STEPS_MS)}
+            min={c.min}
+            max={c.max}
+            step={c.step}
+            value={c.value}
+            style:--at={c.at}
+            onpointerdown={followCtrl}
+            onpointermove={followCtrl}
+            onkeydown={followCtrl}
             oninput={(event) =>
               setTuning({
-                calm_ms: CALM_STEPS_MS[Number(event.currentTarget.value)] ?? 150,
+                calm_ms: fromPosition(
+                  CALM_RANGE,
+                  Number(event.currentTarget.value),
+                ),
               })}
             onchange={done}
           />
@@ -427,14 +456,20 @@ onMount(() => {
         >
         <input
           type="range"
-          min="0"
-          max={SAMPLE_STEPS_MS.length - 1}
-          step="1"
-          value={nearestStep(SAMPLE_STEPS_MS, tuning.sample_ms)}
-          style:--at={at(nearestStep(SAMPLE_STEPS_MS, tuning.sample_ms), SAMPLE_STEPS_MS)}
+          min={r.min}
+          max={r.max}
+          step={r.step}
+          value={r.value}
+          style:--at={r.at}
+          onpointerdown={followCtrl}
+          onpointermove={followCtrl}
+          onkeydown={followCtrl}
           oninput={(event) =>
             setTuning({
-              sample_ms: SAMPLE_STEPS_MS[Number(event.currentTarget.value)] ?? 0,
+              sample_ms: fromPosition(
+                SAMPLE_RANGE,
+                Number(event.currentTarget.value),
+              ),
             })}
           onchange={done}
         />

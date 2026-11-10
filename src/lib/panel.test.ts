@@ -91,29 +91,35 @@ describe('the area settings panel (roadmap 1.60)', () => {
 });
 
 describe("a watch area's tuning (roadmap 1.65)", () => {
-  it('shows the step nearest to what Rust kept', async () => {
-    const { CALM_STEPS_MS, SAMPLE_STEPS_MS, nearestStep } = await import(
-      './panel'
-    );
-    expect(nearestStep(CALM_STEPS_MS, 150)).toBe(2);
-    expect(nearestStep(CALM_STEPS_MS, 160)).toBe(2);
-    expect(nearestStep(SAMPLE_STEPS_MS, 0)).toBe(SAMPLE_STEPS_MS.length - 1);
-    expect(nearestStep(SAMPLE_STEPS_MS, 5_000)).toBe(0);
-  });
-
-  it('runs the tolerance slider from any change to half the area (1.61)', async () => {
-    const { SHARE_STEPS_PERMILLE, nearestStep } = await import('./panel');
-    expect(SHARE_STEPS_PERMILLE[0]).toBe(0);
-    expect(SHARE_STEPS_PERMILLE.at(-1)).toBe(500);
-    expect(nearestStep(SHARE_STEPS_PERMILLE, 0)).toBe(0);
-    expect(nearestStep(SHARE_STEPS_PERMILLE, 500)).toBe(
-      SHARE_STEPS_PERMILLE.length - 1,
-    );
+  it('runs every slider over its whole range in fine steps (2026-11-10)', async () => {
+    const { CALM_RANGE, SAMPLE_RANGE, SHARE_RANGE, track, stepOf } =
+      await import('./panel');
+    expect(SHARE_RANGE).toMatchObject({ min: 0, max: 500, fine: 1 });
+    expect(CALM_RANGE).toMatchObject({ min: 50, max: 10_000, fine: 10 });
+    expect(SAMPLE_RANGE).toMatchObject({ min: 0, max: 5_000, fine: 10 });
+    expect(track(SAMPLE_RANGE)).toEqual({ min: 0, max: 5_000 });
+    expect(stepOf(SHARE_RANGE, false)).toBe(1);
+    expect(stepOf(SHARE_RANGE, true)).toBe(10);
+    expect(stepOf(CALM_RANGE, true)).toBe(100);
   });
 
   it('runs the sampling slider from every five seconds to realtime', async () => {
-    const { SAMPLE_STEPS_MS } = await import('./panel');
-    expect(SAMPLE_STEPS_MS[0]).toBe(5_000);
-    expect(SAMPLE_STEPS_MS.at(-1)).toBe(0);
+    const { SAMPLE_RANGE, toPosition, fromPosition, fraction } = await import(
+      './panel'
+    );
+    expect(fromPosition(SAMPLE_RANGE, 0)).toBe(5_000);
+    expect(fromPosition(SAMPLE_RANGE, 5_000)).toBe(0);
+    expect(toPosition(SAMPLE_RANGE, 0)).toBe(5_000);
+    expect(fraction(SAMPLE_RANGE, 0)).toBe(1);
+    expect(fraction(SAMPLE_RANGE, 5_000)).toBe(0);
+  });
+
+  it('keeps values from Rust and from the input in range', async () => {
+    const { CALM_RANGE, SHARE_RANGE, toPosition, fromPosition, fraction } =
+      await import('./panel');
+    expect(fromPosition(SHARE_RANGE, 37)).toBe(37);
+    expect(fromPosition(SHARE_RANGE, 900)).toBe(500);
+    expect(toPosition(CALM_RANGE, 0)).toBe(50);
+    expect(fraction(SHARE_RANGE, 250)).toBe(0.5);
   });
 });
