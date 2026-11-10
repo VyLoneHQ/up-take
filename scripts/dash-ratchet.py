@@ -93,7 +93,9 @@ file's dashes from the total and the script then congratulated the author on the
 ground it had apparently gained and invited them to bank it with
 `--write-baseline`. A second review found it: one entry for `placement.rs` was
 worth 172. The ceiling is now measured over every text file, exempt ones
-included, so an exemption cannot move the number by one. What it changes is the
+included, so an exemption cannot move the number by one. (The one scope is not
+an exemption: the string catalogue's translations are not counted at all,
+`CATALOGUE` below, UP-TAKE backlog I-412.) What it changes is the
 **floor**: the total can never fall below the number of load-bearing characters,
 and the exemption list is the record of where that floor comes from. Exempt
 paths are also left out of the "worst offenders" list a failure prints, because
