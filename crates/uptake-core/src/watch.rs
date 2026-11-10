@@ -74,9 +74,12 @@ impl Watch {
         }
     }
 
-    /// How long a calm ends a change for this choice, for the event-driven
-    /// host: [`REARM_TIME`] re-arms *changes*, and [`SETTLE_READINGS`]
-    /// readings at [`READING_STEP`] (six seconds) call something finished.
+    /// How long a calm ends a change for this choice before the area's own
+    /// tuning is applied: [`REARM_TIME`] re-arms *changes*, and
+    /// [`SETTLE_READINGS`] readings at [`READING_STEP`] (six seconds) call
+    /// something finished. The host replaces the second with the area's
+    /// [`Tuning::settle_ms`] before every reading ([`Detector::tune`]), so a
+    /// running area waits as long as its panel says.
     #[must_use]
     pub fn settle_time(self) -> Duration {
         match self {
@@ -666,8 +669,9 @@ pub enum Event {
 /// differs by more than [`CELL_DELTA`] from the *baseline*, the reading the
 /// region was last still at, so a slow change adds up until it counts. **A
 /// change ends** when the region has held still for the settle time
-/// ([`Watch::settle_time`]: [`REARM_TIME`] for *Notify when it changes*, six
-/// seconds for *Notify when it stops changing*), every reading in that time
+/// ([`Watch::settle_time`]: [`REARM_TIME`] for *Notify when it changes*, and
+/// for *Notify when it stops changing* the area's own [`Tuning::settle_ms`]
+/// once [`Detector::tune`] has run, six seconds before), every reading in that time
 /// within [`STILL_DELTA`] of the first reading of the still run; the last
 /// becomes the new baseline, wherever the region stopped.
 ///
