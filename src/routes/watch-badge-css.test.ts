@@ -20,8 +20,8 @@ describe('the watching mark stays inside its area', () => {
     expect(block).toContain('max-height: calc(100% - 2px);');
   });
 
-  it('starts from the top right corner', () => {
-    expect(block).toContain('right: 1px;');
+  it('starts from the top left corner (the maintainer, 2026-11-10)', () => {
+    expect(block).toContain('left: 1px;');
     expect(block).toContain('top: 1px;');
   });
 });
@@ -53,5 +53,39 @@ describe('the watching dot fits inside its badge', () => {
     const inset = Number(badge.match(/top: (\d+)px;/)?.[1]);
     const side = Number(block.match(/width: (\d+)px;/)?.[1]);
     expect(inset + side + inset).toBeLessThanOrEqual(8);
+  });
+});
+
+/**
+ * The maintainer, 2026-11-10: the dot animates while it watches, subtly,
+ * and the two states stay easy to tell apart. Pinned in the source, since
+ * jsdom runs no animation: the watching dot breathes by opacity only (its
+ * box, which markSeen measures, never moves), the paused ring has no
+ * animation, and reduced motion stops the breathing.
+ */
+describe('the status dot', () => {
+  const watching = page.match(/\n\.watch-dot \{([^}]*)\}/)?.[1] ?? '';
+  // Its own rule, the last `.held-dot {`: the first is shared with the
+  // watching dot's size.
+  const paused =
+    [...page.matchAll(/\n\.held-dot \{([^}]*)\}/g)].at(-1)?.[1] ?? '';
+  const breathe =
+    page.match(/@keyframes watch-breathe \{([\s\S]*?)\n\}/)?.[1] ?? '';
+
+  it('breathes while it watches, by opacity alone', () => {
+    expect(watching).toContain('animation: watch-breathe');
+    expect(breathe).toContain('opacity');
+    expect(breathe).not.toMatch(/width|height|transform|top|left|margin/);
+  });
+
+  it('holds still while paused, and looks different without colour', () => {
+    expect(paused).not.toContain('animation');
+    expect(paused).toContain('inset 0 0 0 1.5px');
+  });
+
+  it('stops breathing when Windows asks for less motion', () => {
+    expect(page).toMatch(
+      /@media \(prefers-reduced-motion: reduce\) \{\s*\.watch-dot \{\s*animation: none;/,
+    );
   });
 });

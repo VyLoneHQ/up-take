@@ -819,6 +819,7 @@ $effect(() => {
           class:pinned={area.layer !== 'auto'}
           class:filter={area.kind === 'filter'}
           class:watch={area.kind === 'watch'}
+          class:with-status={area.watching || area.held}
           style="transform: translate3d({area.rect.x}px, {area.rect.y}px, 0); width: {area
             .rect.width}px; height: {area.rect.height}px"
         >
@@ -986,7 +987,8 @@ $effect(() => {
                2026-11-10: an area as small as two letters could not fit the
                word, so its mark was never seen and it never read. The word
                stays as the dot's name for a screen reader and a tooltip.
-               Top right, clear of the depth and sticky marks on the left. -->
+               Top left, the maintainer's choice of 2026-11-10, with the
+               depth and sticky marks moved right of it. -->
           {#if area.watching}
             <span
               class="watch-badge"
@@ -1298,7 +1300,7 @@ $effect(() => {
 .watch-badge,
 .held-badge {
   position: absolute;
-  right: 1px;
+  left: 1px;
   top: 1px;
   max-width: calc(100% - 2px);
   max-height: calc(100% - 2px);
@@ -1324,12 +1326,51 @@ $effect(() => {
   box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.55);
 }
 
+/* Two states that must not be confused (the maintainer, 2026-11-10: "keep
+   it subtle and make sure the UX stays great"). Watching: a filled green dot
+   that breathes slowly, alive but quiet. Paused: a hollow grey ring that
+   holds still. Fill, colour and motion all differ, so neither colour nor
+   motion alone has to carry the meaning. Opacity only, so the dot's box,
+   which markSeen measures, never changes. */
 .watch-dot {
   background: rgba(110, 230, 160, 1);
+  animation: watch-breathe 3s ease-in-out infinite;
 }
 
 .held-dot {
-  background: rgba(170, 170, 170, 1);
+  background: rgba(0, 0, 0, 0.35);
+  box-shadow:
+    inset 0 0 0 1.5px rgba(190, 190, 190, 1),
+    inset 0 0 0 2.5px rgba(0, 0, 0, 0.45);
+}
+
+@keyframes watch-breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+/* Windows' "show animations" switched off: the dot holds still and stays
+   green and filled, which still tells it apart from the hollow grey ring. */
+@media (prefers-reduced-motion: reduce) {
+  .watch-dot {
+    animation: none;
+  }
+}
+
+/* The depth and sticky marks sit right of the status dot when the area has
+   one, so the three never overlap. */
+.area.with-status .layer-badge,
+.area.with-status .sticky-badge {
+  left: 12px;
+}
+
+.area.with-status .sticky-badge.beside-layer {
+  left: 26px;
 }
 
 /* The area's name (the founder, 2026-11-03), at its bottom left: clear of the
@@ -1348,10 +1389,12 @@ $effect(() => {
   pointer-events: none;
 }
 
-/* The name field, over the area's top left while the user names it. */
+/* The name field, over the area's top left while the user names it. Right
+   of the status dot, which it would otherwise cover: a watch area whose mark
+   is covered is not read (2026-11-10). */
 .rename {
   position: absolute;
-  left: 4px;
+  left: 10px;
   top: 4px;
   width: min(220px, calc(100% - 8px));
   box-sizing: border-box;

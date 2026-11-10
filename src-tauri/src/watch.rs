@@ -43,11 +43,12 @@
 //! and left out of the comparison ([`own_drawing`]).
 //!
 //! **An area whose mark is not wholly on a monitor does not read** ([`mark`],
-//! [`mark_on_screen`]). The mark sits in the area's top right corner, and an
+//! [`mark_on_screen`]). The mark sits in the area's top left corner (top
+//! right until 2026-11-10, the maintainer's choice), and an
 //! area may hang off the desktop or into a gap between monitors; the capture
 //! would still read the part that is on screen while the mark is drawn
 //! nowhere, which is `ADR-0048`'s first *Revisit if* (review of `#154`,
-//! round 3). Checked against the area's top right corner, which holds the
+//! round 3). Checked against the area's top left corner, which holds the
 //! mark because the page clips the mark to the area (rounds 15 and 16).
 //!
 //! **Each of these is asked again right before each capture**, not once a
@@ -596,7 +597,7 @@ struct Watcher {
 }
 
 /// The parts of a reading that are UP-TAKE's own drawing, in the reading's
-/// pixels: a band along each edge for the border, and the top right corner
+/// pixels: a band along each edge for the border, and the top left corner
 /// for the *watching* mark. `bounds` is the area, `taken` the rectangle the
 /// capture returned, which is `bounds` clamped to the desktop.
 fn own_drawing(bounds: Rect, taken: Rect) -> [Rect; 5] {
@@ -608,18 +609,12 @@ fn own_drawing(bounds: Rect, taken: Rect) -> [Rect; 5] {
     let right = dx + i32::try_from(width).unwrap_or(i32::MAX);
     let bottom = dy + i32::try_from(height).unwrap_or(i32::MAX);
     let edge = i32::try_from(EDGE).unwrap_or(0);
-    let mark_width = i32::try_from(MARK.0.min(width)).unwrap_or(0);
     [
         Rect::new(dx, dy, width, EDGE),
         Rect::new(dx, bottom - edge, width, EDGE),
         Rect::new(dx, dy, EDGE, height),
         Rect::new(right - edge, dy, EDGE, height),
-        Rect::new(
-            right - mark_width,
-            dy,
-            MARK.0.min(width),
-            MARK.1.min(height),
-        ),
+        Rect::new(dx, dy, MARK.0.min(width), MARK.1.min(height)),
     ]
 }
 
@@ -631,7 +626,7 @@ fn in_captures() -> bool {
 
 /// What a reading leaves out. Nothing while UP-TAKE is kept out of captures,
 /// which is the default (`ADR-0019`): its drawing is not in the reading, and
-/// leaving the corner out anyway cost every area its top right corner.
+/// leaving the corner out anyway cost every area its mark's corner.
 /// With *Show UP-TAKE in screen recordings* on, [`own_drawing`], except the
 /// mark's corner when that would leave nothing to read: an area no wider
 /// than the corner and no taller than it read solid black and could never
@@ -684,7 +679,7 @@ fn unknown_under(windows: &[Rect], taken: Rect) -> Vec<Rect> {
         .collect()
 }
 
-/// Where the *watching* mark can be, in desktop pixels: the area's top right
+/// Where the *watching* mark can be, in desktop pixels: the area's top left
 /// corner, [`MARK`] in size or the area's own size when that is smaller.
 ///
 /// The host's own first check, before the page's word ([`confirm`]): an area
@@ -693,12 +688,10 @@ fn unknown_under(windows: &[Rect], taken: Rect) -> Vec<Rect> {
 /// page clips the mark to the area (`+page.svelte`, `.watch-badge`, pinned by
 /// `watch-badge-css.test.ts`) and measures the mark it drew.
 fn mark(bounds: Rect) -> Rect {
-    let width = MARK.0.min(bounds.size.width);
-    let right = bounds.origin.x + i32::try_from(bounds.size.width).unwrap_or(i32::MAX);
     Rect::new(
-        right - i32::try_from(width).unwrap_or(0),
+        bounds.origin.x,
         bounds.origin.y,
-        width,
+        MARK.0.min(bounds.size.width),
         MARK.1.min(bounds.size.height),
     )
 }
@@ -2042,10 +2035,11 @@ mod tests {
         }
 
         /// Round 3: an area whose mark corner is on no monitor is not read,
-        /// though part of the area is on screen.
+        /// though part of the area is on screen. The corner is the top left
+        /// since 2026-11-10, so the area hangs off the desktop's left edge.
         #[test]
         fn an_area_whose_mark_is_off_screen_is_not_read() {
-            let mut fake = Fake::new(targets(&[Rect::new(1700, 100, 600, 400)]));
+            let mut fake = Fake::new(targets(&[Rect::new(-300, 100, 600, 400)]));
             let mut memory = Memory::default();
             run(&mut fake, &mut memory, 2);
             assert_eq!(fake.captured.len(), 0);
@@ -2232,16 +2226,16 @@ mod tests {
         assert_eq!(gate(a, true, [None, None], true, false), Gate::Skip);
     }
 
-    /// The mark is on screen only when its whole corner is on one monitor:
-    /// not past the desktop's right edge, not above its top, not across the
-    /// gap where a shorter monitor ends.
+    /// The mark is on screen only when its whole corner, the area's top left,
+    /// is on one monitor: not past the desktop's right edge, not above its
+    /// top, not across the gap where a shorter monitor ends.
     #[test]
     fn the_mark_must_be_wholly_on_one_monitor() {
         let left = Rect::new(0, 0, 1920, 1080);
         let right = Rect::new(1920, 0, 1280, 720);
         let monitors = [left, right];
         let inside = Rect::new(100, 100, 600, 400);
-        assert_eq!(mark(inside), Rect::new(700 - 24, 100, MARK.0, MARK.1));
+        assert_eq!(mark(inside), Rect::new(100, 100, MARK.0, MARK.1));
         // Rounds 15 and 16: small areas near a monitor's left edge, whose
         // mark (clipped to the area by the page) is on screen, do read.
         assert!(mark_on_screen(mark(Rect::new(0, 100, 40, 400)), &monitors));
@@ -2256,7 +2250,7 @@ mod tests {
         assert!(mark_on_screen(mark(inside), &monitors));
         // Past the right edge of the rightmost monitor.
         assert!(!mark_on_screen(
-            mark(Rect::new(2900, 100, 600, 400)),
+            mark(Rect::new(3190, 100, 600, 400)),
             &monitors
         ));
         // Above the top of the desktop.
@@ -2266,12 +2260,12 @@ mod tests {
         ));
         // Below the shorter right monitor, beside the taller left one.
         assert!(!mark_on_screen(
-            mark(Rect::new(1700, 900, 600, 100)),
+            mark(Rect::new(2000, 900, 600, 100)),
             &monitors
         ));
         // Across the seam between two monitors: on neither wholly.
         assert!(!mark_on_screen(
-            mark(Rect::new(1400, 100, 532, 300)),
+            mark(Rect::new(1910, 100, 300, 300)),
             &monitors
         ));
         assert!(!mark_on_screen(mark(inside), &[]), "no monitors, no mark");
@@ -2293,7 +2287,7 @@ mod tests {
     }
     use uptake_core::geometry::Rect;
 
-    /// The parts left out sit on the area's own edges and its top right
+    /// The parts left out sit on the area's own edges and its top left
     /// corner, in the reading's pixels.
     #[test]
     fn own_drawing_is_the_border_and_the_marks_corner() {
@@ -2303,7 +2297,7 @@ mod tests {
         assert_eq!(parts[1], Rect::new(0, 400 - 4, 600, EDGE));
         assert_eq!(parts[2], Rect::new(0, 0, EDGE, 400));
         assert_eq!(parts[3], Rect::new(600 - 4, 0, EDGE, 400));
-        assert_eq!(parts[4], Rect::new(600 - 24, 0, MARK.0, MARK.1));
+        assert_eq!(parts[4], Rect::new(0, 0, MARK.0, MARK.1));
     }
 
     /// An area hanging off the desktop's left edge: the capture starts 30
@@ -2314,7 +2308,7 @@ mod tests {
         let taken = Rect::new(0, 0, 270, 200);
         let parts = own_drawing(bounds, taken);
         assert_eq!(parts[0], Rect::new(-30, 0, 300, EDGE));
-        assert_eq!(parts[4], Rect::new(270 - 24, 0, MARK.0, MARK.1));
+        assert_eq!(parts[4], Rect::new(-30, 0, MARK.0, MARK.1));
     }
 
     /// An area smaller than the mark's corner leaves out what it has.
