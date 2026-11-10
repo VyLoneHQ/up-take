@@ -1,17 +1,23 @@
 name: Advisories
 
 # Known advisories in the locked dependencies, looked for every day and not
-# only when something changes (V-SECURITY finding SUP-0014: until this file a
-# new advisory in a quiet repository was seen at the next pull request at the
-# earliest). `cargo audit` and `cargo deny` also run in ci.yml on every push
-# and pull request, so a change that brings in an advised crate is still seen
-# on its own pull request; `pnpm audit` runs only here, because the JavaScript
-# side's advisories are all in development dependencies today and a red pull
-# request for a dev-server advisory would block unrelated work.
+# only when something changes (V-SECURITY finding SUP-0014). `cargo audit` and
+# `cargo deny` also run in ci.yml on every pull request and every push to
+# main, so a change that brings in an advised crate is still seen on its own
+# pull request; `pnpm audit` runs only here, because the JavaScript side's
+# advisories are all in development dependencies today and a red pull request
+# for a dev-server advisory would block unrelated work.
 #
-# REPORT-ONLY: a scheduled run blocks no push and no merge. GitHub runs a
-# schedule on the default branch only. Standard runners cost nothing on a
-# public repository.
+# What this does NOT cover, stated because it is the case it is for: GitHub
+# turns a schedule off in a public repository with no activity for 60 days,
+# and a scheduled run uses the default branch's copy of this file. Both are
+# GitHub's, as its documentation describes them, and nothing here probes
+# them (backlog I-465 names the same two for secrets.yml). So in a quiet spell
+# longer than 60 days this stops, and the next pull request's `cargo` checks
+# are the first to see a new advisory.
+#
+# REPORT-ONLY: a scheduled run blocks no push and no merge. It runs on a
+# standard runner.
 
 on:
   schedule:
@@ -49,6 +55,7 @@ jobs:
         with:
           tool: cargo-audit
 
+      # Reads Cargo.lock as a file and resolves nothing: no `--locked` to take.
       - name: cargo audit
         if: ${{ !cancelled() }}
         run: cargo audit
