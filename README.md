@@ -167,8 +167,8 @@ Six of eight area types are built.
 - **A watch area.** Place it over something that changes, such as a download bar, a render or a
   chat, and it shows a Windows notification when that piece of screen starts changing, or when it
   stops. It watches from the moment you make it, *Pause* in its settings or the key `P` stops it,
-  and a green dot breathes in the area's top left corner for as long as it reads (a still grey
-  ring while it is paused). You choose how much of the area has
+  and a green dot in the area's top left corner, pulsing softly every few seconds, shows it is
+  reading (a still grey ring while it is paused). You choose how much of the area has
   to change before it counts, from any change to the whole area. What it reads stays on your computer:
   to compare, it keeps a small greyscale copy of its latest readings in memory, one shade for every
   4 by 4 pixels, and nothing else.
