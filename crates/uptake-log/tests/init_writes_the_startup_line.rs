@@ -59,6 +59,10 @@ fn init_puts_its_startup_line_in_the_log_file() {
 
     let directory = uptake_log::init().expect("init returned an error");
     uptake_log::note("a line written by the integration test");
+    // `I-390`: a budget line and a Windows error carry non-ASCII; the file
+    // must not, or PowerShell 5.1's `Get-Content` shows mojibake.
+    uptake_log::measurement("budget \u{2014} over the \u{a7}1 target");
+    uptake_log::trouble("a cause from Windows", &"Zugriff f\u{fc}r J\u{fc}rgen");
 
     // Polled, not slept: the writer is asynchronous, and polling reports
     // "never" rather than "slow" if it ever stops writing at all.
@@ -66,7 +70,7 @@ fn init_puts_its_startup_line_in_the_log_file() {
     let mut contents = String::new();
     while Instant::now() < deadline {
         contents = read_all_logs(&directory);
-        if contents.contains("UP-TAKE starting") {
+        if contents.contains("UP-TAKE starting") && contents.contains("Juergen") {
             break;
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -81,6 +85,18 @@ fn init_puts_its_startup_line_in_the_log_file() {
     assert!(
         contents.contains("a line written by the integration test"),
         "the startup line landed but a later note did not. Contents:\n{contents}"
+    );
+    assert!(
+        contents.contains("budget -- over the section 1 target"),
+        "the budget line was not written as ASCII. Contents:\n{contents}"
+    );
+    assert!(
+        contents.contains("Zugriff fuer Juergen"),
+        "the Windows cause was not written as ASCII. Contents:\n{contents}"
+    );
+    assert!(
+        contents.is_ascii(),
+        "the log file holds non-ASCII bytes (I-390). Contents:\n{contents}"
     );
 }
 
