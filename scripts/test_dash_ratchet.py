@@ -416,5 +416,84 @@ class RatchetCase(unittest.TestCase):
         self.assertIn("FAILED", err)
 
 
+class CatalogueCase(unittest.TestCase):
+    """UP-TAKE backlog I-412: a translation's dash is not counted, English is.
+
+    RatchetCase's repository and helpers, without inheriting (and so running
+    again) every one of its tests.
+    """
+
+    setUp = RatchetCase.setUp
+    tearDown = RatchetCase.tearDown
+    write_prose = RatchetCase.write_prose
+    write_baseline = RatchetCase.write_baseline
+    commit = RatchetCase.commit
+
+    def write_catalogue(self, en: str, de: str, about: str = "about"):
+        (self.repo / "locales").mkdir(exist_ok=True)
+        (self.repo / "locales" / "strings.json").write_text(
+            json.dumps(
+                {
+                    "_about": [about],
+                    "languages": ["en", "de"],
+                    "strings": {"a.key": {"en": en, "de": de, "de_from": "0"}},
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def test_a_german_dash_in_the_catalogue_is_not_counted(self):
+        """Correct German punctuation must not fail the ratchet."""
+        self.write_catalogue("Watch area", "Bereich " + EM + " beobachtet")
+        self.write_baseline(0)
+        self.commit("a Gedankenstrich in German")
+
+        code, _, err = run_main(self.repo, "--against", "main")
+        self.assertEqual(code, 0, err)
+
+    def test_an_english_dash_in_the_catalogue_still_counts(self):
+        """The English stays gated, so the scope is not a hole."""
+        self.write_catalogue("Watch " + EM + " area", "Bereich")
+        self.write_baseline(0)
+        self.commit("a dash in English")
+
+        code, _, err = run_main(self.repo, "--against", "main")
+        self.assertEqual(code, 1, "an English dash above the ceiling must fail")
+        self.assertIn("FAILED", err)
+
+    def test_a_dash_outside_the_strings_still_counts(self):
+        """Only a translation's value is skipped, not the rest of the file."""
+        self.write_catalogue("Watch area", "Bereich", about="a note " + EN + " here")
+        self.write_baseline(0)
+        self.commit("a dash in _about")
+
+        code, _, err = run_main(self.repo, "--against", "main")
+        self.assertEqual(code, 1, "a dash in `_about` must count")
+
+    def test_the_same_german_dash_elsewhere_still_counts(self):
+        """The scope is the catalogue, not German text in any file."""
+        (self.repo / "prose.md").write_text("Bereich " + EM + " beobachtet\n", encoding="utf-8")
+        self.write_baseline(0)
+        self.commit("German prose outside the catalogue")
+
+        code, _, err = run_main(self.repo, "--against", "main")
+        self.assertEqual(code, 1)
+
+    def test_a_catalogue_that_does_not_parse_is_refused(self):
+        """Unreadable is refused, never counted as zero."""
+        (self.repo / "locales").mkdir(exist_ok=True)
+        (self.repo / "locales" / "strings.json").write_text(
+            '{"languages": ["en", "de"], "strings": {', encoding="utf-8"
+        )
+        self.write_baseline(0)
+        self.commit("a broken catalogue")
+
+        code, _, err = run_main(self.repo, "--against", "main")
+        self.assertEqual(code, 1)
+        self.assertIn("could not read", err)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
