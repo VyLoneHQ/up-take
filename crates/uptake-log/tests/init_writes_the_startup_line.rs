@@ -43,7 +43,10 @@ use std::time::{Duration, Instant};
 #[test]
 fn init_puts_its_startup_line_in_the_log_file() {
     let scratch = std::env::temp_dir().join(format!(
-        "uptake-log-test-{}-{}",
+        // A letter outside ASCII in the path, as in a profile named for its
+        // user: init's startup line says where the logs are, and it must be
+        // ASCII too (review of #172, round 2).
+        "uptake-log-test-j\u{fc}rgen-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -100,6 +103,7 @@ fn init_puts_its_startup_line_in_the_log_file() {
         "trouble -- three",
         "Zugriff fuer Juergen",
         "trouble_for -- four",
+        "uptake-log-test-juergen-",
         "failure -- five",
         "budget -- over the section 1 target",
     ] {
