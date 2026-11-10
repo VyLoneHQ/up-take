@@ -355,9 +355,18 @@ def ambiguous_refs(root: Path, ref: str) -> list[str]:
     """
     if ref.startswith("refs/"):
         return []
+    # Every rule of git's own lookup for a short name (gitrevisions(7),
+    # "<refname>"), in its order: a name directly under `refs/`, a tag, a
+    # branch, a remote-tracking ref, and a remote's HEAD. Round 3 of the
+    # review of #174 found `refs/<name>` missing.
     found = []
-    for prefix in ("refs/heads/", "refs/tags/", "refs/remotes/"):
-        full = prefix + ref
+    for full in (
+        f"refs/{ref}",
+        f"refs/tags/{ref}",
+        f"refs/heads/{ref}",
+        f"refs/remotes/{ref}",
+        f"refs/remotes/{ref}/HEAD",
+    ):
         if (
             subprocess.run(
                 ["git", "-C", str(root), "show-ref", "--verify", "--quiet", full],
@@ -475,7 +484,10 @@ def main() -> int:
         )
         return 1
 
-    reference = baseline_on(root, args.against)
+    # Write mode reads no ref at all (round 3 of the review of #174: it still
+    # read one here, so a malformed baseline on an irrelevant ref refused a
+    # valid write).
+    reference = None if args.write_baseline else baseline_on(root, args.against)
 
     if args.write_baseline:
         if baseline_file.exists():

@@ -442,6 +442,37 @@ class AmbiguousReferenceCase(unittest.TestCase):
         self.assertEqual(code, 1, err)
         self.assertIn("names more than one ref", err)
 
+    def test_a_name_directly_under_refs_is_counted_as_a_candidate(self):
+        """Round 3: `refs/<name>` is git's first rule for a short name."""
+        self.write_prose(2)
+        self.write_baseline(2)
+        self.commit("baseline of 2")
+        git(self.repo, "branch", "review")
+        self.write_prose(9)
+        self.write_baseline(9)
+        self.commit("raised by hand")
+        git(self.repo, "update-ref", "refs/review", "HEAD")
+
+        code, _, err = run_main(self.repo, "--against", "review")
+        self.assertEqual(code, 1, err)
+        self.assertIn("names more than one ref", err)
+
+    def test_write_mode_reads_no_ref(self):
+        """Round 3: a malformed baseline on an irrelevant ref does not stop a
+        valid write."""
+        self.write_prose(2)
+        self.write_baseline(2)
+        self.commit("baseline of 2")
+        git(self.repo, "checkout", "-q", "-b", "elsewhere")
+        (self.repo / "scripts" / "dash-baseline.json").write_text('{"total": "malformed"}\n', encoding="utf-8")
+        self.commit("a malformed baseline on another branch")
+        git(self.repo, "checkout", "-q", "main")
+        self.write_prose(1)
+        self.commit("swept down to one")
+
+        code, out, err = run_main(self.repo, "--write-baseline", "--against", "elsewhere")
+        self.assertEqual(code, 0, err)
+
     def test_the_full_ref_is_read_as_given(self):
         """The way out the refusal names works, and still guards."""
         self.write_prose(2)
