@@ -654,7 +654,8 @@ onMount(() => {
 
 /**
  * Tells the host which watching areas' marks can be seen now (roadmap 1.58,
- * `ADR-0048`'s *Revisit if*: the mark enforced by the reader). The host reads
+ * `ADR-0048`'s amendment of 2026-10-31: the page measures, the reader waits
+ * for its word). The host reads
  * a watch area only while its latest confirmation names it at the bounds and
  * in the overlay state it is reading in (`src-tauri/src/watch.rs`).
  *
