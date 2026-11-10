@@ -280,6 +280,9 @@ def check_exemptions(root: Path, tracked: set[str]) -> list[str]:
 def count(root: Path, paths: list[str]) -> tuple[dict[str, int], list[str]]:
     """Per-file counts over every text file, exempt paths included.
 
+    The string catalogue is counted by `catalogue_dashes`, without its
+    translations (UP-TAKE backlog I-412).
+
     Exempt paths are counted deliberately. Skipping them here is what let an
     exemption lower the ceiling and be reported as ground gained; see the module
     docstring. `EXEMPT` decides what a failure lists, not what the total is.
