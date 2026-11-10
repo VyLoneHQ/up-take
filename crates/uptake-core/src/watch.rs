@@ -346,6 +346,136 @@ const fn luma(r: u8, g: u8, b: u8) -> u8 {
     (weighted / 1000) as u8
 }
 
+/// Which of an area's events become a notification card (roadmap `1.65`,
+/// the maintainer's choice of 2026-11-07).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Notify {
+    /// No card. The area still watches, and its events still count.
+    Never,
+    /// One card per burst: the first event after [`Tuning::calm_ms`] without
+    /// one.
+    Once,
+    /// A card, or a count on the card already shown, for every event.
+    #[default]
+    Each,
+}
+
+/// How a watch area reads and reports, set per area in its panel (roadmap
+/// `1.65`, the maintainer's choices of 2026-11-07). Kept in milliseconds so
+/// it crosses to the page as plain numbers; [`Self::clamped`] keeps each in
+/// its range, whatever the page sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Tuning {
+    /// Which events become a card.
+    pub notify: Notify,
+    /// For [`Notify::Once`]: how long without an event ends a burst, so the
+    /// next event notifies again. His wish: *"the option to set a custom
+    /// calm (reset) duration"*.
+    pub calm_ms: u32,
+    /// The minimum gap after an event before the next may fire; `0` is no
+    /// limit. An event inside the gap is dropped, not delayed.
+    pub gap_ms: u32,
+    /// The least time between two readings (the sampling rate); `0` is
+    /// realtime, every frame that touches the area, up to about 30 a second.
+    pub sample_ms: u32,
+}
+
+impl Default for Tuning {
+    fn default() -> Self {
+        Self {
+            notify: Notify::Each,
+            calm_ms: 150,
+            gap_ms: 0,
+            sample_ms: 0,
+        }
+    }
+}
+
+/// [`Tuning::calm_ms`]'s range.
+pub const CALM_MS: (u32, u32) = (50, 10_000);
+/// [`Tuning::gap_ms`]'s longest: a minute.
+pub const GAP_MS_MAX: u32 = 60_000;
+/// [`Tuning::sample_ms`]'s longest: one reading every five seconds.
+pub const SAMPLE_MS_MAX: u32 = 5_000;
+
+impl Tuning {
+    /// `self` with every value in its range.
+    #[must_use]
+    pub fn clamped(self) -> Self {
+        Self {
+            notify: self.notify,
+            calm_ms: self.calm_ms.clamp(CALM_MS.0, CALM_MS.1),
+            gap_ms: self.gap_ms.min(GAP_MS_MAX),
+            sample_ms: self.sample_ms.min(SAMPLE_MS_MAX),
+        }
+    }
+
+    /// How long after a reading at `last` the next may be taken, at `at`:
+    /// `None` when it may be taken now.
+    #[must_use]
+    pub fn sample_wait(self, last: Option<Duration>, at: Duration) -> Option<Duration> {
+        let step = Duration::from_millis(u64::from(self.sample_ms));
+        let since = at.saturating_sub(last?);
+        (since < step).then(|| step - since)
+    }
+}
+
+/// What [`EventGate::admit`] made of one event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Admitted {
+    /// The event fires: it was outside the minimum gap.
+    pub fires: bool,
+    /// It fires and becomes a card.
+    pub notifies: bool,
+}
+
+/// Applies an area's [`Tuning`] to the events its [`Detector`] reports: the
+/// minimum gap, then the notification choice. One per area.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EventGate {
+    /// When the last event fired.
+    fired: Option<Duration>,
+    /// When the last event arrived, fired or not: a burst is measured on
+    /// what the screen did, not on what the gap let through.
+    arrived: Option<Duration>,
+    /// Whether the current burst has had its card.
+    noticed: bool,
+}
+
+impl EventGate {
+    /// One event at `at` (a clock that only moves forward).
+    pub fn admit(&mut self, tuning: Tuning, at: Duration) -> Admitted {
+        let tuning = tuning.clamped();
+        let calm = Duration::from_millis(u64::from(tuning.calm_ms));
+        if self
+            .arrived
+            .is_none_or(|last| at.saturating_sub(last) >= calm)
+        {
+            self.noticed = false;
+        }
+        self.arrived = Some(at);
+        let gap = Duration::from_millis(u64::from(tuning.gap_ms));
+        if self.fired.is_some_and(|last| at.saturating_sub(last) < gap) {
+            return Admitted {
+                fires: false,
+                notifies: false,
+            };
+        }
+        self.fired = Some(at);
+        let notifies = match tuning.notify {
+            Notify::Never => false,
+            Notify::Each => true,
+            Notify::Once => !std::mem::replace(&mut self.noticed, true),
+        };
+        Admitted {
+            fires: true,
+            notifies,
+        }
+    }
+}
+
 /// One of the two moments a watch area can report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
@@ -366,8 +496,16 @@ pub enum Event {
 /// seconds for *Notify when it stops changing*), every reading in that time
 /// within [`STILL_DELTA`] of the first reading of the still run; the last
 /// becomes the new baseline, wherever the region stopped.
-/// Each is reported once, so a video under a watch area raises one
-/// notification while it plays, not one a reading.
+///
+/// **A detector made for *Notify when it changes* ([`Self::for_watch`])
+/// also reports every further step while a change is under way**: a reading
+/// that differs by more than [`CELL_DELTA`] from the one the region last held
+/// is another [`Event::Changed`] (the maintainer's choice of 2026-11-07, after
+/// his rig pass: about ten changes a second notified once, since the
+/// [`REARM_TIME`] calm never came). The host reads at most once a frame, so
+/// that is at most one a frame, and a video under the area counts up its card
+/// while it plays. A step smaller than [`CELL_DELTA`] (a fade, a slow bar)
+/// adds nothing. Any other detector reports a change once and its end once.
 #[derive(Debug, Clone)]
 pub struct Detector {
     baseline: Option<Fingerprint>,
@@ -382,6 +520,9 @@ pub struct Detector {
     still_since: Duration,
     /// How long a calm ends a change.
     settle: Duration,
+    /// Whether each further full step of a change under way is reported too
+    /// ([`Self::for_watch`] with [`Watch::Changes`]).
+    every_step: bool,
     /// The time [`Self::observe`] gives a reading: [`READING_STEP`] after
     /// the last one.
     clock: Duration,
@@ -420,7 +561,19 @@ impl Detector {
             changing: false,
             still_since: Duration::ZERO,
             settle,
+            every_step: false,
             clock: Duration::ZERO,
+        }
+    }
+
+    /// The detector an area set to `watch` reads with: its settle time
+    /// ([`Watch::settle_time`]), and for [`Watch::Changes`] every full step
+    /// of a change reported, not only its start.
+    #[must_use]
+    pub fn for_watch(watch: Watch) -> Self {
+        Self {
+            every_step: watch == Watch::Changes,
+            ..Self::with_settle_time(watch.settle_time())
         }
     }
 
@@ -487,7 +640,9 @@ impl Detector {
         if moved > STILL_DELTA {
             self.still_from = Some(reading);
             self.still_since = at;
-            return None;
+            // A full step from what the region last held: another change,
+            // for an area that asked to hear of every one.
+            return (self.every_step && moved > CELL_DELTA).then_some(Event::Changed);
         }
         if at.saturating_sub(self.still_since) < self.settle {
             return None;
@@ -932,6 +1087,80 @@ mod tests {
         assert_eq!(changes, 10);
     }
 
+    /// The maintainer's rig pass of 2026-11-07: about ten changes a second
+    /// notified once, since the region never held still for [`REARM_TIME`].
+    /// Read once a frame (33 ms), as the host does while frames arrive, an
+    /// area set to *Notify when it changes* reports every switch; the old
+    /// rule, still what a plain detector does, reports the first only.
+    #[test]
+    fn ten_switches_a_second_are_ten_changes_a_second() {
+        use super::REARM_TIME;
+        use std::time::Duration;
+        let shown = with_patch(grey(64, 64, 30), (8, 24, 48, 16), 220);
+        let empty = grey(64, 64, 30);
+        let count = |mut detector: Detector| {
+            let mut changes = 0;
+            detector.observe_at(print(&empty), Duration::ZERO);
+            for frame in 1..=99_u64 {
+                let at = frame * 33;
+                // Switched every 100 ms for 3.3 s: 32 switches, ten a second.
+                let picture = if (at / 100) % 2 == 0 { &empty } else { &shown };
+                if detector.observe_at(print(picture), Duration::from_millis(at))
+                    == Some(Event::Changed)
+                {
+                    changes += 1;
+                }
+            }
+            changes
+        };
+        assert!(
+            REARM_TIME > Duration::from_millis(100),
+            "the old calm never comes"
+        );
+        assert_eq!(count(Detector::for_watch(Watch::Changes)), 32);
+        assert_eq!(
+            count(Detector::with_settle_time(Watch::Changes.settle_time())),
+            1
+        );
+    }
+
+    /// A fade under an area set to *Notify when it changes*, a few levels a
+    /// frame, is one change, not one a frame: only a full step counts again.
+    #[test]
+    fn a_fade_is_one_change() {
+        use std::time::Duration;
+        let mut detector = Detector::for_watch(Watch::Changes);
+        let mut changes = 0;
+        for frame in 0..=40_u8 {
+            let picture = grey(64, 64, 20 + frame * 5);
+            if detector.observe_at(
+                print(&picture),
+                Duration::from_millis(u64::from(frame) * 33),
+            ) == Some(Event::Changed)
+            {
+                changes += 1;
+            }
+        }
+        assert_eq!(changes, 1);
+    }
+
+    /// *Notify when it stops changing* is not told of every step: its
+    /// detector reports one start and one end, as before.
+    #[test]
+    fn stops_changing_is_not_told_of_every_step() {
+        use std::time::Duration;
+        let (a, b) = (print(&grey(64, 64, 10)), print(&grey(64, 64, 200)));
+        let mut detector = Detector::for_watch(Watch::Settles);
+        let mut reported = Vec::new();
+        detector.observe_at(a.clone(), Duration::ZERO);
+        for frame in 1..=30_u64 {
+            let picture = if frame % 2 == 0 { &a } else { &b };
+            reported
+                .extend(detector.observe_at(picture.clone(), Duration::from_millis(frame * 33)));
+        }
+        assert_eq!(reported, vec![Event::Changed]);
+    }
+
     /// *Stops changing* keeps its six seconds; *changes* re-arms after a
     /// sixth of a second (the maintainer's rig, 2026-11-05).
     #[test]
@@ -995,5 +1224,133 @@ mod tests {
             .filter_map(|(at, &is)| is.then_some(at))
             .collect();
         assert_eq!(marked, vec![17, 18, 19]);
+    }
+}
+
+#[cfg(test)]
+mod tuning_tests {
+    use super::{Admitted, EventGate, Notify, Tuning};
+    use std::time::Duration;
+
+    const fn ms(value: u64) -> Duration {
+        Duration::from_millis(value)
+    }
+
+    /// Feeds events at `times` (ms) and returns which fired and which
+    /// notified.
+    fn run(tuning: Tuning, times: &[u64]) -> (Vec<u64>, Vec<u64>) {
+        let mut gate = EventGate::default();
+        let (mut fired, mut noticed) = (Vec::new(), Vec::new());
+        for &at in times {
+            let Admitted { fires, notifies } = gate.admit(tuning, ms(at));
+            if fires {
+                fired.push(at);
+            }
+            if notifies {
+                noticed.push(at);
+            }
+        }
+        (fired, noticed)
+    }
+
+    /// Every change at ten a second.
+    const BURST: [u64; 6] = [0, 100, 200, 300, 400, 500];
+
+    #[test]
+    fn the_default_fires_and_notifies_every_event() {
+        assert_eq!(Tuning::default().notify, Notify::Each);
+        let (fired, noticed) = run(Tuning::default(), &BURST);
+        assert_eq!(fired, BURST);
+        assert_eq!(noticed, BURST);
+    }
+
+    #[test]
+    fn never_fires_and_shows_no_card() {
+        let tuning = Tuning {
+            notify: Notify::Never,
+            ..Tuning::default()
+        };
+        let (fired, noticed) = run(tuning, &BURST);
+        assert_eq!(fired, BURST);
+        assert!(noticed.is_empty());
+    }
+
+    /// Once: one card per burst, a burst ending after the chosen calm.
+    #[test]
+    fn once_is_one_card_per_burst_with_his_calm() {
+        let tuning = Tuning {
+            notify: Notify::Once,
+            calm_ms: 150,
+            ..Tuning::default()
+        };
+        // A burst at ten a second, a calm of 400 ms, a second burst.
+        let times = [0, 100, 200, 600, 700];
+        assert_eq!(run(tuning, &times).1, vec![0, 600]);
+        // With a calm of a second, the 400 ms pause does not end the burst.
+        let long = Tuning {
+            calm_ms: 1_000,
+            ..tuning
+        };
+        assert_eq!(run(long, &times).1, vec![0]);
+    }
+
+    /// The minimum gap drops what arrives inside it, and a steady stream
+    /// fires once per gap.
+    #[test]
+    fn the_gap_drops_events_inside_it() {
+        let tuning = Tuning {
+            gap_ms: 1_000,
+            ..Tuning::default()
+        };
+        let times: Vec<u64> = (0..=25).map(|n| n * 100).collect();
+        let (fired, noticed) = run(tuning, &times);
+        assert_eq!(fired, vec![0, 1_000, 2_000]);
+        assert_eq!(noticed, fired);
+    }
+
+    /// A burst is what the screen did: events the gap dropped still keep a
+    /// burst going, so Once does not notify again just because the gap let
+    /// one through.
+    #[test]
+    fn once_counts_the_burst_from_every_event_not_only_fired_ones() {
+        let tuning = Tuning {
+            notify: Notify::Once,
+            calm_ms: 150,
+            gap_ms: 1_000,
+            ..Tuning::default()
+        };
+        let times: Vec<u64> = (0..=25).map(|n| n * 100).collect();
+        let (fired, noticed) = run(tuning, &times);
+        assert_eq!(fired, vec![0, 1_000, 2_000]);
+        assert_eq!(noticed, vec![0]);
+    }
+
+    #[test]
+    fn values_from_the_page_are_kept_in_range() {
+        let wild = Tuning {
+            notify: Notify::Each,
+            calm_ms: 0,
+            gap_ms: u32::MAX,
+            sample_ms: u32::MAX,
+        }
+        .clamped();
+        assert_eq!(wild.calm_ms, super::CALM_MS.0);
+        assert_eq!(wild.gap_ms, super::GAP_MS_MAX);
+        assert_eq!(wild.sample_ms, super::SAMPLE_MS_MAX);
+    }
+
+    /// The sampling rate: realtime never waits; a slower rate waits out
+    /// what is left of its step.
+    #[test]
+    fn the_sampling_rate_spaces_readings() {
+        let realtime = Tuning::default();
+        assert_eq!(realtime.sample_wait(Some(ms(1_000)), ms(1_001)), None);
+        let slow = Tuning {
+            sample_ms: 500,
+            ..Tuning::default()
+        };
+        assert_eq!(slow.sample_wait(None, ms(0)), None);
+        assert_eq!(slow.sample_wait(Some(ms(1_000)), ms(1_200)), Some(ms(300)));
+        assert_eq!(slow.sample_wait(Some(ms(1_000)), ms(1_500)), None);
     }
 }

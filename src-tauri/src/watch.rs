@@ -172,7 +172,7 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 use uptake_core::area::{Area, AreaId, AreaStore, AreaType};
 use uptake_core::geometry::Rect;
-use uptake_core::watch::{Detector, Event, Fingerprint, Watch, leave_out};
+use uptake_core::watch::{Detector, Event, EventGate, Fingerprint, Tuning, Watch, leave_out};
 
 use crate::overlay_state::OverlayState;
 
@@ -324,6 +324,9 @@ struct Target {
     /// so a new name is new pixels: the watcher starts again from a fresh
     /// baseline rather than reporting its own label as a change (`I-480`).
     label: u64,
+    /// How it reads and reports (roadmap `1.65`). A change of this alone
+    /// keeps the watcher's baseline: it changes nothing in the reading.
+    tuning: Tuning,
 }
 
 /// What [`Target::label`] keeps of an area's name: enough to tell a new name
@@ -342,6 +345,7 @@ fn target_of(store: &AreaStore, area: &Area) -> Target {
         bounds: area.bounds,
         watch: area.watch,
         label: label_of(store.name(area.id)),
+        tuning: area.tuning,
     }
 }
 
@@ -583,6 +587,11 @@ struct Watcher {
     /// that switched route cannot be told from the switch and is not
     /// reported.
     picture: Option<uptake_core::geometry::Size>,
+    /// The area's tuning applied to its events: the minimum gap, then which
+    /// become a card (roadmap `1.65`).
+    gate: EventGate,
+    /// When it last read, for its sampling rate ([`Tuning::sample_wait`]).
+    read_at: Option<Duration>,
 }
 
 /// The parts of a reading that are UP-TAKE's own drawing, in the reading's
@@ -994,21 +1003,39 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
         }
         let watcher = watchers.entry(target.id).or_insert_with(|| Watcher {
             target,
-            detector: Detector::with_settle_time(target.watch.settle_time()),
+            detector: Detector::for_watch(target.watch),
             failing: false,
             fresh: true,
             picture: None,
+            gate: EventGate::default(),
+            read_at: None,
         });
         if watcher.target != target {
+            // Only the tuning changed: nothing in the reading did, so the
+            // watcher keeps its baseline and its gate.
+            let tuning_only = Target {
+                tuning: target.tuning,
+                ..watcher.target
+            } == target;
             watcher.target = target;
-            watcher.detector = Detector::with_settle_time(target.watch.settle_time());
-            watcher.fresh = true;
+            if !tuning_only {
+                watcher.detector = Detector::for_watch(target.watch);
+                watcher.gate = EventGate::default();
+                watcher.fresh = true;
+            }
         }
         if watcher.fresh {
             watcher.fresh = false;
             soon = Some(FRESH_WAIT);
             continue;
         }
+        // Its sampling rate (roadmap `1.65`): not read again until its step
+        // has passed, and woken then whatever rings.
+        if let Some(wait) = target.tuning.sample_wait(watcher.read_at, at) {
+            soon = Some(soon.map_or(wait, |sooner| sooner.min(wait)));
+            continue;
+        }
+        watcher.read_at = Some(at);
         let reading = match host.capture(target.bounds, state.1) {
             Ok(None) => {
                 // No frame held yet for a monitor it covers: try again soon.
@@ -1060,6 +1087,7 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
         };
         if let Some(event) = reading.and_then(|reading| watcher.detector.observe_at(reading, at))
             && target.watch.notifies(event)
+            && watcher.gate.admit(target.tuning, at).notifies
         {
             host.notify(event, target.id, target.bounds);
         }
@@ -1318,6 +1346,7 @@ mod tests {
                         bounds: *bounds,
                         watch,
                         label: crate::watch::label_of(None),
+                        tuning: uptake_core::watch::Tuning::default(),
                     })
                 })
                 .collect()
@@ -2006,6 +2035,31 @@ mod tests {
             let settle = usize::try_from(Watch::Settles.settle_readings()).unwrap_or(usize::MAX);
             run(&mut fake, &mut memory, settle + 1);
             assert_eq!(fake.notified, vec![Event::Settled]);
+        }
+
+        /// Roadmap `1.65`: an area with a sampling rate of one reading a
+        /// second reads every other pass at the fake's half-second clock,
+        /// and one set to no notifications reports a change to no card.
+        #[test]
+        fn an_areas_tuning_spaces_its_readings_and_silences_its_cards() {
+            let mut list = targets(&[Rect::new(100, 100, 600, 400)]);
+            list[0].tuning.sample_ms = 1_000;
+            let mut fake = Fake::new(list.clone());
+            let mut memory = Memory::default();
+            run(&mut fake, &mut memory, 1); // fresh: no reading
+            run(&mut fake, &mut memory, 10);
+            assert_eq!(fake.captured.len(), 5, "one reading a second");
+
+            list[0].tuning = uptake_core::watch::Tuning {
+                notify: uptake_core::watch::Notify::Never,
+                ..uptake_core::watch::Tuning::default()
+            };
+            let mut fake = Fake::new(list);
+            let mut memory = Memory::default();
+            run(&mut fake, &mut memory, 2);
+            fake.level = 20;
+            run(&mut fake, &mut memory, 1);
+            assert!(fake.notified.is_empty(), "no card");
         }
 
         /// Round 10: an area hanging off the bottom of the desktop, with the

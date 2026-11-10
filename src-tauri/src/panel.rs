@@ -48,7 +48,7 @@ use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use uptake_core::area::{AreaId, AreaStore, AreaType, Input, Layer, OcrBehaviour};
 use uptake_core::geometry::{Monitor, Point, Rect};
 use uptake_core::sticky::OnResize;
-use uptake_core::watch::Watch;
+use uptake_core::watch::{Tuning, Watch};
 
 /// The panel window's label. `capabilities/panel.json` grants it.
 pub const LABEL: &str = "area-panel";
@@ -183,6 +183,9 @@ pub struct PanelView {
     pub watch: Option<Watch>,
     /// Whether it is paused; `null` for a type with nothing to pause.
     pub held: Option<bool>,
+    /// How a watch area reads and reports (roadmap `1.65`); `null` for
+    /// another type.
+    pub tuning: Option<Tuning>,
     /// The types it can be turned into, by wire name, in the menu's order
     /// (`placement::conversion_label` decides which, as for the menu).
     pub kinds: Vec<&'static str>,
@@ -245,6 +248,7 @@ fn view(store: &AreaStore, id: AreaId, can_stick: bool, on_resize: OnResize) -> 
         name: store.name(id).map(str::to_string),
         watch: (area.kind == AreaType::Watch).then_some(area.watch),
         held: area.kind.keeps_working().then_some(area.held),
+        tuning: (area.kind == AreaType::Watch).then_some(area.tuning),
         kinds: convertible().map(crate::overlay::type_name).collect(),
         ocr: (area.kind == AreaType::Ocr).then_some(area.ocr_behaviour),
         depth: depth_name(area.layer),
@@ -688,6 +692,16 @@ pub fn panel_set_watch(app: AppHandle, watch: Watch) -> Result<(), String> {
     Ok(())
 }
 
+/// IPC surface: how the open watch area reads and reports (roadmap `1.65`).
+/// Each value is kept in its range by the store, whatever the page sent.
+#[tauri::command]
+pub fn panel_set_tuning(app: AppHandle, tuning: Tuning) -> Result<(), String> {
+    if with_open_area(|id| crate::overlay::set_area_tuning(&app, id, tuning)) == Some(true) {
+        changed(&app)?;
+    }
+    Ok(())
+}
+
 /// IPC surface: pauses or resumes the open area (`ADR-0053`).
 #[tauri::command]
 pub fn panel_set_held(app: AppHandle, held: bool) -> Result<(), String> {
@@ -702,7 +716,7 @@ mod tests {
     use super::{PanelView, dock};
     use crate::payload_keys::{assert_keys, assert_payload_coverage};
     use uptake_core::geometry::{Point, Rect};
-    use uptake_core::watch::Watch;
+    use uptake_core::watch::{Tuning, Watch};
 
     const MONITOR: Rect = Rect::new(0, 0, 1920, 1080);
     const SIZE: (u32, u32) = (280, 200);
@@ -765,6 +779,7 @@ mod tests {
                 name: Some("Download watcher".to_string()),
                 watch: Some(Watch::Changes),
                 held: Some(false),
+                tuning: Some(Tuning::default()),
                 kinds: vec!["default", "watch"],
                 ocr: None,
                 depth: "auto",
@@ -780,6 +795,7 @@ mod tests {
                 "name",
                 "watch",
                 "held",
+                "tuning",
                 "kinds",
                 "ocr",
                 "depth",
@@ -789,6 +805,11 @@ mod tests {
                 "click_through",
                 "capture",
             ],
+        );
+        assert_keys(
+            "Tuning",
+            &Tuning::default(),
+            &["notify", "calm_ms", "gap_ms", "sample_ms"],
         );
         assert_payload_coverage("panel.rs", include_str!("panel.rs"), &["PanelView"], &[]);
     }
