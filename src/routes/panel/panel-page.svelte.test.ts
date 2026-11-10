@@ -87,6 +87,7 @@ const WATCH = {
   name: null,
   watch: 'changes',
   held: false,
+  tuning: { notify: 'each', calm_ms: 150, gap_ms: 0, sample_ms: 0 },
   kinds: ['default', 'screenshot', 'filter', 'upscale', 'ocr', 'watch'],
   ocr: null,
   depth: 'auto',
@@ -146,12 +147,49 @@ test('each of the menu rows sends its own command', async () => {
   ).toBe(false);
 });
 
+// Roadmap 1.65, his choices of 2026-11-07: notifications (none, once, every
+// time), a quiet time for "once", a minimum gap, and a sampling slider.
+test("a watch area's tuning is sent whole with the one value changed", async () => {
+  render(Page);
+  await settle();
+  const base = WATCH.tuning;
+  expect(document.body.textContent).not.toContain('Quiet time before the next');
+  button('Once').click();
+  expect(lastSet()).toEqual([
+    'panel_set_tuning',
+    { tuning: { ...base, notify: 'once' } },
+  ]);
+  await settle();
+  expect(document.body.textContent).toContain('Quiet time before the next');
+  button('1 s').click();
+  expect(lastSet()).toEqual([
+    'panel_set_tuning',
+    { tuning: { ...base, notify: 'once', gap_ms: 1_000 } },
+  ]);
+  const sliders = document.querySelectorAll<HTMLInputElement>(
+    'input[type="range"]',
+  );
+  const sample = sliders[sliders.length - 1];
+  expect(document.body.textContent).toContain('Realtime');
+  sample.value = '0';
+  sample.dispatchEvent(new Event('input', { bubbles: true }));
+  expect(lastSet()).toEqual([
+    'panel_set_tuning',
+    {
+      tuning: { ...base, notify: 'once', gap_ms: 1_000, sample_ms: 5_000 },
+    },
+  ]);
+  await settle();
+  expect(document.body.textContent).toContain('every 5 s');
+});
+
 test('a type shows only its own rows', async () => {
   replies.set('panel_view', {
     ...WATCH,
     kind: 'screenshot',
     watch: null,
     held: null,
+    tuning: null,
     sticky: true,
     on_resize: 'corner',
     capture: true,
@@ -160,6 +198,7 @@ test('a type shows only its own rows', async () => {
   await settle();
   expect(document.body.textContent).not.toContain('Notify when it changes');
   expect(document.body.textContent).not.toContain('Pause');
+  expect(document.body.textContent).not.toContain('Sampling rate');
   button('Keep top left').click();
   expect(lastSet()).toEqual(['panel_set_on_resize', { onResize: 'top_left' }]);
   button('Copy').click();

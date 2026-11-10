@@ -87,6 +87,9 @@ const RENAMED: Record<string, string> = {
   // tidiness, and the point of this file is that the two are checked, not that
   // they are spelled alike.
   AreaPayload: 'AreaView',
+  // A watch area's tuning (roadmap 1.65) crosses inside `PanelView`; the
+  // page names it for the panel that shows it, as it does `PanelView`.
+  Tuning: 'PanelTuning',
 };
 
 /**

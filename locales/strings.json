@@ -105,6 +105,76 @@
       "de": "Melden, wenn es zur Ruhe kommt",
       "de_from": "102a79bb"
     },
+    "panel.watch.notify": {
+      "en": "Notifications",
+      "de": "Benachrichtigungen",
+      "de_from": "381d190f"
+    },
+    "panel.watch.notify.never": {
+      "en": "None",
+      "de": "Keine",
+      "de_from": "304ff7fb"
+    },
+    "panel.watch.notify.once": {
+      "en": "Once",
+      "de": "Einmal",
+      "de_from": "11b4fce4"
+    },
+    "panel.watch.notify.each": {
+      "en": "Every time",
+      "de": "Jedes Mal",
+      "de_from": "eea654ed"
+    },
+    "panel.watch.calm": {
+      "en": "Quiet time before the next",
+      "de": "Ruhezeit bis zur nächsten",
+      "de_from": "a7f4cd8d"
+    },
+    "panel.watch.gap": {
+      "en": "Minimum gap between events",
+      "de": "Mindestabstand zwischen Ereignissen",
+      "de_from": "14f348f4"
+    },
+    "panel.watch.gap.none": {
+      "en": "No limit",
+      "de": "Ohne Grenze",
+      "de_from": "6de7f47d"
+    },
+    "panel.watch.sample": {
+      "en": "Sampling rate",
+      "de": "Abtastrate",
+      "de_from": "cb4104f2"
+    },
+    "panel.watch.sample.realtime": {
+      "en": "Realtime",
+      "de": "Echtzeit",
+      "de_from": "e3365e5c"
+    },
+    "panel.watch.per_second": {
+      "en": "{n} per second",
+      "de": "{n} pro Sekunde",
+      "de_from": "248589a4"
+    },
+    "panel.watch.every_seconds": {
+      "en": "every {n} s",
+      "de": "alle {n} s",
+      "de_from": "77492c1d"
+    },
+    "panel.watch.ms": {
+      "en": "{n} ms",
+      "de": "{n} ms",
+      "de_from": "230930ad"
+    },
+    "panel.watch.seconds": {
+      "en": "{n} s",
+      "de": "{n} s",
+      "de_from": "37ea8f6e"
+    },
+    "panel.watch.minutes": {
+      "en": "{n} min",
+      "de": "{n} min",
+      "de_from": "0a374e03"
+    },
     "menu.on_resize": {
       "en": "On resize",
       "de": "Bei Größenänderung",
