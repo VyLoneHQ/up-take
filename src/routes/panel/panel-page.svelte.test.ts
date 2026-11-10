@@ -275,7 +275,6 @@ test('each of the four sliders takes Ctrl, pressed and let go', async () => {
   ];
   expect(sliders).toHaveLength(4);
   for (const [index, slider] of sliders.entries()) {
-    expect(slider.max, `slider ${index}`).toBe('100');
     slider.dispatchEvent(
       new PointerEvent('pointerdown', { bubbles: true, ctrlKey: true }),
     );

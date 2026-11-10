@@ -92,28 +92,38 @@ describe('the area settings panel (roadmap 1.60)', () => {
 });
 
 describe("a watch area's tuning (roadmap 1.65)", () => {
-  it('gives every slider 100 steps of 1%, and 10% with Ctrl (2026-11-10)', async () => {
+  it('moves every time slider 100 ms a step and the tolerance 1 %, ten steps with Ctrl', async () => {
     const {
       CALM_RANGE,
       SAMPLE_RANGE,
       SETTLE_RANGE,
       SHARE_RANGE,
-      track,
       stepOf,
+      track,
     } = await import('./panel');
-    for (const range of [CALM_RANGE, SAMPLE_RANGE, SETTLE_RANGE, SHARE_RANGE]) {
-      expect(track(range)).toEqual({ min: 0, max: 100 });
-      expect(stepOf(range, false)).toBe(1);
-      expect(stepOf(range, true)).toBe(10);
+    for (const range of [CALM_RANGE, SAMPLE_RANGE, SETTLE_RANGE]) {
+      expect(range.step).toBe(100);
+      // The lowest value is a whole number of steps (2026-11-10).
+      expect(range.min % range.step).toBe(0);
+      expect(range.max % range.step).toBe(0);
     }
+    expect(SHARE_RANGE.step).toBe(10);
+    expect(track(CALM_RANGE)).toEqual({ min: 0, max: 99 });
+    expect(track(SETTLE_RANGE)).toEqual({ min: 0, max: 299 });
+    expect(track(SAMPLE_RANGE)).toEqual({ min: 0, max: 50 });
+    expect(track(SHARE_RANGE)).toEqual({ min: 0, max: 100 });
+    expect(stepOf(CALM_RANGE, false)).toBe(1);
+    expect(stepOf(CALM_RANGE, true)).toBe(10);
   });
 
-  it('starts each time slider at its lowest practical value, not 0', async () => {
+  it('starts each time slider at 100 ms and gives only whole steps', async () => {
     const { CALM_RANGE, SETTLE_RANGE, fromPosition } = await import('./panel');
-    expect(fromPosition(CALM_RANGE, 0)).toBe(50);
-    expect(fromPosition(CALM_RANGE, 100)).toBe(10_000);
-    expect(fromPosition(SETTLE_RANGE, 0)).toBe(50);
-    expect(fromPosition(SETTLE_RANGE, 100)).toBe(30_000);
+    expect(fromPosition(CALM_RANGE, 0)).toBe(100);
+    expect(fromPosition(CALM_RANGE, 1)).toBe(200);
+    expect(fromPosition(CALM_RANGE, 99)).toBe(10_000);
+    expect(fromPosition(SETTLE_RANGE, 0)).toBe(100);
+    expect(fromPosition(SETTLE_RANGE, 1)).toBe(200);
+    expect(fromPosition(SETTLE_RANGE, 299)).toBe(30_000);
   });
 
   it('runs the sampling slider from every five seconds to realtime', async () => {
@@ -121,20 +131,18 @@ describe("a watch area's tuning (roadmap 1.65)", () => {
       './panel'
     );
     expect(fromPosition(SAMPLE_RANGE, 0)).toBe(5_000);
-    expect(fromPosition(SAMPLE_RANGE, 99)).toBe(50);
-    // Faster than one captured frame is realtime, not "100 per second".
-    expect(fromPosition(SAMPLE_RANGE, 100)).toBe(0);
-    expect(toPosition(SAMPLE_RANGE, 0)).toBe(100);
+    expect(fromPosition(SAMPLE_RANGE, 49)).toBe(100);
+    expect(fromPosition(SAMPLE_RANGE, 50)).toBe(0);
+    expect(toPosition(SAMPLE_RANGE, 0)).toBe(50);
     expect(fraction(SAMPLE_RANGE, 0)).toBe(1);
     expect(fraction(SAMPLE_RANGE, 5_000)).toBe(0);
   });
 
-  it('rounds values, and keeps those from Rust and the input in range', async () => {
+  it('keeps values from Rust and from the input in range', async () => {
     const { CALM_RANGE, SHARE_RANGE, toPosition, fromPosition, fraction } =
       await import('./panel');
     expect(fromPosition(SHARE_RANGE, 37)).toBe(370);
     expect(fromPosition(SHARE_RANGE, 190)).toBe(1_000);
-    expect(fromPosition(CALM_RANGE, 1)).toBe(150);
     expect(toPosition(CALM_RANGE, 0)).toBe(0);
     expect(toPosition(CALM_RANGE, 150)).toBe(1);
     expect(fraction(SHARE_RANGE, 500)).toBe(0.5);

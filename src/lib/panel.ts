@@ -35,70 +35,75 @@ export interface PanelTuning {
 export const GAPS_MS: readonly number[] = [0, 100, 1_000, 10_000, 60_000];
 
 /** A slider over a range of values, the same way for every slider (the
- * maintainer, 2026-11-10): from the lowest valid value to the highest, each
- * step 1% of the range and 10% while Ctrl is held (*"Make the default
- * increment (step-size) 1% (leave ctrl at 10x)"*, and *"I want every slider
- * to be able to be adjusted in both modes"*). The input itself runs from 0
- * to [`STEPS`]; a value is `min` plus that share of the range, rounded to
- * `round`. `reversed` runs the values from `max` on the left to `min` on
- * the right. */
+ * maintainer, 2026-11-10): from the lowest valid value to the highest in
+ * steps of one size, `step`, and ten steps at a time while Ctrl is held.
+ * The step is uniform across the time sliders (100 ms, 1 s with Ctrl: his
+ * *"make sure that the step size is einheitlich across them all"*), and
+ * `min` is always a whole number of steps (*"the min must be either 0,
+ * 100ms or multiple of 100ms"*), so every position is a round value. The
+ * input itself runs from 0 to the number of steps; `reversed` runs the
+ * values from `max` on the left to `min` on the right. */
 export interface SliderRange {
   min: number;
   max: number;
-  /** What a value is rounded to, so the panel shows 150 ms, not 149.6. */
-  round: number;
+  step: number;
   reversed?: boolean;
-  /** Values above `min` and below this snap to `min`: for the sampling
-   * slider, a step shorter than one captured frame reads no faster than
-   * realtime, so it is shown and kept as realtime. */
-  snap?: number;
 }
-
-/** How many steps a slider has: one per percent of its range. */
-export const STEPS = 100;
 
 /** How many steps one step is while Ctrl is held. */
 export const COARSE = 10;
+
+/** One step of every time slider, in ms. */
+export const TIME_STEP_MS = 100;
 
 /** The fastest a watch area reads: one captured frame, about 30 a second
  * (`uptake-capture`'s `WATCH_FRAME_INTERVAL`, which throttles the capture
  * to save cost). Not the monitor's refresh rate. */
 export const FRAME_MS = 34;
 
-/** The calm slider, in ms: 50 ms to 10 s. Not from 0: a calm shorter than
+/** The calm slider, in ms: 100 ms to 10 s. Not from 0: a calm shorter than
  * one captured frame (about 34 ms) is no calm at all, so *Once* would do
- * what *Every time* does (the maintainer, 2026-11-10: *"0ms is NOT valid in
- * this case ... the lowest practical time would be probably around 25 -
- * 50ms"*). */
-export const CALM_RANGE: SliderRange = { min: 50, max: 10_000, round: 10 };
+ * what *Every time* does (*"0ms is NOT valid in this case"*), and the
+ * lowest step above that is 100 ms. */
+export const CALM_RANGE: SliderRange = {
+  min: 100,
+  max: 10_000,
+  step: TIME_STEP_MS,
+};
 
 /** The sampling slider, in ms between readings: every five seconds on the
- * left to realtime (0) on the right. A step shorter than a frame is
- * realtime (the maintainer, 2026-11-10: the label is capped at what the
- * reading can reach). */
+ * left to realtime (0) on the right. */
 export const SAMPLE_RANGE: SliderRange = {
   min: 0,
   max: 5_000,
-  round: 10,
+  step: TIME_STEP_MS,
   reversed: true,
-  snap: FRAME_MS,
 };
 
 /** The tolerance slider, in thousandths of the area: any change on the
- * left to the whole area on the right. */
-export const SHARE_RANGE: SliderRange = { min: 0, max: 1_000, round: 10 };
+ * left to the whole area on the right, 1 % a step. */
+export const SHARE_RANGE: SliderRange = { min: 0, max: 1_000, step: 10 };
 
-/** The "stops changing" slider, in ms of stillness: 50 ms to 30 s. Not
- * from 0: while a change settles the area is read every 50 ms
- * (`SETTLE_POLL`), so a shorter calm waits the same 50 ms. */
-export const SETTLE_RANGE: SliderRange = { min: 50, max: 30_000, round: 10 };
+/** The "stops changing" slider, in ms of stillness: 100 ms to 30 s. While
+ * a change settles the area is read every 50 ms (`SETTLE_POLL`), so a
+ * shorter calm waits the same; the lowest step above that is 100 ms. */
+export const SETTLE_RANGE: SliderRange = {
+  min: 100,
+  max: 30_000,
+  step: TIME_STEP_MS,
+};
 
-/** The input's own bounds: 0 to [`STEPS`] for every slider. */
-export function track(_range: SliderRange): { min: number; max: number } {
-  return { min: 0, max: STEPS };
+/** How many steps a slider has from end to end. */
+export function steps(range: SliderRange): number {
+  return Math.round((range.max - range.min) / range.step);
 }
 
-/** The input's step: one percent, or ten while Ctrl is held. */
+/** The input's own bounds: 0 to the number of steps. */
+export function track(range: SliderRange): { min: number; max: number } {
+  return { min: 0, max: steps(range) };
+}
+
+/** The input's step: one, or ten while Ctrl is held. */
 export function stepOf(_range: SliderRange, coarse: boolean): number {
   return coarse ? COARSE : 1;
 }
@@ -106,25 +111,22 @@ export function stepOf(_range: SliderRange, coarse: boolean): number {
 /** Where `value` sits on the input, the nearest step, kept in range. */
 export function toPosition(range: SliderRange, value: number): number {
   const kept = Math.min(range.max, Math.max(range.min, value));
-  const share = (kept - range.min) / (range.max - range.min);
-  const step = Math.round(share * STEPS);
-  return range.reversed ? STEPS - step : step;
+  const step = Math.round((kept - range.min) / range.step);
+  return range.reversed ? steps(range) - step : step;
 }
 
-/** The value at input position `position`, rounded and kept in range. */
+/** The value at input position `position`: a whole number of steps from
+ * `min`, kept in range. */
 export function fromPosition(range: SliderRange, position: number): number {
-  const step = Math.min(STEPS, Math.max(0, position));
-  const share = (range.reversed ? STEPS - step : step) / STEPS;
-  const raw = range.min + share * (range.max - range.min);
-  const rounded = Math.round(raw / range.round) * range.round;
-  const kept = Math.min(range.max, Math.max(range.min, rounded));
-  return range.snap !== undefined && kept < range.snap ? range.min : kept;
+  const at = Math.min(steps(range), Math.max(0, Math.round(position)));
+  const step = range.reversed ? steps(range) - at : at;
+  return range.min + step * range.step;
 }
 
 /** How far along the track `value` sits, 0 at the left and 1 at the right,
  * for the drawn fill. */
 export function fraction(range: SliderRange, value: number): number {
-  return toPosition(range, value) / STEPS;
+  return toPosition(range, value) / steps(range);
 }
 
 const isCount = (value: unknown): value is number =>
