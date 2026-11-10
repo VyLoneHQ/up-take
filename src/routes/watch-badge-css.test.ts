@@ -72,8 +72,12 @@ describe('the status dot', () => {
   const breathe =
     page.match(/@keyframes watch-breathe \{([\s\S]*?)\n\}/)?.[1] ?? '';
 
-  it('breathes while it watches, by opacity alone', () => {
+  it('pulses once per redraw while it watches, by opacity alone', () => {
     expect(watching).toContain('animation: watch-breathe');
+    // One-shot: an infinite animation woke its own watch area about 12
+    // times a second on a still screen (measured 2026-11-10).
+    expect(watching).not.toContain('infinite');
+    expect(watching).toMatch(/watch-breathe [\d.]+s ease-in-out 1;/);
     expect(breathe).toContain('opacity');
     expect(breathe).not.toMatch(/width|height|transform|top|left|margin/);
   });
@@ -87,5 +91,13 @@ describe('the status dot', () => {
     expect(page).toMatch(
       /@media \(prefers-reduced-motion: reduce\) \{\s*\.watch-dot \{\s*animation: none;/,
     );
+  });
+});
+
+describe('the pulse timer', () => {
+  it('draws each watching dot anew every five seconds, and stops with the page', () => {
+    expect(page).toContain('const PULSE_EVERY_MS = 5_000;');
+    expect(page).toContain('{#key pulse}<span class="watch-dot"></span>{/key}');
+    expect(page).toContain('clearInterval(pulsing);');
   });
 });

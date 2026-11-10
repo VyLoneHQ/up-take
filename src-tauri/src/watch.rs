@@ -135,17 +135,25 @@
 //!
 //! - **A still screen sends no frames and costs nothing**; the thread looks
 //!   again every [`IDLE`] in case a change was missed.
-//! - **Measured so far:** on the maintainer's primary monitor (Windows build
-//!   26200) an ordinary desktop sent 3 to 11 frames a second, every one with
-//!   its dirty regions, about 2 to 3 % of the screen each. This route,
-//!   measured the same day (workspace `evidence/1.58-watch-events/`): 0.34 %
-//!   of a core for one area and 0.43 % for five on the small read, 1.69 % for
-//!   an area as large as a monitor. **The full-size read, used while
-//!   UP-TAKE is shown in screen recordings, measured 2.49 % and 2.59 % for an
-//!   area as large as a monitor: over `quality-bars.md` §1's 2 % target per
-//!   live area, under its 5 % hard fail**, part of it the sessions'
-//!   frames, which `BUDGET` does not cover. A busy screen held at 30 frames a second
-//!   for a long time is not measured yet (`I-474`).
+//! - **Measured, 2026-11-10, with 4-pixel cells** (roadmap `1.61`; workspace
+//!   `evidence/1.61-watch-dot-cost/`, the watcher's harness on a still,
+//!   dark backdrop over the area, 30 s a case): one 600 by 400 area, 0.05 %
+//!   to 0.25 % of a core while nothing changes (no reads at all; the spread
+//!   is the harness's own idle passes); an area as large as a monitor,
+//!   0.61 % on the full read. **The
+//!   watching dot matters more than the read:** a dot animated all the time
+//!   woke its area about 12 times a second even with UP-TAKE kept out of
+//!   captures, and cost 1.7 % to 3.1 % (over `quality-bars.md` §1's 2 %
+//!   target per live area, under its 5 % hard fail); one short pulse every
+//!   5 s cost 0.35 % to 0.8 %, which is why the dot pulses and does not
+//!   breathe. A busy screen held at 30 frames a second for a long time is not
+//!   measured yet (`I-474`).
+//! - Measured before `1.61`, with at most 16 by 16 cells
+//!   (`evidence/1.58-watch-events/`, 2026-11-05): an ordinary desktop sent 3
+//!   to 11 frames a second on the primary monitor, about 2 to 3 % of the
+//!   screen each; 0.34 % of a core for one area, 0.43 % for five, 1.69 % for
+//!   an area as large as a monitor, and 2.49 % to 2.59 % for that area read
+//!   whole. Those figures are for the old grid and are kept as history.
 //! - Earlier routes, measured in workspace `evidence/1.58-watch-cost/`: held
 //!   sessions read whole every two seconds, 0.13 % of a core for one area
 //!   and for five on a still screen; a capture built per reading, 7.3 % for

@@ -638,8 +638,14 @@ onMount(() => {
   // (below): an area drawn over another, or a display change, does not always
   // come with an event this page hears.
   const confirming = setInterval(confirmMarks, 1000);
+  // The watching dot's pulse: one short breath every PULSE_EVERY_MS, and
+  // nothing animating in between (see `.watch-dot`).
+  const pulsing = setInterval(() => {
+    pulse += 1;
+  }, PULSE_EVERY_MS);
   return () => {
     clearInterval(confirming);
+    clearInterval(pulsing);
     void ready.then((unlisteners) => {
       for (const unlisten of unlisteners) unlisten();
     });
@@ -660,6 +666,17 @@ onMount(() => {
 let confirmedNone = false;
 /** See `overlay://drawn`. 0 until the first one: Rust's count starts at 1. */
 let drawnGeneration = 0;
+/** How often the watching dot pulses, in ms (2026-11-10). Measured that day
+ * with the watcher's own harness on a still screen (UP-TAKE
+ * `evidence/1.61-watch-dot-cost/`): a dot breathing all the time woke its
+ * area about 12 times a second even with UP-TAKE kept out of captures, and
+ * took an idle area from 0.25 % of a core to 1.7 % (3.1 % with UP-TAKE in
+ * captures); one 0.6 s pulse every 5 s cost 0.35 %. */
+const PULSE_EVERY_MS = 5_000;
+/** Bumped every PULSE_EVERY_MS; each watching dot is drawn anew on it, which
+ * plays its one-shot pulse once. */
+let pulse = $state(0);
+
 function confirmMarks(): void {
   const shown =
     overlayState === 'hidden'
@@ -996,7 +1013,7 @@ $effect(() => {
               role="img"
               aria-label={text(language, 'area.watching')}
               title={text(language, 'area.watching')}
-              ><span class="watch-dot"></span></span
+              >{#key pulse}<span class="watch-dot"></span>{/key}</span
             >
           {:else if area.held}
             <span
@@ -1326,13 +1343,17 @@ $effect(() => {
 
 /* Two states that must not be confused (the maintainer, 2026-11-10: "keep
    it subtle and make sure the UX stays great"). Watching: a filled green dot
-   that breathes slowly, alive but quiet. Paused: a hollow grey ring that
-   holds still. Fill, colour and motion all differ, so neither colour nor
-   motion alone has to carry the meaning. Opacity only, so the dot's box,
-   which markSeen measures, never changes. */
+   that takes one soft breath every five seconds (PULSE_EVERY_MS), alive but
+   quiet. Paused: a hollow grey ring that holds still. Fill, colour and
+   motion all differ, so neither colour nor motion alone has to carry the
+   meaning. Opacity only, so the dot's box, which markSeen measures, never
+   changes. ONE-SHOT, not infinite, and that is measured, not taste: an
+   animation that runs all the time makes the screen under the dot change
+   every frame, which woke its watch area about 12 times a second on a still
+   screen (evidence/1.61-watch-dot-cost/). Between pulses nothing animates. */
 .watch-dot {
   background: rgba(110, 230, 160, 1);
-  animation: watch-breathe 3s ease-in-out infinite;
+  animation: watch-breathe 0.6s ease-in-out 1;
 }
 
 .held-dot {
