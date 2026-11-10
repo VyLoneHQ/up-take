@@ -256,18 +256,37 @@ test('every slider moves 1% a step, and 10% with Ctrl held', async () => {
   ]);
   await settle();
   expect(document.body.textContent).toContain('37% of the area');
-  // The same on every slider, not only the tolerance (2026-11-10).
+});
+
+// Review of #168, round 9: every slider, the two that show only in some
+// modes included, must take Ctrl itself. With "stops changing" and "Once"
+// all four are on screen; each is given Ctrl on its own, and let go on its
+// own, so a slider missing either handler leaves the step where it was.
+test('each of the four sliders takes Ctrl, pressed and let go', async () => {
+  replies.set('panel_view', {
+    ...WATCH,
+    watch: 'settles',
+    tuning: { ...WATCH.tuning, notify: 'once' },
+  });
+  render(Page);
+  await settle();
   const sliders = [
     ...document.querySelectorAll<HTMLInputElement>('input[type="range"]'),
   ];
-  for (const slider of sliders) {
+  expect(sliders).toHaveLength(4);
+  for (const [index, slider] of sliders.entries()) {
+    expect(slider.max, `slider ${index}`).toBe('100');
     slider.dispatchEvent(
       new PointerEvent('pointerdown', { bubbles: true, ctrlKey: true }),
     );
+    await settle();
+    expect(slider.step, `slider ${index} with Ctrl`).toBe('10');
+    slider.dispatchEvent(
+      new KeyboardEvent('keyup', { bubbles: true, ctrlKey: false }),
+    );
+    await settle();
+    expect(slider.step, `slider ${index} without Ctrl`).toBe('1');
   }
-  await settle();
-  expect(sliders.map((slider) => slider.step)).toEqual(sliders.map(() => '10'));
-  expect(sliders.map((slider) => slider.max)).toEqual(sliders.map(() => '100'));
 });
 
 test('a type shows only its own rows', async () => {
