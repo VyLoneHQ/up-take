@@ -190,7 +190,7 @@ test("a watch area's tuning is sent whole with the one value changed", async () 
   expect(document.body.textContent).toContain('every 5 s');
 });
 
-test("a watch area's tolerance runs from any change to half the area (1.61)", async () => {
+test("a watch area's tolerance runs from any change to the whole area (1.61)", async () => {
   render(Page);
   await settle();
   const base = WATCH.tuning;

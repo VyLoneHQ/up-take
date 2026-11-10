@@ -25,7 +25,7 @@ export interface PanelTuning {
   /** The least time between two readings; 0 is realtime. */
   sample_ms: number;
   /** The tolerance (roadmap 1.61): the share of the area, in thousandths,
-   * that must change before it counts; 0 is any change, 500 half the area. */
+   * that must change before it counts; 0 is any change, 1000 the whole area. */
   share_permille: number;
   /** For "stops changing": how long the area must hold still, in ms. */
   settle_ms: number;
