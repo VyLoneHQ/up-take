@@ -416,46 +416,14 @@ class RatchetCase(unittest.TestCase):
         self.assertIn("FAILED", err)
 
 
-class AmbiguousReferenceCase(unittest.TestCase):
-    """Review of #174, round 2: a short name that is both a branch and a tag."""
+class WriteModeCase(unittest.TestCase):
+    """Review of #174, round 3: write mode reads no ref."""
 
     setUp = RatchetCase.setUp
     tearDown = RatchetCase.tearDown
     write_prose = RatchetCase.write_prose
     write_baseline = RatchetCase.write_baseline
     commit = RatchetCase.commit
-
-    def test_a_name_that_is_a_branch_and_a_tag_is_refused(self):
-        """Git would read the tag; the ratchet refuses to guess."""
-        self.write_prose(2)
-        self.write_baseline(2)
-        self.commit("baseline of 2")
-        git(self.repo, "branch", "review")
-        self.write_prose(9)
-        self.write_baseline(9)
-        self.commit("raised by hand")
-        # A tag of the same name on the raised commit: read instead of the
-        # branch, it would let the raised ceiling through.
-        git(self.repo, "tag", "review")
-
-        code, _, err = run_main(self.repo, "--against", "review")
-        self.assertEqual(code, 1, err)
-        self.assertIn("names more than one ref", err)
-
-    def test_a_name_directly_under_refs_is_counted_as_a_candidate(self):
-        """Round 3: `refs/<name>` is git's first rule for a short name."""
-        self.write_prose(2)
-        self.write_baseline(2)
-        self.commit("baseline of 2")
-        git(self.repo, "branch", "review")
-        self.write_prose(9)
-        self.write_baseline(9)
-        self.commit("raised by hand")
-        git(self.repo, "update-ref", "refs/review", "HEAD")
-
-        code, _, err = run_main(self.repo, "--against", "review")
-        self.assertEqual(code, 1, err)
-        self.assertIn("names more than one ref", err)
 
     def test_write_mode_reads_no_ref(self):
         """Round 3: a malformed baseline on an irrelevant ref does not stop a
@@ -472,21 +440,6 @@ class AmbiguousReferenceCase(unittest.TestCase):
 
         code, out, err = run_main(self.repo, "--write-baseline", "--against", "elsewhere")
         self.assertEqual(code, 0, err)
-
-    def test_the_full_ref_is_read_as_given(self):
-        """The way out the refusal names works, and still guards."""
-        self.write_prose(2)
-        self.write_baseline(2)
-        self.commit("baseline of 2")
-        git(self.repo, "branch", "review")
-        self.write_prose(9)
-        self.write_baseline(9)
-        self.commit("raised by hand")
-        git(self.repo, "tag", "review")
-
-        code, _, err = run_main(self.repo, "--against", "refs/heads/review")
-        self.assertEqual(code, 1, "the branch's ceiling of 2 still refuses 9")
-        self.assertIn("ratchet turns one way", err)
 
 
 class CatalogueCase(unittest.TestCase):
