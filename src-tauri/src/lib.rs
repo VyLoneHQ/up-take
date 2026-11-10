@@ -60,9 +60,12 @@ use uptake_core::area::AreaStore;
 /// the single-instance guard's OS mutex is safe either way. It is a named
 /// kernel object, the system closes every handle when a process terminates, and
 /// the object dies with its last handle — so the next launch's `CreateMutexW`
-/// cannot see `ERROR_ALREADY_EXISTS` no matter how this one ended. The guard's
-/// `on_event(RunEvent::Exit)` release is tidiness, not a correctness
-/// requirement, and a stale lock blocking a relaunch is not a reachable state.
+/// cannot see `ERROR_ALREADY_EXISTS` no matter how this one ended. The plugin
+/// (2.5.5, the version in `Cargo.lock`; a later 2.x may differ, and the
+/// conclusion does not depend on it) keeps the mutex in an `InstanceLock` resource that Tauri
+/// drops in `AppHandle::cleanup_before_exit`, after the app's own exit
+/// handler; that release is tidiness, not a correctness requirement, and a
+/// stale lock blocking a relaunch is not a reachable state.
 /// Do not write recovery code for it.
 ///
 /// A *second* instance never gets here anyway: the guard's own setup hook calls
@@ -153,10 +156,6 @@ pub fn run() -> tauri::Result<()> {
         // (architecture §4). No frontend capability grants it, so the WebView
         // cannot open dialogs.
         .plugin(tauri_plugin_dialog::init())
-        // Linked and no longer called: since ADR-0054 a watch area tells the
-        // user through UP-TAKE's own card (`notice.rs`), never a Windows
-        // toast. Removing the plugin and its dependency is backlog I-481.
-        .plugin(tauri_plugin_notification::init())
         // The freeze probe's IPC endpoint is registered in debug builds only.
         // Nothing stamps a probe in release, so the release form was an inert
         // endpoint with an empty body — harmless, but a command surface that
