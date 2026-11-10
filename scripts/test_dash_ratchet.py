@@ -416,6 +416,48 @@ class RatchetCase(unittest.TestCase):
         self.assertIn("FAILED", err)
 
 
+class AmbiguousReferenceCase(unittest.TestCase):
+    """Review of #174, round 2: a short name that is both a branch and a tag."""
+
+    setUp = RatchetCase.setUp
+    tearDown = RatchetCase.tearDown
+    write_prose = RatchetCase.write_prose
+    write_baseline = RatchetCase.write_baseline
+    commit = RatchetCase.commit
+
+    def test_a_name_that_is_a_branch_and_a_tag_is_refused(self):
+        """Git would read the tag; the ratchet refuses to guess."""
+        self.write_prose(2)
+        self.write_baseline(2)
+        self.commit("baseline of 2")
+        git(self.repo, "branch", "review")
+        self.write_prose(9)
+        self.write_baseline(9)
+        self.commit("raised by hand")
+        # A tag of the same name on the raised commit: read instead of the
+        # branch, it would let the raised ceiling through.
+        git(self.repo, "tag", "review")
+
+        code, _, err = run_main(self.repo, "--against", "review")
+        self.assertEqual(code, 1, err)
+        self.assertIn("names more than one ref", err)
+
+    def test_the_full_ref_is_read_as_given(self):
+        """The way out the refusal names works, and still guards."""
+        self.write_prose(2)
+        self.write_baseline(2)
+        self.commit("baseline of 2")
+        git(self.repo, "branch", "review")
+        self.write_prose(9)
+        self.write_baseline(9)
+        self.commit("raised by hand")
+        git(self.repo, "tag", "review")
+
+        code, _, err = run_main(self.repo, "--against", "refs/heads/review")
+        self.assertEqual(code, 1, "the branch's ceiling of 2 still refuses 9")
+        self.assertIn("ratchet turns one way", err)
+
+
 class CatalogueCase(unittest.TestCase):
     """UP-TAKE backlog I-412: a translation's dash is not counted, English is.
 
@@ -493,6 +535,26 @@ class CatalogueCase(unittest.TestCase):
         code, _, err = run_main(self.repo, "--against", "main")
         self.assertEqual(code, 1)
         self.assertIn("could not read", err)
+
+
+    def test_a_catalogue_of_the_wrong_shape_is_refused(self):
+        """Each shape guard, on its own: a list, `languages` not a list, and
+        an entry that is not an object (review of #174, round 2)."""
+        for name, body in [
+            ("a list", "[]"),
+            ("languages not a list", '{"languages": "en", "strings": {}}'),
+            ("strings not an object", '{"languages": ["en"], "strings": []}'),
+            ("an entry not an object", '{"languages": ["en"], "strings": {"k": "v"}}'),
+        ]:
+            with self.subTest(name):
+                (self.repo / "locales").mkdir(exist_ok=True)
+                (self.repo / "locales" / "strings.json").write_text(body, encoding="utf-8")
+                self.write_baseline(0)
+                self.commit(name)
+
+                code, _, err = run_main(self.repo, "--against", "main")
+                self.assertEqual(code, 1, name)
+                self.assertIn("could not read", err)
 
 
 if __name__ == "__main__":

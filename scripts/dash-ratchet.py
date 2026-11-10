@@ -341,6 +341,34 @@ def ref_exists(root: Path, ref: str) -> bool:
     )
 
 
+def ambiguous_refs(root: Path, ref: str) -> list[str]:
+    """The refs a short name could mean, when it could mean more than one.
+
+    Git resolves a short name to a tag ahead of a branch, and a branch ahead of
+    a remote-tracking ref, and says so only in a warning on stderr, which this
+    script captures and drops. So a tag or a local branch called `origin/main`
+    would be read in place of the remote's `main`, and the anti-tamper
+    comparison would run against whatever it holds (review of `up-take` #174,
+    round 2, with a branch and a tag both called `review`). A full ref
+    (`refs/remotes/origin/main`) is never ambiguous and is returned as no
+    candidates; so is a name only one namespace holds.
+    """
+    if ref.startswith("refs/"):
+        return []
+    found = []
+    for prefix in ("refs/heads/", "refs/tags/", "refs/remotes/"):
+        full = prefix + ref
+        if (
+            subprocess.run(
+                ["git", "-C", str(root), "show-ref", "--verify", "--quiet", full],
+                capture_output=True,
+            ).returncode
+            == 0
+        ):
+            found.append(full)
+    return found if len(found) > 1 else []
+
+
 def baseline_on(root: Path, ref: str) -> int | None:
     """The recorded ceiling on `ref`, or None when `ref` carries no baseline.
 
@@ -427,6 +455,16 @@ def main() -> int:
     # something else from banking the sweep this very check had just ordered
     # them to bank, with a message about fixing their checkout. Friction in the
     # attended workflow that bought no safety, which is what `P-5` forbids.
+    clashes = [] if args.write_baseline else ambiguous_refs(root, args.against)
+    if clashes:
+        print(
+            f"REFUSED: {args.against} names more than one ref ({', '.join(clashes)}), "
+            f"and git would quietly read the first of them. Pass the full ref you "
+            f"mean, such as refs/remotes/origin/main.",
+            file=sys.stderr,
+        )
+        return 1
+
     if not args.write_baseline and not ref_exists(root, args.against):
         print(
             f"REFUSED: {args.against} does not resolve, so the committed ceiling "
