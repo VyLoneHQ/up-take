@@ -52,8 +52,9 @@ export interface SliderRange {
 /** How many fine steps one step is while Ctrl is held. */
 export const COARSE = 10;
 
-/** The calm slider, in ms: 50 ms to 10 s in steps of 10 ms. */
-export const CALM_RANGE: SliderRange = { min: 50, max: 10_000, fine: 10 };
+/** The calm slider, in ms: 0, the lowest valid value, to 10 s in steps of
+ * 10 ms. */
+export const CALM_RANGE: SliderRange = { min: 0, max: 10_000, fine: 10 };
 
 /** The fastest a watch area reads: one captured frame, about 30 a second
  * (`uptake-capture`'s `WATCH_FRAME_INTERVAL`, which throttles the capture
@@ -79,9 +80,9 @@ export const SAMPLE_RANGE: SliderRange = {
  * highest). */
 export const SHARE_RANGE: SliderRange = { min: 0, max: 1_000, fine: 10 };
 
-/** The "stops changing" slider, in ms of stillness: 0.1 s to 30 s, in steps
- * of 10 ms (2026-11-10). */
-export const SETTLE_RANGE: SliderRange = { min: 100, max: 30_000, fine: 10 };
+/** The "stops changing" slider, in ms of stillness: 0, the lowest valid
+ * value, to 30 s, in steps of 10 ms (2026-11-10). */
+export const SETTLE_RANGE: SliderRange = { min: 0, max: 30_000, fine: 10 };
 
 /** The input's own bounds for `range`: a reversed range runs its position
  * from 0 on the left. */

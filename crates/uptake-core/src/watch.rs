@@ -554,8 +554,11 @@ impl Default for Tuning {
     }
 }
 
-/// [`Tuning::calm_ms`]'s range.
-pub const CALM_MS: (u32, u32) = (50, 10_000);
+/// [`Tuning::calm_ms`]'s range: from 0, the lowest valid value (his rule of
+/// 2026-11-10, a slider runs from the lowest valid value to the highest; a
+/// calm of 0 makes every event its own burst, as *Every time* does), to ten
+/// seconds.
+pub const CALM_MS: (u32, u32) = (0, 10_000);
 /// [`Tuning::gap_ms`]'s longest: a minute.
 pub const GAP_MS_MAX: u32 = 60_000;
 /// [`Tuning::sample_ms`]'s longest: one reading every five seconds.
@@ -565,8 +568,9 @@ pub const SAMPLE_MS_MAX: u32 = 5_000;
 /// his rig pass that day: *"A slider range must always provide as much
 /// flexibility as possible, lowest valid value to highest valid value"*.
 pub const SHARE_PERMILLE_MAX: u16 = 1_000;
-/// [`Tuning::settle_ms`]'s range: a tenth of a second to half a minute.
-pub const SETTLE_MS: (u32, u32) = (100, 30_000);
+/// [`Tuning::settle_ms`]'s range: from 0, the lowest valid value (the first
+/// still reading after a change counts as stopped), to half a minute.
+pub const SETTLE_MS: (u32, u32) = (0, 30_000);
 
 impl Tuning {
     /// `self` with every value in its range.
@@ -1710,14 +1714,14 @@ mod tuning_tests {
     fn values_from_the_page_are_kept_in_range() {
         let wild = Tuning {
             notify: Notify::Each,
-            calm_ms: 0,
+            calm_ms: u32::MAX,
             gap_ms: u32::MAX,
             sample_ms: u32::MAX,
             share_permille: u16::MAX,
             settle_ms: u32::MAX,
         }
         .clamped();
-        assert_eq!(wild.calm_ms, super::CALM_MS.0);
+        assert_eq!(wild.calm_ms, super::CALM_MS.1);
         assert_eq!(wild.gap_ms, super::GAP_MS_MAX);
         assert_eq!(wild.sample_ms, super::SAMPLE_MS_MAX);
         assert_eq!(wild.share_permille, super::SHARE_PERMILLE_MAX);

@@ -168,7 +168,7 @@ Six of eight area types are built.
   chat, and it shows a Windows notification when that piece of screen starts changing, or when it
   stops. It watches from the moment you make it, *Pause* in its settings or the key `P` stops it,
   and it says *watching* on the area for as long as it reads. You choose how much of the area has
-  to change before it counts, from any change to half the area. What it reads stays on your computer:
+  to change before it counts, from any change to the whole area. What it reads stays on your computer:
   to compare, it keeps a small greyscale copy of its latest readings in memory, one shade for every
   4 by 4 pixels, and nothing else.
   NOTES FOR RELEASE, not part of the draft. (1) Since roadmap 1.61 a reading is the area's greyscale

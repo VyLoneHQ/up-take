@@ -112,8 +112,9 @@ const number = (value: number): string =>
   value.toLocaleString(language, { maximumFractionDigits: 1 });
 
 // Whether Ctrl is held on a slider, for its ten-times step (the maintainer,
-// 2026-11-10): read from every pointer and key event the slider gets, so it
-// follows Ctrl pressed or let go in the middle of a drag.
+// 2026-11-10): read from every pointer and key event the slider gets, key
+// release included, so it follows Ctrl pressed or let go in the middle of a
+// drag or between two arrow keys (review of #168, round 6).
 let coarse = $state(false);
 function followCtrl(event: PointerEvent | KeyboardEvent): void {
   coarse = event.ctrlKey;
@@ -379,6 +380,7 @@ onMount(() => {
             onpointerdown={followCtrl}
             onpointermove={followCtrl}
             onkeydown={followCtrl}
+            onkeyup={followCtrl}
             oninput={(event) =>
               setTuning({
                 settle_ms: fromPosition(
@@ -405,6 +407,7 @@ onMount(() => {
           onpointerdown={followCtrl}
           onpointermove={followCtrl}
           onkeydown={followCtrl}
+          onkeyup={followCtrl}
           oninput={(event) =>
             setTuning({
               share_permille: fromPosition(
@@ -448,6 +451,7 @@ onMount(() => {
             onpointerdown={followCtrl}
             onpointermove={followCtrl}
             onkeydown={followCtrl}
+            onkeyup={followCtrl}
             oninput={(event) =>
               setTuning({
                 calm_ms: fromPosition(
@@ -494,6 +498,7 @@ onMount(() => {
           onpointerdown={followCtrl}
           onpointermove={followCtrl}
           onkeydown={followCtrl}
+          onkeyup={followCtrl}
           oninput={(event) =>
             setTuning({
               sample_ms: fromPosition(

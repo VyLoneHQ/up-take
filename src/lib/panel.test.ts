@@ -96,7 +96,7 @@ describe("a watch area's tuning (roadmap 1.65)", () => {
     const { CALM_RANGE, SAMPLE_RANGE, SHARE_RANGE, track, stepOf } =
       await import('./panel');
     expect(SHARE_RANGE).toMatchObject({ min: 0, max: 1_000, fine: 10 });
-    expect(CALM_RANGE).toMatchObject({ min: 50, max: 10_000, fine: 10 });
+    expect(CALM_RANGE).toMatchObject({ min: 0, max: 10_000, fine: 10 });
     expect(SAMPLE_RANGE).toMatchObject({ min: 0, max: 5_000, fine: 10 });
     expect(track(SAMPLE_RANGE)).toEqual({ min: 0, max: 5_000 });
     expect(stepOf(SHARE_RANGE, false)).toBe(10);
@@ -124,7 +124,7 @@ describe("a watch area's tuning (roadmap 1.65)", () => {
       await import('./panel');
     expect(fromPosition(SHARE_RANGE, 370)).toBe(370);
     expect(fromPosition(SHARE_RANGE, 1_900)).toBe(1_000);
-    expect(toPosition(CALM_RANGE, 0)).toBe(50);
+    expect(toPosition(CALM_RANGE, -5)).toBe(0);
     expect(fraction(SHARE_RANGE, 500)).toBe(0.5);
   });
 });

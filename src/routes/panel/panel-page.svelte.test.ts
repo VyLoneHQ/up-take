@@ -237,6 +237,17 @@ test('a slider moves in fine steps, and ten times that with Ctrl held', async ()
   );
   await settle();
   expect(share.step).toBe('10');
+  // Ctrl let go on the keyboard, between two arrow keys (round 6).
+  share.dispatchEvent(
+    new KeyboardEvent('keydown', { bubbles: true, ctrlKey: true }),
+  );
+  await settle();
+  expect(share.step).toBe('100');
+  share.dispatchEvent(
+    new KeyboardEvent('keyup', { bubbles: true, ctrlKey: false }),
+  );
+  await settle();
+  expect(share.step).toBe('10');
   share.value = '370';
   share.dispatchEvent(new Event('input', { bubbles: true }));
   expect(lastSet()).toEqual([
