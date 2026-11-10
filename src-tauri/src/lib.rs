@@ -61,7 +61,8 @@ use uptake_core::area::AreaStore;
 /// kernel object, the system closes every handle when a process terminates, and
 /// the object dies with its last handle — so the next launch's `CreateMutexW`
 /// cannot see `ERROR_ALREADY_EXISTS` no matter how this one ended. The plugin
-/// (2.5.5 and later) keeps the mutex in an `InstanceLock` resource that Tauri
+/// (2.5.5, the version in `Cargo.lock`; a later 2.x may differ, and the
+/// conclusion does not depend on it) keeps the mutex in an `InstanceLock` resource that Tauri
 /// drops in `AppHandle::cleanup_before_exit`, after the app's own exit
 /// handler; that release is tidiness, not a correctness requirement, and a
 /// stale lock blocking a relaunch is not a reachable state.
