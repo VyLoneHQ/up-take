@@ -2134,8 +2134,9 @@ mod tests {
         }
 
         /// Roadmap `1.61`: the host reads with the area's own tolerance. A
-        /// 16 by 16 change on a 600 by 400 area (4 of its 3,750 cells) is a
-        /// change at *any change*, and none at one percent of the area.
+        /// 16 by 16 change on a 600 by 400 area (16 of its 15,000 4-pixel
+        /// cells, about 0.1 % of it) is a change at *any change*, and none at
+        /// one percent of the area.
         #[test]
         fn an_areas_tolerance_decides_how_much_change_counts() {
             let small_change = |share_permille: u16| {
