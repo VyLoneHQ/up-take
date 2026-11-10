@@ -93,9 +93,13 @@ export const SETTLE_RANGE: SliderRange = {
   step: TIME_STEP_MS,
 };
 
-/** How many steps a slider has from end to end. */
+/** How many steps a slider has, counted from 0 and not from `min`: the
+ * input's positions are whole steps from 0, so ten at a time (Ctrl) land on
+ * whole multiples of ten steps, 1 s or 10 %, and reach `max` exactly (the
+ * maintainer, 2026-11-10: counted from a `min` of 100 ms, Ctrl gave 14.1 s
+ * and stopped at 29.1 s). A position below `min` reads as `min`. */
 export function steps(range: SliderRange): number {
-  return Math.round((range.max - range.min) / range.step);
+  return Math.round(range.max / range.step);
 }
 
 /** The input's own bounds: 0 to the number of steps. */
@@ -111,16 +115,16 @@ export function stepOf(_range: SliderRange, coarse: boolean): number {
 /** Where `value` sits on the input, the nearest step, kept in range. */
 export function toPosition(range: SliderRange, value: number): number {
   const kept = Math.min(range.max, Math.max(range.min, value));
-  const step = Math.round((kept - range.min) / range.step);
-  return range.reversed ? steps(range) - step : step;
+  const fromLeft = range.reversed ? range.max - kept : kept;
+  return Math.round(fromLeft / range.step);
 }
 
-/** The value at input position `position`: a whole number of steps from
- * `min`, kept in range. */
+/** The value at input position `position`: a whole number of steps, kept
+ * in range. */
 export function fromPosition(range: SliderRange, position: number): number {
   const at = Math.min(steps(range), Math.max(0, Math.round(position)));
-  const step = range.reversed ? steps(range) - at : at;
-  return range.min + step * range.step;
+  const value = range.reversed ? range.max - at * range.step : at * range.step;
+  return Math.min(range.max, Math.max(range.min, value));
 }
 
 /** How far along the track `value` sits, 0 at the left and 1 at the right,

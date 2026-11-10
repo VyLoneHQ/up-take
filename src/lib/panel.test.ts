@@ -108,8 +108,8 @@ describe("a watch area's tuning (roadmap 1.65)", () => {
       expect(range.max % range.step).toBe(0);
     }
     expect(SHARE_RANGE.step).toBe(10);
-    expect(track(CALM_RANGE)).toEqual({ min: 0, max: 99 });
-    expect(track(SETTLE_RANGE)).toEqual({ min: 0, max: 299 });
+    expect(track(CALM_RANGE)).toEqual({ min: 0, max: 100 });
+    expect(track(SETTLE_RANGE)).toEqual({ min: 0, max: 300 });
     expect(track(SAMPLE_RANGE)).toEqual({ min: 0, max: 50 });
     expect(track(SHARE_RANGE)).toEqual({ min: 0, max: 100 });
     expect(stepOf(CALM_RANGE, false)).toBe(1);
@@ -119,11 +119,39 @@ describe("a watch area's tuning (roadmap 1.65)", () => {
   it('starts each time slider at 100 ms and gives only whole steps', async () => {
     const { CALM_RANGE, SETTLE_RANGE, fromPosition } = await import('./panel');
     expect(fromPosition(CALM_RANGE, 0)).toBe(100);
-    expect(fromPosition(CALM_RANGE, 1)).toBe(200);
-    expect(fromPosition(CALM_RANGE, 99)).toBe(10_000);
+    expect(fromPosition(CALM_RANGE, 1)).toBe(100);
+    expect(fromPosition(CALM_RANGE, 2)).toBe(200);
+    expect(fromPosition(CALM_RANGE, 100)).toBe(10_000);
     expect(fromPosition(SETTLE_RANGE, 0)).toBe(100);
-    expect(fromPosition(SETTLE_RANGE, 1)).toBe(200);
-    expect(fromPosition(SETTLE_RANGE, 299)).toBe(30_000);
+    expect(fromPosition(SETTLE_RANGE, 300)).toBe(30_000);
+  });
+
+  // The maintainer, 2026-11-10: Ctrl gave 14.1 s and stopped at 29.1 s.
+  // Ten steps at a time land on whole seconds and whole tens of percent,
+  // and reach each slider's end exactly.
+  it('moves ten steps at a time onto whole values, up to the end', async () => {
+    const {
+      CALM_RANGE,
+      SAMPLE_RANGE,
+      SETTLE_RANGE,
+      SHARE_RANGE,
+      fromPosition,
+      steps,
+    } = await import('./panel');
+    for (const [range, unit] of [
+      [CALM_RANGE, 1_000],
+      [SETTLE_RANGE, 1_000],
+      [SAMPLE_RANGE, 1_000],
+      [SHARE_RANGE, 100],
+    ] as const) {
+      expect(steps(range) % 10, 'the end is ten steps away').toBe(0);
+      for (let at = 10; at <= steps(range); at += 10) {
+        expect(fromPosition(range, at) % unit).toBe(0);
+      }
+      expect(fromPosition(range, steps(range))).toBe(
+        range.reversed ? range.min : range.max,
+      );
+    }
   });
 
   it('runs the sampling slider from every five seconds to realtime', async () => {
@@ -143,8 +171,8 @@ describe("a watch area's tuning (roadmap 1.65)", () => {
       await import('./panel');
     expect(fromPosition(SHARE_RANGE, 37)).toBe(370);
     expect(fromPosition(SHARE_RANGE, 190)).toBe(1_000);
-    expect(toPosition(CALM_RANGE, 0)).toBe(0);
-    expect(toPosition(CALM_RANGE, 150)).toBe(1);
+    expect(toPosition(CALM_RANGE, 0)).toBe(1);
+    expect(toPosition(CALM_RANGE, 200)).toBe(2);
     expect(fraction(SHARE_RANGE, 500)).toBe(0.5);
   });
 });
