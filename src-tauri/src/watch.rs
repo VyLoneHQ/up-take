@@ -135,8 +135,11 @@
 //!
 //! - **A still screen sends no frames and costs nothing**; the thread looks
 //!   again every [`IDLE`] in case a change was missed.
-//! - **Measured, 2026-11-10, with 4-pixel cells** (roadmap `1.61`; workspace
-//!   `evidence/1.61-watch-dot-cost/`, the watcher's harness on a still,
+//! - **Measured, 2026-11-10, with 4-pixel cells** (roadmap `1.61`; the
+//!   maintainer's private planning workspace, `Projects/UP-TAKE/evidence/
+//!   1.61-watch-dot-cost/`, which holds the runs, the stand-in dot and the
+//!   harness, `1.58-watch-events/watch_events.rs` there, which runs this
+//!   loop without the app; not in this repository; the watcher's harness on a still,
 //!   dark backdrop over the area, 30 s a case): one 600 by 400 area, 0.05 %
 //!   to 0.25 % of a core while nothing changes (no reads at all; the spread
 //!   is the harness's own idle passes); an area as large as a monitor,
@@ -146,8 +149,10 @@
 //!   captures, and cost 1.7 % to 3.1 % (over `quality-bars.md` §1's 2 %
 //!   target per live area, under its 5 % hard fail); one short pulse every
 //!   5 s cost 0.35 % to 0.8 %, which is why the dot pulses and does not
-//!   breathe. A busy screen held at 30 frames a second for a long time is not
-//!   measured yet (`I-474`).
+//!   breathe. **Not measured yet: the whole watcher, reads included, on a
+//!   busy screen held at 30 frames a second for a long time** (`I-474`). The
+//!   capture sessions' own share at 30 frames a second, without reads, is
+//!   measured ([`BUDGET`]'s note).
 //! - Measured before `1.61`, with at most 16 by 16 cells
 //!   (`evidence/1.58-watch-events/`, 2026-11-05): an ordinary desktop sent 3
 //!   to 11 frames a second on the primary monitor, about 2 to 3 % of the
@@ -229,8 +234,9 @@ const _: () = assert!(
 /// §1's 2 % per live area, for all of them together. After each pass it rests
 /// until its own time is no more than this share ([`rest_after`]). The held
 /// sessions' frames cost on top of it, outside the governor: about 0.3 to
-/// 0.4 % of a core measured at 30 frames a second (workspace
-/// `evidence/1.58-watch-events/`).
+/// 0.4 % of a core measured at 30 frames a second, the sessions alone and no
+/// reads (the private planning workspace's `evidence/1.58-watch-events/`;
+/// the whole watcher on such a screen is not measured, `I-474`).
 pub const BUDGET: f64 = 0.02;
 
 /// How long to rest after a pass that took `spent`: long enough that the pass
