@@ -5,15 +5,18 @@ import { onMount, tick } from 'svelte';
 import {
   CALM_RANGE,
   DEPTHS,
+  DIRECTIONS,
   FRAME_MS,
   fraction,
   fromPosition,
   GAPS_MS,
   isPanelView,
+  MARK_RANGE,
   NOTIFY,
   ON_RESIZE,
   PANEL_EVENT,
   type PanelDepth,
+  type PanelDirection,
   type PanelNotify,
   type PanelOnResize,
   type PanelTuning,
@@ -23,9 +26,11 @@ import {
   SETTLE_RANGE,
   SHARE_RANGE,
   type SliderRange,
+  shownMarks,
   stepOf,
   toPosition,
   track,
+  WATCHES,
 } from '$lib/panel';
 import {
   fill,
@@ -167,6 +172,34 @@ function setHeld(held: boolean): void {
 function set(command: string, args: Record<string, unknown>): void {
   void invoke(command, args).catch(() => {});
   done();
+}
+
+const watchLabel: Record<PanelWatch, TextKey> = {
+  changes: 'menu.watch.changes',
+  settles: 'menu.watch.settles',
+  fills: 'menu.watch.fills',
+};
+
+const directionLabel: Record<PanelDirection, TextKey> = {
+  left_to_right: 'panel.watch.direction.left_to_right',
+  right_to_left: 'panel.watch.direction.right_to_left',
+  top_to_bottom: 'panel.watch.direction.top_to_bottom',
+  bottom_to_top: 'panel.watch.direction.bottom_to_top',
+};
+
+/** A bar's extra percentage as the panel says it: off, or the percentage. */
+function markLabel(value: number): string {
+  if (value === 0) return text(language, 'panel.watch.mark.off');
+  return fill(language, 'panel.watch.mark.percent', { n: number(value) });
+}
+
+/** `marks` with slot `index` set to `value`. */
+function withMark(
+  marks: readonly number[],
+  index: number,
+  value: number,
+): number[] {
+  return marks.map((old, at) => (at === index ? value : old));
 }
 
 const notifyLabel: Record<PanelNotify, TextKey> = {
@@ -338,22 +371,16 @@ onMount(() => {
       <div class="field">
         <span class="label">{text(language, 'menu.watch')}</span>
         <div class="choice" role="radiogroup">
-          <button
-            type="button"
-            role="radio"
-            aria-checked={view.watch === 'changes'}
-            class:on={view.watch === 'changes'}
-            onclick={() => setWatch('changes')}
-            >{text(language, 'menu.watch.changes')}</button
-          >
-          <button
-            type="button"
-            role="radio"
-            aria-checked={view.watch === 'settles'}
-            class:on={view.watch === 'settles'}
-            onclick={() => setWatch('settles')}
-            >{text(language, 'menu.watch.settles')}</button
-          >
+          {#each WATCHES as watch}
+            <button
+              type="button"
+              role="radio"
+              aria-checked={view.watch === watch}
+              class:on={view.watch === watch}
+              onclick={() => setWatch(watch)}
+              >{text(language, watchLabel[watch])}</button
+            >
+          {/each}
         </div>
       </div>
     {/if}
@@ -392,6 +419,57 @@ onMount(() => {
           />
         </label>
       {/if}
+      {#if view.watch === 'fills'}
+        <div class="field">
+          <span class="label">{text(language, 'panel.watch.direction')}</span>
+          <div class="choice" role="radiogroup">
+            {#each DIRECTIONS as direction}
+              <button
+                type="button"
+                role="radio"
+                aria-checked={tuning.direction === direction}
+                class:on={tuning.direction === direction}
+                onclick={() => {
+                  setTuning({ direction });
+                  done();
+                }}>{text(language, directionLabel[direction])}</button
+              >
+            {/each}
+          </div>
+        </div>
+        {#each shownMarks(tuning.marks) as index (index)}
+          {@const m = slider(MARK_RANGE, tuning.marks[index] ?? 0)}
+          <label class="field">
+            <span class="label"
+              >{text(language, 'panel.watch.mark')}
+              <span class="value">{markLabel(tuning.marks[index] ?? 0)}</span
+              ></span
+            >
+            <input
+              type="range"
+              min={m.min}
+              max={m.max}
+              step={m.step}
+              value={m.value}
+              style:--at={m.at}
+              onpointerdown={followCtrl}
+              onpointermove={followCtrl}
+              onkeydown={followCtrl}
+              onkeyup={followCtrl}
+              oninput={(event) =>
+                setTuning({
+                  marks: withMark(
+                    tuning.marks,
+                    index,
+                    fromPosition(MARK_RANGE, Number(event.currentTarget.value)),
+                  ),
+                })}
+              onchange={done}
+            />
+          </label>
+        {/each}
+      {/if}
+      {#if view.watch !== 'fills'}
       <label class="field">
         <span class="label"
           >{text(language, 'panel.watch.share')}
@@ -418,6 +496,7 @@ onMount(() => {
           onchange={done}
         />
       </label>
+      {/if}
       <div class="field">
         <span class="label">{text(language, 'panel.watch.notify')}</span>
         <div class="choice" role="radiogroup">

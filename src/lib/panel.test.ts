@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isPanelView } from './panel';
+import { isPanelView, shownMarks } from './panel';
 import { toneOf } from './tones';
 
 describe('the area settings panel (roadmap 1.60)', () => {
@@ -16,6 +16,8 @@ describe('the area settings panel (roadmap 1.60)', () => {
       sample_ms: 0,
       share_permille: 0,
       settle_ms: 1_000,
+      direction: 'left_to_right',
+      marks: [0, 0, 0, 0],
     },
     kinds: ['default', 'screenshot', 'watch'],
     ocr: null,
@@ -44,6 +46,19 @@ describe('the area settings panel (roadmap 1.60)', () => {
       }),
     ).toBe(true);
     expect(isPanelView({ ...watch, watch: 'off' })).toBe(false);
+    // Roadmap 1.61: the bar mode, its direction and its percentages.
+    expect(isPanelView({ ...watch, watch: 'fills' })).toBe(true);
+    for (const tuning of [
+      { ...watch.tuning, direction: 'sideways' },
+      { ...watch.tuning, marks: [20, 50, 0] },
+      { ...watch.tuning, marks: [20, 50, 0, 100] },
+      { ...watch.tuning, marks: [20, -1, 0, 0] },
+      { ...watch.tuning, marks: undefined },
+    ]) {
+      expect(isPanelView({ ...watch, tuning }), JSON.stringify(tuning)).toBe(
+        false,
+      );
+    }
     expect(isPanelView({ ...watch, held: 'no' })).toBe(false);
     expect(isPanelView(null)).toBe(false);
   });
@@ -174,5 +189,17 @@ describe("a watch area's tuning (roadmap 1.65)", () => {
     expect(toPosition(CALM_RANGE, 0)).toBe(1);
     expect(toPosition(CALM_RANGE, 200)).toBe(2);
     expect(fraction(SHARE_RANGE, 500)).toBe(0.5);
+  });
+});
+
+describe("a bar's percentage sliders (roadmap 1.61)", () => {
+  it('shows the first always, and each next once the one before is set', () => {
+    expect(shownMarks([0, 0, 0, 0])).toEqual([0]);
+    expect(shownMarks([20, 0, 0, 0])).toEqual([0, 1]);
+    expect(shownMarks([20, 50, 0, 0])).toEqual([0, 1, 2]);
+    expect(shownMarks([20, 50, 70, 90])).toEqual([0, 1, 2, 3]);
+    // A slot set while the one before it was turned off stays on screen,
+    // so it can be turned off too.
+    expect(shownMarks([0, 50, 0, 0])).toEqual([0, 1, 2]);
   });
 });

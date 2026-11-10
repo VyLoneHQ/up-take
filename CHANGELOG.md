@@ -38,7 +38,8 @@ Until then it is written by hand.
   sharpens the piece of screen under it in place, without magnifying it, as a still rather than a
   live view; an OCR area that reads the text under it, shows what it read in place, and puts
   that text on the clipboard so it can be pasted straight into something else; and a watch area
-  that shows a Windows notification when the screen under it starts changing, or stops. A watch
+  that shows a Windows notification when the screen under it starts changing, or stops, or, placed
+  over a progress bar, when the bar is full, and at any percentages you set on the way. A watch
   area starts watching the moment it is made, and `P` or *Pause* in its settings pauses and resumes it. The
   installer carries the OCR runtime and the models; they are not in this repository, and three
   checksummed scripts fetch them before a build can bundle them. (This said "two" scripts until

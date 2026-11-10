@@ -6,7 +6,28 @@
  */
 
 /** What a watch area tells the user about. */
-export type PanelWatch = 'changes' | 'settles';
+export type PanelWatch = 'changes' | 'settles' | 'fills';
+
+/** The watch choices, in the order the panel shows them (the menu's). */
+export const WATCHES: readonly PanelWatch[] = ['changes', 'settles', 'fills'];
+
+/** Which end a bar fills from, for "fills" (roadmap 1.61). */
+export type PanelDirection =
+  | 'left_to_right'
+  | 'right_to_left'
+  | 'top_to_bottom'
+  | 'bottom_to_top';
+
+/** The directions, in the order the panel shows them. */
+export const DIRECTIONS: readonly PanelDirection[] = [
+  'left_to_right',
+  'right_to_left',
+  'top_to_bottom',
+  'bottom_to_top',
+];
+
+/** How many percentages a bar may notify at on the way (Rust's `MARKS`). */
+export const MARKS = 4;
 
 /** Which of a watch area's events become a card (roadmap 1.65). */
 export type PanelNotify = 'never' | 'once' | 'each';
@@ -29,6 +50,11 @@ export interface PanelTuning {
   share_permille: number;
   /** For "stops changing": how long the area must hold still, in ms. */
   settle_ms: number;
+  /** For "fills": which end the bar fills from. */
+  direction: PanelDirection;
+  /** For "fills": the percentages it also notifies at, 1 to 99; 0 is an
+   * unused slot. Always {@link MARKS} long. */
+  marks: number[];
 }
 
 /** The minimum gaps the panel offers, in ms: none, 0.1 s, 1 s, 10 s, 1 min. */
@@ -93,6 +119,25 @@ export const SETTLE_RANGE: SliderRange = {
   step: TIME_STEP_MS,
 };
 
+/** A bar's extra percentage, for "fills" (roadmap 1.61): off (0) on the
+ * left to 99 % on the right, 1 % a step, 10 % with Ctrl. 100 % is the full
+ * bar itself, which always notifies. */
+export const MARK_RANGE: SliderRange = { min: 0, max: 99, step: 1 };
+
+/** Which of a bar's percentage sliders the panel shows: the first always,
+ * and each further one once the one before it, or itself, is set, so the
+ * unused slots are one slider and not four. */
+export function shownMarks(marks: readonly number[]): number[] {
+  return marks
+    .map((_, index) => index)
+    .filter(
+      (index) =>
+        index === 0 ||
+        (marks[index - 1] ?? 0) !== 0 ||
+        (marks[index] ?? 0) !== 0,
+    );
+}
+
 /** How many steps a slider has, counted from 0 and not from `min`: the
  * input's positions are whole steps from 0, so ten at a time (Ctrl) land on
  * whole multiples of ten steps, 1 s or 10 %, and reach `max` exactly (the
@@ -147,7 +192,12 @@ export function isPanelTuning(value: unknown): value is PanelTuning {
     isCount(tuning.gap_ms) &&
     isCount(tuning.sample_ms) &&
     isCount(tuning.share_permille) &&
-    isCount(tuning.settle_ms)
+    isCount(tuning.settle_ms) &&
+    typeof tuning.direction === 'string' &&
+    (DIRECTIONS as readonly string[]).includes(tuning.direction) &&
+    Array.isArray(tuning.marks) &&
+    tuning.marks.length === MARKS &&
+    tuning.marks.every((mark) => isCount(mark) && mark <= 99)
   );
 }
 
@@ -220,7 +270,7 @@ export function isPanelView(value: unknown): value is PanelView {
     typeof view.id === 'number' &&
     typeof view.kind === 'string' &&
     (view.name === null || typeof view.name === 'string') &&
-    (view.watch === null || oneOf(['changes', 'settles'], view.watch)) &&
+    (view.watch === null || oneOf(WATCHES, view.watch)) &&
     (view.held === null || typeof view.held === 'boolean') &&
     (view.tuning === null || isPanelTuning(view.tuning)) &&
     Array.isArray(view.kinds) &&

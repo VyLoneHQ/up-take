@@ -1052,10 +1052,7 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
             }
             Ok(Some(mut captured)) => {
                 watcher.failing = false;
-                leave_out(
-                    &mut captured.bitmap,
-                    &left_out(target.bounds, captured.rect, state.1),
-                );
+                let own = left_out(target.bounds, captured.rect, state.1);
                 // Only while UP-TAKE is in captures: with the setting off a
                 // card is not in the picture and what is under it is read as
                 // it is, so a change there is reported at once (review of
@@ -1063,11 +1060,20 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
                 // change from ever showing). A card on screen when the setting
                 // is turned off is given the new policy at once
                 // (`notice::apply_capture_policy`).
-                let hidden = if state.1 {
+                let mut hidden = if state.1 {
                     unknown_under(&host.own_windows(), captured.rect)
                 } else {
                     Vec::new()
                 };
+                // A bar reads its lines end to end, and the border painted
+                // black down both ends would never fill: for the bar mode
+                // UP-TAKE's own drawing is unknown, not black (roadmap
+                // `1.61`). Every other choice compares it black, as before.
+                if target.watch == Watch::Fills {
+                    hidden.extend(own);
+                } else {
+                    leave_out(&mut captured.bitmap, &own);
+                }
                 let size = uptake_core::geometry::Size::new(
                     captured.bitmap.width(),
                     captured.bitmap.height(),
@@ -1152,10 +1158,7 @@ fn gate<Id: PartialEq + Copy>(
 /// Not a Windows toast any more: at the first real-screen test Windows
 /// accepted every toast and showed none.
 fn notify(app: &AppHandle, event: Event, id: AreaId, bounds: Rect) {
-    let (moment, label) = match event {
-        Event::Changed => ("changed", text(Text::NoticeChanged)),
-        Event::Settled => ("settled", text(Text::NoticeSettled)),
-    };
+    let (moment, label) = card_moment(event);
     let name = {
         let store = app.state::<Mutex<AreaStore>>();
         let store = store.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1173,6 +1176,21 @@ fn notify(app: &AppHandle, event: Event, id: AreaId, bounds: Rect) {
             event: label,
         },
     );
+}
+
+/// The card's moment for `event` and the words it says. Each percentage of
+/// a bar is its own moment (`reached-20`), so a card at 50% is a new card
+/// above the one at 20%, not a count on it (roadmap `1.61`).
+fn card_moment(event: Event) -> (String, String) {
+    match event {
+        Event::Changed => ("changed".into(), text(Text::NoticeChanged).into()),
+        Event::Settled => ("settled".into(), text(Text::NoticeSettled).into()),
+        Event::Filled => ("filled".into(), text(Text::NoticeFilled).into()),
+        Event::Reached(percent) => (
+            format!("reached-{percent}"),
+            crate::strings::fill(Text::NoticeReached, &[("n", &percent.to_string())]),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -2075,6 +2093,73 @@ mod tests {
             let settle = usize::try_from(Watch::Settles.settle_readings()).unwrap_or(usize::MAX);
             run(&mut fake, &mut memory, settle + 1);
             assert_eq!(fake.notified, vec![Event::Settled]);
+        }
+
+        /// Roadmap `1.61`, the bar mode: an area over a bar says nothing while
+        /// the bar fills and one thing when it is full. With *Show UP-TAKE in
+        /// screen recordings* on, so the area's own border lies down both
+        /// ends of the bar: painted black there, as the other choices compare
+        /// it, the ends would never fill and the bar would never be full.
+        #[test]
+        fn a_bar_area_notifies_once_the_bar_is_full() {
+            for in_captures in [false, true] {
+                let bounds = Rect::new(100, 100, 200, 40);
+                let mut list = targets_for(&[bounds], Watch::Fills);
+                list[0].tuning.marks = [50, 0, 0, 0];
+                let mut fake = Fake::new(list);
+                fake.state = (OverlayState::Living, in_captures);
+                fake.level = 40;
+                let mut memory = Memory::default();
+                run(&mut fake, &mut memory, 2);
+                for filled in [40, 80, 110, 160, 199, 200, 200] {
+                    fake.patch = Some((Rect::new(100, 100, filled, 40), 200));
+                    run(&mut fake, &mut memory, 1);
+                }
+                assert_eq!(
+                    fake.notified,
+                    vec![Event::Reached(50), Event::Filled],
+                    "{in_captures}"
+                );
+            }
+        }
+
+        /// The card for each of the bar's moments: the full bar, and each
+        /// percentage its own card, so 50% does not count up on 20%.
+        #[test]
+        fn each_bar_moment_is_its_own_card() {
+            let (filled, words) = crate::watch::card_moment(Event::Filled);
+            assert_eq!((filled.as_str(), words.as_str()), ("filled", "bar full"));
+            let (twenty, words) = crate::watch::card_moment(Event::Reached(20));
+            assert_eq!(
+                (twenty.as_str(), words.as_str()),
+                ("reached-20", "reached 20%")
+            );
+            let (fifty, _) = crate::watch::card_moment(Event::Reached(50));
+            assert_ne!(twenty, fifty);
+            assert_eq!(crate::watch::card_moment(Event::Changed).0, "changed");
+        }
+
+        /// The bar mode and its settings are kept as the store keeps the rest:
+        /// they read back as themselves, and a tuning saved before them reads
+        /// with their defaults.
+        #[test]
+        fn the_bar_mode_and_its_tuning_round_trip() {
+            use uptake_core::watch::{Direction, MARKS, Tuning};
+            let tuning = Tuning {
+                direction: Direction::BottomToTop,
+                marks: [20, 50, 0, 0],
+                ..Tuning::default()
+            };
+            let json = serde_json::to_string(&(Watch::Fills, tuning)).unwrap_or_default();
+            assert!(json.contains("\"fills\""), "{json}");
+            assert!(json.contains("\"bottom_to_top\""), "{json}");
+            let back: Result<(Watch, Tuning), _> = serde_json::from_str(&json);
+            assert_eq!(back.ok(), Some((Watch::Fills, tuning)));
+            let old: Result<Tuning, _> = serde_json::from_str(r#"{"notify":"each","calm_ms":200}"#);
+            assert_eq!(
+                old.ok().map(|tuning| (tuning.direction, tuning.marks)),
+                Some((Direction::LeftToRight, [0; MARKS]))
+            );
         }
 
         /// Roadmap `1.65`: an area with a sampling rate of one reading a

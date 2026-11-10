@@ -4727,6 +4727,7 @@ fn menu_rows(area: &overlay::AreaSummary) -> Vec<MenuRow> {
             children: [
                 (Watch::Changes, Text::MenuWatchChanges),
                 (Watch::Settles, Text::MenuWatchSettles),
+                (Watch::Fills, Text::MenuWatchFills),
             ]
             .into_iter()
             .map(|(watch, label)| {
@@ -6638,7 +6639,7 @@ mod tests {
     /// Roadmap 1.58: a watch area offers what to watch for, "changes" ticked
     /// by default and no Off row since `ADR-0053`, and no other type offers it.
     #[test]
-    fn a_watch_area_offers_changes_and_settles_and_ticks_the_one_it_has() {
+    fn a_watch_area_offers_changes_settles_and_fills_and_ticks_the_one_it_has() {
         use uptake_core::watch::Watch;
         let list = |rows: &[super::MenuRow]| -> Option<Vec<(&'static str, MenuAction, bool)>> {
             let parent = rows.iter().find(|row| row.label == "Watch")?;
@@ -6655,7 +6656,7 @@ mod tests {
             let rows = menu_rows(&summary(kind, Layer::Auto, Input::Interactive));
             assert_eq!(list(&rows).is_some(), kind == AreaType::Watch, "{kind:?}");
         }
-        for watch in [Watch::Changes, Watch::Settles] {
+        for watch in [Watch::Changes, Watch::Settles, Watch::Fills] {
             let area = crate::overlay::AreaSummary {
                 watch,
                 ..summary(AreaType::Watch, Layer::Auto, Input::PassThrough)
@@ -6675,6 +6676,11 @@ mod tests {
                         "Notify when it stops changing",
                         MenuAction::SetWatch(Watch::Settles),
                         watch == Watch::Settles
+                    ),
+                    (
+                        "Notify when the bar is full",
+                        MenuAction::SetWatch(Watch::Fills),
+                        watch == Watch::Fills
                     ),
                 ],
                 "{watch:?}"
