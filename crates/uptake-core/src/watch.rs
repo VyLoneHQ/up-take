@@ -15,23 +15,23 @@
 //! visibly marked while it reads, reading is switched on per area, and what it
 //! reads stays on the machine. Since `ADR-0053` making a watch area is what
 //! switches it on, and pausing it (the area's `held` flag) stops it for a
-//! while; this module only compares. Nothing here keeps a reading: a
-//! [`Fingerprint`] is at most 256 brightness averages, which cannot be turned
-//! back into the picture of any region larger than 16 by 16 pixels. A region
-//! under 16 pixels on a side keeps one value per pixel on that side, which is
-//! its greyscale picture at that size; it is held in memory, compared and
-//! dropped like any other (review of `#154`, round 9).
+//! while; this module only compares. Nothing here keeps a reading beyond the
+//! comparison: a [`Fingerprint`] is the average brightness of each [`CELL`]
+//! by [`CELL`] pixel square of the region, which is the region's greyscale
+//! picture at a quarter of its size. That is a picture, not a summary, and
+//! it is held in memory, compared and dropped like any other reading.
+//! (Until roadmap `1.61` it was at most 16 by 16 averages whatever the
+//! region's size; [`CELL`] says why that changed.)
 //!
-//! # Why a grid of averages
+//! # Why squares of averages
 //!
-//! Two readings of a still screen are not identical bytes: a blinking caret,
-//! a clock's colon and the compositor's own rounding all move a few pixels.
-//! Comparing the average brightness of each cell of a coarse grid ignores a
-//! change that small, because a few pixels move a cell's average by a level or
-//! two, and still sees a new line of text, a progress bar moving or a window
-//! appearing, which move whole cells. [`CELL_DELTA`] is the line between the
-//! two; it is a first value, chosen on arithmetic and not yet tried on a real
-//! screen.
+//! Two readings of a still screen are not identical bytes: the compositor's
+//! own rounding moves a few levels here and there. Comparing the average
+//! brightness of small squares ignores that, and still sees an icon, a word,
+//! a progress bar moving or a window appearing, each of which moves at least
+//! one square by tens of levels. [`CELL_DELTA`] is the line between the two,
+//! measured on a real screen. How MUCH of the region must change is the
+//! area's own choice, its tolerance ([`Tuning::share_permille`]).
 
 use std::time::Duration;
 
@@ -74,9 +74,12 @@ impl Watch {
         }
     }
 
-    /// How long a calm ends a change for this choice, for the event-driven
-    /// host: [`REARM_TIME`] re-arms *changes*, and [`SETTLE_READINGS`]
-    /// readings at [`READING_STEP`] (six seconds) call something finished.
+    /// How long a calm ends a change for this choice before the area's own
+    /// tuning is applied: [`REARM_TIME`] re-arms *changes*, and
+    /// [`SETTLE_READINGS`] readings at [`READING_STEP`] (six seconds) call
+    /// something finished. The host replaces the second with the area's
+    /// [`Tuning::settle_ms`] before every reading ([`Detector::tune`]), so a
+    /// running area waits as long as its panel says.
     #[must_use]
     pub fn settle_time(self) -> Duration {
         match self {
@@ -102,10 +105,35 @@ impl Watch {
 /// a calm is measured in time, whatever the rate.
 pub const READING_STEP: Duration = Duration::from_millis(500);
 
-/// The grid a reading is summarised into: at most this many cells across and
-/// down. A region narrower or shorter than this gets one cell per pixel on
-/// that axis.
-pub const GRID: u32 = 16;
+/// The side of one cell, in screen pixels: a reading is the average
+/// brightness of each square this size (roadmap `1.61`, the maintainer's
+/// choice of 2026-11-07, *fixed-size cells*). A larger region has more cells,
+/// not larger ones, so a small change counts the same on any area.
+///
+/// **Why it changed.** Until `1.61` every region was a grid of at most 16 by
+/// 16 cells. On a monitor-sized area that made each cell about 14,400
+/// pixels, so one changed pixel moved its cell by about 0.02 levels, and at
+/// the maintainer's rig (2026-11-07) a small change on a large area never
+/// fired. At 4 pixels a cell is 16 pixels: an icon or a word moves at least
+/// one cell by tens of levels on any area size.
+///
+/// **Why four, not eight** (review of `#168`, round 4). The tolerance slider
+/// starts at *Any change*, his *"any pixel"*. At 8 pixels one pixel moved its
+/// 64-pixel cell by at most 3 levels, under [`CELL_DELTA`], so no single
+/// pixel ever counted. At 4 pixels one pixel moves its cell by its own change
+/// divided by 16: **a single pixel counts when it changes by more than about
+/// 100 levels of 255** (`CELL_DELTA * 16`), which a glyph, an icon edge or a
+/// status light does. A fainter single pixel still does not, and that is the
+/// floor *Any change* means. Four times as many cells as at 8 pixels: about
+/// 130,000 for a 1080p area, compared on every reading.
+///
+/// A power of two, so the GPU's mip chain averages exactly one cell per
+/// texel at level [`CELL_LEVEL`].
+pub const CELL: u32 = 4;
+
+/// The mip level whose texels are one [`CELL`] each: the level the GPU route
+/// reads back.
+pub const CELL_LEVEL: u32 = CELL.ilog2();
 
 /// How far one cell's average brightness must move, in levels of 255, before
 /// the region counts as changed.
@@ -118,13 +146,12 @@ pub const GRID: u32 = 16;
 /// with `>`, so that real change sat exactly on the line and was never
 /// reported. Six is half of it.
 ///
-/// What it still ignores: on a 1,000 by 600 region a cell is about 60 by 40
-/// pixels, so a caret 2 by 16 pixels moves its cell's average by about three
-/// levels, under six. One line of new text moves a cell by tens of levels.
-///
-/// ⚠️ **The smaller the region, the bigger a cell's share of each pixel.** On
-/// a region a few lines tall a cell is a handful of pixels, and a caret
-/// blinking in it does count as a change. A known limit.
+/// ⚠️ **A blinking caret counts, on any area size, since `1.61`.** A cell is
+/// 4 by 4 pixels, and a caret 2 by 16 pixels fills half of four cells,
+/// moving each by tens of levels. Until then a caret was ignored on a large
+/// area (its cell was about 60 by 40 pixels) and counted on a small one. The
+/// answer is the area's tolerance ([`Tuning::share_permille`]): a share
+/// larger than the caret's leaves it out.
 pub const CELL_DELTA: u8 = 6;
 
 /// How far a cell may move between two CONSECUTIVE readings and the region
@@ -168,8 +195,8 @@ pub const REARM_READINGS: u32 = 2;
 /// every time. The count above is the same rule at half-second readings.
 pub const REARM_TIME: Duration = Duration::from_millis(150);
 
-/// One reading, summarised: the average brightness of each cell of a grid laid
-/// over the region.
+/// One reading: the average brightness of each [`CELL`]-pixel square of the
+/// region.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fingerprint {
     columns: u32,
@@ -182,11 +209,16 @@ pub struct Fingerprint {
     /// area's own border, would itself read as a change when such a window
     /// comes or goes, since the black is not in every reading.
     hidden: Vec<bool>,
+    /// How many of the region's pixels the last column and the last row of
+    /// cells hold, across and down: [`CELL`] where the region's side is a
+    /// multiple of it, less where it is not. A cell's weight in the
+    /// tolerance is the pixels it holds (review of `#168`, round 2).
+    edge: (u32, u32),
 }
 
 impl Fingerprint {
-    /// Summarises `bitmap`. `None` for an empty bitmap, which has nothing to
-    /// summarise.
+    /// Summarises `bitmap`, a region read at full size. `None` for an empty
+    /// bitmap, which has nothing to summarise.
     #[must_use]
     pub fn of(bitmap: &RgbaBitmap) -> Option<Self> {
         Self::of_hiding(bitmap, &[])
@@ -197,15 +229,31 @@ impl Fingerprint {
     /// whatever falls outside the bitmap is ignored.
     #[must_use]
     pub fn of_hiding(bitmap: &RgbaBitmap, hide: &[crate::geometry::Rect]) -> Option<Self> {
-        let mut fingerprint = Self::summarise(bitmap)?;
+        let region = crate::geometry::Size::new(bitmap.width(), bitmap.height());
+        Self::of_region(bitmap, region, hide)
+    }
+
+    /// Summarises `bitmap`, a picture of a region `region` pixels in size,
+    /// read at that size or smaller (the GPU route reads it averaged down to
+    /// one texel per [`CELL`]). The cells are the region's: one per [`CELL`]
+    /// pixels on each side, rounded up, and never more than the bitmap has
+    /// pixels. `hide` is in the bitmap's own pixels, as for
+    /// [`Self::of_hiding`].
+    #[must_use]
+    pub fn of_region(
+        bitmap: &RgbaBitmap,
+        region: crate::geometry::Size,
+        hide: &[crate::geometry::Rect],
+    ) -> Option<Self> {
+        let mut fingerprint = Self::summarise(bitmap, region)?;
         let (width, height) = (bitmap.width(), bitmap.height());
         let whole = crate::geometry::Rect::new(0, 0, width, height);
         let (columns, rows) = (fingerprint.columns, fingerprint.rows);
-        // The pixel-to-cell mapping in `summarise` is monotonic, so a
-        // rectangle's cells are those of its first and last pixel and all
-        // between.
-        let column = |x: u32| (u64::from(x) * u64::from(columns) / u64::from(width)) as u32;
-        let row = |y: u32| (u64::from(y) * u64::from(rows) / u64::from(height)) as u32;
+        // The pixel-to-cell mapping in `summarise` ([`cell_on`]) is
+        // monotonic, so a rectangle's cells are those of its first and last
+        // pixel and all between.
+        let column = |x: u32| cell_on(x, width, region.width, columns);
+        let row = |y: u32| cell_on(y, height, region.height, rows);
         for part in hide {
             let Some(part) = part.intersection(whole) else {
                 continue;
@@ -244,20 +292,20 @@ impl Fingerprint {
         }
     }
 
-    fn summarise(bitmap: &RgbaBitmap) -> Option<Self> {
+    fn summarise(bitmap: &RgbaBitmap, region: crate::geometry::Size) -> Option<Self> {
         let (width, height) = (bitmap.width(), bitmap.height());
         if width == 0 || height == 0 {
             return None;
         }
-        let columns = width.min(GRID);
-        let rows = height.min(GRID);
+        let columns = region.width.div_ceil(CELL).clamp(1, width);
+        let rows = region.height.div_ceil(CELL).clamp(1, height);
         let mut sums = vec![0_u64; (columns * rows) as usize];
         let mut counts = vec![0_u64; (columns * rows) as usize];
         let pixels = bitmap.pixels();
         for y in 0..height {
-            let row = (u64::from(y) * u64::from(rows) / u64::from(height)) as u32;
+            let row = cell_on(y, height, region.height, rows);
             for x in 0..width {
-                let column = (u64::from(x) * u64::from(columns) / u64::from(width)) as u32;
+                let column = cell_on(x, width, region.width, columns);
                 let at = ((y * width + x) * 4) as usize;
                 let Some(&[r, g, b, _]) = pixels.get(at..at + 4) else {
                     continue;
@@ -269,16 +317,28 @@ impl Fingerprint {
                 }
             }
         }
+        // The GPU route's last texel on a side needs no correction: its
+        // padding repeats the region's own last column and row
+        // (`average_box` in `uptake-capture`), so a one-pixel edge is the
+        // whole texel, not a sixteenth of it. (Until round 10 of the review
+        // of `#168` the padding was black and this scaled the texel back,
+        // which cannot undo what the 8-bit texel already lost.)
         let cells = sums
             .iter()
             .zip(&counts)
             .map(|(&sum, &count)| u8::try_from(sum / count.max(1)).unwrap_or(u8::MAX))
             .collect();
+        let last = |region: u32, cells: u32| {
+            region
+                .saturating_sub((cells - 1).saturating_mul(CELL))
+                .clamp(1, CELL)
+        };
         Some(Self {
             columns,
             rows,
             cells,
             hidden: vec![false; (columns * rows) as usize],
+            edge: (last(region.width, columns), last(region.height, rows)),
         })
     }
 
@@ -302,11 +362,85 @@ impl Fingerprint {
     }
 
     /// Whether `other` shows a different region: some cell moved by more than
-    /// [`CELL_DELTA`], or the grid changed.
+    /// [`CELL_DELTA`], or the grid changed. The tolerance at its lowest,
+    /// *any change*; [`Self::differs_by`] takes the area's own.
     #[must_use]
     pub fn differs(&self, other: &Self) -> bool {
-        self.moved(other) > CELL_DELTA
+        self.differs_by(other, CELL_DELTA, 0)
     }
+
+    /// Whether enough of the region moved by more than `delta` levels
+    /// between `self` and `other`: the cells that moved hold at least
+    /// `share_permille` thousandths of the pixels in the cells both know,
+    /// and at least one cell moved. Each cell weighs the pixels it holds, so
+    /// a part-cell at the region's edge counts for its part (review of
+    /// `#168`, round 2: counted as a whole cell, a 1 by 8 edge on a 9 by 8
+    /// area passed *half the area*). A changed grid (the area was resized)
+    /// always differs.
+    #[must_use]
+    pub fn differs_by(&self, other: &Self, delta: u8, share_permille: u16) -> bool {
+        if (self.columns, self.rows, self.edge) != (other.columns, other.rows, other.edge) {
+            return true;
+        }
+        let (mut known, mut moved) = (0_u64, 0_u64);
+        for (at, ((&a, &b), (&a_hidden, &b_hidden))) in self
+            .cells
+            .iter()
+            .zip(&other.cells)
+            .zip(self.hidden.iter().zip(&other.hidden))
+            .enumerate()
+        {
+            if a_hidden || b_hidden {
+                continue;
+            }
+            let weight = self.weight(at);
+            known += weight;
+            if a.abs_diff(b) > delta {
+                moved += weight;
+            }
+        }
+        moved > 0 && moved * 1000 >= known * u64::from(share_permille.min(SHARE_PERMILLE_MAX))
+    }
+
+    /// How many of the region's pixels cell `at` holds.
+    fn weight(&self, at: usize) -> u64 {
+        let at = at as u32;
+        let (column, row) = (at % self.columns, at / self.columns);
+        let across = if column + 1 == self.columns {
+            self.edge.0
+        } else {
+            CELL
+        };
+        let down = if row + 1 == self.rows {
+            self.edge.1
+        } else {
+            CELL
+        };
+        u64::from(across) * u64::from(down)
+    }
+
+    /// How many cells across and down.
+    #[must_use]
+    pub const fn grid(&self) -> (u32, u32) {
+        (self.columns, self.rows)
+    }
+}
+
+/// Which cell along one side a bitmap pixel at `at` belongs to, for a
+/// bitmap `side` pixels long of a region `region` pixels long with `cells`
+/// cells. A full-size picture (`side >= region`) is cut into true [`CELL`]
+/// pixel cells, so the last cell holds what is left (review of `#168`,
+/// round 1: a proportional split made cells of uneven size); a picture
+/// already one texel per cell (the GPU route) maps texel to cell.
+fn cell_on(at: u32, side: u32, region: u32, cells: u32) -> u32 {
+    let cell = if side >= region {
+        at / CELL
+    } else if side == cells {
+        at
+    } else {
+        (u64::from(at) * u64::from(cells) / u64::from(side.max(1))) as u32
+    };
+    cell.min(cells.saturating_sub(1))
 }
 
 /// Paints `parts` of `bitmap` black, so they take no part in a comparison.
@@ -380,25 +514,54 @@ pub struct Tuning {
     /// The least time between two readings (the sampling rate); `0` is
     /// realtime, every frame that touches the area, up to about 30 a second.
     pub sample_ms: u32,
+    /// The tolerance (roadmap `1.61`, the maintainer's choice of
+    /// 2026-11-03): the share of the area, in thousandths, that must change
+    /// before it counts. `0` is *any change* (one [`CELL`]), the default;
+    /// [`SHARE_PERMILLE_MAX`] is the whole area. The same share decides when
+    /// a change has ended: the region is still once fewer cells than that
+    /// are still moving, so a caret blinking inside a larger tolerance
+    /// neither starts a change nor keeps one from settling.
+    pub share_permille: u16,
+    /// For [`Watch::Settles`]: how long the region must hold still before it
+    /// counts as stopped (the maintainer, 2026-11-10: *"it should behave
+    /// based on the settings that are set"*). Until then a fixed six seconds
+    /// nobody could see or change, and at his rig it never seemed to fire.
+    pub settle_ms: u32,
 }
 
 impl Default for Tuning {
     fn default() -> Self {
         Self {
             notify: Notify::Each,
-            calm_ms: 150,
+            calm_ms: 200,
             gap_ms: 0,
             sample_ms: 0,
+            share_permille: 0,
+            settle_ms: 1_000,
         }
     }
 }
 
-/// [`Tuning::calm_ms`]'s range.
-pub const CALM_MS: (u32, u32) = (50, 10_000);
+/// [`Tuning::calm_ms`]'s range: 100 ms to ten seconds. Events arrive at most
+/// once a captured frame (about 34 ms), so a calm shorter than that makes
+/// *Once* do what *Every time* does (the maintainer, 2026-11-10: *"0ms is
+/// NOT valid in this case"*), and the slider moves in 100 ms steps whose
+/// lowest must be a whole step (*"the min must be either 0, 100ms or
+/// multiple of 100ms"*).
+pub const CALM_MS: (u32, u32) = (100, 10_000);
 /// [`Tuning::gap_ms`]'s longest: a minute.
 pub const GAP_MS_MAX: u32 = 60_000;
 /// [`Tuning::sample_ms`]'s longest: one reading every five seconds.
 pub const SAMPLE_MS_MAX: u32 = 5_000;
+/// [`Tuning::share_permille`]'s largest: the whole area. Half the area until
+/// 2026-11-10, his first word (*"from any pixel to half the area"*), until
+/// his rig pass that day: *"A slider range must always provide as much
+/// flexibility as possible, lowest valid value to highest valid value"*.
+pub const SHARE_PERMILLE_MAX: u16 = 1_000;
+/// [`Tuning::settle_ms`]'s range: 100 ms to half a minute. While a change
+/// settles the host reads every 50 ms (`SETTLE_POLL`), so a shorter calm
+/// waits the same, and the slider's lowest whole step is 100 ms.
+pub const SETTLE_MS: (u32, u32) = (100, 30_000);
 
 impl Tuning {
     /// `self` with every value in its range.
@@ -409,6 +572,8 @@ impl Tuning {
             calm_ms: self.calm_ms.clamp(CALM_MS.0, CALM_MS.1),
             gap_ms: self.gap_ms.min(GAP_MS_MAX),
             sample_ms: self.sample_ms.min(SAMPLE_MS_MAX),
+            share_permille: self.share_permille.min(SHARE_PERMILLE_MAX),
+            settle_ms: self.settle_ms.clamp(SETTLE_MS.0, SETTLE_MS.1),
         }
     }
 
@@ -492,8 +657,9 @@ pub enum Event {
 /// differs by more than [`CELL_DELTA`] from the *baseline*, the reading the
 /// region was last still at, so a slow change adds up until it counts. **A
 /// change ends** when the region has held still for the settle time
-/// ([`Watch::settle_time`]: [`REARM_TIME`] for *Notify when it changes*, six
-/// seconds for *Notify when it stops changing*), every reading in that time
+/// ([`Watch::settle_time`]: [`REARM_TIME`] for *Notify when it changes*, and
+/// for *Notify when it stops changing* the area's own [`Tuning::settle_ms`]
+/// once [`Detector::tune`] has run, six seconds before), every reading in that time
 /// within [`STILL_DELTA`] of the first reading of the still run; the last
 /// becomes the new baseline, wherever the region stopped.
 ///
@@ -523,6 +689,9 @@ pub struct Detector {
     /// Whether each further full step of a change under way is reported too
     /// ([`Self::for_watch`] with [`Watch::Changes`]).
     every_step: bool,
+    /// The area's tolerance ([`Tuning::share_permille`]), set by the host
+    /// before each reading ([`Self::set_share`]).
+    share_permille: u16,
     /// The time [`Self::observe`] gives a reading: [`READING_STEP`] after
     /// the last one.
     clock: Duration,
@@ -562,6 +731,7 @@ impl Detector {
             still_since: Duration::ZERO,
             settle,
             every_step: false,
+            share_permille: 0,
             clock: Duration::ZERO,
         }
     }
@@ -574,6 +744,25 @@ impl Detector {
         Self {
             every_step: watch == Watch::Changes,
             ..Self::with_settle_time(watch.settle_time())
+        }
+    }
+
+    /// Takes the area's tolerance ([`Tuning::share_permille`]) for the
+    /// readings from now on. A change already under way keeps going, and
+    /// ends by the new share.
+    pub fn set_share(&mut self, share_permille: u16) {
+        self.share_permille = share_permille.min(SHARE_PERMILLE_MAX);
+    }
+
+    /// Takes an area's [`Tuning`] for the readings from now on: its
+    /// tolerance, and for [`Watch::Settles`] how long a calm ends a change
+    /// ([`Tuning::settle_ms`]). *Notify when it changes* keeps its own short
+    /// re-arm ([`REARM_TIME`]).
+    pub fn tune(&mut self, watch: Watch, tuning: Tuning) {
+        let tuning = tuning.clamped();
+        self.set_share(tuning.share_permille);
+        if watch == Watch::Settles {
+            self.settle = Duration::from_millis(u64::from(tuning.settle_ms));
         }
     }
 
@@ -624,8 +813,9 @@ impl Detector {
             self.still_from = Some(reading);
             return None;
         };
+        let share = self.share_permille;
         if !self.changing {
-            if !baseline.differs(&reading) {
+            if !baseline.differs_by(&reading, CELL_DELTA, share) {
                 return None;
             }
             self.changing = true;
@@ -633,16 +823,18 @@ impl Detector {
             self.still_since = at;
             return Some(Event::Changed);
         }
-        let moved = self
-            .still_from
-            .as_ref()
-            .map_or(u8::MAX, |from| from.moved(&reading));
-        if moved > STILL_DELTA {
+        let (moving, stepped) = self.still_from.as_ref().map_or((true, true), |from| {
+            (
+                from.differs_by(&reading, STILL_DELTA, share),
+                from.differs_by(&reading, CELL_DELTA, share),
+            )
+        });
+        if moving {
             self.still_from = Some(reading);
             self.still_since = at;
             // A full step from what the region last held: another change,
             // for an area that asked to hear of every one.
-            return (self.every_step && moved > CELL_DELTA).then_some(Event::Changed);
+            return (self.every_step && stepped).then_some(Event::Changed);
         }
         if at.saturating_sub(self.still_since) < self.settle {
             return None;
@@ -665,7 +857,7 @@ impl Detector {
 #[cfg(test)]
 mod tests {
     use super::{
-        CELL_DELTA, Detector, Event, Fingerprint, GRID, SETTLE_READINGS, Watch, leave_out,
+        CELL, CELL_DELTA, Detector, Event, Fingerprint, SETTLE_READINGS, Watch, leave_out,
     };
     use crate::bitmap::RgbaBitmap;
     use crate::geometry::Rect;
@@ -726,13 +918,159 @@ mod tests {
         assert!(!print(&picture).differs(&print(&picture.clone())));
     }
 
-    /// A caret: 2 by 16 pixels turning black on white, in a 960 by 640 region
-    /// whose cells are 60 by 40. About three levels on one cell, so ignored.
+    /// A caret: 2 by 16 pixels turning black on white, in a 960 by 640
+    /// region. Since `1.61` it counts at the lowest tolerance, on any area
+    /// size: it fills half of four 4-pixel cells. A tolerance of a
+    /// thousandth (ten of this region's 9,600 cells) leaves it out.
     #[test]
-    fn a_blinking_caret_is_not_a_change() {
+    fn a_blinking_caret_counts_unless_the_tolerance_leaves_it_out() {
         let before = grey(960, 640, 250);
         let after = with_patch(before.clone(), (300, 200, 2, 16), 0);
-        assert!(!print(&before).differs(&print(&after)));
+        assert!(print(&before).differs(&print(&after)));
+        assert!(!print(&before).differs_by(&print(&after), CELL_DELTA, 1));
+    }
+
+    /// His rig pass of 2026-11-07: on an area the size of a monitor a small
+    /// change did not fire, because each of the 16 by 16 cells was about
+    /// 14,400 pixels. A 6 by 6 icon at a contrast of 100 levels on a 1080p
+    /// area must count at the lowest tolerance.
+    #[test]
+    fn a_small_change_on_a_monitor_sized_area_counts() {
+        let before = grey(1920, 1080, 30);
+        let after = with_patch(before.clone(), (1000, 500, 6, 6), 130);
+        assert!(print(&before).differs(&print(&after)));
+    }
+
+    /// Review of `#168`, round 4: *Any change* must see one pixel. A single
+    /// pixel changing by more than about 100 levels counts on any area, and
+    /// one changing by less does not (the floor [`CELL`] documents).
+    #[test]
+    fn any_change_sees_a_single_pixel() {
+        let before = grey(1920, 1080, 30);
+        let bright = with_patch(before.clone(), (1001, 503, 1, 1), 255);
+        assert!(print(&before).differs(&print(&bright)));
+        let faint = with_patch(before.clone(), (1001, 503, 1, 1), 30 + 90);
+        assert!(!print(&before).differs(&print(&faint)));
+    }
+
+    /// Fixed-size cells: a larger region has more cells, not larger ones,
+    /// rounded up so the region's edge is a cell too.
+    #[test]
+    fn a_cell_is_four_pixels_on_any_region() {
+        assert_eq!(CELL, 4);
+        assert_eq!(print(&grey(1920, 1080, 0)).grid(), (480, 270));
+        assert_eq!(print(&grey(106, 62, 0)).grid(), (27, 16));
+        assert_eq!(print(&grey(5, 3, 0)).grid(), (2, 1));
+        assert_eq!(print(&grey(3, 3, 0)).grid(), (1, 1));
+    }
+
+    /// The GPU route reads the region averaged down to one texel per cell
+    /// (`uptake-capture`'s `watch_capture_small`); a picture read that way
+    /// has the same grid, and the same values, as the full picture.
+    #[test]
+    fn a_picture_averaged_down_to_cells_reads_as_the_full_one() {
+        let full = with_patch(grey(64, 48, 40), (8, 16, 16, 8), 200);
+        let mut small = grey(16, 12, 40);
+        small = with_patch(small, (2, 4, 4, 2), 200);
+        let region = Size::new(64, 48);
+        let read = Fingerprint::of_region(&small, region, &[])
+            .unwrap_or_else(|| unreachable!("a non-empty bitmap"));
+        assert_eq!(read, print(&full));
+    }
+
+    /// True 4-pixel cells on a full-size picture whose sides are not a
+    /// multiple of four (review of `#168`, round 1): a 106-pixel side is
+    /// twenty-six cells of 4 and one of 2, so pixel column 7 is in cell 1,
+    /// column 8 in cell 2, and the last two columns in cell 26 alone.
+    #[test]
+    fn a_full_picture_is_cut_into_true_four_pixel_cells() {
+        let base = grey(106, 62, 100);
+        let changed_cells = |x: u32| {
+            let after = with_patch(base.clone(), (x, 0, 1, 62), 255);
+            let (a, b) = (print(&base), print(&after));
+            let mut columns: Vec<u32> = a
+                .cells
+                .iter()
+                .zip(&b.cells)
+                .enumerate()
+                .filter(|(_, (x, y))| x != y)
+                .map(|(at, _)| at as u32 % a.columns)
+                .collect();
+            columns.dedup();
+            columns.sort_unstable();
+            columns.dedup();
+            columns
+        };
+        assert_eq!(changed_cells(7), vec![1]);
+        assert_eq!(changed_cells(8), vec![2]);
+        assert_eq!(changed_cells(104), vec![26]);
+        assert_eq!(changed_cells(103), vec![25]);
+    }
+
+    /// Both routes read a region whose sides are not a multiple of four the
+    /// same way: the GPU's padding repeats the region's last column and row,
+    /// so its last texels are the edge's own pixels, and the grid and the
+    /// values are the full picture's. (The GPU itself is tested in
+    /// `uptake-capture`'s `a_one_pixel_edge_reaches_the_gpu_average`.) 106
+    /// by 62 is 26 cells and 2 pixels across, 15 cells and 2 pixels down.
+    #[test]
+    fn both_routes_agree_on_a_region_not_a_multiple_of_four() {
+        let full = with_patch(grey(106, 62, 192), (8, 8, 16, 8), 0);
+        let mut small = grey(27, 16, 192);
+        small = with_patch(small, (2, 2, 4, 2), 0);
+        let read = Fingerprint::of_region(&small, Size::new(106, 62), &[])
+            .unwrap_or_else(|| unreachable!("a non-empty bitmap"));
+        assert_eq!(read, print(&full));
+    }
+
+    /// The tolerance counts cells: at half the area, a change to under half
+    /// the cells is not a change and one to half of them is; at the whole
+    /// area only a change to all of it counts.
+    #[test]
+    fn the_tolerance_is_a_share_of_the_cells() {
+        // 64 by 64: 16 by 16 cells; half the area is the top 32 pixel rows.
+        let before = grey(64, 64, 100);
+        let three_rows = with_patch(before.clone(), (0, 0, 64, 24), 200);
+        let four_rows = with_patch(before.clone(), (0, 0, 64, 32), 200);
+        let half = 500;
+        assert!(!print(&before).differs_by(&print(&three_rows), CELL_DELTA, half));
+        assert!(print(&before).differs_by(&print(&four_rows), CELL_DELTA, half));
+        // At the whole area, half is not enough and all of it is; above the
+        // whole area is held at the whole area.
+        let all = super::SHARE_PERMILLE_MAX;
+        assert!(!print(&before).differs_by(&print(&four_rows), CELL_DELTA, all));
+        let everything = with_patch(before.clone(), (0, 0, 64, 64), 200);
+        assert!(print(&before).differs_by(&print(&everything), CELL_DELTA, all));
+        assert!(print(&before).differs_by(&print(&everything), CELL_DELTA, u16::MAX));
+    }
+
+    /// Review of `#168`, round 2: a part-cell counts for the pixels it
+    /// holds. On a 9 by 8 area (two columns of 4 by 4 cells and one of 1 by
+    /// 4), changing the 1 by 8 edge is 8 of 72 pixels: a change at *any change*, not at
+    /// half the area, nor at a tenth.
+    #[test]
+    fn a_part_cell_weighs_what_it_holds() {
+        let before = grey(9, 8, 100);
+        let edge = with_patch(before.clone(), (8, 0, 1, 8), 200);
+        assert!(print(&before).differs(&print(&edge)));
+        assert!(!print(&before).differs_by(&print(&edge), CELL_DELTA, 500));
+        assert!(!print(&before).differs_by(&print(&edge), CELL_DELTA, 112));
+        assert!(print(&before).differs_by(&print(&edge), CELL_DELTA, 111));
+        // The first 8 columns are 64 of 72: past half.
+        let body = with_patch(before.clone(), (0, 0, 8, 8), 200);
+        assert!(print(&before).differs_by(&print(&body), CELL_DELTA, 500));
+    }
+
+    /// Cells under a window of UP-TAKE's own count toward neither side of
+    /// the share: half of what is known, not half of the region.
+    #[test]
+    fn the_tolerance_counts_only_known_cells() {
+        let before = grey(64, 64, 100);
+        let after = with_patch(before.clone(), (0, 0, 64, 16), 200);
+        // Hide the bottom half: 32 known cells, 16 of them changed.
+        let hide = [Rect::new(0, 32, 64, 32)];
+        let (a, b) = (hiding(&before, &hide), hiding(&after, &hide));
+        assert!(a.differs_by(&b, CELL_DELTA, 500));
     }
 
     /// A new line of text: a dark band across most of the region's width.
@@ -748,8 +1086,8 @@ mod tests {
     /// threshold did not report. That change must count.
     #[test]
     fn the_measured_icons_are_a_change() {
-        let before = grey(GRID, GRID, 100);
-        let after = grey(GRID, GRID, 112);
+        let before = grey(16, 16, 100);
+        let after = grey(16, 16, 112);
         assert_eq!(print(&before).moved(&print(&after)), 12);
         assert!(print(&before).differs(&print(&after)));
     }
@@ -758,9 +1096,9 @@ mod tests {
     /// and one level more is.
     #[test]
     fn the_line_is_cell_delta_exclusive() {
-        let base = grey(GRID, GRID, 100);
-        assert!(!print(&base).differs(&print(&grey(GRID, GRID, 100 + CELL_DELTA))));
-        assert!(print(&base).differs(&print(&grey(GRID, GRID, 101 + CELL_DELTA))));
+        let base = grey(16, 16, 100);
+        assert!(!print(&base).differs(&print(&grey(16, 16, 100 + CELL_DELTA))));
+        assert!(print(&base).differs(&print(&grey(16, 16, 101 + CELL_DELTA))));
     }
 
     #[test]
@@ -768,9 +1106,10 @@ mod tests {
         assert!(print(&grey(320, 200, 100)).differs(&print(&grey(8, 8, 100))));
     }
 
-    /// A region smaller than the grid gets one cell per pixel and still works.
+    /// A region smaller than one cell is one cell, and a pixel at full
+    /// contrast in it still counts.
     #[test]
-    fn a_tiny_region_is_summarised_per_pixel() {
+    fn a_tiny_region_is_one_cell() {
         let before = grey(3, 2, 0);
         let after = with_patch(before.clone(), (2, 1, 1, 1), 255);
         assert!(print(&before).differs(&print(&after)));
@@ -1215,8 +1554,8 @@ mod tests {
             &bitmap,
             &[Rect::new(5, 5, 10, 2), Rect::new(100, 100, 5, 5)],
         );
-        // 64 px over 16 cells: 4 px a cell, so x 5..=14 is cells 1..=3, y 5..=6
-        // is row 1.
+        // 64 px over 16 cells: 4 px a cell, so x 5..=14 is cells 1..=3, y
+        // 5..=6 is row 1.
         let marked: Vec<usize> = hidden
             .hidden
             .iter()
@@ -1224,6 +1563,42 @@ mod tests {
             .filter_map(|(at, &is)| is.then_some(at))
             .collect();
         assert_eq!(marked, vec![17, 18, 19]);
+    }
+
+    /// The tolerance ends a change too: a caret blinking inside a larger
+    /// share neither starts a change nor keeps a finished one from settling
+    /// (*Notify when it stops changing* over a render with a text field).
+    #[test]
+    fn a_caret_inside_the_tolerance_does_not_keep_a_change_going() {
+        let blank = grey(960, 640, 250);
+        let caret = |on: bool| {
+            if on {
+                with_patch(blank.clone(), (300, 200, 2, 16), 0)
+            } else {
+                blank.clone()
+            }
+        };
+        let done = with_patch(blank.clone(), (0, 400, 960, 40), 0);
+        let done_caret = with_patch(done.clone(), (300, 200, 2, 16), 0);
+        let mut detector = Detector::for_watch(Watch::Settles);
+        detector.set_share(1);
+        let mut at = 0;
+        let mut step = |reading: &RgbaBitmap| {
+            at += 100;
+            detector.observe_at(print(reading), std::time::Duration::from_millis(at))
+        };
+        assert_eq!(step(&caret(false)), None);
+        assert_eq!(step(&caret(true)), None, "the caret alone is no change");
+        assert_eq!(step(&done), Some(Event::Changed), "a bar of 960 by 40 is");
+        let mut events = Vec::new();
+        for n in 0..80 {
+            events.push(step(if n % 2 == 0 { &done_caret } else { &done }));
+        }
+        assert_eq!(
+            events.iter().flatten().collect::<Vec<_>>(),
+            vec![&Event::Settled],
+            "the caret blinks on, and the change still ends once"
+        );
     }
 }
 
@@ -1329,14 +1704,18 @@ mod tuning_tests {
     fn values_from_the_page_are_kept_in_range() {
         let wild = Tuning {
             notify: Notify::Each,
-            calm_ms: 0,
+            calm_ms: u32::MAX,
             gap_ms: u32::MAX,
             sample_ms: u32::MAX,
+            share_permille: u16::MAX,
+            settle_ms: u32::MAX,
         }
         .clamped();
-        assert_eq!(wild.calm_ms, super::CALM_MS.0);
+        assert_eq!(wild.calm_ms, super::CALM_MS.1);
         assert_eq!(wild.gap_ms, super::GAP_MS_MAX);
         assert_eq!(wild.sample_ms, super::SAMPLE_MS_MAX);
+        assert_eq!(wild.share_permille, super::SHARE_PERMILLE_MAX);
+        assert_eq!(wild.settle_ms, super::SETTLE_MS.1);
     }
 
     /// The sampling rate: realtime never waits; a slower rate waits out

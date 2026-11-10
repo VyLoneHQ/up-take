@@ -24,33 +24,113 @@ export interface PanelTuning {
   gap_ms: number;
   /** The least time between two readings; 0 is realtime. */
   sample_ms: number;
+  /** The tolerance (roadmap 1.61): the share of the area, in thousandths,
+   * that must change before it counts; 0 is any change, 1000 the whole area. */
+  share_permille: number;
+  /** For "stops changing": how long the area must hold still, in ms. */
+  settle_ms: number;
 }
 
 /** The minimum gaps the panel offers, in ms: none, 0.1 s, 1 s, 10 s, 1 min. */
 export const GAPS_MS: readonly number[] = [0, 100, 1_000, 10_000, 60_000];
 
-/** The calm slider's steps, in ms, shortest first. */
-export const CALM_STEPS_MS: readonly number[] = [
-  50, 100, 150, 250, 500, 1_000, 2_000, 5_000, 10_000,
-];
+/** A slider over a range of values, the same way for every slider (the
+ * maintainer, 2026-11-10): from the lowest valid value to the highest in
+ * steps of one size, `step`, and ten steps at a time while Ctrl is held.
+ * The step is uniform across the time sliders (100 ms, 1 s with Ctrl: his
+ * *"make sure that the step size is einheitlich across them all"*), and
+ * `min` is always a whole number of steps (*"the min must be either 0,
+ * 100ms or multiple of 100ms"*), so every position is a round value. The
+ * input itself runs from 0 to the number of steps; `reversed` runs the
+ * values from `max` on the left to `min` on the right. */
+export interface SliderRange {
+  min: number;
+  max: number;
+  step: number;
+  reversed?: boolean;
+}
 
-/** The sampling slider's steps, in ms between readings, slowest first so
- * the slider runs from every five seconds on the left to realtime (0) on
- * the right. */
-export const SAMPLE_STEPS_MS: readonly number[] = [
-  5_000, 4_000, 3_000, 2_000, 1_500, 1_000, 750, 500, 250, 100, 0,
-];
+/** How many steps one step is while Ctrl is held. */
+export const COARSE = 10;
 
-/** The index of the step closest to `value`, for a slider showing a value
- * Rust kept that the steps may not hold exactly. */
-export function nearestStep(steps: readonly number[], value: number): number {
-  let best = 0;
-  steps.forEach((step, index) => {
-    if (Math.abs(step - value) < Math.abs((steps[best] ?? 0) - value)) {
-      best = index;
-    }
-  });
-  return best;
+/** One step of every time slider, in ms. */
+export const TIME_STEP_MS = 100;
+
+/** The fastest a watch area reads: one captured frame, about 30 a second
+ * (`uptake-capture`'s `WATCH_FRAME_INTERVAL`, which throttles the capture
+ * to save cost). Not the monitor's refresh rate. */
+export const FRAME_MS = 34;
+
+/** The calm slider, in ms: 100 ms to 10 s. Not from 0: a calm shorter than
+ * one captured frame (about 34 ms) is no calm at all, so *Once* would do
+ * what *Every time* does (*"0ms is NOT valid in this case"*), and the
+ * lowest step above that is 100 ms. */
+export const CALM_RANGE: SliderRange = {
+  min: 100,
+  max: 10_000,
+  step: TIME_STEP_MS,
+};
+
+/** The sampling slider, in ms between readings: every five seconds on the
+ * left to realtime (0) on the right. */
+export const SAMPLE_RANGE: SliderRange = {
+  min: 0,
+  max: 5_000,
+  step: TIME_STEP_MS,
+  reversed: true,
+};
+
+/** The tolerance slider, in thousandths of the area: any change on the
+ * left to the whole area on the right, 1 % a step. */
+export const SHARE_RANGE: SliderRange = { min: 0, max: 1_000, step: 10 };
+
+/** The "stops changing" slider, in ms of stillness: 100 ms to 30 s. While
+ * a change settles the area is read every 50 ms (`SETTLE_POLL`), so a
+ * shorter calm waits the same; the lowest step above that is 100 ms. */
+export const SETTLE_RANGE: SliderRange = {
+  min: 100,
+  max: 30_000,
+  step: TIME_STEP_MS,
+};
+
+/** How many steps a slider has, counted from 0 and not from `min`: the
+ * input's positions are whole steps from 0, so ten at a time (Ctrl) land on
+ * whole multiples of ten steps, 1 s or 10 %, and reach `max` exactly (the
+ * maintainer, 2026-11-10: counted from a `min` of 100 ms, Ctrl gave 14.1 s
+ * and stopped at 29.1 s). A position below `min` reads as `min`. */
+export function steps(range: SliderRange): number {
+  return Math.round(range.max / range.step);
+}
+
+/** The input's own bounds: 0 to the number of steps. */
+export function track(range: SliderRange): { min: number; max: number } {
+  return { min: 0, max: steps(range) };
+}
+
+/** The input's step: one, or ten while Ctrl is held. */
+export function stepOf(_range: SliderRange, coarse: boolean): number {
+  return coarse ? COARSE : 1;
+}
+
+/** Where `value` sits on the input, the nearest step, kept in range. */
+export function toPosition(range: SliderRange, value: number): number {
+  const kept = Math.min(range.max, Math.max(range.min, value));
+  const fromLeft = range.reversed ? range.max - kept : kept;
+  return Math.round(fromLeft / range.step);
+}
+
+/** The value at input position `position`: a whole number of steps, kept
+ * in range. */
+export function fromPosition(range: SliderRange, position: number): number {
+  const at = Math.min(steps(range), Math.max(0, Math.round(position)));
+  const value = range.reversed ? range.max - at * range.step : at * range.step;
+  return Math.min(range.max, Math.max(range.min, value));
+}
+
+/** How far along the track `value` sits, 0 at the left and 1 at the right,
+ * for the drawn fill. */
+export function fraction(range: SliderRange, value: number): number {
+  return toPosition(range, value) / steps(range);
 }
 
 const isCount = (value: unknown): value is number =>
@@ -65,7 +145,9 @@ export function isPanelTuning(value: unknown): value is PanelTuning {
     (NOTIFY as readonly string[]).includes(tuning.notify) &&
     isCount(tuning.calm_ms) &&
     isCount(tuning.gap_ms) &&
-    isCount(tuning.sample_ms)
+    isCount(tuning.sample_ms) &&
+    isCount(tuning.share_permille) &&
+    isCount(tuning.settle_ms)
   );
 }
 

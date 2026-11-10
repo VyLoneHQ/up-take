@@ -18,10 +18,12 @@
 //!   from the same `Area::is_watching`, sent in the area payload, so the two
 //!   answer one question once. Nothing is read while the overlay is hidden,
 //!   because the mark is hidden with it.
-//! - **Local.** A reading is reduced to at most 256 brightness averages
-//!   (a region under 16 pixels on a side keeps one per pixel on that side,
-//!   which is its greyscale picture), and the detector keeps two such
-//!   summaries, the last still one and the last one. Nothing is written,
+//! - **Local.** A reading is reduced to the average brightness of each 4 by
+//!   4 pixel square of its region (`uptake_core::watch::CELL`, roadmap
+//!   `1.61`), which is the region's greyscale picture at a quarter of its
+//!   size: about 130,000 values for an area the size of a 1080p monitor. The
+//!   detector keeps up to two such readings, the last still one and the last
+//!   one. Nothing is written,
 //!   logged or sent; the notification says which moment it was, never what
 //!   was read. ⚠️ **What is held in between is larger than a reading:** while
 //!   any area reads, a capture session on each monitor under one keeps that
@@ -41,11 +43,12 @@
 //! and left out of the comparison ([`own_drawing`]).
 //!
 //! **An area whose mark is not wholly on a monitor does not read** ([`mark`],
-//! [`mark_on_screen`]). The mark sits in the area's top right corner, and an
+//! [`mark_on_screen`]). The mark sits in the area's top left corner (top
+//! right until 2026-11-10, the maintainer's choice), and an
 //! area may hang off the desktop or into a gap between monitors; the capture
 //! would still read the part that is on screen while the mark is drawn
 //! nowhere, which is `ADR-0048`'s first *Revisit if* (review of `#154`,
-//! round 3). Checked against the area's top right corner, which holds the
+//! round 3). Checked against the area's top left corner, which holds the
 //! mark because the page clips the mark to the area (rounds 15 and 16).
 //!
 //! **Each of these is asked again right before each capture**, not once a
@@ -132,17 +135,30 @@
 //!
 //! - **A still screen sends no frames and costs nothing**; the thread looks
 //!   again every [`IDLE`] in case a change was missed.
-//! - **Measured so far:** on the maintainer's primary monitor (Windows build
-//!   26200) an ordinary desktop sent 3 to 11 frames a second, every one with
-//!   its dirty regions, about 2 to 3 % of the screen each. This route,
-//!   measured the same day (workspace `evidence/1.58-watch-events/`): 0.34 %
-//!   of a core for one area and 0.43 % for five on the small read, 1.69 % for
-//!   an area as large as a monitor. **The full-size read, used while
-//!   UP-TAKE is shown in screen recordings, measured 2.49 % and 2.59 % for an
-//!   area as large as a monitor: over `quality-bars.md` §1's 2 % target per
-//!   live area, under its 5 % hard fail**, part of it the sessions'
-//!   frames, which `BUDGET` does not cover. A busy screen held at 30 frames a second
-//!   for a long time is not measured yet (`I-474`).
+//! - **Measured, 2026-11-10, with 4-pixel cells** (roadmap `1.61`; the
+//!   maintainer's private planning workspace, `Projects/UP-TAKE/evidence/
+//!   1.61-watch-dot-cost/`, which holds the runs, the stand-in dot and the
+//!   harness, `1.58-watch-events/watch_events.rs` there, which runs this
+//!   loop without the app; not in this repository; the watcher's harness on a still,
+//!   dark backdrop over the area, 30 s a case): one 600 by 400 area, 0.05 %
+//!   to 0.25 % of a core while nothing changes (no reads at all; the spread
+//!   is the harness's own idle passes); an area as large as a monitor,
+//!   0.61 % on the full read. **The
+//!   watching dot matters more than the read:** a dot animated all the time
+//!   woke its area about 12 times a second even with UP-TAKE kept out of
+//!   captures, and cost 1.7 % to 3.1 % (over `quality-bars.md` §1's 2 %
+//!   target per live area, under its 5 % hard fail); one short pulse every
+//!   5 s cost 0.35 % to 0.8 %, which is why the dot pulses and does not
+//!   breathe. **Not measured yet: the whole watcher, reads included, on a
+//!   busy screen held at 30 frames a second for a long time** (`I-474`). The
+//!   capture sessions' own share at 30 frames a second, without reads, is
+//!   measured ([`BUDGET`]'s note).
+//! - Measured before `1.61`, with at most 16 by 16 cells
+//!   (`evidence/1.58-watch-events/`, 2026-11-05): an ordinary desktop sent 3
+//!   to 11 frames a second on the primary monitor, about 2 to 3 % of the
+//!   screen each; 0.34 % of a core for one area, 0.43 % for five, 1.69 % for
+//!   an area as large as a monitor, and 2.49 % to 2.59 % for that area read
+//!   whole. Those figures are for the old grid and are kept as history.
 //! - Earlier routes, measured in workspace `evidence/1.58-watch-cost/`: held
 //!   sessions read whole every two seconds, 0.13 % of a core for one area
 //!   and for five on a still screen; a capture built per reading, 7.3 % for
@@ -218,8 +234,9 @@ const _: () = assert!(
 /// §1's 2 % per live area, for all of them together. After each pass it rests
 /// until its own time is no more than this share ([`rest_after`]). The held
 /// sessions' frames cost on top of it, outside the governor: about 0.3 to
-/// 0.4 % of a core measured at 30 frames a second (workspace
-/// `evidence/1.58-watch-events/`).
+/// 0.4 % of a core measured at 30 frames a second, the sessions alone and no
+/// reads (the private planning workspace's `evidence/1.58-watch-events/`;
+/// the whole watcher on such a screen is not measured, `I-474`).
 pub const BUDGET: f64 = 0.02;
 
 /// How long to rest after a pass that took `spent`: long enough that the pass
@@ -236,16 +253,15 @@ pub fn rest_after(spent: Duration) -> Duration {
 /// physical pixels: the border, 1.5 CSS pixels, at up to 250 % scaling.
 const EDGE: u32 = 4;
 
-/// The corner left out for the *watching* mark, in physical pixels: the
-/// mark's text at 11 CSS pixels, in either language, at up to about 230 %
-/// scaling. ⚠️ **Width binds first**: the German mark is about 99 to 114
-/// CSS pixels wide (Windows font engines, not WebView2), so from about 230 %
-/// it is wider than 240, and from about 300 % taller than 40. The page clips
-/// the mark to the area, not to this corner, so on a wide area the dot can
-/// then lie outside the corner [`mark_on_screen`] checks (review of `#154`,
-/// round 19). The page's word closes that route: it measures the mark it
-/// drew ([`confirm`]).
-const MARK: (u32, u32) = (240, 40);
+/// The corner left out for the *watching* mark, in physical pixels: a dot
+/// of 6 CSS pixels, 1 in from the corner, so 7 CSS pixels each way, at up to
+/// about 340 % scaling. Until 2026-11-10 the mark was the word *watching*
+/// beside the dot, and this corner was 240 by 40 to hold it; the maintainer's
+/// rig pass found an area as small as two letters could not show the word,
+/// so its mark was never seen and it never read. The page clips the mark to
+/// the area and measures the mark it drew ([`confirm`]), so a scaling past
+/// this corner is caught there (review of `#154`, round 19).
+const MARK: (u32, u32) = (24, 24);
 
 /// Whether the thread exists, and whether it has been woken since it last
 /// looked.
@@ -595,7 +611,7 @@ struct Watcher {
 }
 
 /// The parts of a reading that are UP-TAKE's own drawing, in the reading's
-/// pixels: a band along each edge for the border, and the top right corner
+/// pixels: a band along each edge for the border, and the top left corner
 /// for the *watching* mark. `bounds` is the area, `taken` the rectangle the
 /// capture returned, which is `bounds` clamped to the desktop.
 fn own_drawing(bounds: Rect, taken: Rect) -> [Rect; 5] {
@@ -607,18 +623,12 @@ fn own_drawing(bounds: Rect, taken: Rect) -> [Rect; 5] {
     let right = dx + i32::try_from(width).unwrap_or(i32::MAX);
     let bottom = dy + i32::try_from(height).unwrap_or(i32::MAX);
     let edge = i32::try_from(EDGE).unwrap_or(0);
-    let mark_width = i32::try_from(MARK.0.min(width)).unwrap_or(0);
     [
         Rect::new(dx, dy, width, EDGE),
         Rect::new(dx, bottom - edge, width, EDGE),
         Rect::new(dx, dy, EDGE, height),
         Rect::new(right - edge, dy, EDGE, height),
-        Rect::new(
-            right - mark_width,
-            dy,
-            MARK.0.min(width),
-            MARK.1.min(height),
-        ),
+        Rect::new(dx, dy, MARK.0.min(width), MARK.1.min(height)),
     ]
 }
 
@@ -630,7 +640,7 @@ fn in_captures() -> bool {
 
 /// What a reading leaves out. Nothing while UP-TAKE is kept out of captures,
 /// which is the default (`ADR-0019`): its drawing is not in the reading, and
-/// leaving the corner out anyway cost every area its top right corner.
+/// leaving the corner out anyway cost every area its mark's corner.
 /// With *Show UP-TAKE in screen recordings* on, [`own_drawing`], except the
 /// mark's corner when that would leave nothing to read: an area no wider
 /// than the corner and no taller than it read solid black and could never
@@ -683,7 +693,7 @@ fn unknown_under(windows: &[Rect], taken: Rect) -> Vec<Rect> {
         .collect()
 }
 
-/// Where the *watching* mark can be, in desktop pixels: the area's top right
+/// Where the *watching* mark can be, in desktop pixels: the area's top left
 /// corner, [`MARK`] in size or the area's own size when that is smaller.
 ///
 /// The host's own first check, before the page's word ([`confirm`]): an area
@@ -692,12 +702,10 @@ fn unknown_under(windows: &[Rect], taken: Rect) -> Vec<Rect> {
 /// page clips the mark to the area (`+page.svelte`, `.watch-badge`, pinned by
 /// `watch-badge-css.test.ts`) and measures the mark it drew.
 fn mark(bounds: Rect) -> Rect {
-    let width = MARK.0.min(bounds.size.width);
-    let right = bounds.origin.x + i32::try_from(bounds.size.width).unwrap_or(i32::MAX);
     Rect::new(
-        right - i32::try_from(width).unwrap_or(0),
+        bounds.origin.x,
         bounds.origin.y,
-        width,
+        MARK.0.min(bounds.size.width),
         MARK.1.min(bounds.size.height),
     )
 }
@@ -849,9 +857,9 @@ impl Host for AppHost<'_> {
         whole: bool,
     ) -> Result<Option<uptake_capture::CapturedRegion>, String> {
         let desktop = crate::overlay::monitor_rects();
-        // Averaged down on the GPU and read back at about 16 x 16, so a
-        // read costs about the same for any area size: when nothing has to
-        // be painted out and the area is on one monitor.
+        // Averaged down on the GPU and read back at one texel per 4-pixel
+        // fingerprint cell (`1.61`): when nothing has to be painted out and
+        // the area is on one monitor.
         if !whole {
             match uptake_capture::warm::watch_capture_small(bounds, &desktop) {
                 Ok(small) => {
@@ -1066,7 +1074,10 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
                 );
                 let switched = watcher.picture.is_some_and(|was| was != size);
                 watcher.picture = Some(size);
-                let fingerprint = Fingerprint::of_hiding(&captured.bitmap, &hidden);
+                // The region's own size: the GPU route reads it averaged down
+                // to one texel per cell, and the cells are the region's.
+                let fingerprint =
+                    Fingerprint::of_region(&captured.bitmap, captured.rect.size, &hidden);
                 if switched {
                     // Another route: re-anchored, not compared (round 6).
                     if let Some(fingerprint) = fingerprint {
@@ -1085,6 +1096,10 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
                 None
             }
         };
+        // The area's tolerance (roadmap `1.61`) and, for *Notify when it
+        // stops changing*, its calm, as they are now: the panel may have
+        // moved them since the last reading.
+        watcher.detector.tune(target.watch, target.tuning);
         if let Some(event) = reading.and_then(|reading| watcher.detector.observe_at(reading, at))
             && target.watch.notifies(event)
             && watcher.gate.admit(target.tuning, at).notifies
@@ -1210,6 +1225,9 @@ mod tests {
             whole: Vec<bool>,
             /// The size of the picture captures return, when not the area's.
             picture: Option<Size>,
+            /// A small part of the screen showing another grey, desktop
+            /// pixels: a change to some of an area and not all of it.
+            patch: Option<(Rect, u8)>,
         }
 
         impl Fake {
@@ -1232,6 +1250,7 @@ mod tests {
                     unready: 0,
                     whole: Vec::new(),
                     picture: None,
+                    patch: None,
                 }
             }
         }
@@ -1286,6 +1305,26 @@ mod tests {
                     .ok_or_else(|| "off screen".to_owned())?;
                 let mut pixels = [self.level, self.level, self.level, 255]
                     .repeat(usize::try_from(rect.size.width * rect.size.height).unwrap_or(0));
+                if let Some((patch, grey)) = self.patch
+                    && let Some(part) = patch.intersection(rect)
+                {
+                    let width = i32::try_from(rect.size.width).unwrap_or(0);
+                    for y in
+                        part.origin.y..part.origin.y + i32::try_from(part.size.height).unwrap_or(0)
+                    {
+                        for x in part.origin.x
+                            ..part.origin.x + i32::try_from(part.size.width).unwrap_or(0)
+                        {
+                            let at = usize::try_from(
+                                ((y - rect.origin.y) * width + (x - rect.origin.x)) * 4,
+                            )
+                            .unwrap_or(0);
+                            if let Some(pixel) = pixels.get_mut(at..at + 3) {
+                                pixel.copy_from_slice(&[grey, grey, grey]);
+                            }
+                        }
+                    }
+                }
                 // The card, drawn into the picture as a capture would show it:
                 // only while the setting puts UP-TAKE in captures.
                 if self.state.1
@@ -2010,10 +2049,11 @@ mod tests {
         }
 
         /// Round 3: an area whose mark corner is on no monitor is not read,
-        /// though part of the area is on screen.
+        /// though part of the area is on screen. The corner is the top left
+        /// since 2026-11-10, so the area hangs off the desktop's left edge.
         #[test]
         fn an_area_whose_mark_is_off_screen_is_not_read() {
-            let mut fake = Fake::new(targets(&[Rect::new(1700, 100, 600, 400)]));
+            let mut fake = Fake::new(targets(&[Rect::new(-300, 100, 600, 400)]));
             let mut memory = Memory::default();
             run(&mut fake, &mut memory, 2);
             assert_eq!(fake.captured.len(), 0);
@@ -2062,6 +2102,63 @@ mod tests {
             assert!(fake.notified.is_empty(), "no card");
         }
 
+        /// The maintainer's rig, 2026-11-10: *Notify when it stops changing*
+        /// said nothing. A bar grows across a 600 by 400 area for five
+        /// seconds and stops: one notification, that it settled.
+        #[test]
+        fn a_bar_that_fills_and_stops_says_it_settled() {
+            let list = targets_for(&[Rect::new(100, 100, 600, 400)], Watch::Settles);
+            let mut fake = Fake::new(list);
+            let mut memory = Memory::default();
+            run(&mut fake, &mut memory, 2);
+            for step in 1..=10_u32 {
+                fake.patch = Some((Rect::new(120, 280, 40 * step, 20), 20));
+                run(&mut fake, &mut memory, 1);
+            }
+            assert!(fake.notified.is_empty(), "nothing while it moves");
+            let settle = usize::try_from(Watch::Settles.settle_readings()).unwrap_or(usize::MAX);
+            run(&mut fake, &mut memory, settle + 2);
+            assert_eq!(fake.notified, vec![Event::Settled]);
+        }
+
+        /// The maintainer, 2026-11-10: *Notify when it stops changing* follows
+        /// the area's own setting. With a calm of one second, a change that
+        /// stops says so after two still readings at the fake's half-second
+        /// clock, not after the six seconds it used to wait.
+        #[test]
+        fn stops_changing_waits_the_areas_own_calm() {
+            let mut list = targets_for(&[Rect::new(100, 100, 600, 400)], Watch::Settles);
+            list[0].tuning.settle_ms = 1_000;
+            let mut fake = Fake::new(list);
+            let mut memory = Memory::default();
+            run(&mut fake, &mut memory, 2);
+            fake.level = 20;
+            run(&mut fake, &mut memory, 1);
+            assert!(fake.notified.is_empty(), "nothing while it changes");
+            run(&mut fake, &mut memory, 3);
+            assert_eq!(fake.notified, vec![Event::Settled]);
+        }
+
+        /// Roadmap `1.61`: the host reads with the area's own tolerance. A
+        /// 16 by 16 change on a 600 by 400 area (16 of its 15,000 4-pixel
+        /// cells, about 0.1 % of it) is a change at *any change*, and none at
+        /// one percent of the area.
+        #[test]
+        fn an_areas_tolerance_decides_how_much_change_counts() {
+            let small_change = |share_permille: u16| {
+                let mut list = targets(&[Rect::new(100, 100, 600, 400)]);
+                list[0].tuning.share_permille = share_permille;
+                let mut fake = Fake::new(list);
+                let mut memory = Memory::default();
+                run(&mut fake, &mut memory, 2);
+                fake.patch = Some((Rect::new(300, 300, 16, 16), 20));
+                run(&mut fake, &mut memory, 1);
+                fake.notified
+            };
+            assert_eq!(small_change(0), vec![Event::Changed], "any change");
+            assert!(small_change(10).is_empty(), "one percent of the area");
+        }
+
         /// Round 10: an area hanging off the bottom of the desktop, with the
         /// overlay in captures, still sees a change.
         #[test]
@@ -2077,18 +2174,19 @@ mod tests {
     }
 
     /// Nothing is left out while UP-TAKE is kept out of captures; with it in
-    /// them, a small area keeps something to read.
+    /// them, a small area keeps something to read: one whose inside the mark's
+    /// corner would cover leaves the corner in.
     #[test]
     fn a_reading_always_keeps_something_to_compare() {
-        let small = Rect::new(0, 0, 200, 30);
+        let small = Rect::new(0, 0, 20, 16);
         assert!(left_out(small, small, false).is_empty(), "the default");
         let parts = left_out(small, small, true);
         assert_eq!(parts.len(), 4, "the border only, not the corner");
         let Some(mut bitmap) = uptake_core::bitmap::RgbaBitmap::from_pixels(
-            uptake_core::geometry::Size::new(200, 30),
-            [255_u8; 4].repeat(200 * 30),
+            uptake_core::geometry::Size::new(20, 16),
+            [255_u8; 4].repeat(20 * 16),
         ) else {
-            panic!("a 200 by 30 bitmap");
+            panic!("a 20 by 16 bitmap");
         };
         uptake_core::watch::leave_out(&mut bitmap, &parts);
         assert!(
@@ -2143,16 +2241,16 @@ mod tests {
         assert_eq!(gate(a, true, [None, None], true, false), Gate::Skip);
     }
 
-    /// The mark is on screen only when its whole corner is on one monitor:
-    /// not past the desktop's right edge, not above its top, not across the
-    /// gap where a shorter monitor ends.
+    /// The mark is on screen only when its whole corner, the area's top left,
+    /// is on one monitor: not past the desktop's right edge, not above its
+    /// top, not across the gap where a shorter monitor ends.
     #[test]
     fn the_mark_must_be_wholly_on_one_monitor() {
         let left = Rect::new(0, 0, 1920, 1080);
         let right = Rect::new(1920, 0, 1280, 720);
         let monitors = [left, right];
         let inside = Rect::new(100, 100, 600, 400);
-        assert_eq!(mark(inside), Rect::new(700 - 240, 100, MARK.0, MARK.1));
+        assert_eq!(mark(inside), Rect::new(100, 100, MARK.0, MARK.1));
         // Rounds 15 and 16: small areas near a monitor's left edge, whose
         // mark (clipped to the area by the page) is on screen, do read.
         assert!(mark_on_screen(mark(Rect::new(0, 100, 40, 400)), &monitors));
@@ -2167,7 +2265,7 @@ mod tests {
         assert!(mark_on_screen(mark(inside), &monitors));
         // Past the right edge of the rightmost monitor.
         assert!(!mark_on_screen(
-            mark(Rect::new(2900, 100, 600, 400)),
+            mark(Rect::new(3190, 100, 600, 400)),
             &monitors
         ));
         // Above the top of the desktop.
@@ -2177,12 +2275,12 @@ mod tests {
         ));
         // Below the shorter right monitor, beside the taller left one.
         assert!(!mark_on_screen(
-            mark(Rect::new(1700, 900, 600, 100)),
+            mark(Rect::new(2000, 900, 600, 100)),
             &monitors
         ));
         // Across the seam between two monitors: on neither wholly.
         assert!(!mark_on_screen(
-            mark(Rect::new(1500, 100, 500, 300)),
+            mark(Rect::new(1910, 100, 300, 300)),
             &monitors
         ));
         assert!(!mark_on_screen(mark(inside), &[]), "no monitors, no mark");
@@ -2204,7 +2302,7 @@ mod tests {
     }
     use uptake_core::geometry::Rect;
 
-    /// The parts left out sit on the area's own edges and its top right
+    /// The parts left out sit on the area's own edges and its top left
     /// corner, in the reading's pixels.
     #[test]
     fn own_drawing_is_the_border_and_the_marks_corner() {
@@ -2214,7 +2312,7 @@ mod tests {
         assert_eq!(parts[1], Rect::new(0, 400 - 4, 600, EDGE));
         assert_eq!(parts[2], Rect::new(0, 0, EDGE, 400));
         assert_eq!(parts[3], Rect::new(600 - 4, 0, EDGE, 400));
-        assert_eq!(parts[4], Rect::new(600 - 240, 0, MARK.0, MARK.1));
+        assert_eq!(parts[4], Rect::new(0, 0, MARK.0, MARK.1));
     }
 
     /// An area hanging off the desktop's left edge: the capture starts 30
@@ -2225,13 +2323,13 @@ mod tests {
         let taken = Rect::new(0, 0, 270, 200);
         let parts = own_drawing(bounds, taken);
         assert_eq!(parts[0], Rect::new(-30, 0, 300, EDGE));
-        assert_eq!(parts[4], Rect::new(270 - 240, 0, MARK.0, MARK.1));
+        assert_eq!(parts[4], Rect::new(-30, 0, MARK.0, MARK.1));
     }
 
     /// An area smaller than the mark's corner leaves out what it has.
     #[test]
     fn a_small_area_leaves_out_no_more_than_itself() {
-        let bounds = Rect::new(0, 0, 100, 30);
-        assert_eq!(own_drawing(bounds, bounds)[4], Rect::new(0, 0, 100, 30));
+        let bounds = Rect::new(0, 0, 20, 16);
+        assert_eq!(own_drawing(bounds, bounds)[4], Rect::new(0, 0, 20, 16));
     }
 }

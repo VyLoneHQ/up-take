@@ -638,8 +638,14 @@ onMount(() => {
   // (below): an area drawn over another, or a display change, does not always
   // come with an event this page hears.
   const confirming = setInterval(confirmMarks, 1000);
+  // The watching dot's pulse: one short breath every PULSE_EVERY_MS, and
+  // nothing animating in between (see `.watch-dot`).
+  const pulsing = setInterval(() => {
+    pulse += 1;
+  }, PULSE_EVERY_MS);
   return () => {
     clearInterval(confirming);
+    clearInterval(pulsing);
     void ready.then((unlisteners) => {
       for (const unlisten of unlisteners) unlisten();
     });
@@ -660,6 +666,17 @@ onMount(() => {
 let confirmedNone = false;
 /** See `overlay://drawn`. 0 until the first one: Rust's count starts at 1. */
 let drawnGeneration = 0;
+/** How often the watching dot pulses, in ms (2026-11-10). Measured that day
+ * with the watcher's own harness on a still screen (UP-TAKE
+ * `evidence/1.61-watch-dot-cost/`): a dot breathing all the time woke its
+ * area about 12 times a second even with UP-TAKE kept out of captures, and
+ * took an idle area from 0.25 % of a core to 1.7 % (3.1 % with UP-TAKE in
+ * captures); one 0.6 s pulse every 5 s cost 0.35 %. */
+const PULSE_EVERY_MS = 5_000;
+/** Bumped every PULSE_EVERY_MS; each watching dot is drawn anew on it, which
+ * plays its one-shot pulse once. */
+let pulse = $state(0);
+
 function confirmMarks(): void {
   const shown =
     overlayState === 'hidden'
@@ -819,6 +836,7 @@ $effect(() => {
           class:pinned={area.layer !== 'auto'}
           class:filter={area.kind === 'filter'}
           class:watch={area.kind === 'watch'}
+          class:with-status={area.watching || area.held}
           style="transform: translate3d({area.rect.x}px, {area.rect.y}px, 0); width: {area
             .rect.width}px; height: {area.rect.height}px"
         >
@@ -979,17 +997,32 @@ $effect(() => {
               class:paused={area.sticky === 'paused'}
             >◈{area.sticky === 'paused' ? ` ${text(language, 'area.sticky.paused')}` : ''}</span>
           {/if}
-          <!-- A watch area that is reading its region says so, in words, for
+          <!-- A watch area that is reading its region shows a green dot for
                as long as it reads (roadmap 1.58, ADR-0048: "visibly marked
-               while it watches"). Top right, clear of the depth and sticky
-               marks on the left. -->
+               while it watches"), and a paused one a grey dot (ADR-0053).
+               A dot, not the word, since the maintainer's rig pass of
+               2026-11-10: an area as small as two letters could not fit the
+               word, so its mark was never seen and it never read. The word
+               stays as the dot's name for a screen reader and a tooltip.
+               Top left, the maintainer's choice of 2026-11-10, with the
+               depth and sticky marks moved right of it. -->
           {#if area.watching}
-            <span class="watch-badge" data-area={area.id}
-              ><span class="watch-dot">●</span> {text(language, 'area.watching')}</span
+            <span
+              class="watch-badge"
+              data-area={area.id}
+              role="img"
+              aria-label={text(language, 'area.watching')}
+              title={text(language, 'area.watching')}
+              >{#key pulse}<span class="watch-dot"></span>{/key}</span
             >
           {:else if area.held}
-            <!-- ADR-0053: a paused area says so where its working mark was. -->
-            <span class="held-badge">❚❚ {text(language, 'area.held')}</span>
+            <span
+              class="held-badge"
+              role="img"
+              aria-label={text(language, 'area.held')}
+              title={text(language, 'area.held')}
+              ><span class="held-dot"></span></span
+            >
           {/if}
           <!-- The name the user gave the area (the founder, 2026-11-03), at
                its bottom left, clear of every mark along its top. -->
@@ -1281,29 +1314,82 @@ $effect(() => {
    dot cut off by a small area, off the desktop, or under another area is not
    seen, and the host does not read that area (watch.rs `confirm`, review of
    #154 rounds 14 to 19). Pinned by watch-badge-css.test.ts. */
-.watch-badge {
+.watch-badge,
+.held-badge {
   position: absolute;
-  right: 4px;
-  top: 2px;
-  max-width: calc(100% - 8px);
-  max-height: calc(100% - 4px);
+  left: 1px;
+  top: 1px;
+  max-width: calc(100% - 2px);
+  max-height: calc(100% - 2px);
   overflow: hidden;
-  font: 11px/1 system-ui, sans-serif;
-  color: rgba(140, 235, 180, 0.98);
-  text-shadow: 0 0 3px rgba(0, 0, 0, 0.8);
-  white-space: nowrap;
+  line-height: 0;
 }
 
-/* The dot's box must be its line box. As a plain inline span its box is the
-   whole glyph of the fallback symbol font, about 15px tall against the
-   badge's 11px, so it was never "wholly inside the badge" (markSeen), the page
-   never confirmed a mark, and no watch area ever read on a real screen
-   (measured in headless Edge at 100 to 200 %, 2026-11-03). An inline-block
-   with line-height 1 is exactly the badge's line. Pinned by
-   watch-badge-css.test.ts. */
+/* The dot is a drawn 6px box, not a glyph: its box is exactly what is drawn,
+   so markSeen's "wholly inside the badge" holds whatever the fonts. (A glyph
+   dot's box was the fallback font's whole glyph, taller than its badge, and
+   no watch area read on a real screen until that was fixed on 2026-11-03.)
+   Pinned by watch-badge-css.test.ts. */
+.watch-dot,
+.held-dot {
+  display: block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  /* A dark ring drawn inside the box, so the dot shows on any background
+     and its box is exactly what is drawn (markSeen measures the box). */
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.55);
+}
+
+/* Two states that must not be confused (the maintainer, 2026-11-10: "keep
+   it subtle and make sure the UX stays great"). Watching: a filled green dot
+   that takes one soft breath every five seconds (PULSE_EVERY_MS), alive but
+   quiet. Paused: a hollow grey ring that holds still. Fill, colour and
+   motion all differ, so neither colour nor motion alone has to carry the
+   meaning. Opacity only, so the dot's box, which markSeen measures, never
+   changes. ONE-SHOT, not infinite, and that is measured, not taste: an
+   animation that runs all the time makes the screen under the dot change
+   every frame, which woke its watch area about 12 times a second on a still
+   screen (evidence/1.61-watch-dot-cost/). Between pulses nothing animates. */
 .watch-dot {
-  display: inline-block;
-  line-height: 1;
+  background: rgba(110, 230, 160, 1);
+  animation: watch-breathe 0.6s ease-in-out 1;
+}
+
+.held-dot {
+  background: rgba(0, 0, 0, 0.35);
+  box-shadow:
+    inset 0 0 0 1.5px rgba(190, 190, 190, 1),
+    inset 0 0 0 2.5px rgba(0, 0, 0, 0.45);
+}
+
+@keyframes watch-breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+/* Windows' "show animations" switched off: the dot holds still and stays
+   green and filled, which still tells it apart from the hollow grey ring. */
+@media (prefers-reduced-motion: reduce) {
+  .watch-dot {
+    animation: none;
+  }
+}
+
+/* The depth and sticky marks sit right of the status dot when the area has
+   one, so the three never overlap. */
+.area.with-status .layer-badge,
+.area.with-status .sticky-badge {
+  left: 12px;
+}
+
+.area.with-status .sticky-badge.beside-layer {
+  left: 26px;
 }
 
 /* The area's name (the founder, 2026-11-03), at its bottom left: clear of the
@@ -1322,10 +1408,12 @@ $effect(() => {
   pointer-events: none;
 }
 
-/* The name field, over the area's top left while the user names it. */
+/* The name field, over the area's top left while the user names it. Right
+   of the status dot, which it would otherwise cover: a watch area whose mark
+   is covered is not read (2026-11-10). */
 .rename {
   position: absolute;
-  left: 4px;
+  left: 10px;
   top: 4px;
   width: min(220px, calc(100% - 8px));
   box-sizing: border-box;
@@ -1337,20 +1425,6 @@ $effect(() => {
   font: 12px/1.2 system-ui, sans-serif;
   outline: none;
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
-}
-
-/* The paused mark (ADR-0053): where the watching mark sits, dimmer, so a
-   paused area reads as stopped at a glance. */
-.held-badge {
-  position: absolute;
-  right: 4px;
-  top: 2px;
-  max-width: calc(100% - 8px);
-  overflow: hidden;
-  font: 11px/1 system-ui, sans-serif;
-  color: rgba(220, 220, 220, 0.85);
-  text-shadow: 0 0 3px rgba(0, 0, 0, 0.8);
-  white-space: nowrap;
 }
 
 /* A pinned tier (ADR-0013) is a state the user set and must be able to see; an

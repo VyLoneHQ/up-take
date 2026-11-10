@@ -636,6 +636,33 @@ describe('an area renders the badges its state earns and no others', () => {
     expect(vi.mocked(invoke)).not.toHaveBeenCalledWith('overlay_escape');
   });
 
+  // Review of #168, round 11: the dot pulses because a timer redraws it
+  // every PULSE_EVERY_MS. A fake clock moves five seconds; the dot must be a
+  // new element afterwards (a one-shot animation plays on a new element), and
+  // the same one when less than that has passed.
+  test('the watching dot is drawn anew every five seconds', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      const { container } = await mount();
+      await emit('overlay://state', state());
+      await emit('overlay://areas', {
+        areas: [area({ kind: 'watch', watch: 'changes', watching: true })],
+      });
+      const first = container.querySelector('.watch-dot');
+      expect(first).not.toBeNull();
+      vi.advanceTimersByTime(4_000);
+      await tick();
+      expect(container.querySelector('.watch-dot')).toBe(first);
+      vi.advanceTimersByTime(1_000);
+      await tick();
+      const second = container.querySelector('.watch-dot');
+      expect(second).not.toBeNull();
+      expect(second).not.toBe(first);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   test('a watch area says watching exactly when Rust says it reads', async () => {
     const { container } = await mount();
     await emit('overlay://state', state());
@@ -647,16 +674,21 @@ describe('an area renders the badges its state earns and no others', () => {
     });
     expect(container.querySelector('.area')?.classList).toContain('watch');
     expect(container.querySelectorAll('.watch-badge')).toHaveLength(0);
-    // ADR-0053: a paused area says so where its watching mark was.
-    expect(container.querySelector('.held-badge')?.textContent?.trim()).toBe(
-      '❚❚ paused',
-    );
+    // ADR-0053: a paused area says so where its watching mark was, as a
+    // grey dot named for a screen reader (2026-11-10).
+    expect(
+      container.querySelector('.held-badge')?.getAttribute('aria-label'),
+    ).toBe('paused');
+    expect(container.querySelector('.held-badge .held-dot')).not.toBeNull();
 
     await emit('overlay://areas', {
       areas: [area({ kind: 'watch', watch: 'changes', watching: true })],
     });
+    expect(
+      container.querySelector('.watch-badge')?.getAttribute('aria-label'),
+    ).toBe('watching');
     expect(container.querySelector('.watch-badge')?.textContent?.trim()).toBe(
-      '● watching',
+      '',
     );
     expect(container.querySelectorAll('.held-badge')).toHaveLength(0);
 

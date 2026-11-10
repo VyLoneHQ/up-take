@@ -10,6 +10,7 @@ import { COVERS } from './mark-check';
 const EXEMPT: Record<string, string> = {
   'watch-badge': 'the mark itself',
   'watch-dot': 'the mark itself',
+  'held-dot': 'inside .held-badge, which is on the cover list',
   pin: "inside its own .area, which covers for a later area's pin",
   'grab-bar-label': 'inside .grab-bar',
   'menu-item': 'inside .menu',

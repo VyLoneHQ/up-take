@@ -118,6 +118,9 @@ const PAIRS_EXEMPT: Record<string, string> = {
     'coach-copy.ts. One line of the keybind reference, composed on this side ' +
     'from a key name written in that file and a translated sentence.',
   TypeRow: 'coach-copy.ts. One area type on the tour step 2, like KeyRow.',
+  SliderRange:
+    'panel.ts. The bounds and step of one of the sliders in the panel, written in ' +
+    'that file; nothing sends it.',
   CardLine:
     'notice.ts. A card line split for typesetting, from a Card; nothing sends it.',
   Card:

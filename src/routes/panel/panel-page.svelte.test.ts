@@ -87,7 +87,14 @@ const WATCH = {
   name: null,
   watch: 'changes',
   held: false,
-  tuning: { notify: 'each', calm_ms: 150, gap_ms: 0, sample_ms: 0 },
+  tuning: {
+    notify: 'each',
+    calm_ms: 150,
+    gap_ms: 0,
+    sample_ms: 0,
+    share_permille: 0,
+    settle_ms: 1_000,
+  },
   kinds: ['default', 'screenshot', 'filter', 'upscale', 'ocr', 'watch'],
   ocr: null,
   depth: 'auto',
@@ -181,6 +188,104 @@ test("a watch area's tuning is sent whole with the one value changed", async () 
   ]);
   await settle();
   expect(document.body.textContent).toContain('every 5 s');
+});
+
+test("a watch area's tolerance runs from any change to the whole area (1.61)", async () => {
+  render(Page);
+  await settle();
+  const base = WATCH.tuning;
+  expect(document.body.textContent).toContain('How much must change');
+  expect(document.body.textContent).toContain('Any change');
+  const share = document.querySelectorAll<HTMLInputElement>(
+    'input[type="range"]',
+  )[0];
+  share.value = share.max;
+  share.dispatchEvent(new Event('input', { bubbles: true }));
+  expect(lastSet()).toEqual([
+    'panel_set_tuning',
+    { tuning: { ...base, share_permille: 1_000 } },
+  ]);
+  await settle();
+  expect(document.body.textContent).toContain('100% of the area');
+});
+
+test('stops changing shows its own calm, and only for that choice', async () => {
+  render(Page);
+  await settle();
+  expect(document.body.textContent).not.toContain('Counts as stopped after');
+  replies.set('panel_view', { ...WATCH, watch: 'settles' });
+  handlers.get('panel://changed')?.();
+  await settle();
+  expect(document.body.textContent).toContain('Counts as stopped after');
+  expect(document.body.textContent).toContain('1 s');
+});
+
+test('every slider moves 1% a step, and 10% with Ctrl held', async () => {
+  render(Page);
+  await settle();
+  const share = document.querySelectorAll<HTMLInputElement>(
+    'input[type="range"]',
+  )[0];
+  expect(share.step).toBe('1');
+  share.dispatchEvent(
+    new PointerEvent('pointerdown', { bubbles: true, ctrlKey: true }),
+  );
+  await settle();
+  expect(share.step).toBe('10');
+  share.dispatchEvent(
+    new PointerEvent('pointermove', { bubbles: true, ctrlKey: false }),
+  );
+  await settle();
+  expect(share.step).toBe('1');
+  // Ctrl let go on the keyboard, between two arrow keys (round 6).
+  share.dispatchEvent(
+    new KeyboardEvent('keydown', { bubbles: true, ctrlKey: true }),
+  );
+  await settle();
+  expect(share.step).toBe('10');
+  share.dispatchEvent(
+    new KeyboardEvent('keyup', { bubbles: true, ctrlKey: false }),
+  );
+  await settle();
+  expect(share.step).toBe('1');
+  share.value = '37';
+  share.dispatchEvent(new Event('input', { bubbles: true }));
+  expect(lastSet()).toEqual([
+    'panel_set_tuning',
+    { tuning: { ...WATCH.tuning, share_permille: 370 } },
+  ]);
+  await settle();
+  expect(document.body.textContent).toContain('37% of the area');
+});
+
+// Review of #168, round 9: every slider, the two that show only in some
+// modes included, must take Ctrl itself. With "stops changing" and "Once"
+// all four are on screen; each is given Ctrl on its own, and let go on its
+// own, so a slider missing either handler leaves the step where it was.
+test('each of the four sliders takes Ctrl, pressed and let go', async () => {
+  replies.set('panel_view', {
+    ...WATCH,
+    watch: 'settles',
+    tuning: { ...WATCH.tuning, notify: 'once' },
+  });
+  render(Page);
+  await settle();
+  const sliders = [
+    ...document.querySelectorAll<HTMLInputElement>('input[type="range"]'),
+  ];
+  expect(sliders).toHaveLength(4);
+  for (const [index, slider] of sliders.entries()) {
+    slider.dispatchEvent(
+      new PointerEvent('pointerdown', { bubbles: true, ctrlKey: true }),
+    );
+    await settle();
+    expect(slider.step, `slider ${index} with Ctrl`).toBe('10');
+    slider.dispatchEvent(
+      new KeyboardEvent('keyup', { bubbles: true, ctrlKey: false }),
+    );
+    await settle();
+    expect(slider.step, `slider ${index} without Ctrl`).toBe('1');
+  }
 });
 
 test('a type shows only its own rows', async () => {

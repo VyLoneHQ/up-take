@@ -816,75 +816,72 @@ fn read_box(slot: &Slot, part: Rect) -> Result<Option<Vec<u8>>, String> {
     if retained.size != slot.bounds.size {
         return Ok(None);
     }
-    let source = box_in(slot.bounds, retained.size, part).ok_or("the box leaves the frame")?;
-    let mut desc = D3D11_TEXTURE2D_DESC::default();
-    // SAFETY: fills `desc` from a live texture.
-    unsafe { retained.live.GetDesc(&mut desc) };
-    desc.Width = part.size.width;
-    desc.Height = part.size.height;
+    read_retained(retained, slot.bounds, part).map(Some)
+}
+
+/// [`read_box`]'s GPU work on a frame already held under its lock: `part`
+/// (desktop pixels) of the monitor at `monitor`, RGBA8 top-down.
+fn read_retained(retained: &Retained, monitor: Rect, part: Rect) -> Result<Vec<u8>, String> {
+    let source = box_in(monitor, retained.size, part).ok_or("the box leaves the frame")?;
     // SAFETY: the context's own device; no preconditions.
     let device = unsafe { retained.context.GetDevice() }.map_err(|e| e.to_string())?;
+    read_texture_box(&device, &retained.context, &retained.live, &source)
+}
+
+/// `source_box` of `source` (a texture of the frame's format), RGBA8
+/// top-down: a GPU copy into a staging texture its size, then one readback.
+fn read_texture_box(
+    device: &ID3D11Device,
+    context: &ID3D11DeviceContext,
+    source: &ID3D11Texture2D,
+    source_box: &D3D11_BOX,
+) -> Result<Vec<u8>, String> {
+    let size = Size::new(
+        source_box.right - source_box.left,
+        source_box.bottom - source_box.top,
+    );
+    let mut desc = D3D11_TEXTURE2D_DESC::default();
+    // SAFETY: fills `desc` from a live texture.
+    unsafe { source.GetDesc(&mut desc) };
+    desc.Width = size.width;
+    desc.Height = size.height;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.BindFlags = 0;
+    desc.MiscFlags = 0;
     let staging = create_texture(
-        &device,
+        device,
         &desc,
         D3D11_USAGE_STAGING,
         D3D11_CPU_ACCESS_READ.0.cast_unsigned(),
     )?;
     // SAFETY: the same format by construction; the box lies inside the source
-    // (`box_in`) and fits the destination exactly.
+    // (the callers' `box_in`) and fits the destination exactly.
     unsafe {
-        retained.context.CopySubresourceRegion(
-            &staging,
-            0,
-            0,
-            0,
-            0,
-            &retained.live,
-            0,
-            Some(&source),
-        );
+        context.CopySubresourceRegion(&staging, 0, 0, 0, 0, source, 0, Some(source_box));
     }
     let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
     // SAFETY: as in `readback`.
-    unsafe {
-        retained
-            .context
-            .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
-    }
-    .map_err(|e| e.to_string())?;
+    unsafe { context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)) }
+        .map_err(|e| e.to_string())?;
     let mapped_len = mapped.DepthPitch as usize;
     // SAFETY: as in `readback`: valid until `Unmap`, its length D3D11's own.
     let mapped_bytes = unsafe { std::slice::from_raw_parts(mapped.pData.cast::<u8>(), mapped_len) };
-    let packed = pack_rows(mapped_bytes, mapped.RowPitch as usize, part.size);
+    let packed = pack_rows(mapped_bytes, mapped.RowPitch as usize, size);
     // SAFETY: unmaps exactly what was mapped above.
-    unsafe { retained.context.Unmap(&staging, 0) };
-    packed
-        .map(Some)
-        .ok_or_else(|| "the mapped picture was short".to_string())
-}
-
-/// The mip level of a `size` picture to read back for a fingerprint: the
-/// smallest whose sides are both still at least `least`, or level 0 when the
-/// picture is already narrower or shorter than that. Each level halves the
-/// last, rounding down, as D3D11 sizes a mip chain.
-#[must_use]
-pub fn fingerprint_level(size: Size, least: u32) -> u32 {
-    let mut level = 0;
-    let (mut width, mut height) = (size.width, size.height);
-    while width / 2 >= least && height / 2 >= least {
-        width /= 2;
-        height /= 2;
-        level += 1;
-    }
-    level
+    unsafe { context.Unmap(&staging, 0) };
+    packed.ok_or_else(|| "the mapped picture was short".to_string())
 }
 
 /// `region` as a small picture for a fingerprint, averaged down on the GPU:
 /// the area's box is copied into a texture with a mip chain, the GPU averages
-/// it (`GenerateMips`), and only the smallest level with both sides at least
-/// [`uptake_core::watch::GRID`] is read back ([`fingerprint_level`]), so a
-/// read costs about the same for any area size. The picture's `rect` is the
-/// region; its bitmap is the level's size, not the region's.
+/// it (`GenerateMips`), and the level whose texels are one fingerprint cell
+/// each ([`uptake_core::watch::CELL_LEVEL`], 4 by 4 pixels) is read back.
+/// The picture's `rect` is the region; its bitmap is the level's size, an
+/// quarter of the region's on each side rounded up, not the region's
+/// (roadmap `1.61`: until then the smallest level at least 16 on a side, so
+/// a read cost about the same for any area size; it now grows with the
+/// area, about 520 KB for a 1080p area).
 ///
 /// Only for a region on one monitor, read without anything left out (the
 /// reading's caller paints UP-TAKE's own drawing out of a full picture when
@@ -947,6 +944,54 @@ fn shrink_box(slot: &Slot, part: Rect) -> Result<Option<(Size, Vec<u8>)>, String
     .map(Some)
 }
 
+/// Writes into `small` (one texel per cell, RGBA8) the exact average of each
+/// cell of `strip`, a picture `strip_size` in size read whole from the
+/// region's right edge (`right`, one column of cells) or its bottom edge (one
+/// row of cells). Each cell averages only the strip's own pixels, equally.
+fn overwrite_edge(small: &mut [u8], size: Size, strip: &[u8], strip_size: Size, right: bool) {
+    let cell = uptake_core::watch::CELL;
+    let (sw, sh) = (strip_size.width, strip_size.height);
+    let cells = if right {
+        sh.div_ceil(cell)
+    } else {
+        sw.div_ceil(cell)
+    };
+    for index in 0..cells {
+        let (x0, y0, x1, y1) = if right {
+            (0, index * cell, sw, ((index + 1) * cell).min(sh))
+        } else {
+            (index * cell, 0, ((index + 1) * cell).min(sw), sh)
+        };
+        let mut sum = [0_u64; 3];
+        let mut count = 0_u64;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let at = ((y * sw + x) * 4) as usize;
+                if let Some(pixel) = strip.get(at..at + 3) {
+                    for (total, &channel) in sum.iter_mut().zip(pixel) {
+                        *total += u64::from(channel);
+                    }
+                    count += 1;
+                }
+            }
+        }
+        if count == 0 {
+            continue;
+        }
+        let (column, row) = if right {
+            (size.width - 1, index)
+        } else {
+            (index, size.height - 1)
+        };
+        let at = ((row * size.width + column) * 4) as usize;
+        if let Some(texel) = small.get_mut(at..at + 3) {
+            for (out, total) in texel.iter_mut().zip(sum) {
+                *out = u8::try_from((total + count / 2) / count).unwrap_or(u8::MAX);
+            }
+        }
+    }
+}
+
 /// The size of the mip chain's first level for a picture of `size` averaged
 /// down `level` times: each side rounded up to a whole number of
 /// `2^level`, so every halving is exact and every pixel is weighed. A side
@@ -961,12 +1006,13 @@ pub fn padded_for_level(size: Size, level: u32) -> Size {
 }
 
 /// `source_box` of `source` (a texture of the frame's format), averaged down
-/// on the GPU to the smallest level still at least [`uptake_core::watch::GRID`]
-/// on both sides ([`fingerprint_level`]), and read back, RGBA8 top-down, with
-/// its size. Level 0 is padded to [`padded_for_level`] and cleared to black
-/// before the box is copied in, so the averaging weighs every pixel of the
-/// box equally; the padding is the same black in every reading, so it never
-/// differs.
+/// on the GPU to one texel per fingerprint cell
+/// ([`uptake_core::watch::CELL_LEVEL`]), and read back, RGBA8 top-down, with
+/// its size. Level 0 is padded to [`padded_for_level`], and the padding
+/// repeats the box's own last column and row (review of `#168`, round 10),
+/// so every texel averages pixels of the region at their full strength: the
+/// last texel on a side is the region's part-cell there, not that part-cell
+/// diluted by black.
 fn average_box(
     device: &ID3D11Device,
     context: &ID3D11DeviceContext,
@@ -978,7 +1024,7 @@ fn average_box(
         D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_RESOURCE_MISC_GENERATE_MIPS,
         ID3D11RenderTargetView, ID3D11ShaderResourceView,
     };
-    let level = fingerprint_level(size, uptake_core::watch::GRID);
+    let level = uptake_core::watch::CELL_LEVEL;
     let padded = padded_for_level(size, level);
     let mut desc = D3D11_TEXTURE2D_DESC::default();
     // SAFETY: fills `desc` from a live texture.
@@ -1013,6 +1059,43 @@ fn average_box(
     unsafe {
         context.ClearRenderTargetView(&target, &[0.0, 0.0, 0.0, 1.0]);
         context.CopySubresourceRegion(&mips, 0, 0, 0, 0, source, 0, Some(source_box));
+    }
+    // The padding repeats the box's own last column and row, not black
+    // (review of `#168`, round 10): a part-cell at the region's edge then
+    // averages only the region's pixels at their full strength. Padded with
+    // black, a one-pixel edge was a sixteenth of its texel, and the 8-bit
+    // texel lost what a change there did. At most three columns, three rows
+    // and nine corner pixels, each copied from the frame itself. Repeating
+    // weighs a two- or three-pixel edge unevenly, so `shrink_box` replaces
+    // the edge texels with exact averages afterwards (round 12); the padding
+    // only keeps the mip chain's other texels clear of black.
+    let (width, height) = (size.width, size.height);
+    let last_column = D3D11_BOX {
+        left: source_box.right - 1,
+        ..*source_box
+    };
+    let last_row = D3D11_BOX {
+        top: source_box.bottom - 1,
+        ..*source_box
+    };
+    let corner = D3D11_BOX {
+        left: source_box.right - 1,
+        top: source_box.bottom - 1,
+        ..*source_box
+    };
+    // SAFETY: each box is one column, row or pixel of the box above, so it
+    // lies inside the source; each lands in level 0's padding, inside
+    // `padded`, which is at least `size` plus the padding on each side.
+    unsafe {
+        for x in width..padded.width {
+            context.CopySubresourceRegion(&mips, 0, x, 0, 0, source, 0, Some(&last_column));
+        }
+        for y in height..padded.height {
+            context.CopySubresourceRegion(&mips, 0, 0, y, 0, source, 0, Some(&last_row));
+            for x in width..padded.width {
+                context.CopySubresourceRegion(&mips, 0, x, y, 0, source, 0, Some(&corner));
+            }
+        }
         context.GenerateMips(&view);
     }
     let small_size = Size::new(
@@ -1044,9 +1127,42 @@ fn average_box(
     unsafe { context.Unmap(&staging, 0) };
     // A short mapping is a fault, as in `read_box`, not "no frame yet"
     // (review of `#162`, round 3).
-    packed
-        .map(|pixels| (small_size, pixels))
-        .ok_or_else(|| "the mapped picture was short".to_string())
+    let mut pixels = packed.ok_or_else(|| "the mapped picture was short".to_string())?;
+    // A part-cell at the region's right or bottom edge is read whole and
+    // averaged here, from the same texture: the padding can only copy
+    // pixels, which weighs a two- or three-pixel edge unevenly (review of
+    // `#168`, round 12). At most three pixels wide or tall.
+    let cell = uptake_core::watch::CELL;
+    let (right, bottom) = (size.width % cell, size.height % cell);
+    if right > 0 {
+        let strip = D3D11_BOX {
+            left: source_box.right - right,
+            ..*source_box
+        };
+        let read = read_texture_box(device, context, source, &strip)?;
+        overwrite_edge(
+            &mut pixels,
+            small_size,
+            &read,
+            Size::new(right, size.height),
+            true,
+        );
+    }
+    if bottom > 0 {
+        let strip = D3D11_BOX {
+            top: source_box.bottom - bottom,
+            ..*source_box
+        };
+        let read = read_texture_box(device, context, source, &strip)?;
+        overwrite_edge(
+            &mut pixels,
+            small_size,
+            &read,
+            Size::new(size.width, bottom),
+            false,
+        );
+    }
+    Ok((small_size, pixels))
 }
 
 /// The texture box `part` (desktop pixels) covers on a monitor at `monitor`
@@ -1613,20 +1729,22 @@ mod tests {
         assert!(!touches_a_watch_area(None, &[]), "nothing to watch");
     }
 
-    /// The level read back for a fingerprint: the smallest still at least
-    /// 16 on both sides, so the grid keeps its 16 x 16 cells.
+    /// The level read back for a fingerprint is one texel per cell: 4 by 4
+    /// pixels, level 2, and the padded chain divides evenly into it.
     #[test]
-    fn the_level_read_back_keeps_the_grid() {
-        assert_eq!(fingerprint_level(Size::new(600, 400), 16), 4, "37 x 25");
-        assert_eq!(fingerprint_level(Size::new(1920, 1080), 16), 6, "30 x 16");
-        assert_eq!(fingerprint_level(Size::new(32, 32), 16), 1);
-        assert_eq!(fingerprint_level(Size::new(31, 400), 16), 0, "narrow");
-        assert_eq!(fingerprint_level(Size::new(10, 10), 16), 0, "small");
-        for (w, h) in [(600, 400), (1920, 1080), (3840, 2160), (17, 900)] {
-            let level = fingerprint_level(Size::new(w, h), 16);
-            let (lw, lh) = (w >> level, h >> level);
-            assert!(level == 0 || (lw >= 16 && lh >= 16), "{w} x {h}");
-            assert!(lw / 2 < 16 || lh / 2 < 16, "{w} x {h}: the smallest");
+    fn the_level_read_back_is_one_texel_per_cell() {
+        assert_eq!(uptake_core::watch::CELL_LEVEL, 2);
+        assert_eq!(
+            1 << uptake_core::watch::CELL_LEVEL,
+            uptake_core::watch::CELL
+        );
+        for (w, h) in [(600, 400), (1920, 1080), (17, 900), (5, 3)] {
+            let padded = padded_for_level(Size::new(w, h), uptake_core::watch::CELL_LEVEL);
+            assert_eq!(
+                (padded.width >> 2, padded.height >> 2),
+                (w.div_ceil(4), h.div_ceil(4)),
+                "{w} x {h}"
+            );
         }
     }
 
@@ -1668,6 +1786,10 @@ mod tests {
         assert_eq!(
             padded_for_level(Size::new(1920, 1080), 6),
             Size::new(1920, 1088)
+        );
+        assert_eq!(
+            padded_for_level(Size::new(1920, 1080), 3),
+            Size::new(1920, 1080)
         );
         assert_eq!(padded_for_level(Size::new(10, 10), 0), Size::new(10, 10));
 
@@ -1732,9 +1854,13 @@ mod tests {
                 bottom: size.height,
                 back: 1,
             };
-            average_box(&device, &context, &texture, &whole, size)
-                .unwrap()
-                .1
+            let (small, pixels) = average_box(&device, &context, &texture, &whole, size).unwrap();
+            // One texel per 4-pixel cell, the region's edge rounded up.
+            assert_eq!(
+                small,
+                Size::new(size.width.div_ceil(4), size.height.div_ceil(4))
+            );
+            pixels
         };
         let cases: [(Size, bool, &[u32]); 2] = [
             (
@@ -1764,6 +1890,196 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Review of `#168`, round 12, through the GPU route itself (WARP): a
+    /// 6 by 4 region whose pixel columns 4 and 5 are 0 and 100 reads its last
+    /// cell as 50, not 75 (repeating column 5), and a 4 by 7 region whose
+    /// last three rows are 0, 0 and 90 reads its last cell as 30.
+    #[test]
+    fn the_gpu_route_averages_a_part_cell_equally() {
+        use windows::Win32::Foundation::HMODULE;
+        use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_WARP;
+        use windows::Win32::Graphics::Direct3D11::{
+            D3D11_CREATE_DEVICE_FLAG, D3D11_SDK_VERSION, D3D11_SUBRESOURCE_DATA, D3D11CreateDevice,
+        };
+        use windows::Win32::Graphics::Dxgi::Common::{
+            DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC,
+        };
+        let mut device = None;
+        let mut context = None;
+        // SAFETY: valid out-pointers; WARP needs no adapter.
+        unsafe {
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_WARP,
+                HMODULE::default(),
+                D3D11_CREATE_DEVICE_FLAG(0),
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                Some(&mut context),
+            )
+        }
+        .unwrap();
+        let (device, context) = (device.unwrap(), context.unwrap());
+        let read = |size: Size, level: &dyn Fn(u32, u32) -> u8| -> (Size, Vec<u8>) {
+            let mut pixels = Vec::new();
+            for y in 0..size.height {
+                for x in 0..size.width {
+                    let v = level(x, y);
+                    pixels.extend_from_slice(&[v, v, v, 255]);
+                }
+            }
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: size.width,
+                Height: size.height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Usage: D3D11_USAGE_DEFAULT,
+                ..Default::default()
+            };
+            let data = D3D11_SUBRESOURCE_DATA {
+                pSysMem: pixels.as_ptr().cast(),
+                SysMemPitch: size.width * 4,
+                SysMemSlicePitch: 0,
+            };
+            let mut texture = None;
+            // SAFETY: a valid description with initial data of its size.
+            unsafe { device.CreateTexture2D(&desc, Some(&data), Some(&mut texture)) }.unwrap();
+            let whole = D3D11_BOX {
+                left: 0,
+                top: 0,
+                front: 0,
+                right: size.width,
+                bottom: size.height,
+                back: 1,
+            };
+            average_box(&device, &context, &texture.unwrap(), &whole, size).unwrap()
+        };
+        let (small, pixels) = read(Size::new(6, 4), &|x, _| if x == 5 { 100 } else { 0 });
+        assert_eq!(small, Size::new(2, 1));
+        assert_eq!(pixels[4], 50, "the last cell: pixels 4 and 5, equally");
+        let (small, pixels) = read(Size::new(4, 7), &|_, y| if y == 6 { 90 } else { 0 });
+        assert_eq!(small, Size::new(1, 2));
+        assert_eq!(pixels[4], 30, "the last cell: rows 4, 5 and 6, equally");
+    }
+
+    /// Review of `#168`, round 12: a part-cell two or three pixels wide is
+    /// averaged equally from its own pixels. A 6 by 4 region: its last
+    /// column of cells is pixels 4 and 5, 0 and 100, so 50, not the 75 that
+    /// repeating the last column gives; a 4 by 7 region's last row of cells
+    /// is three rows, 0, 0 and 90, so 30.
+    #[test]
+    fn an_edge_cell_averages_its_own_pixels_equally() {
+        let mut small = [9_u8, 9, 9, 255, 75, 75, 75, 255].to_vec();
+        let mut strip = Vec::new();
+        for _ in 0..4 {
+            strip.extend_from_slice(&[0, 0, 0, 255, 100, 100, 100, 255]);
+        }
+        overwrite_edge(&mut small, Size::new(2, 1), &strip, Size::new(2, 4), true);
+        assert_eq!(&small[4..7], &[50, 50, 50], "two pixels, equally");
+        assert_eq!(&small[0..3], &[9, 9, 9], "the inside is the GPU's");
+
+        let mut small = [0_u8; 8].to_vec();
+        let mut strip = Vec::new();
+        for level in [0_u8, 0, 90] {
+            for _ in 0..4 {
+                strip.extend_from_slice(&[level, level, level, 255]);
+            }
+        }
+        overwrite_edge(&mut small, Size::new(1, 2), &strip, Size::new(4, 3), false);
+        assert_eq!(&small[4..7], &[30, 30, 30], "three rows, equally");
+    }
+
+    /// Review of `#168`, round 10: a region one pixel past a whole cell on
+    /// each side (5 by 5) has a last texel holding a single real pixel row and
+    /// column. With the padding repeating the edge, a change of 10 levels in
+    /// that last column moves the last texel by about 10, as it moves the
+    /// full picture's part-cell; padded with black it moved it by under one
+    /// level, which the 8-bit texel then lost. Run on WARP.
+    #[test]
+    fn a_one_pixel_edge_reaches_the_gpu_average() {
+        use windows::Win32::Foundation::HMODULE;
+        use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_WARP;
+        use windows::Win32::Graphics::Direct3D11::{
+            D3D11_CREATE_DEVICE_FLAG, D3D11_SDK_VERSION, D3D11_SUBRESOURCE_DATA, D3D11CreateDevice,
+        };
+        use windows::Win32::Graphics::Dxgi::Common::{
+            DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC,
+        };
+        let mut device = None;
+        let mut context = None;
+        // SAFETY: valid out-pointers; WARP needs no adapter.
+        unsafe {
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_WARP,
+                HMODULE::default(),
+                D3D11_CREATE_DEVICE_FLAG(0),
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                Some(&mut context),
+            )
+        }
+        .unwrap();
+        let (device, context) = (device.unwrap(), context.unwrap());
+        let size = Size::new(5, 5);
+        let read = |edge: u8| -> Vec<u8> {
+            let mut pixels = [100_u8, 100, 100, 255].repeat(25);
+            for y in 0..5 {
+                let at = (y * 5 + 4) * 4;
+                pixels[at..at + 3].copy_from_slice(&[edge, edge, edge]);
+            }
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: 5,
+                Height: 5,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Usage: D3D11_USAGE_DEFAULT,
+                ..Default::default()
+            };
+            let data = D3D11_SUBRESOURCE_DATA {
+                pSysMem: pixels.as_ptr().cast(),
+                SysMemPitch: 5 * 4,
+                SysMemSlicePitch: 0,
+            };
+            let mut texture = None;
+            // SAFETY: a valid description with initial data of its size.
+            unsafe { device.CreateTexture2D(&desc, Some(&data), Some(&mut texture)) }.unwrap();
+            let whole = D3D11_BOX {
+                left: 0,
+                top: 0,
+                front: 0,
+                right: 5,
+                bottom: 5,
+                back: 1,
+            };
+            let (small, pixels) =
+                average_box(&device, &context, &texture.unwrap(), &whole, size).unwrap();
+            assert_eq!(small, Size::new(2, 2));
+            pixels
+        };
+        // The texel right of the first: x 4 (real) and 5 to 7 (padding).
+        let texel = |pixels: &[u8]| i32::from(pixels[4]);
+        let moved = (texel(&read(110)) - texel(&read(100))).abs();
+        assert!(
+            moved >= 8,
+            "the last texel moved by {moved} levels for a change of 10"
+        );
     }
 
     /// The GPU box for a part of a monitor: monitor-relative, and refused
