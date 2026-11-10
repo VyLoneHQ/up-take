@@ -18,10 +18,12 @@
 //!   from the same `Area::is_watching`, sent in the area payload, so the two
 //!   answer one question once. Nothing is read while the overlay is hidden,
 //!   because the mark is hidden with it.
-//! - **Local.** A reading is reduced to at most 256 brightness averages
-//!   (a region under 16 pixels on a side keeps one per pixel on that side,
-//!   which is its greyscale picture), and the detector keeps two such
-//!   summaries, the last still one and the last one. Nothing is written,
+//! - **Local.** A reading is reduced to the average brightness of each 8 by
+//!   8 pixel square of its region (`uptake_core::watch::CELL`, roadmap
+//!   `1.61`), which is the region's greyscale picture at an eighth of its
+//!   size: about 32,000 values for an area the size of a 1080p monitor. The
+//!   detector keeps up to two such readings, the last still one and the last
+//!   one. Nothing is written,
 //!   logged or sent; the notification says which moment it was, never what
 //!   was read. ⚠️ **What is held in between is larger than a reading:** while
 //!   any area reads, a capture session on each monitor under one keeps that

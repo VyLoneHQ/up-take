@@ -236,11 +236,11 @@ impl Fingerprint {
         let (width, height) = (bitmap.width(), bitmap.height());
         let whole = crate::geometry::Rect::new(0, 0, width, height);
         let (columns, rows) = (fingerprint.columns, fingerprint.rows);
-        // The pixel-to-cell mapping in `summarise` is monotonic, so a
-        // rectangle's cells are those of its first and last pixel and all
-        // between.
-        let column = |x: u32| (u64::from(x) * u64::from(columns) / u64::from(width)) as u32;
-        let row = |y: u32| (u64::from(y) * u64::from(rows) / u64::from(height)) as u32;
+        // The pixel-to-cell mapping in `summarise` ([`cell_on`]) is
+        // monotonic, so a rectangle's cells are those of its first and last
+        // pixel and all between.
+        let column = |x: u32| cell_on(x, width, region.width, columns);
+        let row = |y: u32| cell_on(y, height, region.height, rows);
         for part in hide {
             let Some(part) = part.intersection(whole) else {
                 continue;
@@ -290,9 +290,9 @@ impl Fingerprint {
         let mut counts = vec![0_u64; (columns * rows) as usize];
         let pixels = bitmap.pixels();
         for y in 0..height {
-            let row = (u64::from(y) * u64::from(rows) / u64::from(height)) as u32;
+            let row = cell_on(y, height, region.height, rows);
             for x in 0..width {
-                let column = (u64::from(x) * u64::from(columns) / u64::from(width)) as u32;
+                let column = cell_on(x, width, region.width, columns);
                 let at = ((y * width + x) * 4) as usize;
                 let Some(&[r, g, b, _]) = pixels.get(at..at + 4) else {
                     continue;
@@ -304,10 +304,31 @@ impl Fingerprint {
                 }
             }
         }
+        // The GPU route's last texel on a side averages the region's last
+        // part-cell with the black padding beyond it (`padded_for_level` in
+        // `uptake-capture`). Scaled back by the share that was real, it reads
+        // as the full picture's part-cell does, which averages only its real
+        // pixels (review of `#168`, round 1).
+        let real = |side: u32, region: u32, cells: u32, at: u32| -> u64 {
+            if side == cells && side < region && at + 1 == cells {
+                u64::from(region - (cells - 1) * CELL)
+            } else {
+                u64::from(CELL)
+            }
+        };
         let cells = sums
             .iter()
             .zip(&counts)
-            .map(|(&sum, &count)| u8::try_from(sum / count.max(1)).unwrap_or(u8::MAX))
+            .enumerate()
+            .map(|(at, (&sum, &count))| {
+                let at = at as u32;
+                let (column, row) = (at % columns, at / columns);
+                let shown = u64::from(CELL) * u64::from(CELL);
+                let seen = real(width, region.width, columns, column)
+                    * real(height, region.height, rows, row);
+                let average = sum / count.max(1);
+                u8::try_from((average * shown + seen / 2) / seen).unwrap_or(u8::MAX)
+            })
             .collect();
         Some(Self {
             columns,
@@ -374,6 +395,23 @@ impl Fingerprint {
     pub const fn grid(&self) -> (u32, u32) {
         (self.columns, self.rows)
     }
+}
+
+/// Which cell along one side a bitmap pixel at `at` belongs to, for a
+/// bitmap `side` pixels long of a region `region` pixels long with `cells`
+/// cells. A full-size picture (`side >= region`) is cut into true [`CELL`]
+/// pixel cells, so the last cell holds what is left (review of `#168`,
+/// round 1: a proportional split made cells of 7 and 8 pixels); a picture
+/// already one texel per cell (the GPU route) maps texel to cell.
+fn cell_on(at: u32, side: u32, region: u32, cells: u32) -> u32 {
+    let cell = if side >= region {
+        at / CELL
+    } else if side == cells {
+        at
+    } else {
+        (u64::from(at) * u64::from(cells) / u64::from(side.max(1))) as u32
+    };
+    cell.min(cells.saturating_sub(1))
 }
 
 /// How many of `known` cells must move for a share of `share_permille`
@@ -870,6 +908,53 @@ mod tests {
         small = with_patch(small, (1, 2, 2, 1), 200);
         let region = Size::new(64, 48);
         let read = Fingerprint::of_region(&small, region, &[])
+            .unwrap_or_else(|| unreachable!("a non-empty bitmap"));
+        assert_eq!(read, print(&full));
+    }
+
+    /// True 8-pixel cells on a full-size picture whose sides are not a
+    /// multiple of eight (review of `#168`, round 1): a 106-pixel side is
+    /// thirteen cells of 8 and one of 2, so pixel column 7 is in cell 0,
+    /// column 8 in cell 1, and the last two columns in cell 13 alone.
+    #[test]
+    fn a_full_picture_is_cut_into_true_eight_pixel_cells() {
+        let base = grey(106, 62, 100);
+        let changed_cells = |x: u32| {
+            let after = with_patch(base.clone(), (x, 0, 1, 62), 255);
+            let (a, b) = (print(&base), print(&after));
+            let mut columns: Vec<u32> = a
+                .cells
+                .iter()
+                .zip(&b.cells)
+                .enumerate()
+                .filter(|(_, (x, y))| x != y)
+                .map(|(at, _)| at as u32 % a.columns)
+                .collect();
+            columns.dedup();
+            columns.sort_unstable();
+            columns.dedup();
+            columns
+        };
+        assert_eq!(changed_cells(7), vec![0]);
+        assert_eq!(changed_cells(8), vec![1]);
+        assert_eq!(changed_cells(104), vec![13]);
+        assert_eq!(changed_cells(103), vec![12]);
+    }
+
+    /// Both routes read a region whose sides are not a multiple of eight the
+    /// same way: the GPU's last texels, diluted by black padding, are scaled
+    /// back to what their real pixels hold. 106 by 62 is 13 cells and 2
+    /// pixels across, 7 cells and 6 pixels down; the grey is chosen so every
+    /// diluted texel is a whole level, as the GPU would store it.
+    #[test]
+    fn both_routes_agree_on_a_region_not_a_multiple_of_eight() {
+        let full = with_patch(grey(106, 62, 192), (8, 8, 16, 8), 0);
+        let mut small = grey(14, 8, 192);
+        small = with_patch(small, (1, 1, 2, 1), 0);
+        small = with_patch(small, (13, 0, 1, 7), 48); // 192 * 2 / 8
+        small = with_patch(small, (0, 7, 13, 1), 144); // 192 * 6 / 8
+        small = with_patch(small, (13, 7, 1, 1), 36); // 192 * 12 / 64
+        let read = Fingerprint::of_region(&small, Size::new(106, 62), &[])
             .unwrap_or_else(|| unreachable!("a non-empty bitmap"));
         assert_eq!(read, print(&full));
     }
