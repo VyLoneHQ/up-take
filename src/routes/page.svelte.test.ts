@@ -647,16 +647,21 @@ describe('an area renders the badges its state earns and no others', () => {
     });
     expect(container.querySelector('.area')?.classList).toContain('watch');
     expect(container.querySelectorAll('.watch-badge')).toHaveLength(0);
-    // ADR-0053: a paused area says so where its watching mark was.
-    expect(container.querySelector('.held-badge')?.textContent?.trim()).toBe(
-      '❚❚ paused',
-    );
+    // ADR-0053: a paused area says so where its watching mark was, as a
+    // grey dot named for a screen reader (2026-11-10).
+    expect(
+      container.querySelector('.held-badge')?.getAttribute('aria-label'),
+    ).toBe('paused');
+    expect(container.querySelector('.held-badge .held-dot')).not.toBeNull();
 
     await emit('overlay://areas', {
       areas: [area({ kind: 'watch', watch: 'changes', watching: true })],
     });
+    expect(
+      container.querySelector('.watch-badge')?.getAttribute('aria-label'),
+    ).toBe('watching');
     expect(container.querySelector('.watch-badge')?.textContent?.trim()).toBe(
-      '● watching',
+      '',
     );
     expect(container.querySelectorAll('.held-badge')).toHaveLength(0);
 

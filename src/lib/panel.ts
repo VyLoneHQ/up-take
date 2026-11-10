@@ -43,6 +43,10 @@ export interface SliderRange {
   max: number;
   fine: number;
   reversed?: boolean;
+  /** Values above `min` and below this snap to `min`: for the sampling
+   * slider, a step shorter than one captured frame reads no faster than
+   * realtime, so it is shown and kept as realtime. */
+  snap?: number;
 }
 
 /** How many fine steps one step is while Ctrl is held. */
@@ -51,13 +55,21 @@ export const COARSE = 10;
 /** The calm slider, in ms: 50 ms to 10 s in steps of 10 ms. */
 export const CALM_RANGE: SliderRange = { min: 50, max: 10_000, fine: 10 };
 
+/** The fastest a watch area reads: one captured frame, about 30 a second
+ * (`uptake-capture`'s `WATCH_FRAME_INTERVAL`, which throttles the capture
+ * to save cost). Not the monitor's refresh rate. */
+export const FRAME_MS = 34;
+
 /** The sampling slider, in ms between readings: every five seconds on the
- * left to realtime (0) on the right, in steps of 10 ms. */
+ * left to realtime (0) on the right, in steps of 10 ms. A step shorter than
+ * a frame is realtime (the maintainer, 2026-11-10: the label is capped at
+ * what the reading can reach). */
 export const SAMPLE_RANGE: SliderRange = {
   min: 0,
   max: 5_000,
   fine: 10,
   reversed: true,
+  snap: FRAME_MS,
 };
 
 /** The tolerance slider, in thousandths of the area: any change on the
@@ -91,7 +103,8 @@ export function toPosition(range: SliderRange, value: number): number {
 /** The value at input position `position`, kept in range. */
 export function fromPosition(range: SliderRange, position: number): number {
   const value = range.reversed ? range.max - position : position;
-  return Math.min(range.max, Math.max(range.min, Math.round(value)));
+  const kept = Math.min(range.max, Math.max(range.min, Math.round(value)));
+  return range.snap !== undefined && kept < range.snap ? range.min : kept;
 }
 
 /** How far along the track `value` sits, 0 at the left and 1 at the right,

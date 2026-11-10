@@ -979,17 +979,31 @@ $effect(() => {
               class:paused={area.sticky === 'paused'}
             >◈{area.sticky === 'paused' ? ` ${text(language, 'area.sticky.paused')}` : ''}</span>
           {/if}
-          <!-- A watch area that is reading its region says so, in words, for
+          <!-- A watch area that is reading its region shows a green dot for
                as long as it reads (roadmap 1.58, ADR-0048: "visibly marked
-               while it watches"). Top right, clear of the depth and sticky
-               marks on the left. -->
+               while it watches"), and a paused one a grey dot (ADR-0053).
+               A dot, not the word, since the maintainer's rig pass of
+               2026-11-10: an area as small as two letters could not fit the
+               word, so its mark was never seen and it never read. The word
+               stays as the dot's name for a screen reader and a tooltip.
+               Top right, clear of the depth and sticky marks on the left. -->
           {#if area.watching}
-            <span class="watch-badge" data-area={area.id}
-              ><span class="watch-dot">●</span> {text(language, 'area.watching')}</span
+            <span
+              class="watch-badge"
+              data-area={area.id}
+              role="img"
+              aria-label={text(language, 'area.watching')}
+              title={text(language, 'area.watching')}
+              ><span class="watch-dot"></span></span
             >
           {:else if area.held}
-            <!-- ADR-0053: a paused area says so where its working mark was. -->
-            <span class="held-badge">❚❚ {text(language, 'area.held')}</span>
+            <span
+              class="held-badge"
+              role="img"
+              aria-label={text(language, 'area.held')}
+              title={text(language, 'area.held')}
+              ><span class="held-dot"></span></span
+            >
           {/if}
           <!-- The name the user gave the area (the founder, 2026-11-03), at
                its bottom left, clear of every mark along its top. -->
@@ -1281,17 +1295,15 @@ $effect(() => {
    dot cut off by a small area, off the desktop, or under another area is not
    seen, and the host does not read that area (watch.rs `confirm`, review of
    #154 rounds 14 to 19). Pinned by watch-badge-css.test.ts. */
-.watch-badge {
+.watch-badge,
+.held-badge {
   position: absolute;
-  right: 4px;
-  top: 2px;
-  max-width: calc(100% - 8px);
-  max-height: calc(100% - 4px);
+  right: 1px;
+  top: 1px;
+  max-width: calc(100% - 2px);
+  max-height: calc(100% - 2px);
   overflow: hidden;
-  font: 11px/1 system-ui, sans-serif;
-  color: rgba(140, 235, 180, 0.98);
-  text-shadow: 0 0 3px rgba(0, 0, 0, 0.8);
-  white-space: nowrap;
+  line-height: 0;
 }
 
 /* The dot's box must be its line box. As a plain inline span its box is the
@@ -1301,9 +1313,23 @@ $effect(() => {
    (measured in headless Edge at 100 to 200 %, 2026-11-03). An inline-block
    with line-height 1 is exactly the badge's line. Pinned by
    watch-badge-css.test.ts. */
+.watch-dot,
+.held-dot {
+  display: block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  /* A dark ring drawn inside the box, so the dot shows on any background
+     and its box is exactly what is drawn (markSeen measures the box). */
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.55);
+}
+
 .watch-dot {
-  display: inline-block;
-  line-height: 1;
+  background: rgba(110, 230, 160, 1);
+}
+
+.held-dot {
+  background: rgba(170, 170, 170, 1);
 }
 
 /* The area's name (the founder, 2026-11-03), at its bottom left: clear of the
@@ -1337,20 +1363,6 @@ $effect(() => {
   font: 12px/1.2 system-ui, sans-serif;
   outline: none;
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
-}
-
-/* The paused mark (ADR-0053): where the watching mark sits, dimmer, so a
-   paused area reads as stopped at a glance. */
-.held-badge {
-  position: absolute;
-  right: 4px;
-  top: 2px;
-  max-width: calc(100% - 8px);
-  overflow: hidden;
-  font: 11px/1 system-ui, sans-serif;
-  color: rgba(220, 220, 220, 0.85);
-  text-shadow: 0 0 3px rgba(0, 0, 0, 0.8);
-  white-space: nowrap;
 }
 
 /* A pinned tier (ADR-0013) is a state the user set and must be able to see; an

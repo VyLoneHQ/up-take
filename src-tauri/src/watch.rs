@@ -238,16 +238,15 @@ pub fn rest_after(spent: Duration) -> Duration {
 /// physical pixels: the border, 1.5 CSS pixels, at up to 250 % scaling.
 const EDGE: u32 = 4;
 
-/// The corner left out for the *watching* mark, in physical pixels: the
-/// mark's text at 11 CSS pixels, in either language, at up to about 230 %
-/// scaling. ⚠️ **Width binds first**: the German mark is about 99 to 114
-/// CSS pixels wide (Windows font engines, not WebView2), so from about 230 %
-/// it is wider than 240, and from about 300 % taller than 40. The page clips
-/// the mark to the area, not to this corner, so on a wide area the dot can
-/// then lie outside the corner [`mark_on_screen`] checks (review of `#154`,
-/// round 19). The page's word closes that route: it measures the mark it
-/// drew ([`confirm`]).
-const MARK: (u32, u32) = (240, 40);
+/// The corner left out for the *watching* mark, in physical pixels: a dot
+/// of 6 CSS pixels, 1 in from the corner, so 7 CSS pixels each way, at up to
+/// about 340 % scaling. Until 2026-11-10 the mark was the word *watching*
+/// beside the dot, and this corner was 240 by 40 to hold it; the maintainer's
+/// rig pass found an area as small as two letters could not show the word,
+/// so its mark was never seen and it never read. The page clips the mark to
+/// the area and measures the mark it drew ([`confirm`]), so a scaling past
+/// this corner is caught there (review of `#154`, round 19).
+const MARK: (u32, u32) = (24, 24);
 
 /// Whether the thread exists, and whether it has been woken since it last
 /// looked.
@@ -2166,18 +2165,19 @@ mod tests {
     }
 
     /// Nothing is left out while UP-TAKE is kept out of captures; with it in
-    /// them, a small area keeps something to read.
+    /// them, a small area keeps something to read: one whose inside the mark's
+    /// corner would cover leaves the corner in.
     #[test]
     fn a_reading_always_keeps_something_to_compare() {
-        let small = Rect::new(0, 0, 200, 30);
+        let small = Rect::new(0, 0, 20, 16);
         assert!(left_out(small, small, false).is_empty(), "the default");
         let parts = left_out(small, small, true);
         assert_eq!(parts.len(), 4, "the border only, not the corner");
         let Some(mut bitmap) = uptake_core::bitmap::RgbaBitmap::from_pixels(
-            uptake_core::geometry::Size::new(200, 30),
-            [255_u8; 4].repeat(200 * 30),
+            uptake_core::geometry::Size::new(20, 16),
+            [255_u8; 4].repeat(20 * 16),
         ) else {
-            panic!("a 200 by 30 bitmap");
+            panic!("a 20 by 16 bitmap");
         };
         uptake_core::watch::leave_out(&mut bitmap, &parts);
         assert!(
@@ -2241,7 +2241,7 @@ mod tests {
         let right = Rect::new(1920, 0, 1280, 720);
         let monitors = [left, right];
         let inside = Rect::new(100, 100, 600, 400);
-        assert_eq!(mark(inside), Rect::new(700 - 240, 100, MARK.0, MARK.1));
+        assert_eq!(mark(inside), Rect::new(700 - 24, 100, MARK.0, MARK.1));
         // Rounds 15 and 16: small areas near a monitor's left edge, whose
         // mark (clipped to the area by the page) is on screen, do read.
         assert!(mark_on_screen(mark(Rect::new(0, 100, 40, 400)), &monitors));
@@ -2271,7 +2271,7 @@ mod tests {
         ));
         // Across the seam between two monitors: on neither wholly.
         assert!(!mark_on_screen(
-            mark(Rect::new(1500, 100, 500, 300)),
+            mark(Rect::new(1400, 100, 532, 300)),
             &monitors
         ));
         assert!(!mark_on_screen(mark(inside), &[]), "no monitors, no mark");
@@ -2303,7 +2303,7 @@ mod tests {
         assert_eq!(parts[1], Rect::new(0, 400 - 4, 600, EDGE));
         assert_eq!(parts[2], Rect::new(0, 0, EDGE, 400));
         assert_eq!(parts[3], Rect::new(600 - 4, 0, EDGE, 400));
-        assert_eq!(parts[4], Rect::new(600 - 240, 0, MARK.0, MARK.1));
+        assert_eq!(parts[4], Rect::new(600 - 24, 0, MARK.0, MARK.1));
     }
 
     /// An area hanging off the desktop's left edge: the capture starts 30
@@ -2314,13 +2314,13 @@ mod tests {
         let taken = Rect::new(0, 0, 270, 200);
         let parts = own_drawing(bounds, taken);
         assert_eq!(parts[0], Rect::new(-30, 0, 300, EDGE));
-        assert_eq!(parts[4], Rect::new(270 - 240, 0, MARK.0, MARK.1));
+        assert_eq!(parts[4], Rect::new(270 - 24, 0, MARK.0, MARK.1));
     }
 
     /// An area smaller than the mark's corner leaves out what it has.
     #[test]
     fn a_small_area_leaves_out_no_more_than_itself() {
-        let bounds = Rect::new(0, 0, 100, 30);
-        assert_eq!(own_drawing(bounds, bounds)[4], Rect::new(0, 0, 100, 30));
+        let bounds = Rect::new(0, 0, 20, 16);
+        assert_eq!(own_drawing(bounds, bounds)[4], Rect::new(0, 0, 20, 16));
     }
 }

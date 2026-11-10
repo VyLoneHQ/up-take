@@ -11,17 +11,18 @@ import page from './+page.svelte?raw';
  * is pinned in the source.
  */
 describe('the watching mark stays inside its area', () => {
-  const block = page.match(/\.watch-badge \{([^}]*)\}/)?.[1] ?? '';
+  const block =
+    page.match(/\.watch-badge,\s*\.held-badge \{([^}]*)\}/)?.[1] ?? '';
 
   it('is clipped to the area', () => {
     expect(block).toContain('overflow: hidden;');
-    expect(block).toContain('max-width: calc(100% - 8px);');
-    expect(block).toContain('max-height: calc(100% - 4px);');
+    expect(block).toContain('max-width: calc(100% - 2px);');
+    expect(block).toContain('max-height: calc(100% - 2px);');
   });
 
   it('starts from the top right corner', () => {
-    expect(block).toContain('right: 4px;');
-    expect(block).toContain('top: 2px;');
+    expect(block).toContain('right: 1px;');
+    expect(block).toContain('top: 1px;');
   });
 });
 
@@ -34,10 +35,23 @@ describe('the watching mark stays inside its area', () => {
  * layout, so the rule that makes the dot's box its line box is pinned here.
  */
 describe('the watching dot fits inside its badge', () => {
-  const block = page.match(/\.watch-dot \{([^}]*)\}/)?.[1] ?? '';
+  const block = page.match(/\.watch-dot,\s*\.held-dot \{([^}]*)\}/)?.[1] ?? '';
 
-  it('is laid out as its line box, not as its glyph', () => {
-    expect(block).toContain('display: inline-block;');
-    expect(block).toContain('line-height: 1;');
+  it('is a drawn box of a fixed size, not a glyph', () => {
+    expect(block).toContain('display: block;');
+    expect(block).toContain('width: 6px;');
+    expect(block).toContain('height: 6px;');
+  });
+
+  // The maintainer's rig pass of 2026-11-10: an area as small as two
+  // letters never read, because the word "watching" did not fit and a mark
+  // not seen is a mark not read. With a 6 px dot 1 px in from the corner, an
+  // area 8 CSS pixels on a side shows it whole.
+  it('fits an area 8 pixels on a side', () => {
+    const badge =
+      page.match(/\.watch-badge,\s*\.held-badge \{([^}]*)\}/)?.[1] ?? '';
+    const inset = Number(badge.match(/top: (\d+)px;/)?.[1]);
+    const side = Number(block.match(/width: (\d+)px;/)?.[1]);
+    expect(inset + side + inset).toBeLessThanOrEqual(8);
   });
 });

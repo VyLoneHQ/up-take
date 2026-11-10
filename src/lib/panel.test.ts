@@ -113,6 +113,10 @@ describe("a watch area's tuning (roadmap 1.65)", () => {
     expect(toPosition(SAMPLE_RANGE, 0)).toBe(5_000);
     expect(fraction(SAMPLE_RANGE, 0)).toBe(1);
     expect(fraction(SAMPLE_RANGE, 5_000)).toBe(0);
+    // Faster than one captured frame is realtime, not "100 per second".
+    expect(fromPosition(SAMPLE_RANGE, 4_990)).toBe(0);
+    expect(fromPosition(SAMPLE_RANGE, 4_970)).toBe(0);
+    expect(fromPosition(SAMPLE_RANGE, 4_960)).toBe(40);
   });
 
   it('keeps values from Rust and from the input in range', async () => {

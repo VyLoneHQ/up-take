@@ -5,6 +5,7 @@ import { onMount, tick } from 'svelte';
 import {
   CALM_RANGE,
   DEPTHS,
+  FRAME_MS,
   fraction,
   fromPosition,
   GAPS_MS,
@@ -147,7 +148,7 @@ function share(permille: number): string {
 
 /** A sampling step as the panel says it. */
 function rate(ms: number): string {
-  if (ms === 0) return text(language, 'panel.watch.sample.realtime');
+  if (ms < FRAME_MS) return text(language, 'panel.watch.sample.realtime');
   if (ms >= 1_000)
     return fill(language, 'panel.watch.every_seconds', {
       n: number(ms / 1_000),
