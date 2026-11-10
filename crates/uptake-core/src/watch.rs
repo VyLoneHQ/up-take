@@ -2,12 +2,13 @@
 //! `ADR-0048`).
 //!
 //! A watch area reads its own region every few seconds and tells the user when
-//! what it shows changes, or when it stops changing. This module is the part
-//! of that which needs no screen: what the user asked the area to watch for
+//! what it shows changes, when it stops changing, or, over a progress bar,
+//! when the bar is full (roadmap `1.61`). This module is the part of that
+//! which needs no screen: what the user asked the area to watch for
 //! ([`Watch`]), a small summary of one reading ([`Fingerprint`]), and the rule
-//! that turns a run of readings into the two moments worth a notification
-//! ([`Detector`]). Taking the readings and raising the notification are the
-//! host's (`src-tauri/src/watch.rs`).
+//! that turns a run of readings into the moments worth a notification
+//! ([`Detector`], and its `Bar` for a progress bar). Taking the readings and
+//! raising the notification are the host's (`src-tauri/src/watch.rs`).
 //!
 //! # `ADR-0048`'s four conditions
 //!
