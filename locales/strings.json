@@ -155,6 +155,11 @@
       "de": "{n} % der Fläche",
       "de_from": "5b59f9d5"
     },
+    "panel.watch.settle": {
+      "en": "Counts as stopped after",
+      "de": "Gilt als beendet nach",
+      "de_from": "7dd31c9c"
+    },
     "panel.watch.sample": {
       "en": "Sampling rate",
       "de": "Abtastrate",

@@ -27,6 +27,8 @@ export interface PanelTuning {
   /** The tolerance (roadmap 1.61): the share of the area, in thousandths,
    * that must change before it counts; 0 is any change, 500 half the area. */
   share_permille: number;
+  /** For "stops changing": how long the area must hold still, in ms. */
+  settle_ms: number;
 }
 
 /** The minimum gaps the panel offers, in ms: none, 0.1 s, 1 s, 10 s, 1 min. */
@@ -62,6 +64,10 @@ export const SAMPLE_RANGE: SliderRange = {
  * left to half the area on the right (his *"from any pixel to half the
  * area"*), in steps of a tenth of a percent. */
 export const SHARE_RANGE: SliderRange = { min: 0, max: 500, fine: 1 };
+
+/** The "stops changing" slider, in ms of stillness: 0.1 s to 30 s, in steps
+ * of 10 ms (2026-11-10). */
+export const SETTLE_RANGE: SliderRange = { min: 100, max: 30_000, fine: 10 };
 
 /** The input's own bounds for `range`: a reversed range runs its position
  * from 0 on the left. */
@@ -108,7 +114,8 @@ export function isPanelTuning(value: unknown): value is PanelTuning {
     isCount(tuning.calm_ms) &&
     isCount(tuning.gap_ms) &&
     isCount(tuning.sample_ms) &&
-    isCount(tuning.share_permille)
+    isCount(tuning.share_permille) &&
+    isCount(tuning.settle_ms)
   );
 }
 

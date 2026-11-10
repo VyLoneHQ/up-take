@@ -170,9 +170,9 @@ Six of eight area types are built.
   and it says *watching* on the area for as long as it reads. You choose how much of the area has
   to change before it counts, from any change to half the area. What it reads stays on your computer:
   to compare, it keeps a small greyscale copy of its latest readings in memory, one shade for every
-  8 by 8 pixels, and nothing else.
+  4 by 4 pixels, and nothing else.
   NOTES FOR RELEASE, not part of the draft. (1) Since roadmap 1.61 a reading is the area's greyscale
-  picture at an eighth of its size (8 px cells, crates/uptake-core/src/watch.rs CELL), so the old
+  picture at a quarter of its size (4 px cells, crates/uptake-core/src/watch.rs CELL), so the old
   "coarse summaries, a grid of brightness averages" was no longer true and was replaced; the new
   wording waits for the founder's P-9 with the rest of this bullet. (2) "Nothing else" must also allow for the capture sessions, which hold each watched
   monitor's newest frame in graphics memory while an area watches (#154 round 12).

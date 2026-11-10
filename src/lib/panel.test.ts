@@ -15,6 +15,7 @@ describe('the area settings panel (roadmap 1.60)', () => {
       gap_ms: 0,
       sample_ms: 0,
       share_permille: 0,
+      settle_ms: 1_000,
     },
     kinds: ['default', 'screenshot', 'watch'],
     ocr: null,

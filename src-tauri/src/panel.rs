@@ -809,7 +809,14 @@ mod tests {
         assert_keys(
             "Tuning",
             &Tuning::default(),
-            &["notify", "calm_ms", "gap_ms", "sample_ms", "share_permille"],
+            &[
+                "notify",
+                "calm_ms",
+                "gap_ms",
+                "sample_ms",
+                "share_permille",
+                "settle_ms",
+            ],
         );
         assert_payload_coverage("panel.rs", include_str!("panel.rs"), &["PanelView"], &[]);
     }

@@ -866,12 +866,12 @@ fn read_box(slot: &Slot, part: Rect) -> Result<Option<Vec<u8>>, String> {
 /// `region` as a small picture for a fingerprint, averaged down on the GPU:
 /// the area's box is copied into a texture with a mip chain, the GPU averages
 /// it (`GenerateMips`), and the level whose texels are one fingerprint cell
-/// each ([`uptake_core::watch::CELL_LEVEL`], 8 by 8 pixels) is read back.
+/// each ([`uptake_core::watch::CELL_LEVEL`], 4 by 4 pixels) is read back.
 /// The picture's `rect` is the region; its bitmap is the level's size, an
-/// eighth of the region's on each side rounded up, not the region's
+/// quarter of the region's on each side rounded up, not the region's
 /// (roadmap `1.61`: until then the smallest level at least 16 on a side, so
 /// a read cost about the same for any area size; it now grows with the
-/// area, about 130 KB for a 1080p area).
+/// area, about 520 KB for a 1080p area).
 ///
 /// Only for a region on one monitor, read without anything left out (the
 /// reading's caller paints UP-TAKE's own drawing out of a full picture when
@@ -1600,11 +1600,11 @@ mod tests {
         assert!(!touches_a_watch_area(None, &[]), "nothing to watch");
     }
 
-    /// The level read back for a fingerprint is one texel per cell: 8 by 8
-    /// pixels, level 3, and the padded chain divides evenly into it.
+    /// The level read back for a fingerprint is one texel per cell: 4 by 4
+    /// pixels, level 2, and the padded chain divides evenly into it.
     #[test]
     fn the_level_read_back_is_one_texel_per_cell() {
-        assert_eq!(uptake_core::watch::CELL_LEVEL, 3);
+        assert_eq!(uptake_core::watch::CELL_LEVEL, 2);
         assert_eq!(
             1 << uptake_core::watch::CELL_LEVEL,
             uptake_core::watch::CELL
@@ -1612,8 +1612,8 @@ mod tests {
         for (w, h) in [(600, 400), (1920, 1080), (17, 900), (5, 3)] {
             let padded = padded_for_level(Size::new(w, h), uptake_core::watch::CELL_LEVEL);
             assert_eq!(
-                (padded.width >> 3, padded.height >> 3),
-                (w.div_ceil(8), h.div_ceil(8)),
+                (padded.width >> 2, padded.height >> 2),
+                (w.div_ceil(4), h.div_ceil(4)),
                 "{w} x {h}"
             );
         }
@@ -1726,10 +1726,10 @@ mod tests {
                 back: 1,
             };
             let (small, pixels) = average_box(&device, &context, &texture, &whole, size).unwrap();
-            // One texel per 8-pixel cell, the region's edge rounded up.
+            // One texel per 4-pixel cell, the region's edge rounded up.
             assert_eq!(
                 small,
-                Size::new(size.width.div_ceil(8), size.height.div_ceil(8))
+                Size::new(size.width.div_ceil(4), size.height.div_ceil(4))
             );
             pixels
         };

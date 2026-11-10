@@ -19,6 +19,7 @@ import {
   type PanelView,
   type PanelWatch,
   SAMPLE_RANGE,
+  SETTLE_RANGE,
   SHARE_RANGE,
   type SliderRange,
   stepOf,
@@ -360,6 +361,34 @@ onMount(() => {
       {@const s = slider(SHARE_RANGE, tuning.share_permille)}
       {@const c = slider(CALM_RANGE, tuning.calm_ms)}
       {@const r = slider(SAMPLE_RANGE, tuning.sample_ms)}
+      {@const q = slider(SETTLE_RANGE, tuning.settle_ms)}
+      {#if view.watch === 'settles'}
+        <label class="field">
+          <span class="label"
+            >{text(language, 'panel.watch.settle')}
+            <span class="value">{duration(tuning.settle_ms)}</span></span
+          >
+          <input
+            type="range"
+            min={q.min}
+            max={q.max}
+            step={q.step}
+            value={q.value}
+            style:--at={q.at}
+            onpointerdown={followCtrl}
+            onpointermove={followCtrl}
+            onkeydown={followCtrl}
+            oninput={(event) =>
+              setTuning({
+                settle_ms: fromPosition(
+                  SETTLE_RANGE,
+                  Number(event.currentTarget.value),
+                ),
+              })}
+            onchange={done}
+          />
+        </label>
+      {/if}
       <label class="field">
         <span class="label"
           >{text(language, 'panel.watch.share')}

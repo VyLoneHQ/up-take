@@ -93,6 +93,7 @@ const WATCH = {
     gap_ms: 0,
     sample_ms: 0,
     share_permille: 0,
+    settle_ms: 1_000,
   },
   kinds: ['default', 'screenshot', 'filter', 'upscale', 'ocr', 'watch'],
   ocr: null,
@@ -206,6 +207,17 @@ test("a watch area's tolerance runs from any change to half the area (1.61)", as
   ]);
   await settle();
   expect(document.body.textContent).toContain('50% of the area');
+});
+
+test('stops changing shows its own calm, and only for that choice', async () => {
+  render(Page);
+  await settle();
+  expect(document.body.textContent).not.toContain('Counts as stopped after');
+  replies.set('panel_view', { ...WATCH, watch: 'settles' });
+  handlers.get('panel://changed')?.();
+  await settle();
+  expect(document.body.textContent).toContain('Counts as stopped after');
+  expect(document.body.textContent).toContain('1 s');
 });
 
 test('a slider moves in fine steps, and ten times that with Ctrl held', async () => {

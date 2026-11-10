@@ -18,10 +18,10 @@
 //!   from the same `Area::is_watching`, sent in the area payload, so the two
 //!   answer one question once. Nothing is read while the overlay is hidden,
 //!   because the mark is hidden with it.
-//! - **Local.** A reading is reduced to the average brightness of each 8 by
-//!   8 pixel square of its region (`uptake_core::watch::CELL`, roadmap
-//!   `1.61`), which is the region's greyscale picture at an eighth of its
-//!   size: about 32,000 values for an area the size of a 1080p monitor. The
+//! - **Local.** A reading is reduced to the average brightness of each 4 by
+//!   4 pixel square of its region (`uptake_core::watch::CELL`, roadmap
+//!   `1.61`), which is the region's greyscale picture at a quarter of its
+//!   size: about 130,000 values for an area the size of a 1080p monitor. The
 //!   detector keeps up to two such readings, the last still one and the last
 //!   one. Nothing is written,
 //!   logged or sent; the notification says which moment it was, never what
@@ -851,7 +851,7 @@ impl Host for AppHost<'_> {
         whole: bool,
     ) -> Result<Option<uptake_capture::CapturedRegion>, String> {
         let desktop = crate::overlay::monitor_rects();
-        // Averaged down on the GPU and read back at one texel per 8-pixel
+        // Averaged down on the GPU and read back at one texel per 4-pixel
         // fingerprint cell (`1.61`): when nothing has to be painted out and
         // the area is on one monitor.
         if !whole {
@@ -1090,9 +1090,10 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
                 None
             }
         };
-        // The area's tolerance (roadmap `1.61`), as it is now: the panel may
-        // have moved it since the last reading.
-        watcher.detector.set_share(target.tuning.share_permille);
+        // The area's tolerance (roadmap `1.61`) and, for *Notify when it
+        // stops changing*, its calm, as they are now: the panel may have
+        // moved them since the last reading.
+        watcher.detector.tune(target.watch, target.tuning);
         if let Some(event) = reading.and_then(|reading| watcher.detector.observe_at(reading, at))
             && target.watch.notifies(event)
             && watcher.gate.admit(target.tuning, at).notifies
@@ -2110,6 +2111,24 @@ mod tests {
             assert!(fake.notified.is_empty(), "nothing while it moves");
             let settle = usize::try_from(Watch::Settles.settle_readings()).unwrap_or(usize::MAX);
             run(&mut fake, &mut memory, settle + 2);
+            assert_eq!(fake.notified, vec![Event::Settled]);
+        }
+
+        /// The maintainer, 2026-11-10: *Notify when it stops changing* follows
+        /// the area's own setting. With a calm of one second, a change that
+        /// stops says so after two still readings at the fake's half-second
+        /// clock, not after the six seconds it used to wait.
+        #[test]
+        fn stops_changing_waits_the_areas_own_calm() {
+            let mut list = targets_for(&[Rect::new(100, 100, 600, 400)], Watch::Settles);
+            list[0].tuning.settle_ms = 1_000;
+            let mut fake = Fake::new(list);
+            let mut memory = Memory::default();
+            run(&mut fake, &mut memory, 2);
+            fake.level = 20;
+            run(&mut fake, &mut memory, 1);
+            assert!(fake.notified.is_empty(), "nothing while it changes");
+            run(&mut fake, &mut memory, 3);
             assert_eq!(fake.notified, vec![Event::Settled]);
         }
 
