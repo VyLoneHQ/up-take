@@ -958,7 +958,7 @@ mod tests {
     /// Fixed-size cells: a larger region has more cells, not larger ones,
     /// rounded up so the region's edge is a cell too.
     #[test]
-    fn a_cell_is_eight_pixels_on_any_region() {
+    fn a_cell_is_four_pixels_on_any_region() {
         assert_eq!(CELL, 4);
         assert_eq!(print(&grey(1920, 1080, 0)).grid(), (480, 270));
         assert_eq!(print(&grey(106, 62, 0)).grid(), (27, 16));
@@ -985,7 +985,7 @@ mod tests {
     /// twenty-six cells of 4 and one of 2, so pixel column 7 is in cell 1,
     /// column 8 in cell 2, and the last two columns in cell 26 alone.
     #[test]
-    fn a_full_picture_is_cut_into_true_eight_pixel_cells() {
+    fn a_full_picture_is_cut_into_true_four_pixel_cells() {
         let base = grey(106, 62, 100);
         let changed_cells = |x: u32| {
             let after = with_patch(base.clone(), (x, 0, 1, 62), 255);
@@ -1009,13 +1009,13 @@ mod tests {
         assert_eq!(changed_cells(103), vec![25]);
     }
 
-    /// Both routes read a region whose sides are not a multiple of eight the
+    /// Both routes read a region whose sides are not a multiple of four the
     /// same way: the GPU's last texels, diluted by black padding, are scaled
     /// back to what their real pixels hold. 106 by 62 is 26 cells and 2
     /// pixels across, 15 cells and 2 pixels down; the grey is chosen so every
     /// diluted texel is a whole level, as the GPU would store it.
     #[test]
-    fn both_routes_agree_on_a_region_not_a_multiple_of_eight() {
+    fn both_routes_agree_on_a_region_not_a_multiple_of_four() {
         let full = with_patch(grey(106, 62, 192), (8, 8, 16, 8), 0);
         let mut small = grey(27, 16, 192);
         small = with_patch(small, (2, 2, 4, 2), 0);
