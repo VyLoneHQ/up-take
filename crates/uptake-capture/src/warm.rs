@@ -950,10 +950,11 @@ pub fn padded_for_level(size: Size, level: u32) -> Size {
 /// `source_box` of `source` (a texture of the frame's format), averaged down
 /// on the GPU to one texel per fingerprint cell
 /// ([`uptake_core::watch::CELL_LEVEL`]), and read back, RGBA8 top-down, with
-/// its size. Level 0 is padded to [`padded_for_level`] and cleared to black
-/// before the box is copied in, so the averaging weighs every pixel of the
-/// box equally; the padding is the same black in every reading, so it never
-/// differs.
+/// its size. Level 0 is padded to [`padded_for_level`], and the padding
+/// repeats the box's own last column and row (review of `#168`, round 10),
+/// so every texel averages pixels of the region at their full strength: the
+/// last texel on a side is the region's part-cell there, not that part-cell
+/// diluted by black.
 fn average_box(
     device: &ID3D11Device,
     context: &ID3D11DeviceContext,
@@ -1000,6 +1001,40 @@ fn average_box(
     unsafe {
         context.ClearRenderTargetView(&target, &[0.0, 0.0, 0.0, 1.0]);
         context.CopySubresourceRegion(&mips, 0, 0, 0, 0, source, 0, Some(source_box));
+    }
+    // The padding repeats the box's own last column and row, not black
+    // (review of `#168`, round 10): a part-cell at the region's edge then
+    // averages only the region's pixels at their full strength. Padded with
+    // black, a one-pixel edge was a sixteenth of its texel, and the 8-bit
+    // texel lost what a change there did. At most three columns, three rows
+    // and nine corner pixels, each copied from the frame itself.
+    let (width, height) = (size.width, size.height);
+    let last_column = D3D11_BOX {
+        left: source_box.right - 1,
+        ..*source_box
+    };
+    let last_row = D3D11_BOX {
+        top: source_box.bottom - 1,
+        ..*source_box
+    };
+    let corner = D3D11_BOX {
+        left: source_box.right - 1,
+        top: source_box.bottom - 1,
+        ..*source_box
+    };
+    // SAFETY: each box is one column, row or pixel of the box above, so it
+    // lies inside the source; each lands in level 0's padding, inside
+    // `padded`, which is at least `size` plus the padding on each side.
+    unsafe {
+        for x in width..padded.width {
+            context.CopySubresourceRegion(&mips, 0, x, 0, 0, source, 0, Some(&last_column));
+        }
+        for y in height..padded.height {
+            context.CopySubresourceRegion(&mips, 0, 0, y, 0, source, 0, Some(&last_row));
+            for x in width..padded.width {
+                context.CopySubresourceRegion(&mips, 0, x, y, 0, source, 0, Some(&corner));
+            }
+        }
         context.GenerateMips(&view);
     }
     let small_size = Size::new(
@@ -1761,6 +1796,90 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Review of `#168`, round 10: a region one pixel past a whole cell on
+    /// each side (5 by 5) has a last texel holding a single real pixel row and
+    /// column. With the padding repeating the edge, a change of 10 levels in
+    /// that last column moves the last texel by about 10, as it moves the
+    /// full picture's part-cell; padded with black it moved it by under one
+    /// level, which the 8-bit texel then lost. Run on WARP.
+    #[test]
+    fn a_one_pixel_edge_reaches_the_gpu_average() {
+        use windows::Win32::Foundation::HMODULE;
+        use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_WARP;
+        use windows::Win32::Graphics::Direct3D11::{
+            D3D11_CREATE_DEVICE_FLAG, D3D11_SDK_VERSION, D3D11_SUBRESOURCE_DATA, D3D11CreateDevice,
+        };
+        use windows::Win32::Graphics::Dxgi::Common::{
+            DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC,
+        };
+        let mut device = None;
+        let mut context = None;
+        // SAFETY: valid out-pointers; WARP needs no adapter.
+        unsafe {
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_WARP,
+                HMODULE::default(),
+                D3D11_CREATE_DEVICE_FLAG(0),
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                Some(&mut context),
+            )
+        }
+        .unwrap();
+        let (device, context) = (device.unwrap(), context.unwrap());
+        let size = Size::new(5, 5);
+        let read = |edge: u8| -> Vec<u8> {
+            let mut pixels = [100_u8, 100, 100, 255].repeat(25);
+            for y in 0..5 {
+                let at = (y * 5 + 4) * 4;
+                pixels[at..at + 3].copy_from_slice(&[edge, edge, edge]);
+            }
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: 5,
+                Height: 5,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Usage: D3D11_USAGE_DEFAULT,
+                ..Default::default()
+            };
+            let data = D3D11_SUBRESOURCE_DATA {
+                pSysMem: pixels.as_ptr().cast(),
+                SysMemPitch: 5 * 4,
+                SysMemSlicePitch: 0,
+            };
+            let mut texture = None;
+            // SAFETY: a valid description with initial data of its size.
+            unsafe { device.CreateTexture2D(&desc, Some(&data), Some(&mut texture)) }.unwrap();
+            let whole = D3D11_BOX {
+                left: 0,
+                top: 0,
+                front: 0,
+                right: 5,
+                bottom: 5,
+                back: 1,
+            };
+            let (small, pixels) =
+                average_box(&device, &context, &texture.unwrap(), &whole, size).unwrap();
+            assert_eq!(small, Size::new(2, 2));
+            pixels
+        };
+        // The texel right of the first: x 4 (real) and 5 to 7 (padding).
+        let texel = |pixels: &[u8]| i32::from(pixels[4]);
+        let moved = (texel(&read(110)) - texel(&read(100))).abs();
+        assert!(
+            moved >= 8,
+            "the last texel moved by {moved} levels for a change of 10"
+        );
     }
 
     /// The GPU box for a part of a monitor: monitor-relative, and refused

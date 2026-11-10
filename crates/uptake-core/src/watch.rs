@@ -317,31 +317,16 @@ impl Fingerprint {
                 }
             }
         }
-        // The GPU route's last texel on a side averages the region's last
-        // part-cell with the black padding beyond it (`padded_for_level` in
-        // `uptake-capture`). Scaled back by the share that was real, it reads
-        // as the full picture's part-cell does, which averages only its real
-        // pixels (review of `#168`, round 1).
-        let real = |side: u32, region: u32, cells: u32, at: u32| -> u64 {
-            if side == cells && side < region && at + 1 == cells {
-                u64::from(region - (cells - 1) * CELL)
-            } else {
-                u64::from(CELL)
-            }
-        };
+        // The GPU route's last texel on a side needs no correction: its
+        // padding repeats the region's own last column and row
+        // (`average_box` in `uptake-capture`), so a one-pixel edge is the
+        // whole texel, not a sixteenth of it. (Until round 10 of the review
+        // of `#168` the padding was black and this scaled the texel back,
+        // which cannot undo what the 8-bit texel already lost.)
         let cells = sums
             .iter()
             .zip(&counts)
-            .enumerate()
-            .map(|(at, (&sum, &count))| {
-                let at = at as u32;
-                let (column, row) = (at % columns, at / columns);
-                let shown = u64::from(CELL) * u64::from(CELL);
-                let seen = real(width, region.width, columns, column)
-                    * real(height, region.height, rows, row);
-                let average = sum / count.max(1);
-                u8::try_from((average * shown + seen / 2) / seen).unwrap_or(u8::MAX)
-            })
+            .map(|(&sum, &count)| u8::try_from(sum / count.max(1)).unwrap_or(u8::MAX))
             .collect();
         let last = |region: u32, cells: u32| {
             region
@@ -1022,18 +1007,16 @@ mod tests {
     }
 
     /// Both routes read a region whose sides are not a multiple of four the
-    /// same way: the GPU's last texels, diluted by black padding, are scaled
-    /// back to what their real pixels hold. 106 by 62 is 26 cells and 2
-    /// pixels across, 15 cells and 2 pixels down; the grey is chosen so every
-    /// diluted texel is a whole level, as the GPU would store it.
+    /// same way: the GPU's padding repeats the region's last column and row,
+    /// so its last texels are the edge's own pixels, and the grid and the
+    /// values are the full picture's. (The GPU itself is tested in
+    /// `uptake-capture`'s `a_one_pixel_edge_reaches_the_gpu_average`.) 106
+    /// by 62 is 26 cells and 2 pixels across, 15 cells and 2 pixels down.
     #[test]
     fn both_routes_agree_on_a_region_not_a_multiple_of_four() {
         let full = with_patch(grey(106, 62, 192), (8, 8, 16, 8), 0);
         let mut small = grey(27, 16, 192);
         small = with_patch(small, (2, 2, 4, 2), 0);
-        small = with_patch(small, (26, 0, 1, 15), 96); // 192 * 2 / 4
-        small = with_patch(small, (0, 15, 26, 1), 96); // 192 * 2 / 4
-        small = with_patch(small, (26, 15, 1, 1), 48); // 192 * 4 / 16
         let read = Fingerprint::of_region(&small, Size::new(106, 62), &[])
             .unwrap_or_else(|| unreachable!("a non-empty bitmap"));
         assert_eq!(read, print(&full));
