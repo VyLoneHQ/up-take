@@ -1,0 +1,54 @@
+name: Advisories
+
+# Known advisories in the locked dependencies, looked for every day and not
+# only when something changes (V-SECURITY finding SUP-0014: until this file a
+# new advisory in a quiet repository was seen at the next pull request at the
+# earliest). `cargo audit` and `cargo deny` also run in ci.yml on every push
+# and pull request, so a change that brings in an advised crate is still seen
+# on its own pull request; `pnpm audit` runs only here, because the JavaScript
+# side's advisories are all in development dependencies today and a red pull
+# request for a dev-server advisory would block unrelated work.
+#
+# REPORT-ONLY: a scheduled run blocks no push and no merge. GitHub runs a
+# schedule on the default branch only. Standard runners cost nothing on a
+# public repository.
+
+on:
+  schedule:
+    # Daily, 05:17 UTC: before the working day in Vienna, off the hour.
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  advisories:
+    name: Advisories (pnpm audit, cargo audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      # Reads the lockfile against the registry's advisory list; installs
+      # nothing. Moderate and above is the bar SUP-0014's re-test names.
+      - name: pnpm audit
+        if: ${{ !cancelled() }}
+        run: pnpm audit --audit-level moderate
+
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-audit
+
+      - name: cargo audit
+        if: ${{ !cancelled() }}
+        run: cargo audit
