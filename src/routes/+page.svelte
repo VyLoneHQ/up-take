@@ -1312,8 +1312,9 @@ $effect(() => {
 /* The watching mark: present exactly while the area reads its region. */
 /* Kept inside the area, clipped at its end so the dot shows first. The page
    tells the host which marks it can see (confirmMarks, $lib/mark-check): a
-   dot cut off by a small area, off the desktop, or under another area is not
-   seen, and the host does not read that area (watch.rs `confirm`, review of
+   dot cut off by a small area, off the desktop, or under anything the page
+   draws above it (COVERS) or a freeze's mask is not seen, and the host does
+   not read that area (watch.rs `confirm`, review of
    #154 rounds 14 to 19). Pinned by watch-badge-css.test.ts. */
 .watch-badge,
 .held-badge {

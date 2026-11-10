@@ -59,9 +59,11 @@ const overlaps = (a: Box, b: Box): boolean =>
 /**
  * The mark is seen when its dot, the part drawn first and clipped last, is
  * **wholly** inside the badge's clip box (not cut off by a small area), inside
- * one monitor (not off the desktop or in a gap), and under no area drawn above
- * this one. Any overlapping area counts as covering it, opaque or not, which
- * errs on the side of reading less. An empty dot box (nothing laid out) is not
+ * one monitor (not off the desktop or in a gap), and under nothing the caller
+ * says is drawn above it: every element of a {@link COVERS} class after the
+ * mark (other areas, their controls, menus, the coach and more), and a
+ * freeze's hidden monitors. Any overlapping box counts as covering it, opaque
+ * or not, which errs on the side of reading less. An empty dot box (nothing laid out) is not
  * seen.
  */
 export function markSeen(
