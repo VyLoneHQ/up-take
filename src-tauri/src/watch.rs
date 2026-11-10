@@ -1,7 +1,8 @@
 //! The host half of watch areas (roadmap `1.58`, `ADR-0048`): reading each
 //! watching area's region when its screen changes and raising UP-TAKE's own notification
-//! card (`ADR-0054`, `crate::notice`) when what it shows changes, or stops
-//! changing.
+//! card (`ADR-0054`, `crate::notice`) when what it shows changes, stops
+//! changing, or, over a progress bar, is full and reaches the area's own
+//! percentages (roadmap `1.61`).
 //!
 //! The rule for *what counts* as a change is `uptake_core::watch`, which needs
 //! no screen and is tested there. This module takes the readings and says so.

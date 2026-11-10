@@ -118,8 +118,9 @@ pub enum AreaType {
     Analysis,
     /// A visual treatment — a tint, a dim, a mask — applied over the region.
     Filter,
-    /// Reads its region every few seconds and tells the user when it changes
-    /// or stops changing (roadmap `1.58`, `ADR-0048`). PRODUCT-VISION §3.2's
+    /// Reads its region every few seconds and tells the user when it changes,
+    /// stops changing, or, over a progress bar, fills (roadmap `1.58` and
+    /// `1.61`, `ADR-0048`). PRODUCT-VISION §3.2's
     /// Type row lists it among the planned types, several of which (Notes,
     /// Translate, Rewind) are not modelled here yet; the founder made it a
     /// type of its own on 2026-09-27 (`Q-40`). It starts reading the moment
