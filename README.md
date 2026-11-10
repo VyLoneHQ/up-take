@@ -167,11 +167,14 @@ Six of eight area types are built.
 - **A watch area.** Place it over something that changes, such as a download bar, a render or a
   chat, and it shows a Windows notification when that piece of screen starts changing, or when it
   stops. It watches from the moment you make it, *Pause* in its settings or the key `P` stops it,
-  and it says *watching* on the area for as long as it reads. What it reads stays on your computer: it keeps
-  coarse summaries of its readings, a grid of brightness averages, to compare, and nothing else.
-  NOTES FOR RELEASE, not part of the draft. (1) For an area under 16 px on a side the grid is its
-  greyscale picture (crates/uptake-core/src/watch.rs, review of #154 round 9): say so or drop
-  "coarse". (2) "Nothing else" must also allow for the capture sessions, which hold each watched
+  and it says *watching* on the area for as long as it reads. You choose how much of the area has
+  to change before it counts, from any change to half the area. What it reads stays on your computer:
+  to compare, it keeps a small greyscale copy of its latest readings in memory, one shade for every
+  8 by 8 pixels, and nothing else.
+  NOTES FOR RELEASE, not part of the draft. (1) Since roadmap 1.61 a reading is the area's greyscale
+  picture at an eighth of its size (8 px cells, crates/uptake-core/src/watch.rs CELL), so the old
+  "coarse summaries, a grid of brightness averages" was no longer true and was replaced; the new
+  wording waits for the founder's P-9 with the rest of this bullet. (2) "Nothing else" must also allow for the capture sessions, which hold each watched
   monitor's newest frame in graphics memory while an area watches (#154 round 12).
   This block is one HTML comment and must contain no other comment marker: an inner one closes it
   early and publishes what follows (#154 round 14).

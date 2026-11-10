@@ -9,7 +9,13 @@ describe('the area settings panel (roadmap 1.60)', () => {
     name: null,
     watch: 'changes',
     held: false,
-    tuning: { notify: 'each', calm_ms: 150, gap_ms: 0, sample_ms: 0 },
+    tuning: {
+      notify: 'each',
+      calm_ms: 150,
+      gap_ms: 0,
+      sample_ms: 0,
+      share_permille: 0,
+    },
     kinds: ['default', 'screenshot', 'watch'],
     ocr: null,
     depth: 'auto',
@@ -70,6 +76,8 @@ describe('the area settings panel (roadmap 1.60)', () => {
     expect(
       isPanelView({ ...watch, tuning: { ...watch.tuning, sample_ms: '0' } }),
     ).toBe(false);
+    const { share_permille: _, ...noShare } = watch.tuning;
+    expect(isPanelView({ ...watch, tuning: noShare })).toBe(false);
   });
 
   it('draws each type in its legend colour', () => {
@@ -91,6 +99,16 @@ describe("a watch area's tuning (roadmap 1.65)", () => {
     expect(nearestStep(CALM_STEPS_MS, 160)).toBe(2);
     expect(nearestStep(SAMPLE_STEPS_MS, 0)).toBe(SAMPLE_STEPS_MS.length - 1);
     expect(nearestStep(SAMPLE_STEPS_MS, 5_000)).toBe(0);
+  });
+
+  it('runs the tolerance slider from any change to half the area (1.61)', async () => {
+    const { SHARE_STEPS_PERMILLE, nearestStep } = await import('./panel');
+    expect(SHARE_STEPS_PERMILLE[0]).toBe(0);
+    expect(SHARE_STEPS_PERMILLE.at(-1)).toBe(500);
+    expect(nearestStep(SHARE_STEPS_PERMILLE, 0)).toBe(0);
+    expect(nearestStep(SHARE_STEPS_PERMILLE, 500)).toBe(
+      SHARE_STEPS_PERMILLE.length - 1,
+    );
   });
 
   it('runs the sampling slider from every five seconds to realtime', async () => {

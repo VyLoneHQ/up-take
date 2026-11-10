@@ -18,6 +18,7 @@ import {
   type PanelView,
   type PanelWatch,
   SAMPLE_STEPS_MS,
+  SHARE_STEPS_PERMILLE,
 } from '$lib/panel';
 import {
   fill,
@@ -115,6 +116,14 @@ function duration(ms: number): string {
   if (ms >= 1_000)
     return fill(language, 'panel.watch.seconds', { n: number(ms / 1_000) });
   return fill(language, 'panel.watch.ms', { n: number(ms) });
+}
+
+/** A tolerance step as the panel says it: any change, or a share. */
+function share(permille: number): string {
+  if (permille === 0) return text(language, 'panel.watch.share.any');
+  return fill(language, 'panel.watch.share.percent', {
+    n: number(permille / 10),
+  });
 }
 
 /** A sampling step as the panel says it. */
@@ -330,6 +339,29 @@ onMount(() => {
 
     {#if view.tuning}
       {@const tuning = view.tuning}
+      <label class="field">
+        <span class="label"
+          >{text(language, 'panel.watch.share')}
+          <span class="value">{share(tuning.share_permille)}</span></span
+        >
+        <input
+          type="range"
+          min="0"
+          max={SHARE_STEPS_PERMILLE.length - 1}
+          step="1"
+          value={nearestStep(SHARE_STEPS_PERMILLE, tuning.share_permille)}
+          style:--at={at(
+            nearestStep(SHARE_STEPS_PERMILLE, tuning.share_permille),
+            SHARE_STEPS_PERMILLE,
+          )}
+          oninput={(event) =>
+            setTuning({
+              share_permille:
+                SHARE_STEPS_PERMILLE[Number(event.currentTarget.value)] ?? 0,
+            })}
+          onchange={done}
+        />
+      </label>
       <div class="field">
         <span class="label">{text(language, 'panel.watch.notify')}</span>
         <div class="choice" role="radiogroup">

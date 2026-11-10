@@ -863,28 +863,15 @@ fn read_box(slot: &Slot, part: Rect) -> Result<Option<Vec<u8>>, String> {
         .ok_or_else(|| "the mapped picture was short".to_string())
 }
 
-/// The mip level of a `size` picture to read back for a fingerprint: the
-/// smallest whose sides are both still at least `least`, or level 0 when the
-/// picture is already narrower or shorter than that. Each level halves the
-/// last, rounding down, as D3D11 sizes a mip chain.
-#[must_use]
-pub fn fingerprint_level(size: Size, least: u32) -> u32 {
-    let mut level = 0;
-    let (mut width, mut height) = (size.width, size.height);
-    while width / 2 >= least && height / 2 >= least {
-        width /= 2;
-        height /= 2;
-        level += 1;
-    }
-    level
-}
-
 /// `region` as a small picture for a fingerprint, averaged down on the GPU:
 /// the area's box is copied into a texture with a mip chain, the GPU averages
-/// it (`GenerateMips`), and only the smallest level with both sides at least
-/// [`uptake_core::watch::GRID`] is read back ([`fingerprint_level`]), so a
-/// read costs about the same for any area size. The picture's `rect` is the
-/// region; its bitmap is the level's size, not the region's.
+/// it (`GenerateMips`), and the level whose texels are one fingerprint cell
+/// each ([`uptake_core::watch::CELL_LEVEL`], 8 by 8 pixels) is read back.
+/// The picture's `rect` is the region; its bitmap is the level's size, an
+/// eighth of the region's on each side rounded up, not the region's
+/// (roadmap `1.61`: until then the smallest level at least 16 on a side, so
+/// a read cost about the same for any area size; it now grows with the
+/// area, about 130 KB for a 1080p area).
 ///
 /// Only for a region on one monitor, read without anything left out (the
 /// reading's caller paints UP-TAKE's own drawing out of a full picture when
@@ -961,8 +948,8 @@ pub fn padded_for_level(size: Size, level: u32) -> Size {
 }
 
 /// `source_box` of `source` (a texture of the frame's format), averaged down
-/// on the GPU to the smallest level still at least [`uptake_core::watch::GRID`]
-/// on both sides ([`fingerprint_level`]), and read back, RGBA8 top-down, with
+/// on the GPU to one texel per fingerprint cell
+/// ([`uptake_core::watch::CELL_LEVEL`]), and read back, RGBA8 top-down, with
 /// its size. Level 0 is padded to [`padded_for_level`] and cleared to black
 /// before the box is copied in, so the averaging weighs every pixel of the
 /// box equally; the padding is the same black in every reading, so it never
@@ -978,7 +965,7 @@ fn average_box(
         D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_RESOURCE_MISC_GENERATE_MIPS,
         ID3D11RenderTargetView, ID3D11ShaderResourceView,
     };
-    let level = fingerprint_level(size, uptake_core::watch::GRID);
+    let level = uptake_core::watch::CELL_LEVEL;
     let padded = padded_for_level(size, level);
     let mut desc = D3D11_TEXTURE2D_DESC::default();
     // SAFETY: fills `desc` from a live texture.
@@ -1613,20 +1600,22 @@ mod tests {
         assert!(!touches_a_watch_area(None, &[]), "nothing to watch");
     }
 
-    /// The level read back for a fingerprint: the smallest still at least
-    /// 16 on both sides, so the grid keeps its 16 x 16 cells.
+    /// The level read back for a fingerprint is one texel per cell: 8 by 8
+    /// pixels, level 3, and the padded chain divides evenly into it.
     #[test]
-    fn the_level_read_back_keeps_the_grid() {
-        assert_eq!(fingerprint_level(Size::new(600, 400), 16), 4, "37 x 25");
-        assert_eq!(fingerprint_level(Size::new(1920, 1080), 16), 6, "30 x 16");
-        assert_eq!(fingerprint_level(Size::new(32, 32), 16), 1);
-        assert_eq!(fingerprint_level(Size::new(31, 400), 16), 0, "narrow");
-        assert_eq!(fingerprint_level(Size::new(10, 10), 16), 0, "small");
-        for (w, h) in [(600, 400), (1920, 1080), (3840, 2160), (17, 900)] {
-            let level = fingerprint_level(Size::new(w, h), 16);
-            let (lw, lh) = (w >> level, h >> level);
-            assert!(level == 0 || (lw >= 16 && lh >= 16), "{w} x {h}");
-            assert!(lw / 2 < 16 || lh / 2 < 16, "{w} x {h}: the smallest");
+    fn the_level_read_back_is_one_texel_per_cell() {
+        assert_eq!(uptake_core::watch::CELL_LEVEL, 3);
+        assert_eq!(
+            1 << uptake_core::watch::CELL_LEVEL,
+            uptake_core::watch::CELL
+        );
+        for (w, h) in [(600, 400), (1920, 1080), (17, 900), (5, 3)] {
+            let padded = padded_for_level(Size::new(w, h), uptake_core::watch::CELL_LEVEL);
+            assert_eq!(
+                (padded.width >> 3, padded.height >> 3),
+                (w.div_ceil(8), h.div_ceil(8)),
+                "{w} x {h}"
+            );
         }
     }
 
@@ -1668,6 +1657,10 @@ mod tests {
         assert_eq!(
             padded_for_level(Size::new(1920, 1080), 6),
             Size::new(1920, 1088)
+        );
+        assert_eq!(
+            padded_for_level(Size::new(1920, 1080), 3),
+            Size::new(1920, 1080)
         );
         assert_eq!(padded_for_level(Size::new(10, 10), 0), Size::new(10, 10));
 
@@ -1732,9 +1725,13 @@ mod tests {
                 bottom: size.height,
                 back: 1,
             };
-            average_box(&device, &context, &texture, &whole, size)
-                .unwrap()
-                .1
+            let (small, pixels) = average_box(&device, &context, &texture, &whole, size).unwrap();
+            // One texel per 8-pixel cell, the region's edge rounded up.
+            assert_eq!(
+                small,
+                Size::new(size.width.div_ceil(8), size.height.div_ceil(8))
+            );
+            pixels
         };
         let cases: [(Size, bool, &[u32]); 2] = [
             (

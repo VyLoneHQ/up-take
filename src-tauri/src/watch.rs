@@ -849,9 +849,9 @@ impl Host for AppHost<'_> {
         whole: bool,
     ) -> Result<Option<uptake_capture::CapturedRegion>, String> {
         let desktop = crate::overlay::monitor_rects();
-        // Averaged down on the GPU and read back at about 16 x 16, so a
-        // read costs about the same for any area size: when nothing has to
-        // be painted out and the area is on one monitor.
+        // Averaged down on the GPU and read back at one texel per 8-pixel
+        // fingerprint cell (`1.61`): when nothing has to be painted out and
+        // the area is on one monitor.
         if !whole {
             match uptake_capture::warm::watch_capture_small(bounds, &desktop) {
                 Ok(small) => {
@@ -1066,7 +1066,10 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
                 );
                 let switched = watcher.picture.is_some_and(|was| was != size);
                 watcher.picture = Some(size);
-                let fingerprint = Fingerprint::of_hiding(&captured.bitmap, &hidden);
+                // The region's own size: the GPU route reads it averaged down
+                // to one texel per cell, and the cells are the region's.
+                let fingerprint =
+                    Fingerprint::of_region(&captured.bitmap, captured.rect.size, &hidden);
                 if switched {
                     // Another route: re-anchored, not compared (round 6).
                     if let Some(fingerprint) = fingerprint {
@@ -1085,6 +1088,9 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
                 None
             }
         };
+        // The area's tolerance (roadmap `1.61`), as it is now: the panel may
+        // have moved it since the last reading.
+        watcher.detector.set_share(target.tuning.share_permille);
         if let Some(event) = reading.and_then(|reading| watcher.detector.observe_at(reading, at))
             && target.watch.notifies(event)
             && watcher.gate.admit(target.tuning, at).notifies
@@ -1210,6 +1216,9 @@ mod tests {
             whole: Vec<bool>,
             /// The size of the picture captures return, when not the area's.
             picture: Option<Size>,
+            /// A small part of the screen showing another grey, desktop
+            /// pixels: a change to some of an area and not all of it.
+            patch: Option<(Rect, u8)>,
         }
 
         impl Fake {
@@ -1232,6 +1241,7 @@ mod tests {
                     unready: 0,
                     whole: Vec::new(),
                     picture: None,
+                    patch: None,
                 }
             }
         }
@@ -1286,6 +1296,26 @@ mod tests {
                     .ok_or_else(|| "off screen".to_owned())?;
                 let mut pixels = [self.level, self.level, self.level, 255]
                     .repeat(usize::try_from(rect.size.width * rect.size.height).unwrap_or(0));
+                if let Some((patch, grey)) = self.patch
+                    && let Some(part) = patch.intersection(rect)
+                {
+                    let width = i32::try_from(rect.size.width).unwrap_or(0);
+                    for y in
+                        part.origin.y..part.origin.y + i32::try_from(part.size.height).unwrap_or(0)
+                    {
+                        for x in part.origin.x
+                            ..part.origin.x + i32::try_from(part.size.width).unwrap_or(0)
+                        {
+                            let at = usize::try_from(
+                                ((y - rect.origin.y) * width + (x - rect.origin.x)) * 4,
+                            )
+                            .unwrap_or(0);
+                            if let Some(pixel) = pixels.get_mut(at..at + 3) {
+                                pixel.copy_from_slice(&[grey, grey, grey]);
+                            }
+                        }
+                    }
+                }
                 // The card, drawn into the picture as a capture would show it:
                 // only while the setting puts UP-TAKE in captures.
                 if self.state.1
@@ -2060,6 +2090,25 @@ mod tests {
             fake.level = 20;
             run(&mut fake, &mut memory, 1);
             assert!(fake.notified.is_empty(), "no card");
+        }
+
+        /// Roadmap `1.61`: the host reads with the area's own tolerance. A
+        /// 16 by 16 change on a 600 by 400 area (4 of its 3,750 cells) is a
+        /// change at *any change*, and none at one percent of the area.
+        #[test]
+        fn an_areas_tolerance_decides_how_much_change_counts() {
+            let small_change = |share_permille: u16| {
+                let mut list = targets(&[Rect::new(100, 100, 600, 400)]);
+                list[0].tuning.share_permille = share_permille;
+                let mut fake = Fake::new(list);
+                let mut memory = Memory::default();
+                run(&mut fake, &mut memory, 2);
+                fake.patch = Some((Rect::new(300, 300, 16, 16), 20));
+                run(&mut fake, &mut memory, 1);
+                fake.notified
+            };
+            assert_eq!(small_change(0), vec![Event::Changed], "any change");
+            assert!(small_change(10).is_empty(), "one percent of the area");
         }
 
         /// Round 10: an area hanging off the bottom of the desktop, with the

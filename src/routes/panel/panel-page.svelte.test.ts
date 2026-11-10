@@ -87,7 +87,13 @@ const WATCH = {
   name: null,
   watch: 'changes',
   held: false,
-  tuning: { notify: 'each', calm_ms: 150, gap_ms: 0, sample_ms: 0 },
+  tuning: {
+    notify: 'each',
+    calm_ms: 150,
+    gap_ms: 0,
+    sample_ms: 0,
+    share_permille: 0,
+  },
   kinds: ['default', 'screenshot', 'filter', 'upscale', 'ocr', 'watch'],
   ocr: null,
   depth: 'auto',
@@ -181,6 +187,25 @@ test("a watch area's tuning is sent whole with the one value changed", async () 
   ]);
   await settle();
   expect(document.body.textContent).toContain('every 5 s');
+});
+
+test("a watch area's tolerance runs from any change to half the area (1.61)", async () => {
+  render(Page);
+  await settle();
+  const base = WATCH.tuning;
+  expect(document.body.textContent).toContain('How much must change');
+  expect(document.body.textContent).toContain('Any change');
+  const share = document.querySelectorAll<HTMLInputElement>(
+    'input[type="range"]',
+  )[0];
+  share.value = share.max;
+  share.dispatchEvent(new Event('input', { bubbles: true }));
+  expect(lastSet()).toEqual([
+    'panel_set_tuning',
+    { tuning: { ...base, share_permille: 500 } },
+  ]);
+  await settle();
+  expect(document.body.textContent).toContain('50% of the area');
 });
 
 test('a type shows only its own rows', async () => {

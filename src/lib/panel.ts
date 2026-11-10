@@ -24,6 +24,9 @@ export interface PanelTuning {
   gap_ms: number;
   /** The least time between two readings; 0 is realtime. */
   sample_ms: number;
+  /** The tolerance (roadmap 1.61): the share of the area, in thousandths,
+   * that must change before it counts; 0 is any change, 500 half the area. */
+  share_permille: number;
 }
 
 /** The minimum gaps the panel offers, in ms: none, 0.1 s, 1 s, 10 s, 1 min. */
@@ -39,6 +42,13 @@ export const CALM_STEPS_MS: readonly number[] = [
  * the right. */
 export const SAMPLE_STEPS_MS: readonly number[] = [
   5_000, 4_000, 3_000, 2_000, 1_500, 1_000, 750, 500, 250, 100, 0,
+];
+
+/** The tolerance slider's steps, in thousandths of the area: any change
+ * on the left, half the area on the right (his *"from any pixel to half the
+ * area"*). */
+export const SHARE_STEPS_PERMILLE: readonly number[] = [
+  0, 1, 2, 5, 10, 20, 50, 100, 200, 300, 500,
 ];
 
 /** The index of the step closest to `value`, for a slider showing a value
@@ -65,7 +75,8 @@ export function isPanelTuning(value: unknown): value is PanelTuning {
     (NOTIFY as readonly string[]).includes(tuning.notify) &&
     isCount(tuning.calm_ms) &&
     isCount(tuning.gap_ms) &&
-    isCount(tuning.sample_ms)
+    isCount(tuning.sample_ms) &&
+    isCount(tuning.share_permille)
   );
 }
 

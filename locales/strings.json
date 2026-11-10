@@ -140,6 +140,21 @@
       "de": "Ohne Grenze",
       "de_from": "6de7f47d"
     },
+    "panel.watch.share": {
+      "en": "How much must change",
+      "de": "Wie viel sich ändern muss",
+      "de_from": "205a43b9"
+    },
+    "panel.watch.share.any": {
+      "en": "Any change",
+      "de": "Jede Änderung",
+      "de_from": "5dfb0553"
+    },
+    "panel.watch.share.percent": {
+      "en": "{n}% of the area",
+      "de": "{n} % der Fläche",
+      "de_from": "5b59f9d5"
+    },
     "panel.watch.sample": {
       "en": "Sampling rate",
       "de": "Abtastrate",
