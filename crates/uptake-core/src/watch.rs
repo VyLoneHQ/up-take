@@ -557,11 +557,12 @@ impl Default for Tuning {
     }
 }
 
-/// [`Tuning::calm_ms`]'s range: from 0, the lowest valid value (his rule of
-/// 2026-11-10, a slider runs from the lowest valid value to the highest; a
-/// calm of 0 makes every event its own burst, as *Every time* does), to ten
-/// seconds.
-pub const CALM_MS: (u32, u32) = (0, 10_000);
+/// [`Tuning::calm_ms`]'s range: 50 ms, the lowest practical value, to ten
+/// seconds. Events arrive at most once a captured frame (about 34 ms), so a
+/// shorter calm makes *Once* do what *Every time* does (the maintainer,
+/// 2026-11-10: *"0ms is NOT valid in this case ... the lowest practical time
+/// would be probably around 25 - 50ms"*).
+pub const CALM_MS: (u32, u32) = (50, 10_000);
 /// [`Tuning::gap_ms`]'s longest: a minute.
 pub const GAP_MS_MAX: u32 = 60_000;
 /// [`Tuning::sample_ms`]'s longest: one reading every five seconds.
@@ -571,9 +572,10 @@ pub const SAMPLE_MS_MAX: u32 = 5_000;
 /// his rig pass that day: *"A slider range must always provide as much
 /// flexibility as possible, lowest valid value to highest valid value"*.
 pub const SHARE_PERMILLE_MAX: u16 = 1_000;
-/// [`Tuning::settle_ms`]'s range: from 0, the lowest valid value (the first
-/// still reading after a change counts as stopped), to half a minute.
-pub const SETTLE_MS: (u32, u32) = (0, 30_000);
+/// [`Tuning::settle_ms`]'s range: 50 ms, the lowest practical value, to half
+/// a minute. While a change settles the host reads every 50 ms
+/// (`SETTLE_POLL`), so a shorter calm waits the same.
+pub const SETTLE_MS: (u32, u32) = (50, 30_000);
 
 impl Tuning {
     /// `self` with every value in its range.

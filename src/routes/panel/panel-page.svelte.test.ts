@@ -220,35 +220,35 @@ test('stops changing shows its own calm, and only for that choice', async () => 
   expect(document.body.textContent).toContain('1 s');
 });
 
-test('a slider moves in fine steps, and ten times that with Ctrl held', async () => {
+test('every slider moves 1% a step, and 10% with Ctrl held', async () => {
   render(Page);
   await settle();
   const share = document.querySelectorAll<HTMLInputElement>(
     'input[type="range"]',
   )[0];
-  expect(share.step).toBe('10');
+  expect(share.step).toBe('1');
   share.dispatchEvent(
     new PointerEvent('pointerdown', { bubbles: true, ctrlKey: true }),
   );
   await settle();
-  expect(share.step).toBe('100');
+  expect(share.step).toBe('10');
   share.dispatchEvent(
     new PointerEvent('pointermove', { bubbles: true, ctrlKey: false }),
   );
   await settle();
-  expect(share.step).toBe('10');
+  expect(share.step).toBe('1');
   // Ctrl let go on the keyboard, between two arrow keys (round 6).
   share.dispatchEvent(
     new KeyboardEvent('keydown', { bubbles: true, ctrlKey: true }),
   );
   await settle();
-  expect(share.step).toBe('100');
+  expect(share.step).toBe('10');
   share.dispatchEvent(
     new KeyboardEvent('keyup', { bubbles: true, ctrlKey: false }),
   );
   await settle();
-  expect(share.step).toBe('10');
-  share.value = '370';
+  expect(share.step).toBe('1');
+  share.value = '37';
   share.dispatchEvent(new Event('input', { bubbles: true }));
   expect(lastSet()).toEqual([
     'panel_set_tuning',
@@ -256,6 +256,18 @@ test('a slider moves in fine steps, and ten times that with Ctrl held', async ()
   ]);
   await settle();
   expect(document.body.textContent).toContain('37% of the area');
+  // The same on every slider, not only the tolerance (2026-11-10).
+  const sliders = [
+    ...document.querySelectorAll<HTMLInputElement>('input[type="range"]'),
+  ];
+  for (const slider of sliders) {
+    slider.dispatchEvent(
+      new PointerEvent('pointerdown', { bubbles: true, ctrlKey: true }),
+    );
+  }
+  await settle();
+  expect(sliders.map((slider) => slider.step)).toEqual(sliders.map(() => '10'));
+  expect(sliders.map((slider) => slider.max)).toEqual(sliders.map(() => '100'));
 });
 
 test('a type shows only its own rows', async () => {
