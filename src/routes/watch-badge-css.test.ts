@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import page from './+page.svelte?raw';
 
 /**
- * The host reads a watch area only while the area's own top right corner is
+ * The host reads a watch area only while the area's own top left corner is
  * on a monitor (`src-tauri/src/watch.rs`, `mark`). That says the *watching*
  * mark is on screen only if the page keeps the mark inside the area, which
  * the badge's CSS does by clipping it. Rounds 15 and 16 of the review of #154
@@ -28,11 +28,11 @@ describe('the watching mark stays inside its area', () => {
 
 /**
  * The page confirms a mark only when its dot lies wholly inside the badge
- * ($lib/mark-check, `markSeen`). A plain inline span's box is the whole glyph
- * of the font that draws the dot, taller than the badge's 11px line, so no
- * mark was ever confirmed and no watch area read on a real screen (found at
- * the maintainer's rig, 2026-11-03; measured in headless Edge). jsdom does no
- * layout, so the rule that makes the dot's box its line box is pinned here.
+ * ($lib/mark-check, `markSeen`). Since 2026-11-10 the dot is a drawn box of
+ * a fixed size, so its box is what is drawn; a glyph dot's box was the
+ * font's whole glyph, taller than its badge, and no mark was ever confirmed
+ * on a real screen until 2026-11-03. jsdom does no layout, so the size is
+ * pinned here.
  */
 describe('the watching dot fits inside its badge', () => {
   const block = page.match(/\.watch-dot,\s*\.held-dot \{([^}]*)\}/)?.[1] ?? '';
