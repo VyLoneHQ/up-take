@@ -1247,6 +1247,9 @@ mod tests {
             /// A small part of the screen showing another grey, desktop
             /// pixels: a change to some of an area and not all of it.
             patch: Option<(Rect, u8)>,
+            /// Another grey drawn under [`Self::patch`]: a progress bar's
+            /// empty track, so the page around it differs from the bar.
+            track: Option<(Rect, u8)>,
         }
 
         impl Fake {
@@ -1270,6 +1273,7 @@ mod tests {
                     whole: Vec::new(),
                     picture: None,
                     patch: None,
+                    track: None,
                 }
             }
         }
@@ -1324,9 +1328,10 @@ mod tests {
                     .ok_or_else(|| "off screen".to_owned())?;
                 let mut pixels = [self.level, self.level, self.level, 255]
                     .repeat(usize::try_from(rect.size.width * rect.size.height).unwrap_or(0));
-                if let Some((patch, grey)) = self.patch
-                    && let Some(part) = patch.intersection(rect)
-                {
+                for (patch, grey) in [self.track, self.patch].into_iter().flatten() {
+                    let Some(part) = patch.intersection(rect) else {
+                        continue;
+                    };
                     let width = i32::try_from(rect.size.width).unwrap_or(0);
                     for y in
                         part.origin.y..part.origin.y + i32::try_from(part.size.height).unwrap_or(0)
@@ -2101,9 +2106,17 @@ mod tests {
         /// screen recordings* on, so the area's own border lies down both
         /// ends of the bar: painted black there, as the other choices compare
         /// it, the ends would never fill and the bar would never be full.
+        ///
+        /// Checked frame by frame, not only as the events of the whole run
+        /// (review of `#170`, round 3): an event one frame early is a wrong
+        /// event. ⚠️ **On an area drawn tightly over the bar with the setting
+        /// on, the border covers the bar's last 4 pixels**, on screen as in
+        /// the reading, so the bar is full when the last line UP-TAKE can
+        /// see is filled: at 196 of 200 pixels here. The next test is the
+        /// remedy the bar mode's doc gives, page around the bar.
         #[test]
         fn a_bar_area_notifies_once_the_bar_is_full() {
-            for in_captures in [false, true] {
+            for (in_captures, full_at) in [(false, 200), (true, 196)] {
                 let bounds = Rect::new(100, 100, 200, 40);
                 let mut list = targets_for(&[bounds], Watch::Fills);
                 list[0].tuning.marks = [50, 0, 0, 0];
@@ -2112,15 +2125,54 @@ mod tests {
                 fake.level = 40;
                 let mut memory = Memory::default();
                 run(&mut fake, &mut memory, 2);
-                for filled in [40, 80, 110, 160, 199, 200, 200] {
+                for filled in [40, 80, 110, 160, 195, 196, 199, 200, 200] {
+                    let before = fake.notified.len();
                     fake.patch = Some((Rect::new(100, 100, filled, 40), 200));
                     run(&mut fake, &mut memory, 1);
+                    let expected = match filled {
+                        110 => vec![Event::Reached(50)],
+                        _ if filled == full_at && before == 1 => vec![Event::Filled],
+                        _ => Vec::new(),
+                    };
+                    assert_eq!(
+                        fake.notified[before..],
+                        expected[..],
+                        "{in_captures}, {filled} pixels"
+                    );
                 }
-                assert_eq!(
-                    fake.notified,
-                    vec![Event::Reached(50), Event::Filled],
-                    "{in_captures}"
-                );
+            }
+        }
+
+        /// The maintainer's rig pass of 2026-11-11: an area drawn with page
+        /// around the bar. The border falls on the page, and the bar is full
+        /// at its last pixel whether or not UP-TAKE is in captures.
+        #[test]
+        fn a_bar_area_with_page_around_it_is_full_at_its_last_pixel() {
+            for in_captures in [false, true] {
+                let bounds = Rect::new(100, 100, 216, 56);
+                let mut list = targets_for(&[bounds], Watch::Fills);
+                list[0].tuning.marks = [50, 0, 0, 0];
+                let mut fake = Fake::new(list);
+                fake.state = (OverlayState::Living, in_captures);
+                fake.level = 40;
+                fake.track = Some((Rect::new(108, 108, 200, 40), 120));
+                let mut memory = Memory::default();
+                run(&mut fake, &mut memory, 2);
+                for filled in [40, 80, 110, 160, 196, 199, 200, 200] {
+                    let before = fake.notified.len();
+                    fake.patch = Some((Rect::new(108, 108, filled, 40), 200));
+                    run(&mut fake, &mut memory, 1);
+                    let expected = match filled {
+                        110 => vec![Event::Reached(50)],
+                        200 if before == 1 => vec![Event::Filled],
+                        _ => Vec::new(),
+                    };
+                    assert_eq!(
+                        fake.notified[before..],
+                        expected[..],
+                        "{in_captures}, {filled} pixels"
+                    );
+                }
             }
         }
 

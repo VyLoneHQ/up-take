@@ -972,7 +972,10 @@ impl Detector {
 ///
 /// ⚠️ **Known limits.** With no margin (an area drawn tightly over the bar),
 /// a window moved over the bar or a darkened screen changes every line,
-/// which reads as a full bar. Whatever else is inside the area beside the
+/// which reads as a full bar; and with *Show UP-TAKE in screen recordings*
+/// on, the area's own border covers the bar's last 4 pixels, so the bar is
+/// full once the last line UP-TAKE can see is filled (review of `#170`,
+/// round 3). Whatever else is inside the area beside the
 /// bar (a label next to it) is read as bar, so the area belongs over the bar
 /// and a little page around it, and nothing else. A fill within
 /// [`CELL_DELTA`] of the empty colour is never seen. An area placed over a
@@ -1055,6 +1058,10 @@ impl Bar {
         if let (Some(first), Some(last)) = (first, last) {
             let low = (first..=last).find(|&line| !page(line, first));
             let high = (first..=last).rev().find(|&line| !page(line, last));
+            // With no margin the bar is every known line: the lines under
+            // the area's own border, with UP-TAKE in captures, are not its
+            // ends, and nothing can be compared with them.
+            self.ends = (first, last);
             // A bar is most of its area. Margins that meet, or that leave
             // less than half of it, are not margins: a tight area over a bar
             // whose fill and track are each one flat colour looks like that.
