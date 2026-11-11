@@ -100,6 +100,67 @@ use std::sync::OnceLock;
 /// The target every event carries, so a log reader can filter to this app.
 const TARGET: &str = "up-take";
 
+/// Shows a value as ASCII, for every line this crate writes (UP-TAKE backlog
+/// `I-390`).
+///
+/// **Why.** The log is UTF-8 without a BOM, and Windows PowerShell 5.1's
+/// `Get-Content`, the terminal the maintainer reads it in, decodes it as
+/// CP1252: an em dash came out as `â€”` and a section sign as `Â§` (observed
+/// 2026-09-07). The budget lines say an em dash (U+2014) and `§1`, and a
+/// Windows error message or a profile path can carry any letter. A BOM would
+/// fix PowerShell and can break a tool that parses the file, so the line itself
+/// is made ASCII, at the one place every line passes, rather than by keeping
+/// every caller's text ASCII by hand.
+///
+/// Typographic marks become their ASCII spelling (an em dash, U+2014, is `--`,
+/// `§` is `section`, `×` is `x`), German letters their usual transliteration
+/// (`ä` is `ae`, `ß` is `ss`), and anything else its code point, `\u{..}`, so
+/// nothing is silently lost.
+struct Ascii<'a>(&'a dyn fmt::Display);
+
+impl fmt::Display for Ascii<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let text = self.0.to_string();
+        if text.is_ascii() {
+            return f.write_str(&text);
+        }
+        for c in text.chars() {
+            match ascii_for(c) {
+                Some(spelling) => f.write_str(spelling)?,
+                None if c.is_ascii() => fmt::Write::write_char(f, c)?,
+                None => write!(f, "\\u{{{:x}}}", u32::from(c))?,
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The ASCII spelling of a character that has a usual one.
+const fn ascii_for(c: char) -> Option<&'static str> {
+    Some(match c {
+        '\u{2014}' => "--",
+        '\u{2013}' | '\u{2212}' | '\u{2010}' | '\u{2011}' => "-",
+        '\u{a7}' => "section ",
+        '\u{d7}' => "x",
+        '\u{2026}' => "...",
+        '\u{2018}' | '\u{2019}' => "'",
+        '\u{201c}' | '\u{201d}' => "\"",
+        '\u{a0}' | '\u{202f}' => " ",
+        '\u{2192}' => "->",
+        '\u{2264}' => "<=",
+        '\u{2265}' => ">=",
+        '\u{b5}' => "u",
+        '\u{e4}' => "ae",
+        '\u{f6}' => "oe",
+        '\u{fc}' => "ue",
+        '\u{c4}' => "Ae",
+        '\u{d6}' => "Oe",
+        '\u{dc}' => "Ue",
+        '\u{df}' => "ss",
+        _ => return None,
+    })
+}
+
 /// Keeps the non-blocking writer's worker alive for the process's lifetime.
 ///
 /// `tracing_appender::non_blocking` returns a guard that flushes on drop. Drop
@@ -204,14 +265,14 @@ pub fn init() -> Result<PathBuf, String> {
     // Logged here rather than by the caller: the path is the one fact worth
     // having at the top of every log, and a caller that had to remember to
     // write it is the obligation-an-agent-must-remember shape.
-    tracing::info!(target: TARGET, logs = %directory.display(), "UP-TAKE starting");
+    tracing::info!(target: TARGET, logs = %Ascii(&directory.display()), "UP-TAKE starting");
 
     Ok(directory)
 }
 
 /// Records something that happened. The message is a literal, by type.
 pub fn note(message: &'static str) {
-    tracing::info!(target: TARGET, "{message}");
+    tracing::info!(target: TARGET, "{}", Ascii(&message));
 }
 
 /// Records something that happened, with a detail that is not a literal.
@@ -236,7 +297,7 @@ pub fn note(message: &'static str) {
 /// runtime value can reach a log. **Pass enums, numbers and this codebase's own
 /// error strings. Never anything that was read off the screen.**
 pub fn note_about(message: &'static str, detail: &dyn fmt::Display) {
-    tracing::info!(target: TARGET, %detail, "{message}");
+    tracing::info!(target: TARGET, detail = %Ascii(detail), "{}", Ascii(&message));
 }
 
 /// Records something that went wrong but did not stop the app.
@@ -244,7 +305,7 @@ pub fn note_about(message: &'static str, detail: &dyn fmt::Display) {
 /// See the crate docs for why `cause` is `&dyn Display` and what that leaves
 /// open.
 pub fn trouble(message: &'static str, cause: &dyn fmt::Display) {
-    tracing::warn!(target: TARGET, %cause, "{message}");
+    tracing::warn!(target: TARGET, cause = %Ascii(cause), "{}", Ascii(&message));
 }
 
 /// Records something that went wrong, against an identifier that is safe by
@@ -253,7 +314,7 @@ pub fn trouble(message: &'static str, cause: &dyn fmt::Display) {
 /// Separate from [`trouble`] because a `u64` newtype cannot carry screen
 /// content, and a typed parameter says so in a way `&dyn Display` cannot.
 pub fn trouble_for(message: &'static str, id: u64) {
-    tracing::warn!(target: TARGET, id, "{message}");
+    tracing::warn!(target: TARGET, id, "{}", Ascii(&message));
 }
 
 /// Records a failure. The message is a literal, by type.
@@ -263,7 +324,7 @@ pub fn trouble_for(message: &'static str, id: u64) {
 /// deliberately not passed here: the dialog is read by the person whose screen
 /// it is, the log file on their disk is not.
 pub fn failure(message: &'static str) {
-    tracing::error!(target: TARGET, "{message}");
+    tracing::error!(target: TARGET, "{}", Ascii(&message));
 }
 
 /// The one exception, for `quality-bars.md` section 1 budget lines.
@@ -279,7 +340,7 @@ pub fn failure(message: &'static str) {
 /// call sites can put a runtime `String` in the log?" is answered by
 /// `git grep measurement` and by nothing else.
 pub fn measurement(line: &str) {
-    tracing::info!(target: TARGET, "{line}");
+    tracing::info!(target: TARGET, "{}", Ascii(&line));
 }
 
 #[cfg(test)]
@@ -290,6 +351,30 @@ pub fn measurement(line: &str) {
 )]
 mod tests {
     use super::*;
+
+    /// `I-390`: what the maintainer's terminal showed as `â€”` and `Â§`
+    /// reaches the log as ASCII, and nothing is dropped.
+    #[test]
+    fn a_log_line_is_ascii_whatever_it_was_given() {
+        let budget = "output: copy took 41 ms \u{2014} over the \u{a7}1 target, 2\u{d7}";
+        assert_eq!(
+            Ascii(&budget).to_string(),
+            "output: copy took 41 ms -- over the section 1 target, 2x"
+        );
+        // A German Windows error message and a profile path.
+        assert_eq!(
+            Ascii(&"Zugriff verweigert: C:\\Users\\J\u{fc}rgen Stra\u{df}er").to_string(),
+            "Zugriff verweigert: C:\\Users\\Juergen Strasser"
+        );
+        // Anything without a usual spelling keeps its code point.
+        let other = Ascii(&"\u{65e5}\u{1f600}").to_string();
+        assert_eq!(other, "\\u{65e5}\\u{1f600}");
+        for line in [budget, "\u{2013}\u{2026}\u{201c}x\u{201d}\u{a0}"] {
+            assert!(Ascii(&line).to_string().is_ascii(), "{line}");
+        }
+        // Plain ASCII passes through unchanged, braces included.
+        assert_eq!(Ascii(&"a {b} c").to_string(), "a {b} c");
+    }
 
     #[test]
     fn the_log_root_is_the_one_architecture_section_6_names() {
