@@ -998,6 +998,8 @@ struct Bar {
     /// The highest percentage reported in this fill, or the first reading's
     /// progress: nothing at or below it notifies.
     reported: u8,
+    /// The progress the last reading showed.
+    seen: u8,
     /// Which end the bar fills from.
     direction: Direction,
     /// The area's percentages ([`Tuning::marks`]).
@@ -1006,12 +1008,17 @@ struct Bar {
 
 impl Bar {
     /// Takes the area's direction and percentages. A new direction starts
-    /// again from the next reading, since every line changes meaning.
+    /// again from the next reading, since every line changes meaning. New
+    /// percentages count from where the bar already is: one the bar has
+    /// passed is not reported late (review of `#170`, round 4).
     fn tune(&mut self, tuning: Tuning) {
         let tuning = tuning.clamped();
         if tuning.direction != self.direction {
             self.direction = tuning.direction;
             self.empty = None;
+        }
+        if tuning.marks != self.marks {
+            self.reported = self.reported.max(self.seen);
         }
         self.marks = tuning.marks;
     }
@@ -1102,6 +1109,7 @@ impl Bar {
         self.start = start;
         let (percent, _) = self.progress(&reading, &reading).unwrap_or((0, false));
         self.reported = percent;
+        self.seen = percent;
         self.empty = Some(reading);
     }
 
@@ -1179,6 +1187,7 @@ impl Bar {
         self.empty = Some(empty);
         // Something over the area, not a fill: nothing is taken from it.
         let (percent, full) = progress?;
+        self.seen = percent;
         if u16::from(percent) * 2 < u16::from(self.reported) {
             // The bar emptied: a new fill.
             self.reported = percent;
@@ -2253,6 +2262,41 @@ mod bar_tests {
     fn a_bar_notifies_once_when_it_is_full() {
         let fills: Vec<u32> = (0..=20).map(|step| step * 10).chain([200, 200]).collect();
         assert_eq!(run([0; MARKS], &fills), vec![Event::Filled]);
+    }
+
+    /// Review of `#170`, round 4: a percentage added in the panel after the
+    /// bar has passed it is not reported late; one still ahead is.
+    #[test]
+    fn a_percentage_added_after_the_bar_passed_it_is_not_reported() {
+        let mut detector = detector([0; MARKS], Direction::LeftToRight);
+        assert_eq!(
+            detector.observe(bar(200, 20, 0, Direction::LeftToRight)),
+            None
+        );
+        assert_eq!(
+            detector.observe(bar(200, 20, 140, Direction::LeftToRight)),
+            None
+        );
+        detector.tune(
+            Watch::Fills,
+            Tuning {
+                marks: [50, 90, 0, 0],
+                ..Tuning::default()
+            },
+        );
+        assert_eq!(
+            detector.observe(bar(200, 20, 140, Direction::LeftToRight)),
+            None,
+            "50% was passed before it was set"
+        );
+        assert_eq!(
+            detector.observe(bar(200, 20, 180, Direction::LeftToRight)),
+            Some(Event::Reached(90))
+        );
+        assert_eq!(
+            detector.observe(bar(200, 20, 200, Direction::LeftToRight)),
+            Some(Event::Filled)
+        );
     }
 
     /// A bar one pixel short of full is not full.
