@@ -97,9 +97,9 @@ pub struct Raised {
     /// Its type's colour in the legend.
     pub tone: &'static str,
     /// A stable word for the moment, for [`kind_of`] ("changed").
-    pub moment: &'static str,
+    pub moment: String,
     /// The moment, as the card says it.
-    pub event: &'static str,
+    pub event: String,
 }
 
 /// Cards waiting for their window's page, by window label.
@@ -195,10 +195,10 @@ pub fn monitor_for(bounds: Rect, monitors: &[Monitor]) -> Option<Monitor> {
 #[must_use]
 pub fn payload_of(raised: Raised) -> NoticePayload {
     NoticePayload {
-        kind: kind_of(raised.area, raised.moment),
+        kind: kind_of(raised.area, &raised.moment),
         name: raised.name,
         area_type: raised.area_type.to_string(),
-        event: raised.event.to_string(),
+        event: raised.event,
         tone: raised.tone,
     }
 }
@@ -690,8 +690,8 @@ mod tests {
             name: Some("Download watcher".to_string()),
             area_type: "Watch area",
             tone: "watch",
-            moment: "changed",
-            event: "changed",
+            moment: "changed".to_string(),
+            event: "changed".to_string(),
         });
         assert_eq!(card.kind, kind_of(3, "changed"));
         assert_eq!(card.name.as_deref(), Some("Download watcher"));

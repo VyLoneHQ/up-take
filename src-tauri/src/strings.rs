@@ -114,6 +114,8 @@ texts! {
     MenuWatchChanges => "menu.watch.changes",
     /// That list: notify when the region stops changing.
     MenuWatchSettles => "menu.watch.settles",
+    /// That list: notify when a progress bar is full (roadmap `1.61`).
+    MenuWatchFills => "menu.watch.fills",
     /// Area menu: name the area.
     MenuRename => "menu.rename",
     /// Area menu: open the area's settings panel (roadmap `1.60`).
@@ -124,6 +126,11 @@ texts! {
     NoticeChanged => "notice.event.changed",
     /// A card's event: the region stopped changing.
     NoticeSettled => "notice.event.settled",
+    /// A card's event: the bar under the area is full (roadmap `1.61`).
+    NoticeFilled => "notice.event.filled",
+    /// A card's event: the bar reached one of the area's percentages,
+    /// `{n}`.
+    NoticeReached => "notice.event.reached",
     /// Area menu: pause the area's ongoing work (`ADR-0053`). Only on a type
     /// that keeps working.
     MenuPause => "menu.pause",

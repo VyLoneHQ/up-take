@@ -2,12 +2,13 @@
 //! `ADR-0048`).
 //!
 //! A watch area reads its own region every few seconds and tells the user when
-//! what it shows changes, or when it stops changing. This module is the part
-//! of that which needs no screen: what the user asked the area to watch for
+//! what it shows changes, when it stops changing, or, over a progress bar,
+//! when the bar is full (roadmap `1.61`). This module is the part of that
+//! which needs no screen: what the user asked the area to watch for
 //! ([`Watch`]), a small summary of one reading ([`Fingerprint`]), and the rule
-//! that turns a run of readings into the two moments worth a notification
-//! ([`Detector`]). Taking the readings and raising the notification are the
-//! host's (`src-tauri/src/watch.rs`).
+//! that turns a run of readings into the moments worth a notification
+//! ([`Detector`], and its `Bar` for a progress bar). Taking the readings and
+//! raising the notification are the host's (`src-tauri/src/watch.rs`).
 //!
 //! # `ADR-0048`'s four conditions
 //!
@@ -61,6 +62,13 @@ pub enum Watch {
     /// Notify when the region stops changing after it had been changing: a
     /// download bar or a render reaching its end.
     Settles,
+    /// Notify when a progress bar under the area is full (roadmap `1.61`,
+    /// the maintainer's choice of 2026-11-10): the area is placed tightly
+    /// over the bar, the first reading shows what its empty part looks like,
+    /// and the area notifies once the fill reaches the far end, plus at each
+    /// of the area's own percentages ([`Tuning::marks`]). Which end the bar
+    /// fills from is [`Tuning::direction`]. See [`Bar`] for the rule.
+    Fills,
 }
 
 impl Watch {
@@ -70,7 +78,7 @@ impl Watch {
     pub const fn settle_readings(self) -> u32 {
         match self {
             Self::Changes => REARM_READINGS,
-            Self::Settles => SETTLE_READINGS,
+            Self::Settles | Self::Fills => SETTLE_READINGS,
         }
     }
 
@@ -93,7 +101,9 @@ impl Watch {
     pub const fn notifies(self, event: Event) -> bool {
         matches!(
             (self, event),
-            (Self::Changes, Event::Changed) | (Self::Settles, Event::Settled)
+            (Self::Changes, Event::Changed)
+                | (Self::Settles, Event::Settled)
+                | (Self::Fills, Event::Filled | Event::Reached(_))
         )
     }
 }
@@ -527,7 +537,39 @@ pub struct Tuning {
     /// based on the settings that are set"*). Until then a fixed six seconds
     /// nobody could see or change, and at his rig it never seemed to fire.
     pub settle_ms: u32,
+    /// For [`Watch::Fills`]: which end the bar fills from.
+    pub direction: Direction,
+    /// For [`Watch::Fills`]: the percentages at which the area notifies on
+    /// the way, besides the full bar (the maintainer, 2026-11-10: *"the user
+    /// may also set percentages where he wants to get additional
+    /// notifications, at 20% or 50% for example"*). `0` is an unused slot;
+    /// each other value is 1 to 99. At most [`MARKS`].
+    pub marks: [u8; MARKS],
 }
+
+/// Which end a progress bar fills from, for [`Watch::Fills`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Direction {
+    /// From the left edge to the right: most bars, so the default.
+    #[default]
+    LeftToRight,
+    /// From the right edge to the left.
+    RightToLeft,
+    /// From the top edge down.
+    TopToBottom,
+    /// From the bottom edge up.
+    BottomToTop,
+}
+
+/// How many percentages an area may notify at on the way to a full bar
+/// ([`Tuning::marks`]). Four covers his examples (*"at 20% or 50%"*) with
+/// room to spare, and keeps [`Tuning`] a plain value the page sends whole.
+pub const MARKS: usize = 4;
+
+/// The highest percentage a mark may name: 100 is the full bar itself, which
+/// always notifies.
+pub const MARK_MAX: u8 = 99;
 
 impl Default for Tuning {
     fn default() -> Self {
@@ -538,6 +580,8 @@ impl Default for Tuning {
             sample_ms: 0,
             share_permille: 0,
             settle_ms: 1_000,
+            direction: Direction::LeftToRight,
+            marks: [0; MARKS],
         }
     }
 }
@@ -574,6 +618,8 @@ impl Tuning {
             sample_ms: self.sample_ms.min(SAMPLE_MS_MAX),
             share_permille: self.share_permille.min(SHARE_PERMILLE_MAX),
             settle_ms: self.settle_ms.clamp(SETTLE_MS.0, SETTLE_MS.1),
+            direction: self.direction,
+            marks: self.marks.map(|mark| mark.min(MARK_MAX)),
         }
     }
 
@@ -641,7 +687,7 @@ impl EventGate {
     }
 }
 
-/// One of the two moments a watch area can report.
+/// One of the moments a watch area can report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
     /// The region was still and now differs from its last reading.
@@ -649,6 +695,11 @@ pub enum Event {
     /// The region had been changing and has now held still for the
     /// detector's settle time ([`Watch::settle_time`]).
     Settled,
+    /// For [`Watch::Fills`]: the bar is full.
+    Filled,
+    /// For [`Watch::Fills`]: the bar reached one of the area's percentages
+    /// ([`Tuning::marks`]), the percentage it reached.
+    Reached(u8),
 }
 
 /// Turns a run of readings into [`Event`]s, one area's worth.
@@ -695,6 +746,9 @@ pub struct Detector {
     /// The time [`Self::observe`] gives a reading: [`READING_STEP`] after
     /// the last one.
     clock: Duration,
+    /// For [`Watch::Fills`]: the bar's state, in place of the comparisons
+    /// above. `None` for every other choice.
+    bar: Option<Bar>,
 }
 
 impl Default for Detector {
@@ -733,6 +787,7 @@ impl Detector {
             every_step: false,
             share_permille: 0,
             clock: Duration::ZERO,
+            bar: None,
         }
     }
 
@@ -743,6 +798,7 @@ impl Detector {
     pub fn for_watch(watch: Watch) -> Self {
         Self {
             every_step: watch == Watch::Changes,
+            bar: (watch == Watch::Fills).then(Bar::default),
             ..Self::with_settle_time(watch.settle_time())
         }
     }
@@ -764,6 +820,9 @@ impl Detector {
         if watch == Watch::Settles {
             self.settle = Duration::from_millis(u64::from(tuning.settle_ms));
         }
+        if let Some(bar) = &mut self.bar {
+            bar.tune(tuning);
+        }
     }
 
     /// Whether a change is under way, so the host must keep reading while the
@@ -783,6 +842,10 @@ impl Detector {
     /// reported.
     pub fn rebase_at(&mut self, reading: Fingerprint, at: Duration) {
         self.clock = at;
+        if let Some(bar) = &mut self.bar {
+            bar.learn(reading);
+            return;
+        }
         self.baseline = Some(reading.clone());
         self.still_from = Some(reading);
         self.still_since = at;
@@ -802,6 +865,9 @@ impl Detector {
     /// frames or not.
     pub fn observe_at(&mut self, reading: Fingerprint, at: Duration) -> Option<Event> {
         self.clock = at;
+        if let Some(bar) = &mut self.bar {
+            return bar.observe(reading);
+        }
         for known in [&mut self.baseline, &mut self.still_from]
             .into_iter()
             .flatten()
@@ -851,6 +917,420 @@ impl Detector {
         }
         self.baseline = Some(settled);
         Some(Event::Settled)
+    }
+}
+
+/// A progress bar's state, for [`Watch::Fills`] (roadmap `1.61`, the
+/// maintainer's design of 2026-11-10, corrected after his rig pass of
+/// 2026-11-11).
+///
+/// # The rule
+///
+/// The area is cut into *lines* across the way the bar fills: columns of
+/// cells for a bar that fills sideways, rows for one that fills up or down
+/// ([`Direction`]). The first reading is the bar as the user placed the area
+/// over it, and three things are learned from it:
+///
+/// - **where the bar is**: an area is rarely drawn exactly on a bar, so the
+///   lines at either end that look like that end's outermost line (the page
+///   around the bar) are *margin*, and the cells of the remaining lines that
+///   differ from that page are the bar's *track*. Only the track is read, so
+///   the page above and below a bar and the corners of a round end take no
+///   part. An area drawn tightly over the bar, or over a bar whose track
+///   looks like the page, has no margin, and every cell is read;
+/// - **what each line looks like empty**: the line as that reading shows it;
+/// - **how far the bar was already filled**: the bar's lines from the start
+///   end that do not look like its far end, which a bar that is not yet
+///   full still shows empty.
+///
+/// From then on a line counts as filled when it no longer looks like its
+/// empty self (more than half of its track in cells that moved by more than
+/// [`CELL_DELTA`]), or, for a line already filled at the first reading, when
+/// it still looks as it did then. The bar's progress is the run of filled
+/// lines from the bar's start end, as a share of the bar's length, so a
+/// percentage label inside the bar that changes ahead of the fill does not
+/// count until the fill reaches it. The bar is **full** when that run
+/// reaches the bar's far end and the far end looks like the filled start
+/// (his words: *"fill reaches the end"*), so a last cell only partly filled
+/// is not yet full.
+///
+/// **A reading in which the margin changed is not read at all.** A fill
+/// never changes the page around a bar; anything drawn over the whole area
+/// does. Observed once, on the maintainer's rig on 2026-11-11 and not
+/// probed since: with Win+Shift+S open, an area without this rule reported
+/// his percentages and the full bar at once.
+///
+/// # What notifies, once per fill
+///
+/// [`Event::Filled`] when the bar is full, and [`Event::Reached`] the first
+/// time the progress reaches one of the area's percentages
+/// ([`Tuning::marks`]); several reached in one reading report only the
+/// highest. Nothing at or below the first reading's progress notifies: an
+/// area placed over a bar at 60% does not report 20% and 50%. A fill ends
+/// when the progress falls below half of the highest it reported (a bar that
+/// empties for the next file), and the next fill notifies again.
+///
+/// ⚠️ **Known limits.** With no margin (an area drawn tightly over the bar),
+/// a window moved over the bar or a darkened screen changes every line,
+/// which reads as a full bar; and with *Show UP-TAKE in screen recordings*
+/// on, the area's own border covers the bar's last 4 pixels, so the bar is
+/// full once the last line UP-TAKE can see is filled (review of `#170`,
+/// round 3). Whatever else is inside the area beside the
+/// bar (a label next to it) is read as bar, so the area belongs over the bar
+/// and a little page around it, and nothing else. A fill within
+/// [`CELL_DELTA`] of the empty colour is never seen. An area placed over a
+/// bar that is already full learns its far end filled, and does not see
+/// that bar full again.
+#[derive(Debug, Clone, Default)]
+struct Bar {
+    /// The first reading: what each line looks like empty, and, before
+    /// [`Self::start`], filled.
+    empty: Option<Fingerprint>,
+    /// The bar's first and last line, in fill order; the lines outside them
+    /// are margin.
+    ends: (u32, u32),
+    /// Per cell, whether it is on the bar's track. Empty when the area has
+    /// no margin: every cell is.
+    track: Vec<bool>,
+    /// The line the first reading showed the fill reaching, from the start
+    /// end: the bar's lines before it were already filled.
+    start: u32,
+    /// The highest percentage reported in this fill, or the first reading's
+    /// progress: nothing at or below it notifies.
+    reported: u8,
+    /// The progress the last reading showed.
+    seen: u8,
+    /// Which end the bar fills from.
+    direction: Direction,
+    /// The area's percentages ([`Tuning::marks`]).
+    marks: [u8; MARKS],
+}
+
+impl Bar {
+    /// Takes the area's direction and percentages. A new direction starts
+    /// again from the next reading, since every line changes meaning. New
+    /// percentages count from where the bar already is: one the bar has
+    /// passed is not reported late (review of `#170`, round 4).
+    fn tune(&mut self, tuning: Tuning) {
+        let tuning = tuning.clamped();
+        if tuning.direction != self.direction {
+            self.direction = tuning.direction;
+            self.empty = None;
+        }
+        if tuning.marks != self.marks {
+            self.reported = self.reported.max(self.seen);
+        }
+        self.marks = tuning.marks;
+    }
+
+    /// Whether cell `at` is on the bar's track.
+    fn on_track(&self, at: usize) -> bool {
+        self.track.get(at).copied().unwrap_or(true)
+    }
+
+    /// Whether line `line` of `a` looks different from line `theirs` of `b`,
+    /// read on the cells on the track in both; a line with no such cell
+    /// known is read whole. `None` when nothing of it is known.
+    fn differ(&self, a: &Fingerprint, line: u32, b: &Fingerprint, theirs: u32) -> Option<bool> {
+        let direction = self.direction;
+        match a.line_share(line, b, theirs, direction, |x, y| {
+            self.on_track(x) && self.on_track(y)
+        }) {
+            Some((moved, known)) => Some(moved * 2 > known),
+            None => a.lines_differ(line, b, theirs, direction),
+        }
+    }
+
+    /// Learns the bar from `reading`, as if it were the first: the area was
+    /// just made, turned, or is read by another route.
+    fn learn(&mut self, reading: Fingerprint) {
+        let direction = self.direction;
+        let lines = reading.lines(direction);
+        let known = |line: u32| {
+            reading
+                .lines_differ(line, &reading, line, direction)
+                .is_some()
+        };
+        // Margin: a line that looks like its end's outermost known line, to
+        // within one part in eight of its pixels.
+        let page = |line: u32, edge: u32| {
+            reading
+                .line_share(line, &reading, edge, direction, |_, _| true)
+                .is_none_or(|(moved, known)| moved * 8 <= known)
+        };
+        self.ends = (0, lines.saturating_sub(1));
+        self.track = Vec::new();
+        let first = (0..lines).find(|&line| known(line));
+        let last = (0..lines).rev().find(|&line| known(line));
+        if let (Some(first), Some(last)) = (first, last) {
+            let low = (first..=last).find(|&line| !page(line, first));
+            let high = (first..=last).rev().find(|&line| !page(line, last));
+            // With no margin the bar is every known line: the lines under
+            // the area's own border, with UP-TAKE in captures, are not its
+            // ends, and nothing can be compared with them.
+            self.ends = (first, last);
+            // A bar is most of its area. Margins that meet, or that leave
+            // less than half of it, are not margins: a tight area over a bar
+            // whose fill and track are each one flat colour looks like that.
+            if let (Some(low), Some(high)) = (low, high)
+                && low <= high
+                && (low > first || high < last)
+                && (high - low + 1) * 2 >= lines
+            {
+                self.ends = (low, high);
+                let edge = if low > first { first } else { last };
+                let index = |(column, row): (u32, u32)| (row * reading.columns + column) as usize;
+                let mut track = vec![false; reading.cells.len()];
+                for line in low..=high {
+                    for k in 0..reading.across(direction) {
+                        let at = index(reading.line_cell(line, k, direction));
+                        let page_at = index(reading.line_cell(edge, k, direction));
+                        if let (Some(&cell), Some(&page), Some(slot)) = (
+                            reading.cells.get(at),
+                            reading.cells.get(page_at),
+                            track.get_mut(at),
+                        ) {
+                            *slot = cell.abs_diff(page) > CELL_DELTA;
+                        }
+                    }
+                }
+                self.track = track;
+            }
+        }
+        let (low, high) = self.ends;
+        let mut start = low;
+        for line in low..high {
+            match self.differ(&reading, line, &reading, high) {
+                Some(false) => break,
+                // Filled at the first reading, or unknown: passed over.
+                Some(true) | None => start = line + 1,
+            }
+        }
+        self.start = start;
+        let (percent, _) = self.progress(&reading, &reading).unwrap_or((0, false));
+        self.reported = percent;
+        self.seen = percent;
+        self.empty = Some(reading);
+    }
+
+    /// Whether the margin of `reading` changed against `empty`: more than
+    /// half of it, by pixels, in cells that moved by more than
+    /// [`CELL_DELTA`]. A fill never changes it.
+    fn covered(&self, empty: &Fingerprint, reading: &Fingerprint) -> bool {
+        let direction = self.direction;
+        let (low, high) = self.ends;
+        let (mut moved, mut known) = (0_u64, 0_u64);
+        for line in (0..low).chain(high + 1..empty.lines(direction)) {
+            if let Some((m, k)) = empty.line_share(line, reading, line, direction, |_, _| true) {
+                moved += m;
+                known += k;
+            }
+        }
+        known > 0 && moved * 2 > known
+    }
+
+    /// How far `reading` shows the bar filled against `empty`, in percent of
+    /// its length, and whether it is full; `None` when the margin changed
+    /// ([`Self::covered`]). A line with nothing known in it (under the
+    /// area's own border or mark, with *Show UP-TAKE in screen recordings*
+    /// on, or under one of UP-TAKE's windows) is passed over: it neither
+    /// stops the run nor counts in the length.
+    fn progress(&self, empty: &Fingerprint, reading: &Fingerprint) -> Option<(u8, bool)> {
+        if self.covered(empty, reading) {
+            return None;
+        }
+        let (low, high) = self.ends;
+        let (mut run, mut total) = (0_u64, 0_u64);
+        // The last line the run took: the fill's front, which a cell counts
+        // as filled once part of it moved.
+        let mut front = 0_u64;
+        let mut stopped = false;
+        let mut ends: Option<(u32, u32)> = None;
+        for line in low..=high {
+            let Some(differs) = self.differ(empty, line, reading, line) else {
+                continue;
+            };
+            ends = Some(ends.map_or((line, line), |(first, _)| (first, line)));
+            let length = empty.length(line, self.direction);
+            total += length;
+            let filled = if line < self.start { !differs } else { differs };
+            if filled && !stopped {
+                run += length;
+                front = length;
+            } else {
+                stopped = true;
+            }
+        }
+        // A percentage is never reported early: the front line may be only
+        // partly filled, so it does not count (review of `#170`, round 5: at
+        // 97 of 200 pixels the front cell made 50%). At most one cell late.
+        let counted = run - front;
+        // Full when the run reaches the far end AND the far end looks like
+        // the filled start: a far line only partly filled differs from both
+        // its empty self and the filled start, and is not full yet.
+        //
+        // And the far end must be SEEN (review of `#170`, round 6): a line of
+        // the bar UP-TAKE has read before but that one of its own windows
+        // hides now is not passed over here, or a card over the end would
+        // let the bar read full early. A line never seen at all (under the
+        // area's own border on a tight area, with UP-TAKE in captures) was
+        // never part of the bar it learned, and stays passed over.
+        let seen_ends = (low..=high)
+            .filter(|&line| {
+                empty
+                    .lines_differ(line, empty, line, self.direction)
+                    .is_some()
+            })
+            .fold(None, |ends: Option<(u32, u32)>, line| {
+                Some(ends.map_or((line, line), |(first, _)| (first, line)))
+            });
+        let full = !stopped
+            && ends.is_some()
+            && ends == seen_ends
+            && ends.is_some_and(|(first, last)| {
+                self.differ(reading, last, reading, first) == Some(false)
+            });
+        let percent = u8::try_from((counted * 100 / total.max(1)).min(100)).unwrap_or(100);
+        Some((if full { 100 } else { percent.min(99) }, full))
+    }
+
+    /// Takes one reading and says whether it is a moment worth reporting.
+    fn observe(&mut self, reading: Fingerprint) -> Option<Event> {
+        let Some(mut empty) = self.empty.take() else {
+            self.learn(reading);
+            return None;
+        };
+        if (empty.columns, empty.rows, empty.edge) != (reading.columns, reading.rows, reading.edge)
+        {
+            // Resized: another bar, as far as the lines go.
+            self.learn(reading);
+            return None;
+        }
+        // What lay under one of UP-TAKE's own windows at the first reading is
+        // learned at its first sight, as the other choices do.
+        empty.learn(&reading);
+        let progress = self.progress(&empty, &reading);
+        self.empty = Some(empty);
+        // Something over the area, not a fill: nothing is taken from it.
+        let (percent, full) = progress?;
+        self.seen = percent;
+        if u16::from(percent) * 2 < u16::from(self.reported) {
+            // The bar emptied: a new fill.
+            self.reported = percent;
+        }
+        if full {
+            if self.reported < 100 {
+                self.reported = 100;
+                return Some(Event::Filled);
+            }
+            return None;
+        }
+        let reported = self.reported;
+        let mark = self
+            .marks
+            .iter()
+            .copied()
+            .filter(|&mark| mark > reported && mark <= percent)
+            .max()?;
+        self.reported = mark;
+        Some(Event::Reached(mark))
+    }
+}
+
+impl Fingerprint {
+    /// How many lines a bar filling in `direction` has: columns of cells for
+    /// one that fills sideways, rows for one that fills up or down.
+    const fn lines(&self, direction: Direction) -> u32 {
+        match direction {
+            Direction::LeftToRight | Direction::RightToLeft => self.columns,
+            Direction::TopToBottom | Direction::BottomToTop => self.rows,
+        }
+    }
+
+    /// How many cells across one line.
+    const fn across(&self, direction: Direction) -> u32 {
+        match direction {
+            Direction::LeftToRight | Direction::RightToLeft => self.rows,
+            Direction::TopToBottom | Direction::BottomToTop => self.columns,
+        }
+    }
+
+    /// The column and row of the `k`th cell across line `line`, lines
+    /// counted from the end the bar fills from.
+    const fn line_cell(&self, line: u32, k: u32, direction: Direction) -> (u32, u32) {
+        match direction {
+            Direction::LeftToRight => (line, k),
+            Direction::RightToLeft => (self.columns - 1 - line, k),
+            Direction::TopToBottom => (k, line),
+            Direction::BottomToTop => (k, self.rows - 1 - line),
+        }
+    }
+
+    /// How many pixels long line `line` is along the bar: [`CELL`], less for
+    /// the region's edge line.
+    fn length(&self, line: u32, direction: Direction) -> u64 {
+        let (column, row) = self.line_cell(line, 0, direction);
+        let length = match direction {
+            Direction::LeftToRight | Direction::RightToLeft if column + 1 == self.columns => {
+                self.edge.0
+            }
+            Direction::TopToBottom | Direction::BottomToTop if row + 1 == self.rows => self.edge.1,
+            _ => CELL,
+        };
+        u64::from(length)
+    }
+
+    /// Whether line `line` of `self` looks different from line `theirs` of
+    /// `other`, a reading of the same grid: more than half of it, by the
+    /// pixels its cells hold, in cells that moved by more than
+    /// [`CELL_DELTA`]. `None` when no cell of it is known in both.
+    fn lines_differ(
+        &self,
+        line: u32,
+        other: &Self,
+        theirs: u32,
+        direction: Direction,
+    ) -> Option<bool> {
+        self.line_share(line, other, theirs, direction, |_, _| true)
+            .map(|(moved, known)| moved * 2 > known)
+    }
+
+    /// How many pixels of line `line` of `self` sit in cells that moved by
+    /// more than [`CELL_DELTA`] against line `theirs` of `other`, and how
+    /// many were compared: the cells known in both that `include` takes,
+    /// given each side's cell index. `None` when none was compared.
+    fn line_share(
+        &self,
+        line: u32,
+        other: &Self,
+        theirs: u32,
+        direction: Direction,
+        include: impl Fn(usize, usize) -> bool,
+    ) -> Option<(u64, u64)> {
+        let (mut known, mut moved) = (0_u64, 0_u64);
+        for k in 0..self.across(direction) {
+            let index =
+                |(column, row): (u32, u32), grid: &Self| (row * grid.columns + column) as usize;
+            let (a, b) = (
+                index(self.line_cell(line, k, direction), self),
+                index(other.line_cell(theirs, k, direction), other),
+            );
+            let (Some(&a_cell), Some(&b_cell)) = (self.cells.get(a), other.cells.get(b)) else {
+                continue;
+            };
+            if self.hidden.get(a).copied().unwrap_or(true)
+                || other.hidden.get(b).copied().unwrap_or(true)
+                || !include(a, b)
+            {
+                continue;
+            }
+            let weight = self.weight(a);
+            known += weight;
+            if a_cell.abs_diff(b_cell) > CELL_DELTA {
+                moved += weight;
+            }
+        }
+        (known > 0).then_some((moved, known))
     }
 }
 
@@ -904,6 +1384,12 @@ mod tests {
         assert!(!Watch::Changes.notifies(Event::Settled));
         assert!(Watch::Settles.notifies(Event::Settled));
         assert!(!Watch::Settles.notifies(Event::Changed));
+        assert!(!Watch::Settles.notifies(Event::Filled));
+        assert!(Watch::Fills.notifies(Event::Filled));
+        assert!(Watch::Fills.notifies(Event::Reached(20)));
+        assert!(!Watch::Fills.notifies(Event::Changed));
+        assert!(!Watch::Fills.notifies(Event::Settled));
+        assert!(!Watch::Changes.notifies(Event::Reached(20)));
     }
 
     #[test]
@@ -1709,6 +2195,8 @@ mod tuning_tests {
             sample_ms: u32::MAX,
             share_permille: u16::MAX,
             settle_ms: u32::MAX,
+            direction: super::Direction::BottomToTop,
+            marks: [0, 1, 99, u8::MAX],
         }
         .clamped();
         assert_eq!(wild.calm_ms, super::CALM_MS.1);
@@ -1716,6 +2204,8 @@ mod tuning_tests {
         assert_eq!(wild.sample_ms, super::SAMPLE_MS_MAX);
         assert_eq!(wild.share_permille, super::SHARE_PERMILLE_MAX);
         assert_eq!(wild.settle_ms, super::SETTLE_MS.1);
+        assert_eq!(wild.direction, super::Direction::BottomToTop);
+        assert_eq!(wild.marks, [0, 1, 99, super::MARK_MAX]);
     }
 
     /// The sampling rate: realtime never waits; a slower rate waits out
@@ -1731,5 +2221,432 @@ mod tuning_tests {
         assert_eq!(slow.sample_wait(None, ms(0)), None);
         assert_eq!(slow.sample_wait(Some(ms(1_000)), ms(1_200)), Some(ms(300)));
         assert_eq!(slow.sample_wait(Some(ms(1_000)), ms(1_500)), None);
+    }
+}
+
+/// [`Watch::Fills`], the bar mode (roadmap `1.61`, the maintainer's design of
+/// 2026-11-10).
+#[cfg(test)]
+mod bar_tests {
+    use super::{Detector, Direction, Event, Fingerprint, MARKS, Tuning, Watch};
+    use crate::bitmap::RgbaBitmap;
+    use crate::geometry::Size;
+
+    /// The empty part of a bar, and its fill.
+    const EMPTY: u8 = 40;
+    const FULL: u8 = 200;
+
+    /// A `width` by `height` bar, `filled` pixels of it filled from the end
+    /// `direction` names.
+    fn bar(width: u32, height: u32, filled: u32, direction: Direction) -> Fingerprint {
+        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let inside = match direction {
+                    Direction::LeftToRight => x < filled,
+                    Direction::RightToLeft => x >= width.saturating_sub(filled),
+                    Direction::TopToBottom => y < filled,
+                    Direction::BottomToTop => y >= height.saturating_sub(filled),
+                };
+                let level = if inside { FULL } else { EMPTY };
+                pixels.extend_from_slice(&[level, level, level, 255]);
+            }
+        }
+        let bitmap = RgbaBitmap::from_pixels(Size::new(width, height), pixels)
+            .unwrap_or_else(|| unreachable!("a well-formed bitmap"));
+        Fingerprint::of(&bitmap).unwrap_or_else(|| unreachable!("a non-empty bitmap"))
+    }
+
+    /// A bar detector with `marks` and `direction`.
+    fn detector(marks: [u8; MARKS], direction: Direction) -> Detector {
+        let mut detector = Detector::for_watch(Watch::Fills);
+        detector.tune(
+            Watch::Fills,
+            Tuning {
+                marks,
+                direction,
+                ..Tuning::default()
+            },
+        );
+        detector
+    }
+
+    /// The events a 200 by 20 bar filling left to right reports, one
+    /// reading per entry of `fills` (pixels filled).
+    fn run(marks: [u8; MARKS], fills: &[u32]) -> Vec<Event> {
+        let mut detector = detector(marks, Direction::LeftToRight);
+        fills
+            .iter()
+            .filter_map(|&filled| detector.observe(bar(200, 20, filled, Direction::LeftToRight)))
+            .collect()
+    }
+
+    /// His words: *"the area notifies only once the bar is filled to
+    /// 100%"*. A bar filling step by step says nothing on the way and one
+    /// thing when it is full, and stays quiet while it stays full.
+    #[test]
+    fn a_bar_notifies_once_when_it_is_full() {
+        let fills: Vec<u32> = (0..=20).map(|step| step * 10).chain([200, 200]).collect();
+        assert_eq!(run([0; MARKS], &fills), vec![Event::Filled]);
+    }
+
+    /// Review of `#170`, round 4: a percentage added in the panel after the
+    /// bar has passed it is not reported late; one still ahead is.
+    #[test]
+    fn a_percentage_added_after_the_bar_passed_it_is_not_reported() {
+        let mut detector = detector([0; MARKS], Direction::LeftToRight);
+        assert_eq!(
+            detector.observe(bar(200, 20, 0, Direction::LeftToRight)),
+            None
+        );
+        assert_eq!(
+            detector.observe(bar(200, 20, 140, Direction::LeftToRight)),
+            None
+        );
+        detector.tune(
+            Watch::Fills,
+            Tuning {
+                marks: [50, 90, 0, 0],
+                ..Tuning::default()
+            },
+        );
+        assert_eq!(
+            detector.observe(bar(200, 20, 140, Direction::LeftToRight)),
+            None,
+            "50% was passed before it was set"
+        );
+        assert_eq!(
+            detector.observe(bar(200, 20, 188, Direction::LeftToRight)),
+            Some(Event::Reached(90))
+        );
+        assert_eq!(
+            detector.observe(bar(200, 20, 200, Direction::LeftToRight)),
+            Some(Event::Filled)
+        );
+    }
+
+    /// Review of `#170`, round 5: a cell at the fill's front counts as filled
+    /// once part of it moved, so 97 of 200 pixels read as 50%. A percentage
+    /// is never reported before the bar reaches it.
+    #[test]
+    fn a_percentage_is_not_reported_before_the_bar_reaches_it() {
+        assert_eq!(run([50, 0, 0, 0], &[0, 97, 99]), vec![]);
+        assert_eq!(run([50, 0, 0, 0], &[0, 97, 104]), vec![Event::Reached(50)]);
+    }
+
+    /// A bar one pixel short of full is not full.
+    #[test]
+    fn a_bar_one_pixel_short_is_not_full() {
+        assert_eq!(run([0; MARKS], &[0, 100, 199]), vec![]);
+        assert_eq!(run([0; MARKS], &[0, 199, 200]), vec![Event::Filled]);
+    }
+
+    /// Review of `#170`, round 6: one of UP-TAKE's own windows (a card) over
+    /// the bar's far end hides lines the area has already read. The bar is
+    /// not full until that end is seen again.
+    #[test]
+    fn a_far_end_hidden_by_a_card_is_not_full_until_seen() {
+        let mut detector = detector([0; MARKS], Direction::LeftToRight);
+        assert_eq!(
+            detector.observe(bar(200, 20, 0, Direction::LeftToRight)),
+            None
+        );
+        let mut covered = bar(200, 20, 200, Direction::LeftToRight);
+        for (at, hidden) in covered.hidden.iter_mut().enumerate() {
+            if at as u32 % covered.columns >= covered.columns - 2 {
+                *hidden = true;
+            }
+        }
+        assert_eq!(detector.observe(covered), None, "its far end is hidden");
+        assert_eq!(
+            detector.observe(bar(200, 20, 200, Direction::LeftToRight)),
+            Some(Event::Filled)
+        );
+    }
+
+    /// His addition: *"the user may also set percentages where he wants to
+    /// get additional notifications, at 20% or 50% for example"*. Each is
+    /// reported once, on the way up, and the full bar after them.
+    #[test]
+    fn each_percentage_notifies_once_on_the_way() {
+        let fills = [0, 20, 40, 44, 60, 100, 120, 160, 200];
+        assert_eq!(
+            run([20, 50, 0, 0], &fills),
+            vec![Event::Reached(20), Event::Reached(50), Event::Filled]
+        );
+    }
+
+    /// A bar that jumps past two percentages in one reading reports the
+    /// higher one only: one card, not two at once.
+    #[test]
+    fn a_jump_past_two_percentages_reports_the_higher() {
+        assert_eq!(
+            run([20, 50, 0, 0], &[0, 120, 200]),
+            vec![Event::Reached(50), Event::Filled]
+        );
+    }
+
+    /// An area placed over a bar already at 60% does not report the
+    /// percentages it was placed past, and does report the full bar.
+    #[test]
+    fn a_bar_placed_part_full_skips_what_it_already_passed() {
+        assert_eq!(
+            run([20, 50, 70, 0], &[120, 120, 150, 200]),
+            vec![Event::Reached(70), Event::Filled]
+        );
+    }
+
+    /// A bar placed part full whose fill then goes back to empty and fills
+    /// again: the lines that were filled at the first reading count as
+    /// filled only while they look as they did then.
+    #[test]
+    fn a_bar_placed_part_full_sees_it_empty_and_fill_again() {
+        assert_eq!(
+            run([20, 0, 0, 0], &[120, 0, 50, 200]),
+            vec![Event::Reached(20), Event::Filled]
+        );
+    }
+
+    /// A bar that empties for the next file is a new fill, and notifies
+    /// again.
+    #[test]
+    fn a_bar_that_empties_and_fills_again_notifies_again() {
+        assert_eq!(
+            run([50, 0, 0, 0], &[0, 200, 0, 120, 200]),
+            vec![Event::Filled, Event::Reached(50), Event::Filled]
+        );
+    }
+
+    /// A percentage label in the middle of the bar that changes ahead of
+    /// the fill does not count as fill: progress is the run of filled lines
+    /// from the start end.
+    #[test]
+    fn a_label_ahead_of_the_fill_does_not_count() {
+        let mut detector = detector([20, 50, 0, 0], Direction::LeftToRight);
+        let empty = bar(200, 20, 0, Direction::LeftToRight);
+        assert_eq!(detector.observe(empty.clone()), None);
+        // The label: every cell of the middle 40 pixels changed.
+        let mut labelled = empty;
+        for (at, cell) in labelled.cells.iter_mut().enumerate() {
+            let column = at as u32 % labelled.columns;
+            if (20..30).contains(&column) {
+                *cell = FULL;
+            }
+        }
+        assert_eq!(detector.observe(labelled), None);
+    }
+
+    /// Each direction fills from its own end, and a fill from the other end
+    /// is not progress.
+    #[test]
+    fn each_direction_fills_from_its_own_end() {
+        for direction in [
+            Direction::LeftToRight,
+            Direction::RightToLeft,
+            Direction::TopToBottom,
+            Direction::BottomToTop,
+        ] {
+            let opposite = match direction {
+                Direction::LeftToRight => Direction::RightToLeft,
+                Direction::RightToLeft => Direction::LeftToRight,
+                Direction::TopToBottom => Direction::BottomToTop,
+                Direction::BottomToTop => Direction::TopToBottom,
+            };
+            let mut detector = detector([50, 0, 0, 0], direction);
+            assert_eq!(detector.observe(bar(80, 80, 0, direction)), None);
+            assert_eq!(
+                detector.observe(bar(80, 80, 60, opposite)),
+                None,
+                "{direction:?}: a fill from the far end"
+            );
+            assert_eq!(detector.observe(bar(80, 80, 0, direction)), None);
+            assert_eq!(
+                detector.observe(bar(80, 80, 44, direction)),
+                Some(Event::Reached(50)),
+                "{direction:?}"
+            );
+            assert_eq!(
+                detector.observe(bar(80, 80, 80, direction)),
+                Some(Event::Filled),
+                "{direction:?}"
+            );
+        }
+    }
+
+    /// A bar whose length is not a whole number of cells: the last, partial
+    /// line counts for the pixels it holds, and the bar is full only once it
+    /// is filled too.
+    #[test]
+    fn a_bar_of_uneven_length_counts_its_edge_line() {
+        let mut detector = detector([0; MARKS], Direction::LeftToRight);
+        assert_eq!(
+            detector.observe(bar(201, 20, 0, Direction::LeftToRight)),
+            None
+        );
+        assert_eq!(
+            detector.observe(bar(201, 20, 200, Direction::LeftToRight)),
+            None
+        );
+        assert_eq!(
+            detector.observe(bar(201, 20, 201, Direction::LeftToRight)),
+            Some(Event::Filled)
+        );
+    }
+
+    /// Turning the direction in the panel starts again from the next
+    /// reading: what was learned for one direction means nothing for the
+    /// other, and is not reported as a fill.
+    #[test]
+    fn a_new_direction_learns_the_bar_again() {
+        let mut detector = detector([0; MARKS], Direction::LeftToRight);
+        assert_eq!(
+            detector.observe(bar(200, 20, 0, Direction::LeftToRight)),
+            None
+        );
+        assert_eq!(
+            detector.observe(bar(200, 20, 100, Direction::LeftToRight)),
+            None
+        );
+        detector.tune(
+            Watch::Fills,
+            Tuning {
+                direction: Direction::RightToLeft,
+                ..Tuning::default()
+            },
+        );
+        // The first reading after the turn is learned, not compared.
+        assert_eq!(
+            detector.observe(bar(200, 20, 0, Direction::RightToLeft)),
+            None
+        );
+        assert_eq!(
+            detector.observe(bar(200, 20, 200, Direction::RightToLeft)),
+            Some(Event::Filled)
+        );
+    }
+
+    /// A resized area, or a reading by another route, is another bar as far
+    /// as its lines go: learned, not reported.
+    #[test]
+    fn a_resized_or_rebased_bar_is_learned_not_reported() {
+        let mut detector = detector([0; MARKS], Direction::LeftToRight);
+        assert_eq!(
+            detector.observe(bar(200, 20, 0, Direction::LeftToRight)),
+            None
+        );
+        assert_eq!(
+            detector.observe(bar(100, 20, 100, Direction::LeftToRight)),
+            None
+        );
+        detector.rebase_at(
+            bar(200, 20, 0, Direction::LeftToRight),
+            std::time::Duration::ZERO,
+        );
+        assert_eq!(
+            detector.observe(bar(200, 20, 200, Direction::LeftToRight)),
+            Some(Event::Filled)
+        );
+    }
+
+    /// A bar as a real screen shows it, from the maintainer's rig pass of
+    /// 2026-11-11: a 240 by 40 area with an 8 pixel margin of page around
+    /// the bar, the bar a pill with round ends (radius 12), a light track,
+    /// a darker fill, and a white `45%` label fixed near its far end.
+    /// `filled` is pixels of the track's 224 filled; `dim` is the darkened
+    /// screen Windows' snipping overlay (Win+Shift+S) draws over everything.
+    fn pill(filled: u32, dim: bool) -> Fingerprint {
+        const PAGE: u8 = 250;
+        const TRACK: u8 = 225;
+        const FILL: u8 = 100;
+        const TEXT: u8 = 250;
+        let (width, height, margin) = (240_u32, 40_u32, 8_u32);
+        let radius = f64::from(height - 2 * margin) / 2.0;
+        let middle = f64::from(height) / 2.0;
+        let (left, right) = (
+            f64::from(margin) + radius,
+            f64::from(width - margin) - radius,
+        );
+        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let (px, py) = (f64::from(x) + 0.5, f64::from(y) + 0.5);
+                let dx = px - px.clamp(left, right);
+                let on_track = dx * dx + (py - middle) * (py - middle) <= radius * radius;
+                let label = (width - margin - 50..width - margin - 30).contains(&x)
+                    && (15..25).contains(&y);
+                let mut level = if !on_track {
+                    PAGE
+                } else if label {
+                    TEXT
+                } else if x < margin + filled {
+                    FILL
+                } else {
+                    TRACK
+                };
+                if dim {
+                    level = level / 10 * 6;
+                }
+                pixels.extend_from_slice(&[level, level, level, 255]);
+            }
+        }
+        let bitmap = RgbaBitmap::from_pixels(Size::new(width, height), pixels)
+            .unwrap_or_else(|| unreachable!("a well-formed bitmap"));
+        Fingerprint::of(&bitmap).unwrap_or_else(|| unreachable!("a non-empty bitmap"))
+    }
+
+    /// The maintainer's rig pass, 2026-11-11: an area with page around a
+    /// round-ended bar never reported its percentages or the full bar. The
+    /// margin never changes, so a run counted from the area's own edge
+    /// never started, and a round end never had half its line filled.
+    #[test]
+    fn a_bar_with_page_around_it_and_round_ends_notifies() {
+        let mut detector = detector([20, 50, 0, 0], Direction::LeftToRight);
+        let events: Vec<Event> = (0..=28)
+            .map(|step| step * 8)
+            .chain([224, 224])
+            .filter_map(|filled| detector.observe(pill(filled, false)))
+            .collect();
+        assert_eq!(
+            events,
+            vec![Event::Reached(20), Event::Reached(50), Event::Filled]
+        );
+    }
+
+    /// The same rig pass: Win+Shift+S darkened the screen, every line of the
+    /// area changed, and the area reported its percentages and the full bar
+    /// at once. The page around the bar changed too, which a fill never does,
+    /// so such a reading is not a fill; the fill after it still reads.
+    #[test]
+    fn a_darkened_screen_over_a_bar_is_not_a_fill() {
+        let mut detector = detector([20, 50, 0, 0], Direction::LeftToRight);
+        assert_eq!(detector.observe(pill(0, false)), None);
+        assert_eq!(detector.observe(pill(0, true)), None);
+        assert_eq!(detector.observe(pill(30, true)), None);
+        assert_eq!(detector.observe(pill(0, false)), None);
+        assert_eq!(detector.observe(pill(120, false)), Some(Event::Reached(50)));
+        assert_eq!(detector.observe(pill(150, true)), None);
+        assert_eq!(detector.observe(pill(224, false)), Some(Event::Filled));
+    }
+
+    /// A round-ended bar a few pixels short of full is not full.
+    #[test]
+    fn a_round_ended_bar_short_of_its_end_is_not_full() {
+        let mut detector = detector([0; MARKS], Direction::LeftToRight);
+        assert_eq!(detector.observe(pill(0, false)), None);
+        assert_eq!(detector.observe(pill(214, false)), None);
+        assert_eq!(detector.observe(pill(224, false)), Some(Event::Filled));
+    }
+
+    /// Only the bar mode reads as a bar: the same readings in *Notify when
+    /// it changes* report a change and never a full bar.
+    #[test]
+    fn only_the_bar_mode_reports_a_full_bar() {
+        let mut detector = Detector::for_watch(Watch::Changes);
+        let events: Vec<Event> = [0, 200]
+            .iter()
+            .filter_map(|&filled| detector.observe(bar(200, 20, filled, Direction::LeftToRight)))
+            .collect();
+        assert_eq!(events, vec![Event::Changed]);
+        assert!(!Detector::for_watch(Watch::Fills).is_settling());
     }
 }

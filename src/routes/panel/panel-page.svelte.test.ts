@@ -94,6 +94,8 @@ const WATCH = {
     sample_ms: 0,
     share_permille: 0,
     settle_ms: 1_000,
+    direction: 'left_to_right',
+    marks: [0, 0, 0, 0],
   },
   kinds: ['default', 'screenshot', 'filter', 'upscale', 'ocr', 'watch'],
   ocr: null,
@@ -286,6 +288,54 @@ test('each of the four sliders takes Ctrl, pressed and let go', async () => {
     await settle();
     expect(slider.step, `slider ${index} without Ctrl`).toBe('1');
   }
+});
+
+// Roadmap 1.61, the bar mode on his design of 2026-11-10: a direction, and
+// percentages to be told at on the way, each sent in the area's tuning; the
+// tolerance slider, which the bar does not use, is not shown.
+test('the bar mode shows its direction and its percentages', async () => {
+  render(Page);
+  await settle();
+  button('Notify when the bar is full').click();
+  expect(lastSet()).toEqual(['panel_set_watch', { watch: 'fills' }]);
+  expect(document.body.textContent).not.toContain('Fills from');
+  replies.set('panel_view', { ...WATCH, watch: 'fills' });
+  handlers.get('panel://changed')?.();
+  await settle();
+  expect(document.body.textContent).toContain('Fills from');
+  expect(document.body.textContent).not.toContain('How much must change');
+  button('Right').click();
+  expect(lastSet()).toEqual([
+    'panel_set_tuning',
+    { tuning: { ...WATCH.tuning, direction: 'right_to_left' } },
+  ]);
+  const marks = () => [
+    ...document.querySelectorAll<HTMLInputElement>('input[type="range"]'),
+  ];
+  // The first percentage slider, then the sampling slider below.
+  const first = marks()[0];
+  if (!first) throw new Error('no percentage slider');
+  expect(document.body.textContent).toContain('Also notify at');
+  expect(document.body.textContent).toContain('Off');
+  first.value = '20';
+  first.dispatchEvent(new Event('input', { bubbles: true }));
+  expect(lastSet()).toEqual([
+    'panel_set_tuning',
+    {
+      tuning: {
+        ...WATCH.tuning,
+        direction: 'right_to_left',
+        marks: [20, 0, 0, 0],
+      },
+    },
+  ]);
+  await settle();
+  expect(document.body.textContent).toContain('20%');
+  // A second slider for the next percentage.
+  const labels = [...document.querySelectorAll('.label')].filter((label) =>
+    label.textContent?.includes('Also notify at'),
+  );
+  expect(labels).toHaveLength(2);
 });
 
 test('a type shows only its own rows', async () => {

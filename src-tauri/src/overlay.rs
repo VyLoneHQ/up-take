@@ -1300,8 +1300,8 @@ struct AreaPayload {
     /// (roadmap `1.47`): `free`, `following` or `paused`. The page marks a
     /// sticky area and says so when it is paused.
     sticky: Sticky,
-    /// What a watch area tells the user about (roadmap `1.58`): `changes`
-    /// or `settles`.
+    /// What a watch area tells the user about (roadmap `1.58`): `changes`,
+    /// `settles`, or `fills` for a progress bar (roadmap `1.61`).
     watch: Watch,
     /// Whether the user paused the area's ongoing work (`ADR-0053`). The page
     /// says *paused* on a paused area of a type that keeps working.

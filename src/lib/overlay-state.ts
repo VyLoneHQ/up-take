@@ -97,11 +97,12 @@ export type LayerName = 'front' | 'auto' | 'back';
 export type StickyState = 'free' | 'following' | 'paused';
 
 /**
- * What a watch area tells the user about (roadmap 1.58): a change, or the end
- * of one. There is no `off` since ADR-0053: a watch area watches from the
- * moment it is made, and pausing it is {@link AreaView.held}.
+ * What a watch area tells the user about (roadmap 1.58): a change, the end
+ * of one, or a progress bar that is full (`fills`, roadmap 1.61). There is no
+ * `off` since ADR-0053: a watch area watches from the moment it is made, and
+ * pausing it is {@link AreaView.held}.
  */
-export type WatchState = 'changes' | 'settles';
+export type WatchState = 'changes' | 'settles' | 'fills';
 
 /**
  * Whether an area is drawn at all in this overlay state (roadmap 1.47, the

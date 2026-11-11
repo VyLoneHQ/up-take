@@ -816,6 +816,8 @@ mod tests {
                 "sample_ms",
                 "share_permille",
                 "settle_ms",
+                "direction",
+                "marks",
             ],
         );
         assert_payload_coverage("panel.rs", include_str!("panel.rs"), &["PanelView"], &[]);

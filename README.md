@@ -165,7 +165,7 @@ Six of eight area types are built.
 <!-- HELD (2026-10-31): the watch area bullet waits for the founder's P-9 approval after he has
      seen a notification on a real screen. The draft:
 - **A watch area.** Place it over something that changes, such as a download bar, a render or a
-  chat, and it shows a Windows notification when that piece of screen starts changing, or when it
+  chat, and it shows a notification card when that piece of screen starts changing, or when it
   stops. It watches from the moment you make it, *Pause* in its settings or the key `P` stops it,
   and a green dot in the area's top left corner, pulsing softly every few seconds, shows it is
   reading (a still grey ring while it is paused). You choose how much of the area has

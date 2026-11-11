@@ -105,6 +105,11 @@
       "de": "Melden, wenn es zur Ruhe kommt",
       "de_from": "102a79bb"
     },
+    "menu.watch.fills": {
+      "en": "Notify when the bar is full",
+      "de": "Melden, wenn der Balken voll ist",
+      "de_from": "28808aa7"
+    },
     "panel.watch.notify": {
       "en": "Notifications",
       "de": "Benachrichtigungen",
@@ -154,6 +159,46 @@
       "en": "{n}% of the area",
       "de": "{n} % der Fläche",
       "de_from": "5b59f9d5"
+    },
+    "panel.watch.direction": {
+      "en": "Fills from",
+      "de": "Füllt sich von",
+      "de_from": "c0dccc0f"
+    },
+    "panel.watch.direction.left_to_right": {
+      "en": "Left",
+      "de": "links",
+      "de_from": "92773890"
+    },
+    "panel.watch.direction.right_to_left": {
+      "en": "Right",
+      "de": "rechts",
+      "de_from": "1e9e9f85"
+    },
+    "panel.watch.direction.top_to_bottom": {
+      "en": "Top",
+      "de": "oben",
+      "de_from": "099b73dc"
+    },
+    "panel.watch.direction.bottom_to_top": {
+      "en": "Bottom",
+      "de": "unten",
+      "de_from": "22b5f34a"
+    },
+    "panel.watch.mark": {
+      "en": "Also notify at",
+      "de": "Zusätzlich melden bei",
+      "de_from": "5530f274"
+    },
+    "panel.watch.mark.off": {
+      "en": "Off",
+      "de": "Aus",
+      "de_from": "0dc6b4aa"
+    },
+    "panel.watch.mark.percent": {
+      "en": "{n}%",
+      "de": "{n} %",
+      "de_from": "592614a2"
     },
     "panel.watch.settle": {
       "en": "Counts as stopped after",
@@ -461,9 +506,9 @@
       "de_from": "7fb331a9"
     },
     "coach.types.watch": {
-      "en": "Tells you when it changes, or stops changing.",
-      "de": "Meldet, wenn sich etwas ändert oder zur Ruhe kommt.",
-      "de_from": "ac26813f"
+      "en": "Tells you when it changes, stops changing, or a progress bar fills.",
+      "de": "Meldet, wenn sich etwas ändert, zur Ruhe kommt oder ein Balken voll ist.",
+      "de_from": "a972bb44"
     },
     "coach.types.footer": {
       "en": "Drag with no key held and you get a plain area.",
@@ -694,6 +739,16 @@
       "en": "stopped changing",
       "de": "zur Ruhe gekommen",
       "de_from": "6c2011c9"
+    },
+    "notice.event.filled": {
+      "en": "bar full",
+      "de": "Balken voll",
+      "de_from": "7073d897"
+    },
+    "notice.event.reached": {
+      "en": "reached {n}%",
+      "de": "{n} % erreicht",
+      "de_from": "f9796b10"
     },
     "menu.settings": {
       "en": "Settings…",
