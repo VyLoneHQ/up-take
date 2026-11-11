@@ -101,6 +101,11 @@ docs: clarify build-from-source steps
 not in comments, not in doc comments, not in strings a user or an operator sees. Use a comma, a
 colon, a full stop, or parentheses. Ranges take a plain hyphen (`1084-1099`) or the word "to".
 
+**One exception: a translation.** A string in a language other than English in
+`locales/strings.json` uses the punctuation that language calls for, such as the German
+Gedankenstrich. `src/lib/strings.test.ts` and the ratchet both leave translations out; the English
+of every string stays gated.
+
 `scripts/dash-ratchet.py` runs in CI and fails if the repository-wide count goes up. It is a
 **ratchet**: the count may go down and never up, because the rule arrived against about twelve
 hundred pre-existing characters, and a check that fails the build on the day it lands is a check
@@ -110,7 +115,7 @@ unbanked improvement is headroom, and the next change can spend it while the che
 regression.
 
 **What the ratchet does NOT do, because the first version of this section claimed it did.** It does
-not refuse a new dash on its own. It compares one repository-wide total against one ceiling, so a
+not refuse a new dash on its own. It compares one repository-wide total (translations aside) against one ceiling, so a
 change that adds a dash to a new comment and removes one somewhere else passes green. What it
 guarantees is that the repository never gets worse in total and that every tranche of cleanup is
 permanent. Refusing a newly added dash needs a diff-aware check, which is a different program,

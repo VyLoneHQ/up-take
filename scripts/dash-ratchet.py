@@ -93,7 +93,9 @@ file's dashes from the total and the script then congratulated the author on the
 ground it had apparently gained and invited them to bank it with
 `--write-baseline`. A second review found it: one entry for `placement.rs` was
 worth 172. The ceiling is now measured over every text file, exempt ones
-included, so an exemption cannot move the number by one. What it changes is the
+included, so an exemption cannot move the number by one. (The one scope is not
+an exemption: the string catalogue's translations are not counted at all,
+`CATALOGUE` below, UP-TAKE backlog I-412.) What it changes is the
 **floor**: the total can never fall below the number of load-bearing characters,
 and the exemption list is the record of where that floor comes from. Exempt
 paths are also left out of the "worst offenders" list a failure prints, because
@@ -171,6 +173,59 @@ EXEMPT: dict[str, str] = {}
 
 BASELINE_PATH = "scripts/dash-baseline.json"
 
+# The string catalogue (roadmap 1.38): one entry per string, its languages side
+# by side. Its TRANSLATIONS are not counted, and that is a scope, not an
+# exemption (UP-TAKE backlog I-412). The Gedankenstrich is correct German
+# punctuation (the workspace's VOICE.md, section 7), and `src/lib/strings.test.ts`
+# already refuses a dash in the English of every entry while exempting the other
+# languages by name. Counting them here put the two guards at odds: the next
+# German string that needed one would fail CI, and the ways out would be worse
+# German or a raised ceiling. So this file is read as JSON, and every string in
+# it counts (keys, `_about`, the English, the fingerprints) except the value of
+# a language other than English. A catalogue this cannot parse is refused, as
+# any unreadable file is.
+CATALOGUE = "locales/strings.json"
+
+
+def catalogue_dashes(text: str) -> int:
+    """Dashes in the catalogue outside its translations.
+
+    Raises ValueError for a catalogue whose shape this cannot read, which the
+    caller turns into a refusal rather than a count of zero.
+    """
+    data = json.loads(text)
+    if not isinstance(data, dict):
+        raise ValueError("the catalogue is not an object")
+    languages = data.get("languages")
+    entries = data.get("strings")
+    if not isinstance(languages, list) or not isinstance(entries, dict):
+        raise ValueError("the catalogue has no `languages` list or `strings` object")
+    translations = {lang for lang in languages if isinstance(lang, str) and lang != "en"}
+
+    def dashes(value: object, skip: set[str]) -> int:
+        if isinstance(value, str):
+            return sum(value.count(d) for d in DASHES)
+        if isinstance(value, list):
+            return sum(dashes(item, set()) for item in value)
+        if isinstance(value, dict):
+            return sum(
+                dashes(key, set()) + (0 if key in skip else dashes(item, set()))
+                for key, item in value.items()
+            )
+        return 0
+
+    total = 0
+    for key, value in data.items():
+        total += dashes(key, set())
+        if key == "strings":
+            for entry_key, entry in entries.items():
+                if not isinstance(entry, dict):
+                    raise ValueError(f"the entry `{entry_key}` is not an object")
+                total += dashes(entry_key, set()) + dashes(entry, translations)
+        else:
+            total += dashes(value, set())
+    return total
+
 
 def repo_root() -> Path:
     """The repository root, so the answer does not depend on the caller's cwd.
@@ -225,6 +280,9 @@ def check_exemptions(root: Path, tracked: set[str]) -> list[str]:
 def count(root: Path, paths: list[str]) -> tuple[dict[str, int], list[str]]:
     """Per-file counts over every text file, exempt paths included.
 
+    The string catalogue is counted by `catalogue_dashes`, without its
+    translations (UP-TAKE backlog I-412).
+
     Exempt paths are counted deliberately. Skipping them here is what let an
     exemption lower the ceiling and be reported as ground gained; see the module
     docstring. `EXEMPT` decides what a failure lists, not what the total is.
@@ -236,7 +294,12 @@ def count(root: Path, paths: list[str]) -> tuple[dict[str, int], list[str]]:
             continue
         try:
             text = (root / path).read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as error:
+            n = (
+                catalogue_dashes(text)
+                if path == CATALOGUE
+                else sum(text.count(d) for d in DASHES)
+            )
+        except (OSError, UnicodeDecodeError, ValueError) as error:
             # NOT skipped silently, and this is the fix rather than the message.
             # The first version printed a warning to stderr and returned 0, so a
             # tracked file that had gone missing or turned invalid lowered the
@@ -244,7 +307,6 @@ def count(root: Path, paths: list[str]) -> tuple[dict[str, int], list[str]]:
             # file it cannot vouch for, and the honest answer is a refusal.
             unreadable.append(f"{path}: {type(error).__name__}")
             continue
-        n = sum(text.count(d) for d in DASHES)
         if n:
             counts[path] = n
     return counts, unreadable
@@ -375,7 +437,10 @@ def main() -> int:
         )
         return 1
 
-    reference = baseline_on(root, args.against)
+    # Write mode reads no ref at all (round 3 of the review of #174: it still
+    # read one here, so a malformed baseline on an irrelevant ref refused a
+    # valid write).
+    reference = None if args.write_baseline else baseline_on(root, args.against)
 
     if args.write_baseline:
         if baseline_file.exists():
