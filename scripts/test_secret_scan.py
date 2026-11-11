@@ -1775,11 +1775,13 @@ class TwelfthReview(unittest.TestCase):
             {key: value for key, value in job.items() if key != "steps"},
             {"name": "Secrets (detect-secrets)", "runs-on": "ubuntu-latest"},
         )
+        # Each outside action by the full commit hash of its tag (`v7.0.1`
+        # and `v7.1.0`, V-SECURITY `SUP-0012`); Dependabot moves both.
         scan = next(i for i, step in enumerate(job["steps"]) if "secret-scan.py" in str(step))
         self.assertEqual(
             job["steps"][: scan + 1],
             [
-                {"uses": "actions/checkout@v7", "with": {"fetch-depth": 0}},
+                {"uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "with": {"fetch-depth": 0}},
                 # Git only, and on the daily run only (I-467, review of #149).
                 {
                     "name": "Fetch every branch and tag (daily run)",
@@ -1787,7 +1789,7 @@ class TwelfthReview(unittest.TestCase):
                     "run": "git fetch --prune --no-tags origin"
                     " '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*'",
                 },
-                {"uses": "actions/setup-python@v7", "with": {"python-version": "3.12"}},
+                {"uses": "actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0", "with": {"python-version": "3.12"}},
                 {
                     "name": "Install detect-secrets",
                     "run": "python -I -m pip install detect-secrets==1.5.0 unidiff==0.7.5",
