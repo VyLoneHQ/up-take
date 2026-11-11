@@ -496,8 +496,21 @@ class WriteModeCase(unittest.TestCase):
         self.write_prose(1)
         self.commit("swept down to one")
 
-        code, out, err = run_main(self.repo, "--write-baseline", "--against", "elsewhere")
+        code, out, err = run_main(
+            self.repo, "--write-baseline", "--against", "refs/heads/elsewhere"
+        )
         self.assertEqual(code, 0, err)
+
+    def test_write_mode_still_refuses_a_short_name(self):
+        """Review of #175, round 1: write mode reads no ref, but `--against`
+        takes a full ref in every mode, so a short name is refused there too."""
+        self.write_prose(1)
+        self.write_baseline(2)
+        self.commit("one dash under a ceiling of two")
+
+        code, _, err = run_main(self.repo, "--write-baseline", "--against", "main")
+        self.assertEqual(code, 1, err)
+        self.assertIn("not a full ref", err)
 
 
 class CatalogueCase(unittest.TestCase):

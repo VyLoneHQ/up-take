@@ -65,7 +65,7 @@ enforced by the code that writes it. The first version guarded only
 313 it had apparently gained. An independent review found it by trying.
 
 So the committed baseline is compared against the baseline on the reference ref
-(`--against`, `origin/main` in CI). A pull request that raises it is refused
+(`--against`, `refs/remotes/origin/main` in CI). A pull request that raises it is refused
 whatever it did to the file. On the reference ref itself the comparison is with
 itself and passes, which is correct: the check exists for changes.
 
@@ -474,7 +474,9 @@ def main() -> int:
     # something else from banking the sweep this very check had just ordered
     # them to bank, with a message about fixing their checkout. Friction in the
     # attended workflow that bought no safety, which is what `P-5` forbids.
-    if not args.write_baseline and not is_full_ref(args.against):
+    # It is exempt from RESOLVING the ref, not from its form: `--against` takes
+    # a full ref in every mode (review of #175, round 1).
+    if not is_full_ref(args.against):
         print(
             f"REFUSED: --against {args.against} is not a full ref. Give the whole "
             f"name, such as refs/remotes/origin/main: git resolves a short name by "
