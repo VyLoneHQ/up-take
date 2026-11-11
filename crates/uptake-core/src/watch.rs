@@ -1141,6 +1141,9 @@ impl Bar {
         }
         let (low, high) = self.ends;
         let (mut run, mut total) = (0_u64, 0_u64);
+        // The last line the run took: the fill's front, which a cell counts
+        // as filled once part of it moved.
+        let mut front = 0_u64;
         let mut stopped = false;
         let mut ends: Option<(u32, u32)> = None;
         for line in low..=high {
@@ -1153,10 +1156,15 @@ impl Bar {
             let filled = if line < self.start { !differs } else { differs };
             if filled && !stopped {
                 run += length;
+                front = length;
             } else {
                 stopped = true;
             }
         }
+        // A percentage is never reported early: the front line may be only
+        // partly filled, so it does not count (review of `#170`, round 5: at
+        // 97 of 200 pixels the front cell made 50%). At most one cell late.
+        let counted = run - front;
         // Full when the run reaches the far end AND the far end looks like
         // the filled start: a far line only partly filled differs from both
         // its empty self and the filled start, and is not full yet.
@@ -1164,7 +1172,7 @@ impl Bar {
             && ends.is_some_and(|(first, last)| {
                 self.differ(reading, last, reading, first) == Some(false)
             });
-        let percent = u8::try_from((run * 100 / total.max(1)).min(100)).unwrap_or(100);
+        let percent = u8::try_from((counted * 100 / total.max(1)).min(100)).unwrap_or(100);
         Some((if full { 100 } else { percent.min(99) }, full))
     }
 
@@ -2290,13 +2298,22 @@ mod bar_tests {
             "50% was passed before it was set"
         );
         assert_eq!(
-            detector.observe(bar(200, 20, 180, Direction::LeftToRight)),
+            detector.observe(bar(200, 20, 188, Direction::LeftToRight)),
             Some(Event::Reached(90))
         );
         assert_eq!(
             detector.observe(bar(200, 20, 200, Direction::LeftToRight)),
             Some(Event::Filled)
         );
+    }
+
+    /// Review of `#170`, round 5: a cell at the fill's front counts as filled
+    /// once part of it moved, so 97 of 200 pixels read as 50%. A percentage
+    /// is never reported before the bar reaches it.
+    #[test]
+    fn a_percentage_is_not_reported_before_the_bar_reaches_it() {
+        assert_eq!(run([50, 0, 0, 0], &[0, 97, 99]), vec![]);
+        assert_eq!(run([50, 0, 0, 0], &[0, 97, 104]), vec![Event::Reached(50)]);
     }
 
     /// A bar one pixel short of full is not full.
