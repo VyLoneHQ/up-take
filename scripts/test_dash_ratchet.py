@@ -135,7 +135,7 @@ class RatchetCase(unittest.TestCase):
         self.write_baseline(9)  # raising the bound instead of fixing the prose
         self.commit("raise the ceiling by hand")
 
-        code, _, err = run_main(self.repo, "--against", "reference")
+        code, _, err = run_main(self.repo, "--against", "refs/heads/reference")
         self.assertEqual(code, 1, "a raised ceiling must be refused")
         self.assertIn("REFUSED", err)
         self.assertIn("ratchet turns one way", err)
@@ -147,7 +147,7 @@ class RatchetCase(unittest.TestCase):
         self.commit("baseline of 2")
         git(self.repo, "branch", "reference")
 
-        code, _, _ = run_main(self.repo, "--against", "reference")
+        code, _, _ = run_main(self.repo, "--against", "refs/heads/reference")
         self.assertEqual(code, 0)
 
     def test_a_lowered_ceiling_passes(self):
@@ -159,7 +159,7 @@ class RatchetCase(unittest.TestCase):
         self.write_baseline(1)
         self.commit("swept down to one")
 
-        code, out, _ = run_main(self.repo, "--against", "reference")
+        code, out, _ = run_main(self.repo, "--against", "refs/heads/reference")
         self.assertEqual(code, 0, out)
 
     # -- a tranche is not permanent unless the bound comes down with it -------
@@ -172,7 +172,7 @@ class RatchetCase(unittest.TestCase):
         git(self.repo, "branch", "reference")
         self.write_prose(1)  # swept, baseline deliberately left at 5
 
-        code, _, err = run_main(self.repo, "--against", "reference")
+        code, _, err = run_main(self.repo, "--against", "refs/heads/reference")
         self.assertEqual(code, 1, "an unbanked sweep must be refused")
         self.assertIn("REFUSED", err)
         self.assertIn("--write-baseline", err)
@@ -198,7 +198,7 @@ class RatchetCase(unittest.TestCase):
         self.write_prose(4, name="new.md")  # total back to 5, ceiling now 1
         self.commit("spend it again in a new file")
 
-        code, _, err = run_main(self.repo, "--against", "reference")
+        code, _, err = run_main(self.repo, "--against", "refs/heads/reference")
         self.assertEqual(code, 1, "the banked ground was handed back and passed")
         self.assertIn("FAILED", err)
         self.assertIn("new.md", err)
@@ -214,7 +214,7 @@ class RatchetCase(unittest.TestCase):
         self.write_prose(1)
         self.commit("no baseline anywhere")
 
-        code, _, err = run_main(self.repo, "--against", "main")
+        code, _, err = run_main(self.repo, "--against", "refs/heads/main")
         self.assertEqual(code, 1, "a missing baseline must be refused, not assumed")
         self.assertIn("REFUSED", err)
         self.assertIn("--write-baseline", err)
@@ -225,7 +225,7 @@ class RatchetCase(unittest.TestCase):
         self.commit("three")
 
         code, out, err = run_main(
-            self.repo, "--write-baseline", "--against", "origin/does-not-exist"
+            self.repo, "--write-baseline", "--against", "refs/remotes/origin/does-not-exist"
         )
         self.assertEqual(code, 0, err)
         self.assertIn("baseline written", out)
@@ -246,7 +246,7 @@ class RatchetCase(unittest.TestCase):
         self.write_prose(3)
         self.commit("three")
 
-        code, _, err = run_main(self.repo, "--write-baseline", "--against", "main")
+        code, _, err = run_main(self.repo, "--write-baseline", "--against", "refs/heads/main")
         self.assertEqual(code, 0, err)
 
         written = (self.repo / "scripts" / "dash-baseline.json").read_bytes()
@@ -261,7 +261,7 @@ class RatchetCase(unittest.TestCase):
         self.write_prose(1)
         self.commit("a boolean ceiling")
 
-        code, _, err = run_main(self.repo, "--against", "main")
+        code, _, err = run_main(self.repo, "--against", "refs/heads/main")
         self.assertEqual(code, 1)
         self.assertIn("is not a count", err)
 
@@ -273,7 +273,7 @@ class RatchetCase(unittest.TestCase):
         self.write_baseline(1)
         self.commit("one")
 
-        code, _, err = run_main(self.repo, "--against", "origin/does-not-exist")
+        code, _, err = run_main(self.repo, "--against", "refs/remotes/origin/does-not-exist")
         self.assertEqual(code, 1, "an unresolvable ref must fail closed")
         self.assertIn("REFUSED", err)
         self.assertIn("does not resolve", err)
@@ -285,10 +285,68 @@ class RatchetCase(unittest.TestCase):
         self.write_baseline(1)
         self.commit("introduce the baseline")
 
-        code, _, err = run_main(self.repo, "--against", "reference")
+        code, _, err = run_main(self.repo, "--against", "refs/heads/reference")
         self.assertEqual(code, 0, err)
         self.assertIn("NOTICE", err)
         self.assertIn("first", err)
+
+    # -- I-487: only a full ref, looked up exactly ----------------------------
+
+    def _raised_decoy(self) -> None:
+        """An honest `reference` branch at 2, and a commit at 9 left on HEAD:
+        the ceiling raised by hand, which a decoy ref may point at."""
+        self.write_prose(2)
+        self.write_baseline(2)
+        self.commit("baseline of 2")
+        git(self.repo, "branch", "reference")
+        self.write_prose(9)
+        self.write_baseline(9)
+        self.commit("raise the ceiling by hand")
+
+    def test_a_short_name_is_refused(self):
+        """A short name is resolved by git's precedence list, so it is
+        refused outright rather than resolved (I-487)."""
+        self._raised_decoy()
+        code, _, err = run_main(self.repo, "--against", "reference")
+        self.assertEqual(code, 1, err)
+        self.assertIn("not a full ref", err)
+
+    def test_a_same_named_tag_does_not_stand_in_for_the_branch(self):
+        """Review of #174, round 2: a tag beside a branch of the same name was
+        read instead of the branch. A full ref names the branch alone."""
+        self._raised_decoy()
+        git(self.repo, "tag", "reference", "HEAD")
+        code, _, err = run_main(self.repo, "--against", "refs/heads/reference")
+        self.assertEqual(code, 1, "the branch's ceiling of 2 must be the one read")
+        self.assertIn("ratchet turns one way", err)
+
+    def test_a_ref_in_a_higher_namespace_does_not_stand_in(self):
+        """Review of #174, round 3: `refs/<name>` beats `refs/remotes/<name>`
+        in git's lookup. With the full name it is never consulted."""
+        self._raised_decoy()
+        git(self.repo, "update-ref", "refs/remotes/origin/main", "refs/heads/reference")
+        git(self.repo, "update-ref", "refs/refs/remotes/origin/main", "HEAD")
+        code, _, err = run_main(self.repo, "--against", "refs/remotes/origin/main")
+        self.assertEqual(code, 1, "the remote ref's ceiling of 2 must be the one read")
+        self.assertIn("ratchet turns one way", err)
+
+    def test_a_missing_full_ref_is_not_found_elsewhere(self):
+        """A full ref that does not exist must not fall through to git's
+        short-name lookup, which would try `refs/tags/<it>` and the rest."""
+        self._raised_decoy()
+        git(self.repo, "tag", "refs/remotes/origin/main", "HEAD")
+        code, _, err = run_main(self.repo, "--against", "refs/remotes/origin/main")
+        self.assertEqual(code, 1, err)
+        self.assertIn("does not resolve", err)
+
+    def test_a_pseudo_ref_cannot_be_named(self):
+        """Review of #174, round 4: `ORIG_HEAD` in the git dir was read as the
+        reference. A pseudo-ref is not under `refs/`, so it is refused."""
+        self._raised_decoy()
+        git(self.repo, "update-ref", "ORIG_HEAD", "HEAD")
+        code, _, err = run_main(self.repo, "--against", "ORIG_HEAD")
+        self.assertEqual(code, 1, err)
+        self.assertIn("not a full ref", err)
 
     # -- an exemption is not progress ----------------------------------------
 
@@ -299,11 +357,11 @@ class RatchetCase(unittest.TestCase):
         self.commit("seven")
         git(self.repo, "branch", "reference")
 
-        without = run_main(self.repo, "--against", "reference", "--list")
+        without = run_main(self.repo, "--against", "refs/heads/reference", "--list")
         with_exempt = run_main(
             self.repo,
             "--against",
-            "reference",
+            "refs/heads/reference",
             "--list",
             exempt={"prose.md": "a fixture another test compares against"},
         )
@@ -326,7 +384,7 @@ class RatchetCase(unittest.TestCase):
         _, out, _ = run_main(
             self.repo,
             "--against",
-            "reference",
+            "refs/heads/reference",
             exempt={"prose.md": "a fixture another test compares against"},
         )
         self.assertNotIn("ground you gained", out)
@@ -336,7 +394,7 @@ class RatchetCase(unittest.TestCase):
         self.write_prose(1)
         self.write_baseline(1)
         self.commit("one")
-        code, _, err = run_main(self.repo, "--against", "main", exempt={"prose.md": "   "})
+        code, _, err = run_main(self.repo, "--against", "refs/heads/main", exempt={"prose.md": "   "})
         self.assertEqual(code, 1)
         self.assertIn("no reason", err)
 
@@ -345,7 +403,7 @@ class RatchetCase(unittest.TestCase):
         self.write_baseline(1)
         self.commit("one")
         code, _, err = run_main(
-            self.repo, "--against", "main", exempt={"gone.md": "used to be load-bearing"}
+            self.repo, "--against", "refs/heads/main", exempt={"gone.md": "used to be load-bearing"}
         )
         self.assertEqual(code, 1)
         self.assertIn("not tracked", err)
@@ -359,7 +417,7 @@ class RatchetCase(unittest.TestCase):
         git(self.repo, "branch", "reference")
         self.write_prose(4)  # four now, ceiling still one
 
-        code, _, err = run_main(self.repo, "--against", "reference")
+        code, _, err = run_main(self.repo, "--against", "refs/heads/reference")
         self.assertEqual(code, 1)
         self.assertIn("FAILED", err)
         self.assertIn("prose.md", err)
@@ -370,7 +428,7 @@ class RatchetCase(unittest.TestCase):
         self.commit("one")
         self.write_prose(5)
 
-        code, _, err = run_main(self.repo, "--write-baseline", "--against", "main")
+        code, _, err = run_main(self.repo, "--write-baseline", "--against", "refs/heads/main")
         self.assertEqual(code, 1)
         self.assertIn("only turns one way", err)
 
@@ -382,7 +440,7 @@ class RatchetCase(unittest.TestCase):
         old = Path.cwd()
         try:
             os.chdir(self.repo / "scripts")
-            code, out, err = run_main(Path.cwd(), "--write-baseline", "--against", "main")
+            code, out, err = run_main(Path.cwd(), "--write-baseline", "--against", "refs/heads/main")
         finally:
             os.chdir(old)
 
@@ -401,7 +459,7 @@ class RatchetCase(unittest.TestCase):
         # Tracked, then made invalid UTF-8 in the working tree.
         (self.repo / "prose.md").write_bytes(b"\xff\xfe\x00bad")
 
-        code, _, err = run_main(self.repo, "--against", "main")
+        code, _, err = run_main(self.repo, "--against", "refs/heads/main")
         self.assertEqual(code, 1)
         self.assertIn("could not read", err)
 
@@ -411,7 +469,7 @@ class RatchetCase(unittest.TestCase):
         self.write_baseline(0)
         self.commit("an en-dash")
 
-        code, _, err = run_main(self.repo, "--against", "main")
+        code, _, err = run_main(self.repo, "--against", "refs/heads/main")
         self.assertEqual(code, 1, "an en-dash above the ceiling must fail")
         self.assertIn("FAILED", err)
 
@@ -438,8 +496,21 @@ class WriteModeCase(unittest.TestCase):
         self.write_prose(1)
         self.commit("swept down to one")
 
-        code, out, err = run_main(self.repo, "--write-baseline", "--against", "elsewhere")
+        code, out, err = run_main(
+            self.repo, "--write-baseline", "--against", "refs/heads/elsewhere"
+        )
         self.assertEqual(code, 0, err)
+
+    def test_write_mode_still_refuses_a_short_name(self):
+        """Review of #175, round 1: write mode reads no ref, but `--against`
+        takes a full ref in every mode, so a short name is refused there too."""
+        self.write_prose(1)
+        self.write_baseline(2)
+        self.commit("one dash under a ceiling of two")
+
+        code, _, err = run_main(self.repo, "--write-baseline", "--against", "main")
+        self.assertEqual(code, 1, err)
+        self.assertIn("not a full ref", err)
 
 
 class CatalogueCase(unittest.TestCase):
@@ -476,7 +547,7 @@ class CatalogueCase(unittest.TestCase):
         self.write_baseline(0)
         self.commit("a Gedankenstrich in German")
 
-        code, _, err = run_main(self.repo, "--against", "main")
+        code, _, err = run_main(self.repo, "--against", "refs/heads/main")
         self.assertEqual(code, 0, err)
 
     def test_an_english_dash_in_the_catalogue_still_counts(self):
@@ -485,7 +556,7 @@ class CatalogueCase(unittest.TestCase):
         self.write_baseline(0)
         self.commit("a dash in English")
 
-        code, _, err = run_main(self.repo, "--against", "main")
+        code, _, err = run_main(self.repo, "--against", "refs/heads/main")
         self.assertEqual(code, 1, "an English dash above the ceiling must fail")
         self.assertIn("FAILED", err)
 
@@ -495,7 +566,7 @@ class CatalogueCase(unittest.TestCase):
         self.write_baseline(0)
         self.commit("a dash in _about")
 
-        code, _, err = run_main(self.repo, "--against", "main")
+        code, _, err = run_main(self.repo, "--against", "refs/heads/main")
         self.assertEqual(code, 1, "a dash in `_about` must count")
 
     def test_the_same_german_dash_elsewhere_still_counts(self):
@@ -504,7 +575,7 @@ class CatalogueCase(unittest.TestCase):
         self.write_baseline(0)
         self.commit("German prose outside the catalogue")
 
-        code, _, err = run_main(self.repo, "--against", "main")
+        code, _, err = run_main(self.repo, "--against", "refs/heads/main")
         self.assertEqual(code, 1)
 
     def test_a_catalogue_that_does_not_parse_is_refused(self):
@@ -516,7 +587,7 @@ class CatalogueCase(unittest.TestCase):
         self.write_baseline(0)
         self.commit("a broken catalogue")
 
-        code, _, err = run_main(self.repo, "--against", "main")
+        code, _, err = run_main(self.repo, "--against", "refs/heads/main")
         self.assertEqual(code, 1)
         self.assertIn("could not read", err)
 
@@ -536,7 +607,7 @@ class CatalogueCase(unittest.TestCase):
                 self.write_baseline(0)
                 self.commit(name)
 
-                code, _, err = run_main(self.repo, "--against", "main")
+                code, _, err = run_main(self.repo, "--against", "refs/heads/main")
                 self.assertEqual(code, 1, name)
                 self.assertIn("could not read", err)
 

@@ -63,7 +63,8 @@ jobs:
       # because each of them initialises a git repository in a temp dir. This
       # comment said "a two-second Python run" and described only the first,
       # one commit after the second was added beneath it.
-      # `--against origin/main` is what stops the ceiling being raised by hand,
+      # `--against refs/remotes/origin/main` (a full ref, I-487) is what stops
+      # the ceiling being raised by hand,
       # and it needs main to be fetched. The checkout above is shallow, so the
       # ref is fetched explicitly rather than by setting fetch-depth: 0 on the
       # whole job, which would clone the full history for one comparison.
@@ -189,7 +190,7 @@ jobs:
         run: python3 scripts/test_draw_ocr_characters.py
 
       - name: Em-dash ratchet
-        run: python3 scripts/dash-ratchet.py --against origin/main
+        run: python3 scripts/dash-ratchet.py --against refs/remotes/origin/main
 
   # ---------------------------------------------------------------------------
   # Rust: format, lint, test. Windows because uptake-capture and the window
