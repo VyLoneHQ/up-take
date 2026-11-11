@@ -921,29 +921,44 @@ impl Detector {
 }
 
 /// A progress bar's state, for [`Watch::Fills`] (roadmap `1.61`, the
-/// maintainer's design of 2026-11-10).
+/// maintainer's design of 2026-11-10, corrected after his rig pass of
+/// 2026-11-11).
 ///
 /// # The rule
 ///
 /// The area is cut into *lines* across the way the bar fills: columns of
 /// cells for a bar that fills sideways, rows for one that fills up or down
 /// ([`Direction`]). The first reading is the bar as the user placed the area
-/// over it, and two things are learned from it:
+/// over it, and three things are learned from it:
 ///
+/// - **where the bar is**: an area is rarely drawn exactly on a bar, so the
+///   lines at either end that look like that end's outermost line (the page
+///   around the bar) are *margin*, and the cells of the remaining lines that
+///   differ from that page are the bar's *track*. Only the track is read, so
+///   the page above and below a bar and the corners of a round end take no
+///   part. An area drawn tightly over the bar, or over a bar whose track
+///   looks like the page, has no margin, and every cell is read;
 /// - **what each line looks like empty**: the line as that reading shows it;
-/// - **how far the bar was already filled**: the lines from the start end
-///   that do not look like the far end, which a bar that is not yet full
-///   still shows empty.
+/// - **how far the bar was already filled**: the bar's lines from the start
+///   end that do not look like its far end, which a bar that is not yet
+///   full still shows empty.
 ///
 /// From then on a line counts as filled when it no longer looks like its
-/// empty self (more than half of it in cells that moved by more than
+/// empty self (more than half of its track in cells that moved by more than
 /// [`CELL_DELTA`]), or, for a line already filled at the first reading, when
 /// it still looks as it did then. The bar's progress is the run of filled
-/// lines from the start end, as a share of the bar's length, so a percentage
-/// label inside the bar that changes ahead of the fill does not count until
-/// the fill reaches it. The bar is **full** when that run reaches the far
-/// end and the far end looks like the filled start (his words: *"fill
-/// reaches the end"*), so a last cell only partly filled is not yet full.
+/// lines from the bar's start end, as a share of the bar's length, so a
+/// percentage label inside the bar that changes ahead of the fill does not
+/// count until the fill reaches it. The bar is **full** when that run
+/// reaches the bar's far end and the far end looks like the filled start
+/// (his words: *"fill reaches the end"*), so a last cell only partly filled
+/// is not yet full.
+///
+/// **A reading in which the margin changed is not read at all.** A fill
+/// never changes the page around a bar; a screen darkened by Windows'
+/// snipping overlay does (his rig pass: Win+Shift+S reported his
+/// percentages and the full bar at once), and so does a window moved over
+/// the area.
 ///
 /// # What notifies, once per fill
 ///
@@ -955,18 +970,27 @@ impl Detector {
 /// when the progress falls below half of the highest it reported (a bar that
 /// empties for the next file), and the next fill notifies again.
 ///
-/// ⚠️ **Known limits of this first version.** A window moved over the bar
-/// changes every line, which reads as a full bar. Whatever else is inside
-/// the area (a label beside the bar, a frame wider than a cell) counts as bar
-/// too, so the area belongs tightly over it. A fill within [`CELL_DELTA`] of
-/// the empty colour is never seen. An area placed over a bar that is already
-/// full learns its far end filled, and does not see that bar full again.
+/// ⚠️ **Known limits.** With no margin (an area drawn tightly over the bar),
+/// a window moved over the bar or a darkened screen changes every line,
+/// which reads as a full bar. Whatever else is inside the area beside the
+/// bar (a label next to it) is read as bar, so the area belongs over the bar
+/// and a little page around it, and nothing else. A fill within
+/// [`CELL_DELTA`] of the empty colour is never seen. An area placed over a
+/// bar that is already full learns its far end filled, and does not see
+/// that bar full again.
 #[derive(Debug, Clone, Default)]
 struct Bar {
     /// The first reading: what each line looks like empty, and, before
     /// [`Self::start`], filled.
     empty: Option<Fingerprint>,
-    /// How many lines from the start end the first reading showed filled.
+    /// The bar's first and last line, in fill order; the lines outside them
+    /// are margin.
+    ends: (u32, u32),
+    /// Per cell, whether it is on the bar's track. Empty when the area has
+    /// no margin: every cell is.
+    track: Vec<bool>,
+    /// The line the first reading showed the fill reaching, from the start
+    /// end: the bar's lines before it were already filled.
     start: u32,
     /// The highest percentage reported in this fill, or the first reading's
     /// progress: nothing at or below it notifies.
@@ -989,49 +1013,127 @@ impl Bar {
         self.marks = tuning.marks;
     }
 
+    /// Whether cell `at` is on the bar's track.
+    fn on_track(&self, at: usize) -> bool {
+        self.track.get(at).copied().unwrap_or(true)
+    }
+
+    /// Whether line `line` of `a` looks different from line `theirs` of `b`,
+    /// read on the cells on the track in both; a line with no such cell
+    /// known is read whole. `None` when nothing of it is known.
+    fn differ(&self, a: &Fingerprint, line: u32, b: &Fingerprint, theirs: u32) -> Option<bool> {
+        let direction = self.direction;
+        match a.line_share(line, b, theirs, direction, |x, y| {
+            self.on_track(x) && self.on_track(y)
+        }) {
+            Some((moved, known)) => Some(moved * 2 > known),
+            None => a.lines_differ(line, b, theirs, direction),
+        }
+    }
+
     /// Learns the bar from `reading`, as if it were the first: the area was
     /// just made, turned, or is read by another route.
     fn learn(&mut self, reading: Fingerprint) {
         let direction = self.direction;
         let lines = reading.lines(direction);
-        // The far end: the last line with anything known in it.
-        let far = (0..lines).rev().find(|&line| {
+        let known = |line: u32| {
             reading
                 .lines_differ(line, &reading, line, direction)
                 .is_some()
-        });
-        let mut start = 0;
-        if let Some(far) = far {
-            for line in 0..far {
-                match reading.lines_differ(line, &reading, far, direction) {
-                    Some(false) => break,
-                    // Filled at the first reading, or unknown: passed over.
-                    Some(true) | None => start = line + 1,
+        };
+        // Margin: a line that looks like its end's outermost known line, to
+        // within one part in eight of its pixels.
+        let page = |line: u32, edge: u32| {
+            reading
+                .line_share(line, &reading, edge, direction, |_, _| true)
+                .is_none_or(|(moved, known)| moved * 8 <= known)
+        };
+        self.ends = (0, lines.saturating_sub(1));
+        self.track = Vec::new();
+        let first = (0..lines).find(|&line| known(line));
+        let last = (0..lines).rev().find(|&line| known(line));
+        if let (Some(first), Some(last)) = (first, last) {
+            let low = (first..=last).find(|&line| !page(line, first));
+            let high = (first..=last).rev().find(|&line| !page(line, last));
+            // A bar is most of its area. Margins that meet, or that leave
+            // less than half of it, are not margins: a tight area over a bar
+            // whose fill and track are each one flat colour looks like that.
+            if let (Some(low), Some(high)) = (low, high)
+                && low <= high
+                && (low > first || high < last)
+                && (high - low + 1) * 2 >= lines
+            {
+                self.ends = (low, high);
+                let edge = if low > first { first } else { last };
+                let index = |(column, row): (u32, u32)| (row * reading.columns + column) as usize;
+                let mut track = vec![false; reading.cells.len()];
+                for line in low..=high {
+                    for k in 0..reading.across(direction) {
+                        let at = index(reading.line_cell(line, k, direction));
+                        let page_at = index(reading.line_cell(edge, k, direction));
+                        if let (Some(&cell), Some(&page), Some(slot)) = (
+                            reading.cells.get(at),
+                            reading.cells.get(page_at),
+                            track.get_mut(at),
+                        ) {
+                            *slot = cell.abs_diff(page) > CELL_DELTA;
+                        }
+                    }
                 }
+                self.track = track;
+            }
+        }
+        let (low, high) = self.ends;
+        let mut start = low;
+        for line in low..high {
+            match self.differ(&reading, line, &reading, high) {
+                Some(false) => break,
+                // Filled at the first reading, or unknown: passed over.
+                Some(true) | None => start = line + 1,
             }
         }
         self.start = start;
-        let (percent, _) = self.progress(&reading, &reading);
+        let (percent, _) = self.progress(&reading, &reading).unwrap_or((0, false));
         self.reported = percent;
         self.empty = Some(reading);
     }
 
-    /// How far `reading` shows the bar filled against `empty`, in percent of
-    /// its length, and whether it is full. A line with nothing known in it
-    /// (under the area's own border or mark, with *Show UP-TAKE in screen
-    /// recordings* on, or under one of UP-TAKE's windows) is passed over: it
-    /// neither stops the run nor counts in the length.
-    fn progress(&self, empty: &Fingerprint, reading: &Fingerprint) -> (u8, bool) {
+    /// Whether the margin of `reading` changed against `empty`: more than
+    /// half of it, by pixels, in cells that moved by more than
+    /// [`CELL_DELTA`]. A fill never changes it.
+    fn covered(&self, empty: &Fingerprint, reading: &Fingerprint) -> bool {
         let direction = self.direction;
+        let (low, high) = self.ends;
+        let (mut moved, mut known) = (0_u64, 0_u64);
+        for line in (0..low).chain(high + 1..empty.lines(direction)) {
+            if let Some((m, k)) = empty.line_share(line, reading, line, direction, |_, _| true) {
+                moved += m;
+                known += k;
+            }
+        }
+        known > 0 && moved * 2 > known
+    }
+
+    /// How far `reading` shows the bar filled against `empty`, in percent of
+    /// its length, and whether it is full; `None` when the margin changed
+    /// ([`Self::covered`]). A line with nothing known in it (under the
+    /// area's own border or mark, with *Show UP-TAKE in screen recordings*
+    /// on, or under one of UP-TAKE's windows) is passed over: it neither
+    /// stops the run nor counts in the length.
+    fn progress(&self, empty: &Fingerprint, reading: &Fingerprint) -> Option<(u8, bool)> {
+        if self.covered(empty, reading) {
+            return None;
+        }
+        let (low, high) = self.ends;
         let (mut run, mut total) = (0_u64, 0_u64);
         let mut stopped = false;
         let mut ends: Option<(u32, u32)> = None;
-        for line in 0..empty.lines(direction) {
-            let Some(differs) = empty.lines_differ(line, reading, line, direction) else {
+        for line in low..=high {
+            let Some(differs) = self.differ(empty, line, reading, line) else {
                 continue;
             };
             ends = Some(ends.map_or((line, line), |(first, _)| (first, line)));
-            let length = empty.length(line, direction);
+            let length = empty.length(line, self.direction);
             total += length;
             let filled = if line < self.start { !differs } else { differs };
             if filled && !stopped {
@@ -1045,10 +1147,10 @@ impl Bar {
         // its empty self and the filled start, and is not full yet.
         let full = !stopped
             && ends.is_some_and(|(first, last)| {
-                reading.lines_differ(last, reading, first, direction) == Some(false)
+                self.differ(reading, last, reading, first) == Some(false)
             });
         let percent = u8::try_from((run * 100 / total.max(1)).min(100)).unwrap_or(100);
-        (if full { 100 } else { percent.min(99) }, full)
+        Some((if full { 100 } else { percent.min(99) }, full))
     }
 
     /// Takes one reading and says whether it is a moment worth reporting.
@@ -1066,8 +1168,10 @@ impl Bar {
         // What lay under one of UP-TAKE's own windows at the first reading is
         // learned at its first sight, as the other choices do.
         empty.learn(&reading);
-        let (percent, full) = self.progress(&empty, &reading);
+        let progress = self.progress(&empty, &reading);
         self.empty = Some(empty);
+        // Something over the area, not a fill: nothing is taken from it.
+        let (percent, full) = progress?;
         if u16::from(percent) * 2 < u16::from(self.reported) {
             // The bar emptied: a new fill.
             self.reported = percent;
@@ -1145,6 +1249,22 @@ impl Fingerprint {
         theirs: u32,
         direction: Direction,
     ) -> Option<bool> {
+        self.line_share(line, other, theirs, direction, |_, _| true)
+            .map(|(moved, known)| moved * 2 > known)
+    }
+
+    /// How many pixels of line `line` of `self` sit in cells that moved by
+    /// more than [`CELL_DELTA`] against line `theirs` of `other`, and how
+    /// many were compared: the cells known in both that `include` takes,
+    /// given each side's cell index. `None` when none was compared.
+    fn line_share(
+        &self,
+        line: u32,
+        other: &Self,
+        theirs: u32,
+        direction: Direction,
+        include: impl Fn(usize, usize) -> bool,
+    ) -> Option<(u64, u64)> {
         let (mut known, mut moved) = (0_u64, 0_u64);
         for k in 0..self.across(direction) {
             let index =
@@ -1158,6 +1278,7 @@ impl Fingerprint {
             };
             if self.hidden.get(a).copied().unwrap_or(true)
                 || other.hidden.get(b).copied().unwrap_or(true)
+                || !include(a, b)
             {
                 continue;
             }
@@ -1167,7 +1288,7 @@ impl Fingerprint {
                 moved += weight;
             }
         }
-        (known > 0).then_some(moved * 2 > known)
+        (known > 0).then_some((moved, known))
     }
 }
 
@@ -2316,6 +2437,95 @@ mod bar_tests {
             detector.observe(bar(200, 20, 200, Direction::LeftToRight)),
             Some(Event::Filled)
         );
+    }
+
+    /// A bar as a real screen shows it, from the maintainer's rig pass of
+    /// 2026-11-11: a 240 by 40 area with an 8 pixel margin of page around
+    /// the bar, the bar a pill with round ends (radius 12), a light track,
+    /// a darker fill, and a white `45%` label fixed near its far end.
+    /// `filled` is pixels of the track's 224 filled; `dim` is the darkened
+    /// screen Windows' snipping overlay (Win+Shift+S) draws over everything.
+    fn pill(filled: u32, dim: bool) -> Fingerprint {
+        const PAGE: u8 = 250;
+        const TRACK: u8 = 225;
+        const FILL: u8 = 100;
+        const TEXT: u8 = 250;
+        let (width, height, margin) = (240_u32, 40_u32, 8_u32);
+        let radius = f64::from(height - 2 * margin) / 2.0;
+        let middle = f64::from(height) / 2.0;
+        let (left, right) = (
+            f64::from(margin) + radius,
+            f64::from(width - margin) - radius,
+        );
+        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let (px, py) = (f64::from(x) + 0.5, f64::from(y) + 0.5);
+                let dx = px - px.clamp(left, right);
+                let on_track = dx * dx + (py - middle) * (py - middle) <= radius * radius;
+                let label = (width - margin - 50..width - margin - 30).contains(&x)
+                    && (15..25).contains(&y);
+                let mut level = if !on_track {
+                    PAGE
+                } else if label {
+                    TEXT
+                } else if x < margin + filled {
+                    FILL
+                } else {
+                    TRACK
+                };
+                if dim {
+                    level = level / 10 * 6;
+                }
+                pixels.extend_from_slice(&[level, level, level, 255]);
+            }
+        }
+        let bitmap = RgbaBitmap::from_pixels(Size::new(width, height), pixels)
+            .unwrap_or_else(|| unreachable!("a well-formed bitmap"));
+        Fingerprint::of(&bitmap).unwrap_or_else(|| unreachable!("a non-empty bitmap"))
+    }
+
+    /// The maintainer's rig pass, 2026-11-11: an area with page around a
+    /// round-ended bar never reported its percentages or the full bar. The
+    /// margin never changes, so a run counted from the area's own edge
+    /// never started, and a round end never had half its line filled.
+    #[test]
+    fn a_bar_with_page_around_it_and_round_ends_notifies() {
+        let mut detector = detector([20, 50, 0, 0], Direction::LeftToRight);
+        let events: Vec<Event> = (0..=28)
+            .map(|step| step * 8)
+            .chain([224, 224])
+            .filter_map(|filled| detector.observe(pill(filled, false)))
+            .collect();
+        assert_eq!(
+            events,
+            vec![Event::Reached(20), Event::Reached(50), Event::Filled]
+        );
+    }
+
+    /// The same rig pass: Win+Shift+S darkened the screen, every line of the
+    /// area changed, and the area reported its percentages and the full bar
+    /// at once. The page around the bar changed too, which a fill never does,
+    /// so such a reading is not a fill; the fill after it still reads.
+    #[test]
+    fn a_darkened_screen_over_a_bar_is_not_a_fill() {
+        let mut detector = detector([20, 50, 0, 0], Direction::LeftToRight);
+        assert_eq!(detector.observe(pill(0, false)), None);
+        assert_eq!(detector.observe(pill(0, true)), None);
+        assert_eq!(detector.observe(pill(30, true)), None);
+        assert_eq!(detector.observe(pill(0, false)), None);
+        assert_eq!(detector.observe(pill(120, false)), Some(Event::Reached(50)));
+        assert_eq!(detector.observe(pill(150, true)), None);
+        assert_eq!(detector.observe(pill(224, false)), Some(Event::Filled));
+    }
+
+    /// A round-ended bar a few pixels short of full is not full.
+    #[test]
+    fn a_round_ended_bar_short_of_its_end_is_not_full() {
+        let mut detector = detector([0; MARKS], Direction::LeftToRight);
+        assert_eq!(detector.observe(pill(0, false)), None);
+        assert_eq!(detector.observe(pill(214, false)), None);
+        assert_eq!(detector.observe(pill(224, false)), Some(Event::Filled));
     }
 
     /// Only the bar mode reads as a bar: the same readings in *Notify when
