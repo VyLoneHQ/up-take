@@ -506,9 +506,9 @@
       "de_from": "7fb331a9"
     },
     "coach.types.watch": {
-      "en": "Tells you when it changes, or stops changing.",
-      "de": "Meldet, wenn sich etwas ändert oder zur Ruhe kommt.",
-      "de_from": "ac26813f"
+      "en": "Tells you when it changes, stops changing, or a progress bar fills.",
+      "de": "Meldet, wenn sich etwas ändert, zur Ruhe kommt oder ein Balken voll ist.",
+      "de_from": "a972bb44"
     },
     "coach.types.footer": {
       "en": "Drag with no key held and you get a plain area.",
