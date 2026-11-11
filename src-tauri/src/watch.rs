@@ -64,7 +64,9 @@
 //! 2026-10-31). Every check above asks the host's own state, and rounds 2 to
 //! 19 of the review of `#154` each found another way for the mark to be
 //! unseen while those checks passed (UP-TAKE backlog `I-475`). `ADR-0048`'s
-//! *Revisit if* names the fix for the class: the reader enforces the mark.
+//! *Revisit if* asked for the mark to be enforced by the reader rather than
+//! by the page; the founder chose a different mechanism (its amendment of
+//! 2026-10-31): the page measures, and the reader reads only on its word.
 //! The page measures each watching mark once it is laid out (not once it is
 //! painted: the host cannot see a paint), counting as covering everything it
 //! draws after the mark and a freeze's hidden monitors. An area is read only
@@ -399,11 +401,13 @@ fn overlay_state(app: &AppHandle) -> OverlayState {
 }
 
 /// The page's latest word on which watching marks it can see (roadmap
-/// `1.58`, `ADR-0048`'s *Revisit if*: the mark enforced by the reader).
+/// `1.58`, `ADR-0048`'s amendment of 2026-10-31: the page measures, the
+/// reader waits for its word).
 ///
-/// The page measures each watching area's mark once laid out: its
-/// dot wholly inside the badge, on a monitor, under no other area
-/// (`src/lib/mark-check.ts`). It sends the areas whose mark is seen, with the
+/// The page measures each watching area's mark once laid out: its dot wholly
+/// inside the badge, on a monitor, under nothing the page draws above it
+/// (`COVERS`: other areas and their controls among them) and not under a
+/// freeze's mask (`src/lib/mark-check.ts`). It sends the areas whose mark is seen, with the
 /// bounds it drew them at and the overlay state it drew in, after every change
 /// and every second. An area is read only while the latest word names it at
 /// its present bounds, in the present state, and is no older than

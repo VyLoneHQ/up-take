@@ -6,8 +6,10 @@ import type { CssRect as Box } from './regions';
  *
  * The host reads a watch area only while the page has confirmed its mark
  * (`overlay_confirm_marks`, `src-tauri/src/watch.rs`). ADR-0048's *Revisit if*
- * asks for the mark to be enforced by the reader rather than trusted from the
- * page's intent; the page is the only side that knows where the mark is drawn,
+ * asked for the mark to be enforced by the reader rather than trusted from the
+ * page's intent; the founder chose instead (its amendment of 2026-10-31) that
+ * the page measures and the reader waits for its word, since the page is the
+ * only side that knows where the mark is drawn,
  * how large it is at this scale and in this language, and what is drawn over
  * it, so it measures and the host waits for the answer. Rounds 2 to 19 of the
  * review of #154 found routes past every fixed size the host tried instead.
@@ -57,9 +59,11 @@ const overlaps = (a: Box, b: Box): boolean =>
 /**
  * The mark is seen when its dot, the part drawn first and clipped last, is
  * **wholly** inside the badge's clip box (not cut off by a small area), inside
- * one monitor (not off the desktop or in a gap), and under no area drawn above
- * this one. Any overlapping area counts as covering it, opaque or not, which
- * errs on the side of reading less. An empty dot box (nothing laid out) is not
+ * one monitor (not off the desktop or in a gap), and under nothing the caller
+ * says is drawn above it: every element of a {@link COVERS} class after the
+ * mark (other areas, their controls, menus, the coach and more), and a
+ * freeze's hidden monitors. Any overlapping box counts as covering it, opaque
+ * or not, which errs on the side of reading less. An empty dot box (nothing laid out) is not
  * seen.
  */
 export function markSeen(

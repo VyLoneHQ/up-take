@@ -65,7 +65,7 @@ enforced by the code that writes it. The first version guarded only
 313 it had apparently gained. An independent review found it by trying.
 
 So the committed baseline is compared against the baseline on the reference ref
-(`--against`, `origin/main` in CI). A pull request that raises it is refused
+(`--against`, `refs/remotes/origin/main` in CI). A pull request that raises it is refused
 whatever it did to the file. On the reference ref itself the comparison is with
 itself and passes, which is correct: the check exists for changes.
 
@@ -93,7 +93,9 @@ file's dashes from the total and the script then congratulated the author on the
 ground it had apparently gained and invited them to bank it with
 `--write-baseline`. A second review found it: one entry for `placement.rs` was
 worth 172. The ceiling is now measured over every text file, exempt ones
-included, so an exemption cannot move the number by one. What it changes is the
+included, so an exemption cannot move the number by one. (The one scope is not
+an exemption: the string catalogue's translations are not counted at all,
+`CATALOGUE` below, UP-TAKE backlog I-412.) What it changes is the
 **floor**: the total can never fall below the number of load-bearing characters,
 and the exemption list is the record of where that floor comes from. Exempt
 paths are also left out of the "worst offenders" list a failure prints, because
@@ -119,11 +121,29 @@ is accepted. What keeps that narrow is the refusal above it: a change that delet
 the baseline is refused by the `not baseline_file.exists()` branch before it can
 merge, so `main` cannot reach that state through this check. It is a residual
 rather than an open door, and it is written down rather than rounded up.
+
+`--against` takes a full ref, and only a full ref
+-------------------------------------------------
+
+**A short name like `origin/main` is refused.** Git resolves a short name by a
+precedence list (`$GIT_DIR/<name>`, then `refs/<name>`, `refs/tags/<name>`,
+`refs/heads/<name>`, `refs/remotes/<name>` and more) and says only `warning:
+refname is ambiguous` on stderr, which this script never read. So a tag, a
+`refs/<name>` or a pseudo-ref beside the real ref was read instead, and a
+ceiling raised on it passed with exit 0. The review of #174 found three such
+routes in three rounds, and a guard listing namespaces was taken out again
+because git has more of them than a list keeps up with (`I-487`). The class is
+closed instead: the ref must begin with `refs/`, and it is looked up with
+`git show-ref --verify`, which matches exactly that name and nothing else; the
+baseline is then read at the commit it names, by hash. A full ref that does not
+exist is refused like any ref that does not resolve, and is never handed to
+git's short-name lookup, which would try `refs/tags/<it>` and the rest.
 """
 
 from __future__ import annotations
 
 import argparse
+import re
 import json
 import subprocess
 import sys
@@ -170,6 +190,59 @@ TEXT_NAMES = {".editorconfig", ".gitattributes", ".gitignore", "LICENSE"}
 EXEMPT: dict[str, str] = {}
 
 BASELINE_PATH = "scripts/dash-baseline.json"
+
+# The string catalogue (roadmap 1.38): one entry per string, its languages side
+# by side. Its TRANSLATIONS are not counted, and that is a scope, not an
+# exemption (UP-TAKE backlog I-412). The Gedankenstrich is correct German
+# punctuation (the workspace's VOICE.md, section 7), and `src/lib/strings.test.ts`
+# already refuses a dash in the English of every entry while exempting the other
+# languages by name. Counting them here put the two guards at odds: the next
+# German string that needed one would fail CI, and the ways out would be worse
+# German or a raised ceiling. So this file is read as JSON, and every string in
+# it counts (keys, `_about`, the English, the fingerprints) except the value of
+# a language other than English. A catalogue this cannot parse is refused, as
+# any unreadable file is.
+CATALOGUE = "locales/strings.json"
+
+
+def catalogue_dashes(text: str) -> int:
+    """Dashes in the catalogue outside its translations.
+
+    Raises ValueError for a catalogue whose shape this cannot read, which the
+    caller turns into a refusal rather than a count of zero.
+    """
+    data = json.loads(text)
+    if not isinstance(data, dict):
+        raise ValueError("the catalogue is not an object")
+    languages = data.get("languages")
+    entries = data.get("strings")
+    if not isinstance(languages, list) or not isinstance(entries, dict):
+        raise ValueError("the catalogue has no `languages` list or `strings` object")
+    translations = {lang for lang in languages if isinstance(lang, str) and lang != "en"}
+
+    def dashes(value: object, skip: set[str]) -> int:
+        if isinstance(value, str):
+            return sum(value.count(d) for d in DASHES)
+        if isinstance(value, list):
+            return sum(dashes(item, set()) for item in value)
+        if isinstance(value, dict):
+            return sum(
+                dashes(key, set()) + (0 if key in skip else dashes(item, set()))
+                for key, item in value.items()
+            )
+        return 0
+
+    total = 0
+    for key, value in data.items():
+        total += dashes(key, set())
+        if key == "strings":
+            for entry_key, entry in entries.items():
+                if not isinstance(entry, dict):
+                    raise ValueError(f"the entry `{entry_key}` is not an object")
+                total += dashes(entry_key, set()) + dashes(entry, translations)
+        else:
+            total += dashes(value, set())
+    return total
 
 
 def repo_root() -> Path:
@@ -225,6 +298,9 @@ def check_exemptions(root: Path, tracked: set[str]) -> list[str]:
 def count(root: Path, paths: list[str]) -> tuple[dict[str, int], list[str]]:
     """Per-file counts over every text file, exempt paths included.
 
+    The string catalogue is counted by `catalogue_dashes`, without its
+    translations (UP-TAKE backlog I-412).
+
     Exempt paths are counted deliberately. Skipping them here is what let an
     exemption lower the ceiling and be reported as ground gained; see the module
     docstring. `EXEMPT` decides what a failure lists, not what the total is.
@@ -236,7 +312,12 @@ def count(root: Path, paths: list[str]) -> tuple[dict[str, int], list[str]]:
             continue
         try:
             text = (root / path).read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as error:
+            n = (
+                catalogue_dashes(text)
+                if path == CATALOGUE
+                else sum(text.count(d) for d in DASHES)
+            )
+        except (OSError, UnicodeDecodeError, ValueError) as error:
             # NOT skipped silently, and this is the fix rather than the message.
             # The first version printed a warning to stderr and returned 0, so a
             # tracked file that had gone missing or turned invalid lowered the
@@ -244,7 +325,6 @@ def count(root: Path, paths: list[str]) -> tuple[dict[str, int], list[str]]:
             # file it cannot vouch for, and the honest answer is a refusal.
             unreadable.append(f"{path}: {type(error).__name__}")
             continue
-        n = sum(text.count(d) for d in DASHES)
         if n:
             counts[path] = n
     return counts, unreadable
@@ -268,27 +348,56 @@ def read_baseline(raw: str, where: str) -> int:
     return value
 
 
-def ref_exists(root: Path, ref: str) -> bool:
-    """Whether `ref` resolves in this repository."""
+def is_full_ref(ref: str) -> bool:
+    """Whether `ref` is a full ref name: `refs/...`, well formed."""
     return (
-        subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+        ref.startswith("refs/")
+        and subprocess.run(
+            ["git", "check-ref-format", ref],
             capture_output=True,
         ).returncode
         == 0
     )
 
 
-def baseline_on(root: Path, ref: str) -> int | None:
-    """The recorded ceiling on `ref`, or None when `ref` carries no baseline.
+def resolve(root: Path, ref: str) -> str | None:
+    """The commit full ref `ref` names, as a hash, or None when it names none.
 
-    Callers must ask `ref_exists` first. This returning None means the file is
-    absent on a ref that does exist, which is the first-run case and nothing
+    `git show-ref --verify` matches the exact name and never a short-name
+    lookup, so no same-named ref in another namespace can stand in for it.
+    """
+    shown = subprocess.run(
+        ["git", "-C", str(root), "show-ref", "--verify", "--", ref],
+        capture_output=True,
+    )
+    if shown.returncode != 0:
+        return None
+    lines = shown.stdout.decode("utf-8").splitlines()
+    if len(lines) != 1:
+        return None
+    sha, _, name = lines[0].partition(" ")
+    if name != ref or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha):
+        return None
+    peeled = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}"],
+        capture_output=True,
+    )
+    if peeled.returncode != 0:
+        return None
+    return peeled.stdout.decode("utf-8").strip()
+
+
+def baseline_on(root: Path, commit: str, ref: str) -> int | None:
+    """The recorded ceiling at `commit` (what `ref` names), or None when it
+    carries no baseline.
+
+    Callers must resolve the ref first. This returning None means the file is
+    absent on a commit that does exist, which is the first-run case and nothing
     else; an unresolvable ref is a broken checkout and is refused by the caller.
     Collapsing the two is what made the anti-tamper guard fail open.
     """
     result = subprocess.run(
-        ["git", "-C", str(root), "show", f"{ref}:{BASELINE_PATH}"],
+        ["git", "-C", str(root), "show", f"{commit}:{BASELINE_PATH}"],
         capture_output=True,
     )
     if result.returncode != 0:
@@ -310,11 +419,11 @@ def main() -> int:
     )
     parser.add_argument(
         "--against",
-        default="origin/main",
+        default="refs/remotes/origin/main",
         help=(
-            "ref whose baseline this one may not exceed. This is what stops the "
-            "ceiling being raised by hand. Unreachable refs are reported, not "
-            "assumed away."
+            "FULL ref (refs/...) whose baseline this one may not exceed. This is "
+            "what stops the ceiling being raised by hand. A short name is "
+            "refused, and unreachable refs are reported, not assumed away."
         ),
     )
     args = parser.parse_args()
@@ -365,7 +474,19 @@ def main() -> int:
     # something else from banking the sweep this very check had just ordered
     # them to bank, with a message about fixing their checkout. Friction in the
     # attended workflow that bought no safety, which is what `P-5` forbids.
-    if not args.write_baseline and not ref_exists(root, args.against):
+    # It is exempt from RESOLVING the ref, not from its form: `--against` takes
+    # a full ref in every mode (review of #175, round 1).
+    if not is_full_ref(args.against):
+        print(
+            f"REFUSED: --against {args.against} is not a full ref. Give the whole "
+            f"name, such as refs/remotes/origin/main: git resolves a short name by "
+            f"precedence, so a same-named tag or ref elsewhere would be read "
+            f"instead, and its ceiling would pass.",
+            file=sys.stderr,
+        )
+        return 1
+    commit = None if args.write_baseline else resolve(root, args.against)
+    if not args.write_baseline and commit is None:
         print(
             f"REFUSED: {args.against} does not resolve, so the committed ceiling "
             f"cannot be compared against anything and the guard that stops it "
@@ -375,7 +496,10 @@ def main() -> int:
         )
         return 1
 
-    reference = baseline_on(root, args.against)
+    # Write mode reads no ref at all (round 3 of the review of #174: it still
+    # read one here, so a malformed baseline on an irrelevant ref refused a
+    # valid write).
+    reference = None if commit is None else baseline_on(root, commit, args.against)
 
     if args.write_baseline:
         if baseline_file.exists():

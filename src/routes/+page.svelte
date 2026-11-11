@@ -654,7 +654,8 @@ onMount(() => {
 
 /**
  * Tells the host which watching areas' marks can be seen now (roadmap 1.58,
- * `ADR-0048`'s *Revisit if*: the mark enforced by the reader). The host reads
+ * `ADR-0048`'s amendment of 2026-10-31: the page measures, the reader waits
+ * for its word). The host reads
  * a watch area only while its latest confirmation names it at the bounds and
  * in the overlay state it is reading in (`src-tauri/src/watch.rs`).
  *
@@ -1311,8 +1312,9 @@ $effect(() => {
 /* The watching mark: present exactly while the area reads its region. */
 /* Kept inside the area, clipped at its end so the dot shows first. The page
    tells the host which marks it can see (confirmMarks, $lib/mark-check): a
-   dot cut off by a small area, off the desktop, or under another area is not
-   seen, and the host does not read that area (watch.rs `confirm`, review of
+   dot cut off by a small area, off the desktop, or under anything the page
+   draws above it (COVERS) or a freeze's mask is not seen, and the host does
+   not read that area (watch.rs `confirm`, review of
    #154 rounds 14 to 19). Pinned by watch-badge-css.test.ts. */
 .watch-badge,
 .held-badge {
