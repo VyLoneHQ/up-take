@@ -43,7 +43,10 @@ use std::time::{Duration, Instant};
 #[test]
 fn init_puts_its_startup_line_in_the_log_file() {
     let scratch = std::env::temp_dir().join(format!(
-        "uptake-log-test-{}-{}",
+        // A letter outside ASCII in the path, as in a profile named for its
+        // user: init's startup line says where the logs are, and it must be
+        // ASCII too (review of #172, round 2).
+        "uptake-log-test-j\u{fc}rgen-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -59,6 +62,17 @@ fn init_puts_its_startup_line_in_the_log_file() {
 
     let directory = uptake_log::init().expect("init returned an error");
     uptake_log::note("a line written by the integration test");
+    // `I-390`: every entry point, given non-ASCII in each value it takes;
+    // the file must hold none, or PowerShell 5.1's `Get-Content` shows
+    // mojibake. One line each, so a wrapper missing from any one of them
+    // leaves non-ASCII in the file and fails the last assertion (review of
+    // #172, round 2: four of them were never given any).
+    uptake_log::note("note \u{2014} one");
+    uptake_log::note_about("note_about \u{2014} two", &"detail \u{e4}");
+    uptake_log::trouble("trouble \u{2014} three", &"Zugriff f\u{fc}r J\u{fc}rgen");
+    uptake_log::trouble_for("trouble_for \u{2014} four", 7);
+    uptake_log::failure("failure \u{2014} five");
+    uptake_log::measurement("budget \u{2014} over the \u{a7}1 target");
 
     // Polled, not slept: the writer is asynchronous, and polling reports
     // "never" rather than "slow" if it ever stops writing at all.
@@ -66,7 +80,7 @@ fn init_puts_its_startup_line_in_the_log_file() {
     let mut contents = String::new();
     while Instant::now() < deadline {
         contents = read_all_logs(&directory);
-        if contents.contains("UP-TAKE starting") {
+        if contents.contains("UP-TAKE starting") && contents.contains("section 1 target") {
             break;
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -81,6 +95,26 @@ fn init_puts_its_startup_line_in_the_log_file() {
     assert!(
         contents.contains("a line written by the integration test"),
         "the startup line landed but a later note did not. Contents:\n{contents}"
+    );
+    for line in [
+        "note -- one",
+        "note_about -- two",
+        "detail ae",
+        "trouble -- three",
+        "Zugriff fuer Juergen",
+        "trouble_for -- four",
+        "uptake-log-test-juergen-",
+        "failure -- five",
+        "budget -- over the section 1 target",
+    ] {
+        assert!(
+            contents.contains(line),
+            "{line:?} was not written as ASCII. Contents:\n{contents}"
+        );
+    }
+    assert!(
+        contents.is_ascii(),
+        "the log file holds non-ASCII bytes (I-390). Contents:\n{contents}"
     );
 }
 
