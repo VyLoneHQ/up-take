@@ -955,10 +955,10 @@ impl Detector {
 /// is not yet full.
 ///
 /// **A reading in which the margin changed is not read at all.** A fill
-/// never changes the page around a bar; a screen darkened by Windows'
-/// snipping overlay does (his rig pass: Win+Shift+S reported his
-/// percentages and the full bar at once), and so does a window moved over
-/// the area.
+/// never changes the page around a bar; anything drawn over the whole area
+/// does. Observed once, on the maintainer's rig on 2026-11-11 and not
+/// probed since: with Win+Shift+S open, an area without this rule reported
+/// his percentages and the full bar at once.
 ///
 /// # What notifies, once per fill
 ///
@@ -1168,7 +1168,25 @@ impl Bar {
         // Full when the run reaches the far end AND the far end looks like
         // the filled start: a far line only partly filled differs from both
         // its empty self and the filled start, and is not full yet.
+        //
+        // And the far end must be SEEN (review of `#170`, round 6): a line of
+        // the bar UP-TAKE has read before but that one of its own windows
+        // hides now is not passed over here, or a card over the end would
+        // let the bar read full early. A line never seen at all (under the
+        // area's own border on a tight area, with UP-TAKE in captures) was
+        // never part of the bar it learned, and stays passed over.
+        let seen_ends = (low..=high)
+            .filter(|&line| {
+                empty
+                    .lines_differ(line, empty, line, self.direction)
+                    .is_some()
+            })
+            .fold(None, |ends: Option<(u32, u32)>, line| {
+                Some(ends.map_or((line, line), |(first, _)| (first, line)))
+            });
         let full = !stopped
+            && ends.is_some()
+            && ends == seen_ends
             && ends.is_some_and(|(first, last)| {
                 self.differ(reading, last, reading, first) == Some(false)
             });
@@ -2321,6 +2339,29 @@ mod bar_tests {
     fn a_bar_one_pixel_short_is_not_full() {
         assert_eq!(run([0; MARKS], &[0, 100, 199]), vec![]);
         assert_eq!(run([0; MARKS], &[0, 199, 200]), vec![Event::Filled]);
+    }
+
+    /// Review of `#170`, round 6: one of UP-TAKE's own windows (a card) over
+    /// the bar's far end hides lines the area has already read. The bar is
+    /// not full until that end is seen again.
+    #[test]
+    fn a_far_end_hidden_by_a_card_is_not_full_until_seen() {
+        let mut detector = detector([0; MARKS], Direction::LeftToRight);
+        assert_eq!(
+            detector.observe(bar(200, 20, 0, Direction::LeftToRight)),
+            None
+        );
+        let mut covered = bar(200, 20, 200, Direction::LeftToRight);
+        for (at, hidden) in covered.hidden.iter_mut().enumerate() {
+            if at as u32 % covered.columns >= covered.columns - 2 {
+                *hidden = true;
+            }
+        }
+        assert_eq!(detector.observe(covered), None, "its far end is hidden");
+        assert_eq!(
+            detector.observe(bar(200, 20, 200, Direction::LeftToRight)),
+            Some(Event::Filled)
+        );
     }
 
     /// His addition: *"the user may also set percentages where he wants to
