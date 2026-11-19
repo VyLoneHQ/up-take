@@ -996,7 +996,13 @@ impl Detector {
 /// round 3). A label beside the bar is left out only when at least
 /// [`GAP_LINES`] + 1 lines of page (a dozen pixels) lie between them. A fill
 /// within [`CELL_DELTA`] of the empty colour is never seen. A bar that is
-/// already full at the first reading reads as empty, and a bar that shows a
+/// already full at the first reading reads as empty, and so does one filled
+/// past the [`FAR_LINES`] lines before its far cap (the last two dozen
+/// pixels or so, about 94% of a 200-pixel bar): with every line it reads
+/// the empty level from already filled, one picture cannot tell that bar
+/// from an empty one in another colour, and it does not report that fill's
+/// end (review of `#178`, round 6). Its next fill, after it empties, is
+/// reported. Placed anywhere short of that, it is read correctly; and a bar that shows a
 /// block of one colour at its far end then (the sweep of an indeterminate
 /// bar, caught at the wrong moment) reads as filled up to it: both are the
 /// same picture as a half-filled bar.
@@ -1299,23 +1305,29 @@ impl Bar {
             // is that much off it.
             let empty_like = |a: i32, b: i32| a.abs_diff(b) <= EMPTY_DELTA;
             let deep = live.len() >= 2 * CAP_LINES + 2;
-            // What the empty track looks like: the middle level of the last
-            // FAR_LINES lines before the far end's cap, which a bar not yet
-            // that close to full still shows empty. (One line would do for a
-            // flat bar, but a segmented one has lines that are half gap.) Until
-            // review round 5 of `#178` this was the far third, which a bar
-            // placed past about 80% shows filled, and that bar never read full.
+            // What the empty track looks like, read from the last FAR_LINES
+            // lines before the far end's cap. When they look alike, their
+            // middle level (one line would do for a flat bar, but a segmented
+            // one has lines that are half gap). When they do not, the fill's
+            // front is among them, the bar is nearly full, and the far-most of
+            // them is the empty track. (Review of `#178`, rounds 5 and 6: the
+            // far third, then a plain median of these lines, read a bar placed
+            // past about 80%, then past about 90%, as empty, and it never read
+            // full.)
             let far = if deep {
                 let end = live.len() - CAP_LINES;
-                let mut levels: Vec<i32> = live[end.saturating_sub(FAR_LINES).max(CAP_LINES)..end]
-                    .iter()
-                    .map(|&line| level(line))
-                    .collect();
+                let window = &live[end.saturating_sub(FAR_LINES).max(CAP_LINES)..end];
+                let mut levels: Vec<i32> = window.iter().map(|&line| level(line)).collect();
                 levels.sort_unstable();
-                levels
-                    .get(levels.len() / 2)
-                    .copied()
-                    .unwrap_or_else(|| level(last_live))
+                match (levels.first(), levels.last(), window.last()) {
+                    (Some(&low), Some(&high), Some(&far_most)) if !empty_like(low, high) => {
+                        level(far_most)
+                    }
+                    _ => levels
+                        .get(levels.len() / 2)
+                        .copied()
+                        .unwrap_or_else(|| level(last_live)),
+                }
             } else {
                 level(last_live)
             };
@@ -3068,13 +3080,13 @@ mod bar_tests {
         );
     }
 
-    /// An area placed over a bar already 80% or 90% full still reports the
-    /// full bar (review of `#178`, round 5: the empty level came from the
-    /// middle of the far third, which a bar past about 80% shows filled, and
-    /// the bar then never read full).
+    /// An area placed over a bar already 80% to 93% full, the front on a
+    /// cell's edge or inside one, still reports the full bar (review of
+    /// `#178`, rounds 5 and 6: the empty level came from lines a bar that far
+    /// along shows filled, and the bar then never read full).
     #[test]
     fn a_bar_placed_far_along_still_reports_full() {
-        for placed in [160, 170, 180] {
+        for placed in [160, 170, 180, 181, 182, 183, 184, 185, 186, 187] {
             assert_eq!(
                 run([0, 0, 0, 0], &[placed, placed, 190, 200]),
                 vec![Event::Filled],
