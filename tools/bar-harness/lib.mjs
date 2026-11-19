@@ -30,11 +30,12 @@ export async function startEdge(edge = DEFAULT_EDGE) {
     for (let i = 0; i < 10; i++) {
       try { rmSync(profile, { recursive: true, force: true }); return; } catch { await new Promise((r) => setTimeout(r, 300)); }
     }
-    console.error(`could not remove the Edge profile ${profile}`);
+    throw new Error(`could not remove the Edge profile ${profile}`);
   };
   for (let i = 0; i < 100; i++) {
     try { await (await fetch(`http://127.0.0.1:${port}/json/version`)).json(); return { port, stop }; } catch { await new Promise(r => setTimeout(r, 200)); }
   }
+  await stop().catch(() => {});
   throw new Error('Edge did not start');
 }
 
