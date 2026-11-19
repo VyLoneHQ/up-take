@@ -12,7 +12,11 @@
 //! files whose name contains it. It prints one row per fixture and speed and
 //! fails at the end if any row is wrong.
 
+// A test that reads files and indexes frames: a failure is a panic with a message.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use std::path::PathBuf;
+use std::time::Duration;
 
 use uptake_core::bitmap::RgbaBitmap;
 use uptake_core::geometry::Size;
@@ -71,13 +75,18 @@ fn feed(
     frames: &[&Frame],
     direction: Direction,
     repeat: usize,
+    marks: [u8; MARKS],
+    per_frame: Duration,
 ) -> Vec<(Event, f32)> {
-    let mut detector = detector(direction, [50, 0, 0, 0]);
+    let mut detector = detector(direction, marks);
     let mut seen = Vec::new();
+    let mut at = Duration::ZERO;
+    let reading = per_frame / u32::try_from(repeat).expect("a small count");
     for frame in frames {
         let print = Fingerprint::of(&frame.bitmap).expect("a non-empty picture");
         for _ in 0..repeat {
-            if let Some(event) = detector.observe(print.clone()) {
+            at += reading;
+            if let Some(event) = detector.observe_at(print.clone(), at) {
                 seen.push((event, frame.value));
             }
         }
@@ -102,11 +111,48 @@ fn judge_fill(events: &[(Event, f32)]) -> Result<(), String> {
     }
 }
 
+/// A bar first read part full, then emptying, then filling twice: what the
+/// area must say. Marks at 20 and 50, the first reading at 30 %.
+fn judge_scenarios(frames: &[&Frame], direction: Direction) -> Result<(), String> {
+    let at = |value: f32| {
+        frames
+            .iter()
+            .position(|f| f.value >= value)
+            .ok_or_else(|| format!("no frame at {value}"))
+    };
+    let (placed, empty) = (at(30.0)?, at(0.0)?);
+    let print = |i: usize| Fingerprint::of(&frames[i].bitmap).expect("a non-empty picture");
+    let mut detector = detector(direction, [20, 50, 0, 0]);
+    let mut events = Vec::new();
+    // Placed over the bar at 30 %: it fills to the end. 20 % was passed.
+    detector.observe(print(placed));
+    for i in placed..frames.len() {
+        events.extend(detector.observe(print(i)));
+    }
+    if events != [Event::Reached(50), Event::Filled] {
+        return Err(format!("placed at 30 %, saw {events:?}"));
+    }
+    // Then it empties (a new file) and fills again: every moment again.
+    let mut again = Vec::new();
+    for i in (empty..frames.len()).step_by(4) {
+        again.extend(detector.observe(print(i)));
+    }
+    if again != [Event::Reached(20), Event::Reached(50), Event::Filled] {
+        return Err(format!("filling again, saw {again:?}"));
+    }
+    Ok(())
+}
+
 #[test]
 #[ignore = "needs the fixtures tools/bar-harness/capture.mjs writes"]
 fn the_bar_mode_reads_real_renders() {
     let dir = std::env::var("BAR_FIXTURES").map_or_else(
-        |_| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/bar-fixtures")),
+        |_| {
+            PathBuf::from(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../target/bar-fixtures"
+            ))
+        },
         PathBuf::from,
     );
     let filter = std::env::var("BAR_FILTER").unwrap_or_default();
@@ -122,37 +168,70 @@ fn the_bar_mode_reads_real_renders() {
     let mut failures = 0;
     // Readings per frame at 0.25 % a frame, at about 30 readings a second.
     for path in files {
-        let name = path.file_stem().expect("a name").to_string_lossy().to_string();
+        let name = path
+            .file_stem()
+            .expect("a name")
+            .to_string_lossy()
+            .to_string();
         let style = name.split('_').next().expect("a style").to_string();
         let direction = direction_of(&style);
         let frames = load(&path);
         let refs: Vec<&Frame> = frames.iter().collect();
         let step = f64::from(frames[1].value - frames[0].value).max(0.01);
-        for (label, seconds) in [("20s", 20.0), ("60s", 60.0), ("120s", 120.0)] {
-            let repeat = ((step / 100.0 * seconds * 30.0).round() as usize).max(1);
-            let verdict = if style == "marquee" {
-                // Two sweeps, and one backwards: nothing, ever.
+        let mut report = |label: &str, verdict: Result<String, String>| match verdict {
+            Ok(what) => println!("ok    {name:<34} {label:>6}  {what}"),
+            Err(why) => {
+                failures += 1;
+                println!("FAIL  {name:<34} {label:>6}  {why}");
+            }
+        };
+        if style == "marquee" {
+            // The sweep of an indeterminate bar, every 1.5 s, 3 s and 6 s: two
+            // sweeps and one backwards, then caught at each of its phases, with
+            // percentages low enough for the block to reach them. Nothing, ever.
+            for (label, seconds) in [("1.5s", 1.5), ("3s", 3.0), ("6s", 6.0)] {
+                let per_frame = Duration::from_secs_f64(seconds / (frames.len() - 1) as f64);
                 let mut sweeps: Vec<&Frame> = refs.clone();
                 sweeps.extend(refs.iter().copied());
                 sweeps.extend(refs.iter().rev().copied());
-                let events = feed(&sweeps, direction, repeat);
-                if events.is_empty() {
-                    Ok(String::from("nothing"))
-                } else {
-                    Err(format!("a marquee notified: {events:?}"))
+                let events = feed(&sweeps, direction, 1, [20, 50, 80, 0], per_frame);
+                // Caught at another phase: a block sitting at the far end reads
+                // as a bar filled up to it (the bar's documented limit), so this
+                // is counted, not judged.
+                let mut elsewhere = 0;
+                for start in (1..refs.len()).step_by(23) {
+                    let mut phase: Vec<&Frame> = refs[start..].to_vec();
+                    phase.extend(refs.iter().copied());
+                    elsewhere += feed(&phase, direction, 1, [20, 50, 80, 0], per_frame).len();
                 }
-            } else {
-                let events = feed(&refs, direction, repeat);
-                judge_fill(&events).map(|()| format!("{events:?}"))
-            };
-            match verdict {
-                Ok(events) => println!("ok    {name:<34} {label:>4}  {events}"),
-                Err(why) => {
-                    failures += 1;
-                    println!("FAIL  {name:<34} {label:>4}  {why}");
-                }
+                report(
+                    label,
+                    if events.is_empty() {
+                        Ok(format!(
+                            "nothing (marks 20 50 80); {elsewhere} events when learned at other phases"
+                        ))
+                    } else {
+                        Err(format!(
+                            "a marquee notified {} times, first {:?}",
+                            events.len(),
+                            events[0]
+                        ))
+                    },
+                );
             }
+            continue;
         }
+        for (label, seconds) in [("20s", 20.0), ("60s", 60.0), ("120s", 120.0)] {
+            let repeat = ((step / 100.0 * seconds * 30.0).round() as usize).max(1);
+            let per_frame = Duration::from_secs_f64(step / 100.0 * seconds);
+            let events = feed(&refs, direction, repeat, [50, 0, 0, 0], per_frame);
+            report(label, judge_fill(&events).map(|()| format!("{events:?}")));
+        }
+        report(
+            "again",
+            judge_scenarios(&refs, direction)
+                .map(|()| String::from("placed at 30 %, then emptied and filled again")),
+        );
     }
     assert_eq!(failures, 0, "{failures} fixture runs failed");
 }
