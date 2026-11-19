@@ -79,6 +79,10 @@ async function one(port, style, theme, scale, margin) {
 const { port, stop } = await startEdge(edge);
 const queue = [];
 for (const style of styles) for (const theme of themes) for (const scale of scales) for (const margin of margins) queue.push([style, theme, scale, margin]);
-await Promise.all(Array.from({ length: jobs }, async () => { for (let job; (job = queue.shift());) await one(port, ...job); }));
-await stop();
+try {
+  await Promise.all(Array.from({ length: jobs }, async () => { for (let job; (job = queue.shift());) await one(port, ...job); }));
+} finally {
+  // A failed capture still removes Edge's profile (review of #178, round 4).
+  await stop();
+}
 process.exit(0);

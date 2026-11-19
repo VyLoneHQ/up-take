@@ -79,42 +79,46 @@ function asymmetry(img, rect, scale, bg) {
 const { port, stop } = await startEdge();
 const rows = []; const tiles = [];
 let failures = 0;
-for (const scale of [1, 1.25, 1.5, 2]) {
-  for (const kind of ['watching', 'held']) {
-    for (const [bgName, bg] of Object.entries(BACKGROUNDS)) {
-      for (const state of kind === 'held' ? ['none'] : Object.keys(STATES)) {
-        const cdp = await newTab(port);
-        await cdp.send('Page.enable');
-        await cdp.send('Emulation.setDeviceMetricsOverride', { width: 400, height: 200, deviceScaleFactor: scale, mobile: false });
-        const file = join(out, `dot_${kind}_${bgName}_${state}_s${scale}.html`);
-        writeFileSync(file, html(bg, state, kind));
-        await cdp.send('Page.navigate', { url: pathToFileURL(file).href });
-        await new Promise((r) => setTimeout(r, 400));
-        const rect = JSON.parse((await cdp.send('Runtime.evaluate', { expression: `JSON.stringify(document.querySelector('.${kind === 'held' ? 'held-dot' : 'watch-dot'}').getBoundingClientRect())`, returnByValue: true })).result.value);
-        const shot = await cdp.send('Page.captureScreenshot', { format: 'png' });
-        const img = decodePng(Buffer.from(shot.data, 'base64'));
-        const hex = bg.slice(1).match(/../g).map((v) => parseInt(v, 16));
-        const r = asymmetry(img, rect, scale, hex);
-        // Everything outside the circle's own box must still be the background.
-        rows.push(`${kind.padEnd(8)} ${bgName.padEnd(6)} ${state.padEnd(8)} scale ${String(scale).padEnd(4)} painted ${r.w}x${r.h}  mirror error ${r.worst}`);
-        // A dot that painted nothing, or a box far from the 6 CSS pixels it was given, is
-        // not a circle at all: the symmetry test alone would pass an empty box (review of
-        // #178, finding 1).
-        const side = 6 * scale;
-        const sized = r.w > 0 && r.h > 0 && Math.abs(r.w - r.h) <= 1 && Math.abs(r.w - side) <= 2;
-        if (!sized) rows.push(`  ^ FAIL: painted ${r.w}x${r.h}, expected about ${side}x${side}`);
-        if (!sized || r.worst > 24) failures++;
-        // 12x12 physical pixels around the dot, for the montage.
-        const x0 = r.at[0] - 2, y0 = r.at[1] - 2;
-        const tile = Buffer.alloc(12 * 12 * 3);
-        for (let y = 0; y < 12; y++) for (let x = 0; x < 12; x++) for (let c = 0; c < 3; c++) tile[(y * 12 + x) * 3 + c] = img.px[((y0 + y) * img.width + x0 + x) * img.bpp + c];
-        tiles.push({ label: `${kind} ${bgName} ${state} ${scale}`, tile });
-        cdp.close();
+try {
+  for (const scale of [1, 1.25, 1.5, 2]) {
+    for (const kind of ['watching', 'held']) {
+      for (const [bgName, bg] of Object.entries(BACKGROUNDS)) {
+        for (const state of kind === 'held' ? ['none'] : Object.keys(STATES)) {
+          const cdp = await newTab(port);
+          await cdp.send('Page.enable');
+          await cdp.send('Emulation.setDeviceMetricsOverride', { width: 400, height: 200, deviceScaleFactor: scale, mobile: false });
+          const file = join(out, `dot_${kind}_${bgName}_${state}_s${scale}.html`);
+          writeFileSync(file, html(bg, state, kind));
+          await cdp.send('Page.navigate', { url: pathToFileURL(file).href });
+          await new Promise((r) => setTimeout(r, 400));
+          const rect = JSON.parse((await cdp.send('Runtime.evaluate', { expression: `JSON.stringify(document.querySelector('.${kind === 'held' ? 'held-dot' : 'watch-dot'}').getBoundingClientRect())`, returnByValue: true })).result.value);
+          const shot = await cdp.send('Page.captureScreenshot', { format: 'png' });
+          const img = decodePng(Buffer.from(shot.data, 'base64'));
+          const hex = bg.slice(1).match(/../g).map((v) => parseInt(v, 16));
+          const r = asymmetry(img, rect, scale, hex);
+          // Everything outside the circle's own box must still be the background.
+          rows.push(`${kind.padEnd(8)} ${bgName.padEnd(6)} ${state.padEnd(8)} scale ${String(scale).padEnd(4)} painted ${r.w}x${r.h}  mirror error ${r.worst}`);
+          // A dot that painted nothing, or a box far from the 6 CSS pixels it was given, is
+          // not a circle at all: the symmetry test alone would pass an empty box (review of
+          // #178, finding 1).
+          const side = 6 * scale;
+          const sized = r.w > 0 && r.h > 0 && Math.abs(r.w - r.h) <= 1 && Math.abs(r.w - side) <= 2;
+          if (!sized) rows.push(`  ^ FAIL: painted ${r.w}x${r.h}, expected about ${side}x${side}`);
+          if (!sized || r.worst > 24) failures++;
+          // 12x12 physical pixels around the dot, for the montage.
+          const x0 = r.at[0] - 2, y0 = r.at[1] - 2;
+          const tile = Buffer.alloc(12 * 12 * 3);
+          for (let y = 0; y < 12; y++) for (let x = 0; x < 12; x++) for (let c = 0; c < 3; c++) tile[(y * 12 + x) * 3 + c] = img.px[((y0 + y) * img.width + x0 + x) * img.bpp + c];
+          tiles.push({ label: `${kind} ${bgName} ${state} ${scale}`, tile });
+          cdp.close();
+        }
       }
     }
   }
+} finally {
+  // A failed render still removes Edge's profile (review of #178, round 4).
+  await stop();
 }
-await stop();
 console.log(rows.join('\n'));
 writeFileSync(join(out, 'tiles.json'), JSON.stringify(tiles.map((t) => ({ label: t.label, rgb: t.tile.toString('base64') }))));
 console.log(failures ? `${failures} states are not a symmetric circle` : 'every state is a symmetric circle');

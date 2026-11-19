@@ -103,6 +103,19 @@ describe('the status dot', () => {
   it('holds still while paused, and looks different without colour', () => {
     expect(paused).not.toContain('animation');
     expect(paused).toContain('radial-gradient');
+    // Not the watching dot without its breath (review of #178, round 4): the
+    // paused ring has none of the watching green, and its light grey band sits
+    // around a dark centre, so it is hollow where the watching dot is filled.
+    expect(paused).not.toMatch(/110 230 160/);
+    expect(paused).toMatch(/rgb\(190, 190, 190\)/);
+    const stops = [...paused.matchAll(/(rgba?\([^)]*\))\s+([\d.]+)px/g)];
+    const firstGrey = stops.findIndex(([, colour]) =>
+      colour.includes('190, 190, 190'),
+    );
+    expect(firstGrey).toBeGreaterThan(0);
+    expect(
+      stops.slice(0, firstGrey).every(([, colour]) => !colour.includes('190')),
+    ).toBe(true);
   });
 
   it('stops breathing when Windows asks for less motion', () => {
