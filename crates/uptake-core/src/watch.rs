@@ -1777,7 +1777,13 @@ impl Bar {
         }
         let mark = reach?;
         self.reported = mark;
-        self.held = [None; MARKS];
+        // Only the percentages at or below the one reported are done: a higher
+        // one already waiting keeps its own calm (review of `#178`, round 8).
+        for (other, held) in self.marks.iter().copied().zip(self.held.iter_mut()) {
+            if other <= mark {
+                *held = None;
+            }
+        }
         Some(Event::Reached(mark))
     }
 }
@@ -2933,6 +2939,32 @@ mod bar_tests {
             Some(Event::Reached(50))
         );
         assert!(!detector.is_settling());
+    }
+
+    /// Two percentages reached a little apart, their calms overlapping: the
+    /// higher one keeps its own calm when the lower is reported, and the host
+    /// keeps reading for it (review of `#178`, round 8).
+    #[test]
+    fn a_later_percentage_keeps_its_calm_when_an_earlier_one_reports() {
+        let mut detector = detector([20, 50, 0, 0], Direction::LeftToRight);
+        let at = std::time::Duration::from_millis;
+        assert_eq!(
+            detector.observe_at(bar(200, 20, 0, Direction::LeftToRight), at(0)),
+            None
+        );
+        let past_20 = bar(200, 20, 60, Direction::LeftToRight);
+        let past_50 = bar(200, 20, 110, Direction::LeftToRight);
+        assert_eq!(detector.observe_at(past_20, at(100)), None);
+        assert_eq!(detector.observe_at(past_50.clone(), at(400)), None);
+        assert_eq!(
+            detector.observe_at(past_50.clone(), at(600)),
+            Some(Event::Reached(20))
+        );
+        assert!(detector.is_settling(), "50% is still waiting out its calm");
+        assert_eq!(
+            detector.observe_at(past_50, at(900)),
+            Some(Event::Reached(50))
+        );
     }
 
     /// A block that comes in from the start end and leaves again (an
