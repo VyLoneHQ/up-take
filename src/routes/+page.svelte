@@ -1337,10 +1337,14 @@ $effect(() => {
   display: block;
   width: 6px;
   height: 6px;
-  border-radius: 50%;
-  /* A dark ring drawn inside the box, so the dot shows on any background
-     and its box is exactly what is drawn (markSeen measures the box). */
-  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.55);
+  /* No rounded corners and no shadow: both draw through a rounded clip
+     whose edge falls on a different part of a physical pixel at each fractional
+     scale (the badge sits 1 CSS px in, 1.5 device pixels at 150 %), and idle
+     and pulsing dots rasterised differently, leaving stray light pixels at the
+     dot's top and left (the maintainer's rig, 2026-11-19, which measured it:
+     tools/bar-harness/dot-check.mjs). The circle is a radial gradient in the
+     box instead, centred in the box as it is snapped to the screen's pixels,
+     so it is round at every scale and the same in both states. */
 }
 
 /* Two states that must not be confused (the maintainer, 2026-11-10: "keep
@@ -1354,24 +1358,54 @@ $effect(() => {
    every frame, which woke its watch area about 12 times a second on a still
    screen (evidence/1.61-watch-dot-cost/). Between pulses nothing animates. */
 .watch-dot {
-  background: rgba(110, 230, 160, 1);
+  /* A filled green dot inside a dark ring 1 px wide, so it shows on any
+     background and its box is exactly what is drawn (markSeen measures the
+     box). */
+  background: radial-gradient(
+    circle closest-side,
+    rgb(110 230 160 / var(--dot-alpha)) 0,
+    rgb(110 230 160 / var(--dot-alpha)) 1.9px,
+    rgb(49 104 72 / var(--dot-alpha)) 2.2px,
+    rgb(49 104 72 / var(--dot-alpha)) 2.7px,
+    rgb(49 104 72 / 0) 3px
+  );
   animation: watch-breathe 0.6s ease-in-out 1;
 }
 
 .held-dot {
-  background: rgba(0, 0, 0, 0.35);
-  box-shadow:
-    inset 0 0 0 1.5px rgba(190, 190, 190, 1),
-    inset 0 0 0 2.5px rgba(0, 0, 0, 0.45);
+  /* A hollow ring: light grey outside, dark inside, dark centre. */
+  background: radial-gradient(
+    circle closest-side,
+    rgba(0, 0, 0, 0.35) 0,
+    rgba(0, 0, 0, 0.35) 0.5px,
+    rgba(40, 40, 40, 0.75) 0.8px,
+    rgba(40, 40, 40, 0.75) 1.2px,
+    rgb(190, 190, 190) 1.5px,
+    rgb(190, 190, 190) 2.7px,
+    rgba(190, 190, 190, 0) 3px
+  );
+}
+
+/* The breath animates the dot's own alpha, a registered number the gradient
+   reads, and NOT the element's opacity. An opacity animation lifts the dot onto
+   a compositing layer for as long as it runs, and a layer is rasterised at its
+   own fractional offset, so the dot looked different while it breathed than
+   while it rested (the maintainer's rig, 2026-11-19; measured by
+   tools/bar-harness/dot-check.mjs). The alpha is repainted in place, in the
+   same pixels the resting dot is, and the box never changes. */
+@property --dot-alpha {
+  syntax: '<number>';
+  inherits: false;
+  initial-value: 1;
 }
 
 @keyframes watch-breathe {
   0%,
   100% {
-    opacity: 1;
+    --dot-alpha: 1;
   }
   50% {
-    opacity: 0.45;
+    --dot-alpha: 0.45;
   }
 }
 

@@ -78,13 +78,30 @@ describe('the status dot', () => {
     // times a second on a still screen (measured 2026-11-10).
     expect(watching).not.toContain('infinite');
     expect(watching).toMatch(/watch-breathe [\d.]+s ease-in-out 1;/);
-    expect(breathe).toContain('opacity');
-    expect(breathe).not.toMatch(/width|height|transform|top|left|margin/);
+    // The dot's own alpha, repainted in place: an opacity animation lifts the
+    // dot onto a layer rasterised at its own fractional offset, and the dot
+    // then looked different breathing than resting (2026-11-19).
+    expect(breathe).toContain('--dot-alpha');
+    expect(breathe).not.toMatch(
+      /opacity|width|height|transform|top|left|margin/,
+    );
+  });
+
+  it('is a gradient in its box, not a rounded box with a shadow', () => {
+    // A rounded clip and an inset shadow rasterise differently at each
+    // fractional scale, which left stray light pixels at the dot's top and
+    // left (2026-11-19, tools/bar-harness/dot-check.mjs).
+    const shared = page.match(/\.watch-dot,\s*\.held-dot \{([^}]*)\}/)?.[1] ?? '';
+    for (const rule of [shared, watching, paused]) {
+      expect(rule).not.toMatch(/border-radius|box-shadow|will-change/);
+    }
+    expect(watching).toContain('radial-gradient');
+    expect(paused).toContain('radial-gradient');
   });
 
   it('holds still while paused, and looks different without colour', () => {
     expect(paused).not.toContain('animation');
-    expect(paused).toContain('inset 0 0 0 1.5px');
+    expect(paused).toContain('radial-gradient');
   });
 
   it('stops breathing when Windows asks for less motion', () => {
