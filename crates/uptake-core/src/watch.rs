@@ -1291,7 +1291,10 @@ impl Bar {
                     .map(|&line| level(line))
                     .collect();
                 levels.sort_unstable();
-                levels.get(levels.len() / 2).copied().unwrap_or(0)
+                levels
+                    .get(levels.len() / 2)
+                    .copied()
+                    .unwrap_or_else(|| level(last_live))
             } else {
                 level(last_live)
             };
@@ -2919,6 +2922,58 @@ mod bar_tests {
             None,
             "its calm starts again"
         );
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(48))]
+
+        /// Whatever pictures it is given (any size, any levels, any area
+        /// hidden, any direction), the bar mode reads them without a panic,
+        /// and says no more than one moment per reading.
+        #[test]
+        fn any_pictures_read_without_a_panic(
+            width in 1_u32..70,
+            height in 1_u32..70,
+            seeds in proptest::collection::vec(proptest::num::u64::ANY, 1..5),
+            direction in 0_u8..4,
+        ) {
+            let direction = [
+                Direction::LeftToRight,
+                Direction::RightToLeft,
+                Direction::TopToBottom,
+                Direction::BottomToTop,
+            ][usize::from(direction)];
+            let mut detector = detector([20, 50, 80, 0], direction);
+            for (n, seed) in seeds.iter().enumerate() {
+                // A picture of bands, from the seed: flat stretches and edges.
+                let mut state = *seed | 1;
+                let mut next = move || {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    state
+                };
+                let mut pixels = Vec::new();
+                let mut level = 128_u8;
+                for _ in 0..height {
+                    for _ in 0..width {
+                        if next() % 9 == 0 {
+                            level = u8::try_from(next() % 256).unwrap_or(0);
+                        }
+                        pixels.extend_from_slice(&[level, level, level, 255]);
+                    }
+                }
+                if let Some(bitmap) = RgbaBitmap::from_pixels(Size::new(width, height), pixels)
+                    && let Some(mut print) = Fingerprint::of(&bitmap)
+                {
+                    for (at, hidden) in print.hidden.iter_mut().enumerate() {
+                        *hidden = at % 11 == 3 && n % 2 == 1;
+                    }
+                    let _ = detector
+                        .observe_at(print, std::time::Duration::from_millis(300 * n as u64));
+                }
+            }
+        }
     }
 
     /// A bar a few pixels short of full is not full. Not one pixel, as this
