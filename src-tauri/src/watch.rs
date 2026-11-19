@@ -2116,11 +2116,15 @@ mod tests {
         /// event. ⚠️ **On an area drawn tightly over the bar with the setting
         /// on, the border covers the bar's last 4 pixels**, on screen as in
         /// the reading, so the bar is full when the last line UP-TAKE can
-        /// see is filled: at 196 of 200 pixels here. The next test is the
-        /// remedy the bar mode's doc gives, page around the bar.
+        /// see is filled: at 194 of 200 pixels here. The next test is the
+        /// remedy the bar mode's doc gives, page around the bar. (Without
+        /// the setting the bar is full at 198 of 200, as it said 200 until
+        /// 2026-11-19, and 194 where it said 196: a last line filled to half
+        /// is as full as a bar ending in a border of its own colour can be
+        /// told from.)
         #[test]
         fn a_bar_area_notifies_once_the_bar_is_full() {
-            for (in_captures, full_at) in [(false, 200), (true, 196)] {
+            for (in_captures, full_at) in [(false, 198), (true, 194)] {
                 let bounds = Rect::new(100, 100, 200, 40);
                 let mut list = targets_for(&[bounds], Watch::Fills);
                 list[0].tuning.marks = [50, 0, 0, 0];
@@ -2129,12 +2133,15 @@ mod tests {
                 fake.level = 40;
                 let mut memory = Memory::default();
                 run(&mut fake, &mut memory, 2);
-                for filled in [40, 80, 110, 160, 195, 196, 199, 200, 200] {
+                for filled in [40, 80, 110, 160, 193, 194, 196, 198, 199, 200, 200] {
                     let before = fake.notified.len();
                     fake.patch = Some((Rect::new(100, 100, filled, 40), 200));
                     run(&mut fake, &mut memory, 1);
+                    // 50% is reported once the bar has held it for half a
+                    // second ([`MARK_CALM`]): the pass after the one that
+                    // reached it, at the fake's half-second clock.
                     let expected = match filled {
-                        110 => vec![Event::Reached(50)],
+                        160 => vec![Event::Reached(50)],
                         _ if filled == full_at && before == 1 => vec![Event::Filled],
                         _ => Vec::new(),
                     };
@@ -2149,9 +2156,9 @@ mod tests {
 
         /// The maintainer's rig pass of 2026-11-11: an area drawn with page
         /// around the bar. The border falls on the page, and the bar is full
-        /// at its last pixel whether or not UP-TAKE is in captures.
+        /// at its last line, to a pixel, whether or not UP-TAKE is in captures.
         #[test]
-        fn a_bar_area_with_page_around_it_is_full_at_its_last_pixel() {
+        fn a_bar_area_with_page_around_it_is_full_at_its_last_line() {
             for in_captures in [false, true] {
                 let bounds = Rect::new(100, 100, 216, 56);
                 let mut list = targets_for(&[bounds], Watch::Fills);
@@ -2162,13 +2169,13 @@ mod tests {
                 fake.track = Some((Rect::new(108, 108, 200, 40), 120));
                 let mut memory = Memory::default();
                 run(&mut fake, &mut memory, 2);
-                for filled in [40, 80, 110, 160, 196, 199, 200, 200] {
+                for filled in [40, 80, 110, 160, 196, 198, 199, 200, 200] {
                     let before = fake.notified.len();
                     fake.patch = Some((Rect::new(108, 108, filled, 40), 200));
                     run(&mut fake, &mut memory, 1);
                     let expected = match filled {
-                        110 => vec![Event::Reached(50)],
-                        200 if before == 1 => vec![Event::Filled],
+                        160 => vec![Event::Reached(50)],
+                        198 if before == 1 => vec![Event::Filled],
                         _ => Vec::new(),
                     };
                     assert_eq!(
@@ -2178,6 +2185,32 @@ mod tests {
                     );
                 }
             }
+        }
+
+        /// A bar that has reached a percentage and not yet held it for half a
+        /// second is waiting on readings, and a still screen sends no frames:
+        /// the loop asks to be woken in [`SETTLE_POLL`], not [`IDLE`], and
+        /// the card comes without another frame (2026-11-19).
+        #[test]
+        fn a_bar_waiting_out_a_percentage_is_read_without_a_frame() {
+            use super::super::{IDLE, SETTLE_POLL};
+            let bounds = Rect::new(100, 100, 200, 40);
+            let mut list = targets_for(&[bounds], Watch::Fills);
+            list[0].tuning.marks = [50, 0, 0, 0];
+            let mut fake = Fake::new(list);
+            fake.level = 40;
+            let mut memory = Memory::default();
+            run(&mut fake, &mut memory, 2);
+            fake.patch = Some((Rect::new(100, 100, 110, 40), 200));
+            assert_eq!(
+                pass(&mut fake, &mut memory),
+                Some(SETTLE_POLL),
+                "50% reached, held for half a second first"
+            );
+            assert!(fake.notified.is_empty());
+            // No frame changed since: the same picture, the next reading.
+            assert_eq!(pass(&mut fake, &mut memory), Some(IDLE));
+            assert_eq!(fake.notified, vec![Event::Reached(50)]);
         }
 
         /// The card for each of the bar's moments: the full bar, and each

@@ -91,7 +91,8 @@ describe('the status dot', () => {
     // A rounded clip and an inset shadow rasterise differently at each
     // fractional scale, which left stray light pixels at the dot's top and
     // left (2026-11-19, tools/bar-harness/dot-check.mjs).
-    const shared = page.match(/\.watch-dot,\s*\.held-dot \{([^}]*)\}/)?.[1] ?? '';
+    const shared =
+      page.match(/\.watch-dot,\s*\.held-dot \{([^}]*)\}/)?.[1] ?? '';
     for (const rule of [shared, watching, paused]) {
       expect(rule).not.toMatch(/border-radius|box-shadow|will-change/);
     }
