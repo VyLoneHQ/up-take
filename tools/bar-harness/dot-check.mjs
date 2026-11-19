@@ -97,7 +97,13 @@ for (const scale of [1, 1.25, 1.5, 2]) {
         const r = asymmetry(img, rect, scale, hex);
         // Everything outside the circle's own box must still be the background.
         rows.push(`${kind.padEnd(8)} ${bgName.padEnd(6)} ${state.padEnd(8)} scale ${String(scale).padEnd(4)} painted ${r.w}x${r.h}  mirror error ${r.worst}`);
-        if (r.worst > 24) failures++;
+        // A dot that painted nothing, or a box far from the 6 CSS pixels it was given, is
+        // not a circle at all: the symmetry test alone would pass an empty box (review of
+        // #178, finding 1).
+        const side = 6 * scale;
+        const sized = r.w > 0 && r.h > 0 && Math.abs(r.w - r.h) <= 1 && Math.abs(r.w - side) <= 2;
+        if (!sized) rows.push(`  ^ FAIL: painted ${r.w}x${r.h}, expected about ${side}x${side}`);
+        if (!sized || r.worst > 24) failures++;
         // 12x12 physical pixels around the dot, for the montage.
         const x0 = r.at[0] - 2, y0 = r.at[1] - 2;
         const tile = Buffer.alloc(12 * 12 * 3);

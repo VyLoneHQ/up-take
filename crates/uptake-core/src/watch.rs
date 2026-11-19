@@ -1721,8 +1721,13 @@ impl Bar {
         empty.learn(&reading);
         let progress = self.progress(&empty, &reading);
         self.empty = Some(empty);
-        // Something over the area, not a fill: nothing is taken from it.
-        let (percent, full) = progress?;
+        // Something over the area, not a fill: nothing is taken from it, and
+        // a percentage waiting out its calm starts it again, since the bar was
+        // not seen holding it (review of `#178`, finding 2).
+        let Some((percent, full)) = progress else {
+            self.held = [None; MARKS];
+            return None;
+        };
         self.seen = percent;
         if u16::from(percent) * 2 < u16::from(self.reported) {
             // The bar emptied: a new fill.
@@ -3832,6 +3837,37 @@ mod real_bars {
             }
             assert_eq!(events, vec![], "the screen is dim, look {which}");
         }
+    }
+
+    /// A reading with the page covered (Win+Shift+S) breaks a percentage's
+    /// calm: the first reading after it is not reported at once on the strength
+    /// of the time before the cover (review of `#178`, finding 2).
+    #[test]
+    fn a_covered_reading_starts_a_percentage_calm_again() {
+        let mut detector = detector(ROUND.direction, [20, 0, 0, 0]);
+        let ms = Duration::from_millis;
+        assert_eq!(
+            detector.observe_at(render(&ROUND, 0, None, 0, false), ms(0)),
+            None
+        );
+        assert_eq!(
+            detector.observe_at(render(&ROUND, 72, None, 0, false), ms(100)),
+            None
+        );
+        assert!(detector.is_settling(), "30% reached, waiting out the calm");
+        assert_eq!(
+            detector.observe_at(render(&ROUND, 72, None, 0, true), ms(300)),
+            None
+        );
+        assert_eq!(
+            detector.observe_at(render(&ROUND, 72, None, 0, false), ms(700)),
+            None,
+            "the calm starts again after the cover"
+        );
+        assert_eq!(
+            detector.observe_at(render(&ROUND, 72, None, 0, false), ms(1_200)),
+            Some(Event::Reached(20))
+        );
     }
 
     /// A bar placed over when it is already part full, in each style: the

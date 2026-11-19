@@ -166,7 +166,8 @@ fn the_bar_mode_reads_real_renders() {
     files.sort();
     assert!(!files.is_empty(), "no fixtures matched");
     let mut failures = 0;
-    // Readings per frame at 0.25 % a frame, at about 30 readings a second.
+    // Readings per frame follow the fixture's own step (0.5 % by default), at about 30 readings
+    // a second.
     for path in files {
         let name = path
             .file_stem()

@@ -17,7 +17,7 @@ cargo test -p uptake-core --test bar_fixtures --release -- --ignored --nocapture
 
 `capture.mjs` drives headless Edge over CDP (no packages) and writes one fixture per
 style x theme x scale x margin, a luma picture of the bar's track plus page margin at every
-0.25 % step (`--step`). Options: `--styles`, `--themes`, `--scales` (device scale, default
+0.5 % step (`--step`, default 0.5). Options: `--styles`, `--themes`, `--scales` (device scale, default
 `1,1.5`), `--margins` (`8` is 8 CSS px of page all round, `0` a tight area, `label` includes the
 percentage beside the bar, `8+1` moves the area's left and top edge one device pixel in, since
 an area is rarely drawn on the 4-pixel cell grid), `--jobs`.
