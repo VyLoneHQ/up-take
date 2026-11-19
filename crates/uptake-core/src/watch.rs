@@ -1067,6 +1067,11 @@ const GAP_LINES: u32 = 2;
 /// pixels deep, at a scale of 1.5 thirteen, three lines of four.
 const CAP_LINES: usize = 3;
 
+/// How many lines before the far end's cap the empty track's level is read
+/// from, at the first reading: enough that a segmented bar's half-gap line is
+/// outvoted, few enough that a bar placed nearly full still shows them empty.
+const FAR_LINES: usize = 3;
+
 /// How far, as a share of its neighbours' movement, the last line of a bar
 /// must have moved for the fill to have reached the end. A bar that ends in
 /// a border the same colour as its track (a dark theme's) cannot be told from
@@ -1294,12 +1299,15 @@ impl Bar {
             // is that much off it.
             let empty_like = |a: i32, b: i32| a.abs_diff(b) <= EMPTY_DELTA;
             let deep = live.len() >= 2 * CAP_LINES + 2;
-            // What the empty track looks like: the middle level of the lines in
-            // the far third of the bar, which a bar not yet two thirds full
-            // still shows empty. (One line would do for a flat bar, but a
-            // segmented one has lines that are half gap.)
+            // What the empty track looks like: the middle level of the last
+            // FAR_LINES lines before the far end's cap, which a bar not yet
+            // that close to full still shows empty. (One line would do for a
+            // flat bar, but a segmented one has lines that are half gap.) Until
+            // review round 5 of `#178` this was the far third, which a bar
+            // placed past about 80% shows filled, and that bar never read full.
             let far = if deep {
-                let mut levels: Vec<i32> = live[live.len() * 2 / 3..live.len() - CAP_LINES]
+                let end = live.len() - CAP_LINES;
+                let mut levels: Vec<i32> = live[end.saturating_sub(FAR_LINES).max(CAP_LINES)..end]
                     .iter()
                     .map(|&line| level(line))
                     .collect();
@@ -3058,6 +3066,21 @@ mod bar_tests {
             run([20, 50, 70, 0], &[120, 120, 150, 200]),
             vec![Event::Reached(70), Event::Filled]
         );
+    }
+
+    /// An area placed over a bar already 80% or 90% full still reports the
+    /// full bar (review of `#178`, round 5: the empty level came from the
+    /// middle of the far third, which a bar past about 80% shows filled, and
+    /// the bar then never read full).
+    #[test]
+    fn a_bar_placed_far_along_still_reports_full() {
+        for placed in [160, 170, 180] {
+            assert_eq!(
+                run([0, 0, 0, 0], &[placed, placed, 190, 200]),
+                vec![Event::Filled],
+                "placed at {placed} of 200"
+            );
+        }
     }
 
     /// A bar placed part full whose fill then goes back to empty and fills
