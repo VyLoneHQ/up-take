@@ -17,8 +17,21 @@ export async function startEdge(edge = DEFAULT_EDGE) {
       '--force-color-profile=srgb', '--no-first-run', '--no-default-browser-check', 'about:blank'],
     { stdio: 'ignore' },
   );
-  const stop = () => { try { browser.kill(); } catch {} setTimeout(() => { try { rmSync(profile, { recursive: true, force: true }); } catch {} }, 1500); };
-  process.on('exit', stop);
+  // Stopping waits for Edge to exit and then removes its profile, so a caller that awaits
+  // it and then exits leaves nothing behind (review of #178, round 2, finding 1). A process
+  // that dies some other way still kills Edge on exit, synchronously; the profile is then
+  // left in the temp folder, named bar-edge-*.
+  const exited = new Promise((done) => browser.once('exit', done));
+  const kill = () => { try { browser.kill(); } catch {} };
+  process.on('exit', kill);
+  const stop = async () => {
+    kill();
+    await Promise.race([exited, new Promise((r) => setTimeout(r, 5000))]);
+    for (let i = 0; i < 10; i++) {
+      try { rmSync(profile, { recursive: true, force: true }); return; } catch { await new Promise((r) => setTimeout(r, 300)); }
+    }
+    console.error(`could not remove the Edge profile ${profile}`);
+  };
   for (let i = 0; i < 100; i++) {
     try { await (await fetch(`http://127.0.0.1:${port}/json/version`)).json(); return { port, stop }; } catch { await new Promise(r => setTimeout(r, 200)); }
   }
@@ -63,4 +76,3 @@ export function decodePng(buf) {
   }
   return { width, height, bpp, px };
 }
-

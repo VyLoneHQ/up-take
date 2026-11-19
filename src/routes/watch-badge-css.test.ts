@@ -59,7 +59,7 @@ describe('the watching dot fits inside its badge', () => {
 /**
  * The maintainer, 2026-11-10: the dot animates while it watches, subtly,
  * and the two states stay easy to tell apart. Pinned in the source, since
- * jsdom runs no animation: the watching dot breathes by opacity only (its
+ * jsdom runs no animation: the watching dot breathes by its fill's alpha only (its
  * box, which markSeen measures, never moves), the paused ring has no
  * animation, and reduced motion stops the breathing.
  */
@@ -72,7 +72,7 @@ describe('the status dot', () => {
   const breathe =
     page.match(/@keyframes watch-breathe \{([\s\S]*?)\n\}/)?.[1] ?? '';
 
-  it('pulses once per redraw while it watches, by opacity alone', () => {
+  it('pulses once per redraw while it watches, by its alpha alone', () => {
     expect(watching).toContain('animation: watch-breathe');
     // One-shot: an infinite animation woke its own watch area about 12
     // times a second on a still screen (measured 2026-11-10).

@@ -1352,7 +1352,8 @@ $effect(() => {
    that takes one soft breath every five seconds (PULSE_EVERY_MS), alive but
    quiet. Paused: a hollow grey ring that holds still. Fill, colour and
    motion all differ, so neither colour nor motion alone has to carry the
-   meaning. Opacity only, so the dot's box, which markSeen measures, never
+   meaning. Only the fill's alpha moves (a registered --dot-alpha, not the
+   element's opacity), so the dot's box, which markSeen measures, never
    changes. ONE-SHOT, not infinite, and that is measured, not taste: an
    animation that runs all the time makes the screen under the dot change
    every frame, which woke its watch area about 12 times a second on a still

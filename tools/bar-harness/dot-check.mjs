@@ -114,7 +114,7 @@ for (const scale of [1, 1.25, 1.5, 2]) {
     }
   }
 }
-stop();
+await stop();
 console.log(rows.join('\n'));
 writeFileSync(join(out, 'tiles.json'), JSON.stringify(tiles.map((t) => ({ label: t.label, rgb: t.tile.toString('base64') }))));
 console.log(failures ? `${failures} states are not a symmetric circle` : 'every state is a symmetric circle');

@@ -80,5 +80,5 @@ const { port, stop } = await startEdge(edge);
 const queue = [];
 for (const style of styles) for (const theme of themes) for (const scale of scales) for (const margin of margins) queue.push([style, theme, scale, margin]);
 await Promise.all(Array.from({ length: jobs }, async () => { for (let job; (job = queue.shift());) await one(port, ...job); }));
-stop();
+await stop();
 process.exit(0);
