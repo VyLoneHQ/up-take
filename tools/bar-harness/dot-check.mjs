@@ -3,7 +3,8 @@
 // and reports how far each is from a symmetric circle (the dot must be a clean circle
 // in every state; the founder saw two stray light pixels at its top and left while idle).
 //
-// node tools/bar-harness/dot-check.mjs [--out target/dot-check] [--png montage.png]
+// node tools/bar-harness/dot-check.mjs [--out target/dot-check]
+// (a picture of every state: tools/bar-harness/montage.py on its tiles.json, see the README)
 //
 // The CSS is read from src/routes/+page.svelte, so a change there is what is measured.
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -73,7 +74,14 @@ function asymmetry(img, rect, scale, bg) {
       worst = Math.max(worst, Math.max(...a.map((v, i) => Math.abs(v - b[i]))));
     }
   }
-  return { worst, w: bw, h: bh, at: [x0 + minX, y0 + minY] };
+  // Round, not square (review of #178, round 7): a circle leaves the corners of its own
+  // painted box (at the radius times the square root of two) close to the background, so
+  // each corner is at most half as far from it as the middle is.
+  const far = (c) => Math.max(...c.map((v, i) => Math.abs(v - bg[i])));
+  const middle = far(px(minX + (bw >> 1), minY + (bh >> 1)));
+  const corner = Math.max(...[[0, 0], [bw - 1, 0], [0, bh - 1], [bw - 1, bh - 1]].map(([x, y]) => far(px(minX + x, minY + y))));
+  const round = bw > 0 && bh > 0 && corner * 2 <= middle;
+  return { worst, w: bw, h: bh, round, corner, middle, at: [x0 + minX, y0 + minY] };
 }
 
 const { port, stop } = await startEdge();
@@ -104,7 +112,8 @@ try {
           const side = 6 * scale;
           const sized = r.w > 0 && r.h > 0 && Math.abs(r.w - r.h) <= 1 && Math.abs(r.w - side) <= 2;
           if (!sized) rows.push(`  ^ FAIL: painted ${r.w}x${r.h}, expected about ${side}x${side}`);
-          if (!sized || r.worst > 24) failures++;
+          if (sized && !r.round) rows.push(`  ^ FAIL: not round, corner ${r.corner} against middle ${r.middle}`);
+          if (!sized || !r.round || r.worst > 24) failures++;
           // 12x12 physical pixels around the dot, for the montage.
           const x0 = r.at[0] - 2, y0 = r.at[1] - 2;
           const tile = Buffer.alloc(12 * 12 * 3);
