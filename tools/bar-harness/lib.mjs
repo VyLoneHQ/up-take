@@ -21,7 +21,11 @@ export async function startEdge(edge = DEFAULT_EDGE) {
   // it and then exits leaves nothing behind (review of #178, round 2, finding 1). A process
   // that dies some other way still kills Edge on exit, synchronously; the profile is then
   // left in the temp folder, named bar-edge-*.
-  const exited = new Promise((done) => browser.once('exit', done));
+  // A spawn that fails (no such Edge) emits 'error' and no 'exit': caught here, so the
+  // start below ends through the same cleanup (review of #178, round 9).
+  let failed = null;
+  browser.once('error', (e) => { failed = e; });
+  const exited = new Promise((done) => { browser.once('exit', done); browser.once('error', done); });
   const kill = () => { try { browser.kill(); } catch {} };
   process.on('exit', kill);
   const stop = async () => {
@@ -32,11 +36,11 @@ export async function startEdge(edge = DEFAULT_EDGE) {
     }
     throw new Error(`could not remove the Edge profile ${profile}`);
   };
-  for (let i = 0; i < 100; i++) {
+  for (let i = 0; i < 100 && !failed; i++) {
     try { await (await fetch(`http://127.0.0.1:${port}/json/version`)).json(); return { port, stop }; } catch { await new Promise(r => setTimeout(r, 200)); }
   }
   await stop().catch(() => {});
-  throw new Error('Edge did not start');
+  throw new Error(`Edge did not start${failed ? `: ${failed.message}` : ''}`);
 }
 
 /** A new tab: {cdp, close}. */
