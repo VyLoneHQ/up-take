@@ -1071,9 +1071,13 @@ const CAP_LINES: usize = 3;
 /// must have moved for the fill to have reached the end. A bar that ends in
 /// a border the same colour as its track (a dark theme's) cannot be told from
 /// one a few pixels short, and a border is a quarter of a four-pixel cell at
-/// a scale of 1 and a half of it at 2, so a line that moved by less than
-/// that is short; a line that moved by that much is full.
-const REACHES_THE_END_PERCENT: u64 = 45;
+/// a scale of 1, half of it at 2, and more where the area's edge cuts the
+/// bar (measured on the rig's renders at 1.25: a last line 38% covered), and
+/// a round tip has a narrow last line that is covered late (a vertical bar at
+/// 97% had one 29% covered, and must not be full): a line that moved by less
+/// than 35% of its neighbours' share is short, and one that moved by that
+/// much is full.
+const REACHES_THE_END_PERCENT: u64 = 35;
 
 /// How far a cell must be from the page, in levels, to be the bar's track:
 /// twice [`CELL_DELTA`], so that the one-pixel border of a bar and the
@@ -1086,8 +1090,8 @@ const TRACK_DELTA: u8 = 2 * CELL_DELTA;
 /// from the track (the maintainer's two themes: 89 and 114).
 const EMPTY_DELTA: u32 = 3 * CELL_DELTA as u32;
 
-/// How far apart, in levels, the cells of a line may be for it to be one flat
-/// colour across the bar, as a border is.
+/// How far from the middle cell of a line, in levels, a cell may be for it to
+/// count as the same flat colour, as a border's are.
 const BORDER_SPREAD: u8 = CELL_DELTA / 2;
 
 /// How far a cell may be from the page, in levels, and still be page the
@@ -1165,11 +1169,13 @@ impl Bar {
             .map_or(0, |(sum, weight)| sum * 100 / weight)
     }
 
-    /// How far apart the cells of the track of line `line` of `reading` are,
-    /// from the lowest to the highest, in levels.
-    fn spread(&self, reading: &Fingerprint, line: u32) -> u8 {
+    /// Whether most of the track of line `line` of `reading` is one flat
+    /// colour: at least two thirds of its cells within [`BORDER_SPREAD`]
+    /// levels of the middle one. A border is, with the corners of a rounded
+    /// one left over; a round cap, whose cells run from track to page, is not.
+    fn is_flat(&self, reading: &Fingerprint, line: u32) -> bool {
         let direction = self.direction;
-        let (mut least, mut most) = (u8::MAX, u8::MIN);
+        let mut cells = Vec::new();
         for k in 0..reading.across(direction) {
             let (column, row) = reading.line_cell(line, k, direction);
             let at = (row * reading.columns + column) as usize;
@@ -1177,11 +1183,18 @@ impl Bar {
                 && !reading.hidden.get(at).copied().unwrap_or(true)
                 && self.on_track(at)
             {
-                least = least.min(cell);
-                most = most.max(cell);
+                cells.push(cell);
             }
         }
-        most.saturating_sub(least)
+        cells.sort_unstable();
+        let Some(&middle) = cells.get(cells.len() / 2) else {
+            return false;
+        };
+        let near = cells
+            .iter()
+            .filter(|&&cell| cell.abs_diff(middle) <= BORDER_SPREAD)
+            .count();
+        near * 3 >= cells.len() * 2
     }
 
     /// The average level of the track of line `line` of `reading`, over the
@@ -1315,8 +1328,7 @@ impl Bar {
                     // flat colour across the bar, is a border, not a cap
                     // (whose cells run from track to page): it does not fill,
                     // and is passed over when it has not changed.
-                    odd[line as usize] =
-                        !like(level(line), far) && self.spread(&reading, line) <= BORDER_SPREAD;
+                    odd[line as usize] = !like(level(line), far) && self.is_flat(&reading, line);
                 }
             }
             finish = live
@@ -2976,13 +2988,15 @@ mod bar_tests {
         }
     }
 
-    /// A bar a few pixels short of full is not full. Not one pixel, as this
-    /// said until 2026-11-19: a bar that ends in a border of its own track's
-    /// colour (a dark theme's) is a pixel of border short of full when it is
-    /// full, and a fill at two pixels of four is as full as one can tell.
+    /// A bar short of its last cell is not full. Not one pixel short, as
+    /// this said until 2026-11-19: a bar that ends in a border of its own
+    /// track's colour (a dark theme's) is up to a cell of border short of
+    /// full when it is full, and a last line with two pixels of fill in it is
+    /// as full as one can tell.
     #[test]
-    fn a_bar_a_few_pixels_short_is_not_full() {
+    fn a_bar_a_cell_short_is_not_full() {
         assert_eq!(run([0; MARKS], &[0, 100, 197]), vec![]);
+        assert_eq!(run([0; MARKS], &[0, 100, 195]), vec![]);
         assert_eq!(run([0; MARKS], &[0, 197, 200]), vec![Event::Filled]);
     }
 

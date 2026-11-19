@@ -2119,7 +2119,7 @@ mod tests {
         /// see is filled: at 194 of 200 pixels here. The next test is the
         /// remedy the bar mode's doc gives, page around the bar. (Without
         /// the setting the bar is full at 198 of 200, as it said 200 until
-        /// 2026-11-19, and 194 where it said 196: a last line filled to half
+        /// 2026-11-19, and 194 where it said 196: a last line half covered
         /// is as full as a bar ending in a border of its own colour can be
         /// told from.)
         #[test]
@@ -2133,7 +2133,9 @@ mod tests {
                 fake.level = 40;
                 let mut memory = Memory::default();
                 run(&mut fake, &mut memory, 2);
-                for filled in [40, 80, 110, 160, 193, 194, 196, 198, 199, 200, 200] {
+                for filled in [
+                    40, 80, 110, 160, 192, 193, 194, 196, 197, 198, 199, 200, 200,
+                ] {
                     let before = fake.notified.len();
                     fake.patch = Some((Rect::new(100, 100, filled, 40), 200));
                     run(&mut fake, &mut memory, 1);
@@ -2169,7 +2171,7 @@ mod tests {
                 fake.track = Some((Rect::new(108, 108, 200, 40), 120));
                 let mut memory = Memory::default();
                 run(&mut fake, &mut memory, 2);
-                for filled in [40, 80, 110, 160, 196, 198, 199, 200, 200] {
+                for filled in [40, 80, 110, 160, 196, 197, 198, 199, 200, 200] {
                     let before = fake.notified.len();
                     fake.patch = Some((Rect::new(108, 108, filled, 40), 200));
                     run(&mut fake, &mut memory, 1);
