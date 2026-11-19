@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bar test</title>
+<style>
+  :root {
+    --bg: #ffffff; --text: #1d1d1f; --muted: #6b6b70; --card: #f5f5f7; --line: #d9d9de;
+    --track: #e3e3e6; --fill: #2f7de1; --fill-2: #7bb0f2; --ok: #2ea043; --win: #06b025;
+  }
+  :root[data-theme="dark"] {
+    --bg: #16171a; --text: #ececf0; --muted: #9a9aa2; --card: #202227; --line: #33353b;
+    --track: #34363d; --fill: #4c9bff; --fill-2: #2a5d9e; --ok: #3fb950; --win: #16c60c;
+  }
+  * { box-sizing: border-box }
+  body { background: var(--bg); color: var(--text); font: 15px/1.4 system-ui, "Segoe UI", sans-serif; margin: 0; padding: 32px 48px 80px }
+  header { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 8px }
+  h1 { font-size: 20px; margin: 0 16px 0 0 }
+  p.note { color: var(--muted); margin: 4px 0 24px; max-width: 900px }
+  button, select { font: inherit; padding: 5px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--card); color: var(--text); cursor: pointer }
+  button:hover { border-color: var(--muted) }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(520px, 1fr)); gap: 28px 40px }
+  .case { padding: 18px 20px; border: 1px solid var(--line); border-radius: 10px }
+  .case h2 { font-size: 14px; margin: 0 0 4px }
+  .case .why { color: var(--muted); font-size: 13px; margin: 0 0 18px }
+  .stage { padding: 22px 26px; display: flex; align-items: center; gap: 14px; min-height: 70px }
+  .ctl { display: flex; gap: 8px; align-items: center; margin-top: 10px; font-size: 13px; color: var(--muted) }
+  .pct { min-width: 44px; text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); font-size: 13px }
+
+  /* shared bar parts */
+  .track { position: relative; overflow: hidden; background: var(--track); width: 440px; height: 18px }
+  .fill { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--fill) }
+
+  .round .track, .round .fill { border-radius: 999px }
+  .square .track { border-radius: 0; border: 1px solid var(--line) }
+  .square .fill { border-radius: 0 }
+  .thin .track { height: 4px; border-radius: 2px }
+  .thin .fill { border-radius: 2px }
+  .thick .track { height: 34px; border-radius: 8px }
+  .thick .fill { border-radius: 8px }
+  .thick .label { position: absolute; inset: 0; display: grid; place-items: center; font-weight: 600; font-size: 14px; color: var(--text); mix-blend-mode: normal }
+  .gradient .fill { background: linear-gradient(90deg, var(--fill-2), var(--fill)); border-radius: 999px }
+  .gradient .track { border-radius: 999px }
+
+  .striped .track { border-radius: 6px; height: 22px }
+  .striped .fill { border-radius: 6px;
+    background-image: repeating-linear-gradient(45deg, rgba(255,255,255,.28) 0 10px, transparent 10px 20px);
+    background-color: var(--fill); background-size: 28.28px 28.28px; animation: stripes 0.9s linear infinite }
+  @keyframes stripes { to { background-position: 28.28px 0 } }
+
+  .shimmer .track { height: 16px; border-radius: 3px; border: 1px solid var(--line) }
+  .shimmer .fill { background: var(--win); border-radius: 2px; overflow: hidden }
+  .shimmer .fill::after { content: ""; position: absolute; inset: 0; width: 80px; left: -80px;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,.55), transparent); animation: shimmer 1.6s linear infinite }
+  @keyframes shimmer { to { left: 100% } }
+
+  .segmented .track { background: transparent; display: flex; gap: 4px; height: 20px; overflow: visible }
+  .segmented .seg { flex: 1; background: var(--track); border-radius: 3px }
+  .segmented .seg.on { background: var(--ok) }
+
+  .rtl .track { border-radius: 999px }
+  .rtl .fill { left: auto; right: 0; border-radius: 999px }
+
+  .vertical .stage { min-height: 220px }
+  .vertical .track { width: 22px; height: 180px; border-radius: 999px }
+  .vertical .fill { inset: auto 0 0 0; width: 100%; height: 0; border-radius: 999px }
+
+  .marquee .track { border-radius: 999px }
+  .marquee .fill { width: 30%; border-radius: 999px; animation: marquee 1.5s ease-in-out infinite }
+  @keyframes marquee { 0% { left: -30% } 100% { left: 100% } }
+  .marquee.idle .fill { animation-play-state: paused; left: -30% }
+
+  /* Static mode (?static=1, for tools/bar-harness): one case at a fixed place, nothing running. */
+  body.static { padding: 0 }
+  body.static header, body.static p.note, body.static .case h2, body.static .case .why, body.static .ctl { display: none }
+  body.static .grid { display: block }
+  body.static .case { border: 0; padding: 0; position: absolute; left: 40px; top: 40px }
+  body.static .stage { padding: 0; min-height: 0 }
+  body.static .fill, body.static .fill::after { animation-delay: calc(var(--ph, 0) * -1s) !important; animation-play-state: paused !important }
+</style>
+
+<header>
+  <h1>Bar test</h1>
+  <button id="theme">Dark mode</button>
+  <label class="ctl" style="margin:0">Duration
+    <select id="dur">
+      <option value="20">20 s</option>
+      <option value="60" selected>60 s</option>
+      <option value="120">120 s</option>
+    </select>
+  </label>
+  <button id="all">Start all</button>
+  <button id="resetall">Reset all</button>
+</header>
+<p class="note">Draw a watch area around one bar, with some page around it, then press that bar's Start. Each bar has its own Start, Pause and Reset. <b>Stall</b> stops a bar at its current value for 10 s and then carries on, to check nothing fires early. The marquee bar never fills: it should never notify <i>bar full</i>.</p>
+
+<div class="grid" id="grid"></div>
+
+<script>
+  const cases = [
+    ["round", "Rounded ends", "The shape that failed on 2026-11-11: round ends, flat fill."],
+    ["square", "Square with a border", "A classic flat bar with a one-pixel outline."],
+    ["thin", "Thin, 4 px", "A thin line, as many web pages and installers use."],
+    ["thick", "Thick, with the percentage inside", "Text in the middle of the bar changes on every step."],
+    ["gradient", "Gradient fill", "The fill is not one colour: its start and its end differ."],
+    ["striped", "Striped and animated", "The stripes move all the time, even when the value does not."],
+    ["shimmer", "Windows style, with a shimmer", "Green fill with a light sweep, like Explorer's copy dialog."],
+    ["segmented", "Segmented blocks", "Twenty blocks that switch on one by one."],
+    ["rtl", "Fills from the right", "Set the direction to Right."],
+    ["vertical", "Vertical, fills from the bottom", "Set the direction to Bottom."],
+    ["marquee", "Marquee (indeterminate)", "A block sweeps back and forth; there is no progress value. Should never count as full."],
+  ];
+  const grid = document.getElementById('grid');
+  const bars = [];
+  // Static mode: ?static=1&style=round&pct=37.5&theme=dark&phase=0.4 draws one frame and runs nothing.
+  const q = new URLSearchParams(location.search);
+  const isStatic = q.get('static') === '1';
+  if (isStatic) {
+    document.body.classList.add('static');
+    document.documentElement.style.setProperty('--ph', q.get('phase') || '0');
+  }
+  for (const [cls, title, why] of cases) {
+    if (isStatic && cls !== q.get('style')) continue;
+    const el = document.createElement('section');
+    el.className = 'case ' + cls + (cls === 'marquee' ? ' idle' : '');
+    const inner = cls === 'segmented'
+      ? Array.from({length: 20}, () => '<div class="seg"></div>').join('')
+      : '<div class="fill"></div>' + (cls === 'thick' ? '<div class="label">0 %</div>' : '');
+    el.innerHTML = `<h2>${title}</h2><p class="why">${why}</p>
+      <div class="stage"><div class="track">${inner}</div><span class="pct">${cls === 'marquee' ? '' : '0 %'}</span></div>
+      <div class="ctl"><button data-a="start">Start</button><button data-a="pause">Pause</button>
+      ${cls === 'marquee' ? '' : '<button data-a="stall">Stall 10 s</button>'}<button data-a="reset">Reset</button></div>`;
+    grid.appendChild(el);
+    const bar = makeBar(el, cls);
+    bars.push(bar);
+    if (isStatic) bar.set(parseFloat(q.get('pct') || '0'));
+  }
+  window.setStatic = (v, ph) => { document.documentElement.style.setProperty('--ph', String(ph || 0)); bars[0].set(v); };
+
+  function makeBar(el, cls) {
+    const fill = el.querySelector('.fill'), pct = el.querySelector('.pct'), label = el.querySelector('.label');
+    const segs = [...el.querySelectorAll('.seg')];
+    let p = 0, timer = null, stallUntil = 0, last = 0;
+    function draw() {
+      if (cls === 'marquee') return;
+      if (cls === 'segmented') segs.forEach((s, i) => s.classList.toggle('on', (i + 1) / segs.length <= p / 100 + 1e-9));
+      else if (cls === 'vertical') fill.style.height = p + '%';
+      else fill.style.width = p + '%';
+      pct.textContent = Math.floor(p) + ' %';
+      if (label) label.textContent = Math.floor(p) + ' %';
+    }
+    function tick() {
+      const now = performance.now(), dt = now - last; last = now;
+      if (now < stallUntil) return;
+      p = Math.min(100, p + dt / (+document.getElementById('dur').value * 10));
+      draw();
+      if (p >= 100) stop();
+    }
+    function stop() { clearInterval(timer); timer = null; }
+    const api = {
+      set(v) { p = v; draw(); if (cls === 'marquee') el.classList.remove('idle'); },
+      start() {
+        if (cls === 'marquee') { el.classList.remove('idle'); return; }
+        if (timer || p >= 100) return; last = performance.now(); timer = setInterval(tick, 50);
+      },
+      pause() { if (cls === 'marquee') el.classList.add('idle'); else stop(); },
+      stall() { stallUntil = performance.now() + 10000; },
+      reset() { stop(); p = 0; stallUntil = 0; if (cls === 'marquee') el.classList.add('idle'); draw(); },
+    };
+    el.querySelector('.ctl').addEventListener('click', e => { const a = e.target.dataset.a; if (a) api[a](); });
+    return api;
+  }
+
+  document.getElementById('all').onclick = () => bars.forEach(b => b.start());
+  document.getElementById('resetall').onclick = () => bars.forEach(b => b.reset());
+
+  const themeBtn = document.getElementById('theme'), root = document.documentElement;
+  function applyTheme(t) { root.dataset.theme = t; themeBtn.textContent = t === 'dark' ? 'Light mode' : 'Dark mode';
+    try { localStorage.setItem('bar-test-theme', t); } catch (e) {} }
+  let saved = null; try { saved = localStorage.getItem('bar-test-theme'); } catch (e) {}
+  applyTheme(q.get('theme') || saved || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'));
+  themeBtn.onclick = () => applyTheme(root.dataset.theme === 'dark' ? 'light' : 'dark');
+</script>
+</html>

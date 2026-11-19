@@ -1,0 +1,41 @@
+# Bar harness
+
+Real-render checks for the bar mode (roadmap 1.61) and the watching dot. Nothing here
+runs in CI: it needs Windows, Edge and Node 22+, and writes its fixtures under the
+gitignored `target/`.
+
+## The bar
+
+`bar-test.html` is the founder's test page: eleven bar styles, light and dark, three
+speeds. Open it as it is to test a real watch area by hand. With `?static=1&style=round&pct=37.5&theme=dark&phase=0.4`
+it draws one frame and runs nothing; `capture.mjs` uses that.
+
+```
+node tools/bar-harness/capture.mjs --out target/bar-fixtures
+cargo test -p uptake-core --test bar_fixtures --release -- --ignored --nocapture
+```
+
+`capture.mjs` drives headless Edge over CDP (no packages) and writes one fixture per
+style x theme x scale x margin, a luma picture of the bar's track plus page margin at every
+0.25 % step (`--step`). Options: `--styles`, `--themes`, `--scales` (device scale, default
+`1,1.5`), `--margins` (`8` is 8 CSS px of page all round, `0` a tight area, `label` includes the
+percentage beside the bar, `8+1` moves the area's left and top edge one device pixel in, since
+an area is rarely drawn on the 4-pixel cell grid), `--jobs`.
+
+The ignored test feeds each fixture to a `Detector` set to *fills* with one mark at 50 % and
+prints one row per fixture and speed (20, 60 and 120 s, as repeated readings per step at about
+30 readings a second). A fill must give `Reached(50)` once, never before the bar is half full,
+then `Filled` once, never early. The marquee must give nothing, in two sweeps and one backwards.
+`BAR_FILTER=round_dark` keeps the files whose name contains it.
+
+## The watching dot
+
+```
+node tools/bar-harness/dot-check.mjs
+python tools/bar-harness/montage.py target/dot-check/tiles.json montage.png
+```
+
+Renders the page's own dot CSS (read from `src/routes/+page.svelte`) at device scales 1, 1.25,
+1.5 and 2, resting and mid-pulse, on four backgrounds, measures how far each is from a
+mirror-symmetric circle, and exits non-zero if any is not. `montage.py` (Pillow) magnifies the
+tiles for looking at.
