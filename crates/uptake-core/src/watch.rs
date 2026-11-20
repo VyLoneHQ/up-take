@@ -1129,6 +1129,10 @@ struct Bar {
     /// Whether the page around the bar was covered at a reading and has not
     /// yet come back ([`Self::page_back`]).
     covering: bool,
+    /// The cells hidden in every reading since the bar was learned: the
+    /// area's own border and mark, and nothing a card or the panel hid for a
+    /// while. A relearn hides no more (review of `#179`, round 3).
+    least_hidden: Vec<bool>,
     /// While [`Self::covering`]: the reading the area has held still since,
     /// and when. An area whose page stays changed, and that holds wholly still
     /// for [`RELEARN_AFTER`], shows a new page, and the bar is learned again
@@ -1402,6 +1406,7 @@ impl Bar {
     fn learn(&mut self, reading: Fingerprint) {
         // The reading the bar is learned from is its first clear one.
         self.clear = Some(reading.clone());
+        self.least_hidden.clone_from(&reading.hidden);
         self.covering = false;
         self.attached = None;
         // Learned again (a route switch, a resize, a page changed for good):
@@ -2198,17 +2203,17 @@ impl Bar {
                     at
                 }
             };
-            // Only from a reading that hides no more than the last clear one
-            // did (the area's own border and mark): learned with a card or
-            // the panel over part of it, the bar would keep that hole when it
-            // goes (review of `#179`, round 2).
-            let whole = self.clear.as_ref().is_none_or(|clear| {
-                reading
-                    .hidden
-                    .iter()
-                    .zip(&clear.hidden)
-                    .all(|(now, then)| !now || *then)
-            });
+            // Only from a reading that hides no more than every reading since
+            // the bar was learned did (the area's own border and mark):
+            // learned with a card or the panel over part of it, the bar would
+            // keep that hole when it goes (review of `#179`, round 2; round 3
+            // found a card in the last clear reading passing a comparison
+            // with that reading alone).
+            let whole = reading
+                .hidden
+                .iter()
+                .zip(&self.least_hidden)
+                .all(|(now, always)| !now || *always);
             if whole && at.saturating_sub(since) >= RELEARN_AFTER {
                 self.learn(reading);
                 self.held = [None; MARKS];
@@ -2216,6 +2221,9 @@ impl Bar {
             }
         } else {
             self.still = None;
+            for (always, now) in self.least_hidden.iter_mut().zip(&reading.hidden) {
+                *always &= *now;
+            }
             self.clear = Some(reading);
         }
         // Something over the area, not a fill: nothing is taken from it, and
@@ -4600,6 +4608,50 @@ mod real_bars {
         };
         assert!(bar.covering, "not learned again under the card");
         // The card gone: five seconds still, then learned whole.
+        let mut events = feed(&mut area, &dark, 0, false, 5_400, &mut at);
+        for filled in (0..=ROUND.length).step_by(4).chain([ROUND.length]) {
+            events.extend(feed(&mut area, &dark, filled, false, 66, &mut at));
+        }
+        assert_eq!(events, vec![Event::Reached(50), Event::Filled]);
+    }
+
+    /// Review of `#179`, round 3: a card already over part of the area in the
+    /// last clear reading, and still there when the page changes for good:
+    /// the bar is not learned again with that hole either.
+    #[test]
+    fn a_card_from_before_the_page_changed_also_waits() {
+        let dark = Look {
+            theme: DARK,
+            ..ROUND
+        };
+        let card = |look: &Look| {
+            let mut print = render(look, 0, None, 0, false);
+            for row in 0..print.rows {
+                for column in print.columns / 2..print.columns {
+                    if let Some(cell) = print
+                        .hidden
+                        .get_mut((row * print.columns + column) as usize)
+                    {
+                        *cell = true;
+                    }
+                }
+            }
+            print
+        };
+        let mut area = detector(ROUND.direction, [50, 0, 0, 0]);
+        let mut at = Duration::ZERO;
+        area.observe_at(render(&ROUND, 0, None, 0, false), at);
+        // The card comes on the old page, then the page switches under it.
+        for print in [card(&ROUND), card(&dark)] {
+            for _ in 0..240 {
+                at += Duration::from_millis(33);
+                assert_eq!(area.observe_at(print.clone(), at), None);
+            }
+        }
+        let Some(bar) = area.bar.as_ref() else {
+            panic!("a bar detector");
+        };
+        assert!(bar.covering, "not learned again under the card");
         let mut events = feed(&mut area, &dark, 0, false, 5_400, &mut at);
         for filled in (0..=ROUND.length).step_by(4).chain([ROUND.length]) {
             events.extend(feed(&mut area, &dark, filled, false, 66, &mut at));
