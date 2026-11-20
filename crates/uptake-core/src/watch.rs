@@ -884,6 +884,9 @@ impl Detector {
                 rival.covering = true;
                 rival.held = [None; MARKS];
                 rival.attached = None;
+                rival.drop_pending();
+                bar.drop_pending();
+                bar.leading = (None, 0, 0, Duration::ZERO);
             }
         }
     }
@@ -1146,6 +1149,9 @@ struct Bar {
     /// While [`Self::auto`] is undecided: the moment this end would have
     /// reported, kept for the moment it is taken.
     pending: Option<Event>,
+    /// What this end had reported before [`Self::pending`]: restored when a
+    /// pending moment is dropped, so it is reported again once seen again.
+    pending_from: u8,
     /// Since when every reading has shown the bar filled from its start end,
     /// with nothing over it: a fill that has done so for [`STEADY_FILL`] is
     /// not an indeterminate bar's sweep, and its percentages need no calm.
@@ -2005,13 +2011,31 @@ impl Bar {
         let Some(mut rival) = self.rival.take() else {
             return self.observe_one(reading, at);
         };
+        let (mine_from, theirs_from) = (self.reported, rival.reported);
         let mine = self.observe_one(reading.clone(), at);
         let theirs = rival.observe_one(reading, at);
+        // Nothing is taken from a covered reading, the choice of end
+        // included: the lead and what either end waits to report start again
+        // (review of `#180`, round 3: a lead run out under Win+Shift+S
+        // released a waiting percentage).
+        if self.covering || rival.covering {
+            self.leading = (None, 0, 0, at);
+            self.drop_pending();
+            rival.drop_pending();
+            self.rival = Some(rival);
+            return None;
+        }
         // A moment an end reports while undecided waits for it to be taken.
         if mine.is_some() {
+            if self.pending.is_none() {
+                self.pending_from = mine_from;
+            }
             self.pending = mine;
         }
         if theirs.is_some() {
+            if rival.pending.is_none() {
+                rival.pending_from = theirs_from;
+            }
             rival.pending = theirs;
         }
         let grown = |bar: &Self| bar.seen >= bar.first.saturating_add(AUTO_GROWTH);
@@ -2085,6 +2109,14 @@ impl Bar {
                 self.rival = Some(rival);
                 None
             }
+        }
+    }
+
+    /// Drops the moment this end waits to report while [`Direction::Auto`]
+    /// decides, and what it had reported goes back to before it.
+    fn drop_pending(&mut self) {
+        if self.pending.take().is_some() {
+            self.reported = self.pending_from;
         }
     }
 
@@ -4693,6 +4725,40 @@ mod real_bars {
                 "{direction:?}, marks set while undecided"
             );
         }
+    }
+
+    /// Review of `#180`, round 3: while [`Direction::Auto`] decides, a
+    /// covered reading takes nothing, a waiting percentage included, however
+    /// long the lead ran. A bar that jumped past 50% and was then darkened
+    /// (Win+Shift+S) reports nothing under the cover; once the cover goes, it
+    /// is read again and reported.
+    #[test]
+    fn auto_takes_nothing_from_a_covered_reading() {
+        let look = Look {
+            direction: Direction::RightToLeft,
+            ..ROUND
+        };
+        let mut area = detector(Direction::Auto, [50, 0, 0, 0]);
+        let mut at = Duration::ZERO;
+        area.observe_at(render(&look, 0, None, 0, false), at);
+        let read = |area: &mut Detector, filled: u32, dim: bool, ms: u64, at: &mut Duration| {
+            let mut events = Vec::new();
+            for _ in 0..ms / 33 {
+                *at += Duration::from_millis(33);
+                events.extend(area.observe_at(render(&look, filled, None, 0, dim), *at));
+            }
+            events
+        };
+        // A jump to 60%, held 600 ms: 50% waits for an end to be taken.
+        let mut events = read(&mut area, 144, false, 600, &mut at);
+        // Darkened past the second's lead.
+        events.extend(read(&mut area, 144, true, 1_500, &mut at));
+        assert_eq!(events, vec![], "nothing under the cover");
+        events.extend(read(&mut area, 144, false, 2_000, &mut at));
+        for filled in (144..=look.length).step_by(4).chain([look.length; 10]) {
+            events.extend(read(&mut area, filled, false, 66, &mut at));
+        }
+        assert_eq!(events, vec![Event::Reached(50), Event::Filled]);
     }
 
     /// [`Direction::Auto`] on an indeterminate bar: the sweep reports nothing,
