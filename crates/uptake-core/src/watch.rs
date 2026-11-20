@@ -866,7 +866,9 @@ impl Detector {
     /// area's mark, as when another program's window lies over the overlay):
     /// for the bar mode, what the bar was learned to be is kept, and the next
     /// readings wait, as after a cover, until the page around the bar looks as
-    /// it did at the last clear reading ([`Bar::page_back`]). Learning the
+    /// it did at the last clear reading ([`Bar::page_back`]), or until the
+    /// area has held wholly still for [`RELEARN_AFTER`] and the bar is learned
+    /// again from it (`I-493`). Learning the
     /// bar again from the first reading after the wait learned Win+Shift+S's
     /// darkened screen as the empty bar, and a selection dragged over it then
     /// read as a full bar (the maintainer's rig trace of `#178`, 2026-11-20).
@@ -888,10 +890,17 @@ impl Detector {
 
     /// Whether this detector keeps what it learned over a wait the host could
     /// not read through ([`Self::hold`]): the bar mode's, once it has learned
-    /// the bar.
+    /// the bar, and only with page at one of the bar's ends to tell the
+    /// wait's end by ([`Bar::page_back`] passes over the page beside a line
+    /// that changed, and a darkened screen changes every line). An area drawn
+    /// tightly over its bar, or with page only beside it, starts again as
+    /// before, with the documented limit that a darkened screen reads as a
+    /// full bar there (reviews of `#178`, rounds 16 and 17).
     #[must_use]
     pub fn holds(&self) -> bool {
-        self.bar.as_ref().is_some_and(|bar| bar.empty.is_some())
+        self.bar
+            .as_ref()
+            .is_some_and(|bar| bar.empty.is_some() && bar.has_end_page())
     }
 
     /// Takes one reading [`READING_STEP`] after the last one and says whether
@@ -1038,7 +1047,9 @@ impl Detector {
 /// fill ends when the progress falls below half of the highest it reported
 /// (a bar that empties for the next file), and the next fill notifies again.
 ///
-/// ⚠️ **Known limits.** With no margin (an area drawn tightly over the bar),
+/// ⚠️ **Known limits.** With no margin (an area drawn tightly over the bar,
+/// or with page above and below it and none before and after, so that no
+/// page lies beyond the bar's ends: reviews of `#178`, rounds 16 and 17),
 /// a window moved over the bar or a darkened screen changes every line,
 /// which reads as a full bar; and with *Show UP-TAKE in screen recordings*
 /// on, the area's own border covers the bar's last 4 pixels, so the bar is
@@ -1815,7 +1826,30 @@ impl Bar {
                 }
             }
         }
-        moved * 16 <= known
+        // Nothing to compare is not the page come back (review of `#178`,
+        // round 17: page only beside a bar whose every line darkened).
+        known > 0 && moved * 16 <= known
+    }
+
+    /// Whether any page lies on a line beyond the bar's ends, which
+    /// [`Self::page_back`] always compares.
+    fn has_end_page(&self) -> bool {
+        let Some(empty) = &self.empty else {
+            return false;
+        };
+        let direction = self.direction;
+        let (low, high) = self.ends;
+        (0..empty.lines(direction))
+            .filter(|line| !(low..=high).contains(line))
+            .any(|line| {
+                (0..empty.across(direction)).any(|k| {
+                    let (column, row) = empty.line_cell(line, k, direction);
+                    self.page
+                        .get((row * empty.columns + column) as usize)
+                        .copied()
+                        .unwrap_or(false)
+                })
+            })
     }
 
     /// How far `reading` shows the bar filled against `empty`, in percent of
@@ -4577,6 +4611,66 @@ mod real_bars {
             read(&mut area, filled, &mut at);
         }
         assert_eq!(events, vec![Event::Reached(50), Event::Filled]);
+    }
+
+    /// Review of `#178`, round 17: a cover is not gone when there is nothing
+    /// to tell it by. The renderer cannot draw page only beside a bar (an end
+    /// margin thin enough has none at all, a wider one has page in its
+    /// corners beyond the bar's ends), so the mask is made so here: the page
+    /// beyond the ends removed. Every line darkened, [`Bar::page_back`]
+    /// passes over all the page: not back, and such a bar does not hold.
+    #[test]
+    fn page_only_beside_the_bar_neither_holds_nor_comes_back_from_nothing() {
+        let look = Look {
+            margin: (5, 12),
+            ..ROUND
+        };
+        let mut area = detector(look.direction, [50, 0, 0, 0]);
+        area.observe_at(render(&look, 0, None, 0, false), Duration::ZERO);
+        assert!(
+            area.holds(),
+            "with its corners, it has page beyond its ends"
+        );
+        let Some(bar) = area.bar.as_mut() else {
+            panic!("a bar detector");
+        };
+        let Some(empty) = bar.empty.clone() else {
+            panic!("a learned bar");
+        };
+        let (low, high) = bar.ends;
+        for line in (0..empty.lines(bar.direction)).filter(|line| !(low..=high).contains(line)) {
+            for k in 0..empty.across(bar.direction) {
+                let (column, row) = empty.line_cell(line, k, bar.direction);
+                if let Some(page) = bar.page.get_mut((row * empty.columns + column) as usize) {
+                    *page = false;
+                }
+            }
+        }
+        assert!(
+            bar.page.iter().any(|page| *page),
+            "page beside the bar is left"
+        );
+        assert!(!bar.page_back(&render(&look, 0, None, 0, true)));
+        assert!(bar.page_back(&render(&look, 0, None, 0, false)));
+        assert!(!area.holds());
+    }
+
+    /// Review of `#178`, round 16: a bar with no page around it (an area
+    /// drawn tightly over it) is not held, since nothing could tell that a
+    /// cover had gone; one with page around it is. Page only beside it:
+    /// [`page_only_beside_the_bar_neither_holds_nor_comes_back_from_nothing`].
+    #[test]
+    fn only_a_bar_with_page_around_it_holds() {
+        let tight = Look {
+            margin: (0, 0),
+            ..ROUND
+        };
+        for (look, holds) in [(tight, false), (ROUND, true)] {
+            let mut area = detector(look.direction, [50, 0, 0, 0]);
+            assert!(!area.holds(), "nothing learned yet");
+            area.observe_at(render(&look, 0, None, 0, false), Duration::ZERO);
+            assert_eq!(area.holds(), holds, "margin {:?}", look.margin);
+        }
     }
 
     /// The founder's rig pass of `#178`, 2026-11-20: Win+Shift+S darkens the
