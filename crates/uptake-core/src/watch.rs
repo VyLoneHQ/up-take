@@ -853,6 +853,34 @@ impl Detector {
         self.still_since = at;
     }
 
+    /// The host could not read the region for a while, for a reason that
+    /// says nothing about what is under it (the page has not confirmed the
+    /// area's mark, as when another program's window lies over the overlay):
+    /// for the bar mode, what the bar was learned to be is kept, and the next
+    /// readings wait, as after a cover, until the page around the bar looks as
+    /// it did at the last clear reading ([`Bar::page_back`]). Learning the
+    /// bar again from the first reading after the wait learned Win+Shift+S's
+    /// darkened screen as the empty bar, and a selection dragged over it then
+    /// read as a full bar (the maintainer's rig trace of `#178`, 2026-11-20).
+    /// Nothing for the other choices, which the host starts again instead.
+    pub fn hold(&mut self) {
+        if let Some(bar) = &mut self.bar
+            && bar.empty.is_some()
+        {
+            bar.covering = true;
+            bar.held = [None; MARKS];
+            bar.attached = None;
+        }
+    }
+
+    /// Whether this detector keeps what it learned over a wait the host could
+    /// not read through ([`Self::hold`]): the bar mode's, once it has learned
+    /// the bar.
+    #[must_use]
+    pub fn holds(&self) -> bool {
+        self.bar.as_ref().is_some_and(|bar| bar.empty.is_some())
+    }
+
     /// Takes one reading [`READING_STEP`] after the last one and says whether
     /// it is a moment worth reporting.
     pub fn observe(&mut self, reading: Fingerprint) -> Option<Event> {
@@ -4065,6 +4093,69 @@ mod real_bars {
             }
             assert_eq!(events, vec![], "the screen is dim, look {which}");
         }
+    }
+
+    /// The maintainer's rig trace of `#178`, 2026-11-20, replayed: during
+    /// Win+Shift+S the host lost the page's word on the area's mark, skipped
+    /// a reading, and learned the bar again from the next one, which was the
+    /// darkened screen; a selection dragged over it then read as a full bar,
+    /// ten times in a minute. The synthetic darkening of the tests above does
+    /// not reproduce it, so these are the rig's own readings
+    /// (`tests/fixtures/snip-skip-2026-11-20.txt`). Held over the skip
+    /// ([`Detector::hold`]), the bar keeps what it learned and reports
+    /// nothing; learned again, as the host did, the same readings report a
+    /// full bar.
+    #[test]
+    fn a_bar_held_over_a_skip_does_not_learn_the_darkened_screen() {
+        let readings: Vec<(Duration, Fingerprint)> =
+            include_str!("../tests/fixtures/snip-skip-2026-11-20.txt")
+                .lines()
+                .filter(|line| !line.starts_with('#'))
+                .map(|line| {
+                    let parts: Vec<&str> = line.split(' ').collect();
+                    let number = |at: usize| parts[at].parse::<u32>().unwrap_or(0);
+                    let cells = (0..parts[5].len() / 2)
+                        .map(|at| {
+                            u8::from_str_radix(&parts[5][at * 2..at * 2 + 2], 16).unwrap_or(0)
+                        })
+                        .collect();
+                    let hidden = parts[6].chars().map(|digit| digit == '1').collect();
+                    (
+                        Duration::from_millis(u64::from(number(0))),
+                        Fingerprint {
+                            columns: number(1),
+                            rows: number(2),
+                            cells,
+                            hidden,
+                            edge: (number(3), number(4)),
+                        },
+                    )
+                })
+                .collect();
+        assert_eq!(readings.len(), 39, "the fixture");
+        let marks = [25, 50, 75, 0];
+        // Held: learned from the empty bar, read up to the skip, held.
+        let mut held = detector(Direction::LeftToRight, marks);
+        let mut events = Vec::new();
+        for (at, print) in &readings[..2] {
+            events.extend(held.observe_at(print.clone(), *at));
+        }
+        held.hold();
+        for (at, print) in &readings[2..] {
+            events.extend(held.observe_at(print.clone(), *at));
+        }
+        assert_eq!(events, vec![], "held over the skip");
+        // Learned again from the first reading after the skip.
+        let mut again = detector(Direction::LeftToRight, marks);
+        let events: Vec<Event> = readings[2..]
+            .iter()
+            .filter_map(|(at, print)| again.observe_at(print.clone(), *at))
+            .collect();
+        assert_eq!(
+            events,
+            vec![Event::Filled],
+            "learned again, as the host did"
+        );
     }
 
     /// The founder's rig pass of `#178`, 2026-11-20: Win+Shift+S darkens the

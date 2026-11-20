@@ -1001,14 +1001,33 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
         // latest confirmation for these bounds in this overlay state.
         let shown =
             mark_on_screen(mark(target.bounds), &monitors) && host.mark_seen(target, state.0);
-        match gate(target.id, now == state, [moving, gesture_now], still, shown) {
+        let gestures = [moving, gesture_now];
+        match gate(target.id, now == state, gestures, still, shown) {
             Gate::Stop => break,
             Gate::Skip => {
                 // Not read, and read again from a fresh baseline: soon, since
                 // what it waits for (the page's word on its mark, a move
                 // ending) rings nothing reliably, and a change made in the
                 // wait would become its baseline (review of `#162`, round 1).
-                watchers.remove(&target.id);
+                // A bar that only lost the page's word on its mark (watching,
+                // nothing moving, the same overlay state) keeps the bar it
+                // learned and waits for its page to come back instead: learned
+                // again, it learned Win+Shift+S's darkened screen as the empty
+                // bar (the maintainer's rig trace of `#178`, 2026-11-20).
+                let only_unconfirmed =
+                    now == state && !gestures.contains(&Some(target.id)) && still && !shown;
+                match watchers.get_mut(&target.id) {
+                    Some(watcher)
+                        if only_unconfirmed
+                            && watcher.target == target
+                            && watcher.detector.holds() =>
+                    {
+                        watcher.detector.hold();
+                    }
+                    _ => {
+                        watchers.remove(&target.id);
+                    }
+                }
                 soon = Some(FRESH_WAIT);
                 continue;
             }
