@@ -1011,9 +1011,11 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
                 // wait would become its baseline (review of `#162`, round 1).
                 // A bar that only lost the page's word on its mark (watching,
                 // nothing moving, the same overlay state) keeps the bar it
-                // learned and waits for its page to come back instead: learned
-                // again, it learned Win+Shift+S's darkened screen as the empty
-                // bar (the maintainer's rig trace of `#178`, 2026-11-20).
+                // learned and waits for its page to come back instead, or for
+                // the area to hold still five seconds (`RELEARN_AFTER`,
+                // `I-493`): learned again at once, it learned Win+Shift+S's
+                // darkened screen as the empty bar (the maintainer's rig trace
+                // of `#178`, 2026-11-20).
                 // The mark on a monitor by the host's geometry, and only the
                 // page's word missing: a mark off every monitor is a real
                 // change and starts again (review of `#178`, round 14).
@@ -1095,6 +1097,10 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
                 } else {
                     Vec::new()
                 };
+                // One of UP-TAKE's own windows over the area, apart from its
+                // own border and mark: a bar is not learned from this reading
+                // (review of `#179`, round 6).
+                let windowed = !hidden.is_empty();
                 // A bar reads its lines end to end, and the border painted
                 // black down both ends would never fill: for the bar mode
                 // UP-TAKE's own drawing is unknown, not black (roadmap
@@ -1113,7 +1119,8 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
                 // The region's own size: the GPU route reads it averaged down
                 // to one texel per cell, and the cells are the region's.
                 let fingerprint =
-                    Fingerprint::of_region(&captured.bitmap, captured.rect.size, &hidden);
+                    Fingerprint::of_region(&captured.bitmap, captured.rect.size, &hidden)
+                        .map(|print| print.under_own_window(windowed));
                 if switched {
                     // Another route: re-anchored, not compared (round 6).
                     if let Some(fingerprint) = fingerprint {
@@ -1144,6 +1151,12 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
         }
         if watcher.detector.is_settling() {
             soon = Some(soon.map_or(SETTLE_POLL, |wait| wait.min(SETTLE_POLL)));
+        }
+        // A covered bar waiting to be learned again is read when that is due,
+        // not at the next idle look (review of `#179`, round 7).
+        if let Some(due) = watcher.detector.relearn_due_in(at) {
+            let due = due.max(SETTLE_POLL);
+            soon = Some(soon.map_or(due, |wait| wait.min(due)));
         }
     }
     host.end_pass();
@@ -2238,6 +2251,60 @@ mod tests {
                 run(&mut fake, &mut memory, 1);
             }
             assert_eq!(fake.notified, vec![Event::Reached(50), Event::Filled]);
+        }
+
+        /// Review of `#179`, round 6, through the loop: a card already over
+        /// part of a bar area when it starts reading (UP-TAKE in captures, so
+        /// what lies under the card is unknown). The bar is not learned until
+        /// the card goes, then read whole: 50% and full.
+        #[test]
+        fn a_bar_area_is_not_learned_under_a_card() {
+            let bounds = Rect::new(100, 100, 216, 56);
+            let mut list = targets_for(&[bounds], Watch::Fills);
+            list[0].tuning.marks = [50, 0, 0, 0];
+            list[0].tuning.direction = uptake_core::watch::Direction::LeftToRight;
+            let mut fake = Fake::new(list);
+            fake.state = (OverlayState::Living, true);
+            fake.level = 40;
+            fake.track = Some((Rect::new(108, 108, 200, 40), 120));
+            fake.card = Some((Rect::new(200, 90, 140, 80), 90));
+            let mut memory = Memory::default();
+            run(&mut fake, &mut memory, 3);
+            fake.card = None;
+            run(&mut fake, &mut memory, 2);
+            for filled in [40, 80, 110, 160, 160, 196, 198, 199, 200, 200] {
+                fake.patch = Some((Rect::new(108, 108, filled, 40), 200));
+                run(&mut fake, &mut memory, 1);
+            }
+            assert_eq!(fake.notified, vec![Event::Reached(50), Event::Filled]);
+        }
+
+        /// Review of `#179`, round 7: a bar area whose page changed for good
+        /// asks to be read when its relearn is due, not at the two-second idle
+        /// look, so it is learned again at five seconds, not about six.
+        #[test]
+        fn a_bar_area_waiting_to_relearn_is_read_when_it_is_due() {
+            use super::super::IDLE;
+            let bounds = Rect::new(100, 100, 216, 56);
+            let mut list = targets_for(&[bounds], Watch::Fills);
+            list[0].tuning.marks = [50, 0, 0, 0];
+            list[0].tuning.direction = uptake_core::watch::Direction::LeftToRight;
+            let mut fake = Fake::new(list);
+            fake.level = 40;
+            fake.track = Some((Rect::new(108, 108, 200, 40), 120));
+            let mut memory = Memory::default();
+            run(&mut fake, &mut memory, 2);
+            // The page changes for good, and holds still.
+            fake.level = 80;
+            let waits: Vec<_> = (0..12)
+                .filter_map(|_| pass(&mut fake, &mut memory))
+                .collect();
+            assert!(
+                waits
+                    .iter()
+                    .any(|wait| *wait < IDLE && *wait > Duration::ZERO),
+                "asked to be read when the relearn is due: {waits:?}"
+            );
         }
 
         /// The maintainer's rig pass of 2026-11-11: an area drawn with page
