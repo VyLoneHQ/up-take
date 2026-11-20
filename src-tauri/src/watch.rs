@@ -1011,9 +1011,11 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
                 // wait would become its baseline (review of `#162`, round 1).
                 // A bar that only lost the page's word on its mark (watching,
                 // nothing moving, the same overlay state) keeps the bar it
-                // learned and waits for its page to come back instead: learned
-                // again, it learned Win+Shift+S's darkened screen as the empty
-                // bar (the maintainer's rig trace of `#178`, 2026-11-20).
+                // learned and waits for its page to come back instead, or for
+                // the area to hold still five seconds (`RELEARN_AFTER`,
+                // `I-493`): learned again at once, it learned Win+Shift+S's
+                // darkened screen as the empty bar (the maintainer's rig trace
+                // of `#178`, 2026-11-20).
                 // The mark on a monitor by the host's geometry, and only the
                 // page's word missing: a mark off every monitor is a real
                 // change and starts again (review of `#178`, round 14).

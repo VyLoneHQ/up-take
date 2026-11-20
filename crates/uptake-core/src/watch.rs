@@ -858,7 +858,9 @@ impl Detector {
     /// area's mark, as when another program's window lies over the overlay):
     /// for the bar mode, what the bar was learned to be is kept, and the next
     /// readings wait, as after a cover, until the page around the bar looks as
-    /// it did at the last clear reading ([`Bar::page_back`]). Learning the
+    /// it did at the last clear reading ([`Bar::page_back`]), or until the
+    /// area has held wholly still for [`RELEARN_AFTER`] and the bar is learned
+    /// again from it (`I-493`). Learning the
     /// bar again from the first reading after the wait learned Win+Shift+S's
     /// darkened screen as the empty bar, and a selection dragged over it then
     /// read as a full bar (the maintainer's rig trace of `#178`, 2026-11-20).
