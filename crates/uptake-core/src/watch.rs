@@ -1003,7 +1003,10 @@ impl Detector {
 /// unread until the page looks again as it did before**
 /// ([`Bar::page_back`]): on 2026-11-20 a snipping selection dragged over part
 /// of the area brought most of the page back bright and left the rest of the
-/// bar dark, which read as a fill.
+/// bar dark, which read as a fill. **Or until the area has held wholly still
+/// for [`RELEARN_AFTER`]** (five seconds), when the bar is learned again from
+/// it: a page changed for good (a theme switch) otherwise left the area deaf
+/// (`I-493`).
 ///
 /// # What notifies, once per fill
 ///
@@ -1098,6 +1101,11 @@ struct Bar {
     /// Whether the page around the bar was covered at a reading and has not
     /// yet come back ([`Self::page_back`]).
     covering: bool,
+    /// While [`Self::covering`]: the reading the area has held still since,
+    /// and when. An area whose page stays changed, and that holds wholly still
+    /// for [`RELEARN_AFTER`], shows a new page, and the bar is learned again
+    /// from it.
+    still: Option<(Duration, Fingerprint)>,
     /// Since when every reading has shown the bar filled from its start end,
     /// with nothing over it: a fill that has done so for [`STEADY_FILL`] is
     /// not an indeterminate bar's sweep, and its percentages need no calm.
@@ -1121,6 +1129,15 @@ pub const MARK_CALM: Duration = Duration::from_millis(500);
 /// percentage half a second late, and at a 20-second fill 2.5% late (the
 /// founder's rig pass of `#178`, 2026-11-20: a 50% mark came at about 54%).
 pub const STEADY_FILL: Duration = Duration::from_secs(3);
+
+/// How long the page around a bar must stay changed and still before the bar
+/// is learned again from it: five seconds, the founder's choice of
+/// 2026-11-20 (UP-TAKE backlog `I-493`). A theme switch, a scrolled page or
+/// another tab under the area changed the page for good, and the area never
+/// read again. Known risk, his trade: a Win+Shift+S selection held still this
+/// long is learned as the bar, and dragging it on can report one false full
+/// bar.
+pub const RELEARN_AFTER: Duration = Duration::from_secs(5);
 
 /// How many lines of page may lie between two stretches of a bar and still
 /// leave them one bar: the break between the blocks of a segmented bar (4
@@ -1295,6 +1312,7 @@ impl Bar {
         self.clear = Some(reading.clone());
         self.covering = false;
         self.attached = None;
+        self.still = None;
         let direction = self.direction;
         let lines = reading.lines(direction);
         let across = reading.across(direction);
@@ -1876,10 +1894,30 @@ impl Bar {
             self.progress(&empty, &reading)
         };
         self.covering = covered;
-        if !covered {
+        self.empty = Some(empty);
+        if covered {
+            // A page that stays changed and still is a new page (`I-493`).
+            let since = match &self.still {
+                // The whole area, the bar too: a snipping selection dragged
+                // slowly along the bar leaves the page around it as it was,
+                // and was learned as the bar (a fill and that drag look
+                // alike). A theme switched in the middle of a fill is learned
+                // once the bar stops.
+                Some((since, from)) if !from.differs_by(&reading, CELL_DELTA, 0) => *since,
+                _ => {
+                    self.still = Some((at, reading.clone()));
+                    at
+                }
+            };
+            if at.saturating_sub(since) >= RELEARN_AFTER {
+                self.learn(reading);
+                self.held = [None; MARKS];
+                return None;
+            }
+        } else {
+            self.still = None;
             self.clear = Some(reading);
         }
-        self.empty = Some(empty);
         // Something over the area, not a fill: nothing is taken from it, and
         // a percentage waiting out its calm starts it again, since the bar was
         // not seen holding it (review of `#178`, finding 2).
@@ -4158,6 +4196,109 @@ mod real_bars {
         );
     }
 
+    /// Feeds `look` at `filled` for `ms` milliseconds, a reading every 33.
+    fn feed(
+        detector: &mut Detector,
+        look: &Look,
+        filled: u32,
+        dim: bool,
+        ms: u64,
+        at: &mut Duration,
+    ) -> Vec<Event> {
+        let print = render(look, filled, None, 0, dim);
+        let mut events = Vec::new();
+        for _ in 0..ms / 33 {
+            *at += Duration::from_millis(33);
+            events.extend(detector.observe_at(print.clone(), *at));
+        }
+        events
+    }
+
+    /// `I-493`, found by the founder on 2026-11-20: an area placed in a light
+    /// page that was then switched to dark never read again, since every
+    /// reading looked covered. A page that stays changed and still for
+    /// [`RELEARN_AFTER`] is a new page: the bar is learned again from it and
+    /// read, an idle bar and one switched in the middle of its fill alike.
+    #[test]
+    fn a_bar_reads_again_after_its_page_changes_for_good() {
+        let dark = Look {
+            theme: DARK,
+            ..ROUND
+        };
+        // Switched while idle, then filled.
+        let mut area = detector(ROUND.direction, [50, 0, 0, 0]);
+        let mut at = Duration::ZERO;
+        area.observe_at(render(&ROUND, 0, None, 0, false), at);
+        let mut events = feed(&mut area, &dark, 0, false, 5_400, &mut at);
+        for filled in (0..=ROUND.length).step_by(4).chain([ROUND.length]) {
+            events.extend(feed(&mut area, &dark, filled, false, 66, &mut at));
+        }
+        assert_eq!(
+            events,
+            vec![Event::Reached(50), Event::Filled],
+            "switched while idle"
+        );
+        // Switched at 10% while it fills: that fill is lost (the bar moves,
+        // so the area is never still); the bar empties for the next file and
+        // waits, is learned after five seconds, and the next fill is read
+        // whole. (A full bar held still that long is learned full: a bar
+        // already full at the first reading, a limit of [`Bar`].)
+        let mut area = detector(ROUND.direction, [25, 50, 0, 0]);
+        let mut at = Duration::ZERO;
+        area.observe_at(render(&ROUND, 0, None, 0, false), at);
+        let mut events = feed(&mut area, &ROUND, 24, false, 330, &mut at);
+        for filled in (24..=ROUND.length).step_by(2) {
+            events.extend(feed(&mut area, &dark, filled, false, 66, &mut at));
+        }
+        events.extend(feed(&mut area, &dark, ROUND.length, false, 1_000, &mut at));
+        events.extend(feed(&mut area, &dark, 0, false, 5_400, &mut at));
+        assert_eq!(events, vec![], "the fill switched under it is lost");
+        for filled in (0..=ROUND.length).step_by(4).chain([ROUND.length]) {
+            events.extend(feed(&mut area, &dark, filled, false, 66, &mut at));
+        }
+        assert_eq!(
+            events,
+            vec![Event::Reached(25), Event::Reached(50), Event::Filled],
+            "the next fill"
+        );
+    }
+
+    /// The other side of [`RELEARN_AFTER`]: a darkened screen (Win+Shift+S)
+    /// held a little short of it, then gone, is a cover and nothing more. The
+    /// bar is not learned from it and nothing is reported.
+    #[test]
+    fn a_cover_held_short_of_the_relearn_wait_is_only_a_cover() {
+        let mut detector = detector(ROUND.direction, [50, 0, 0, 0]);
+        let mut at = Duration::ZERO;
+        detector.observe_at(render(&ROUND, 0, None, 0, false), at);
+        let mut events = feed(&mut detector, &ROUND, 60, false, 330, &mut at);
+        events.extend(feed(&mut detector, &ROUND, 60, true, 4_900, &mut at));
+        events.extend(feed(&mut detector, &ROUND, 60, false, 330, &mut at));
+        for filled in (60..=ROUND.length).step_by(4).chain([ROUND.length]) {
+            events.extend(feed(&mut detector, &ROUND, filled, false, 66, &mut at));
+        }
+        assert_eq!(events, vec![Event::Reached(50), Event::Filled]);
+    }
+
+    /// A page that changed while the host could not read ([`Detector::hold`])
+    /// is a new page too, once it has stayed so for [`RELEARN_AFTER`].
+    #[test]
+    fn a_page_changed_over_a_skip_is_read_again() {
+        let dark = Look {
+            theme: DARK,
+            ..ROUND
+        };
+        let mut detector = detector(ROUND.direction, [50, 0, 0, 0]);
+        let mut at = Duration::ZERO;
+        detector.observe_at(render(&ROUND, 0, None, 0, false), at);
+        detector.hold();
+        let mut events = feed(&mut detector, &dark, 0, false, 5_400, &mut at);
+        for filled in (0..=ROUND.length).step_by(4).chain([ROUND.length]) {
+            events.extend(feed(&mut detector, &dark, filled, false, 66, &mut at));
+        }
+        assert_eq!(events, vec![Event::Reached(50), Event::Filled]);
+    }
+
     /// The founder's rig pass of `#178`, 2026-11-20: Win+Shift+S darkens the
     /// screen, and a selection dragged over the bar shows the part inside it
     /// bright again. With most of the page around the bar inside the
@@ -4251,8 +4392,9 @@ mod real_bars {
                     };
                 detector.observe_at(render(&look, 0, None, 0, false), at);
                 read(&mut detector, 60, false, &mut at);
-                // Covered from 25% to 75%, past the 50% mark.
-                for filled in (60..=180).step_by(12) {
+                // Covered from 25% to 75%, past the 50% mark, for about four
+                // seconds: shorter than RELEARN_AFTER.
+                for filled in (60..=180).step_by(24) {
                     read(&mut detector, filled, true, &mut at);
                 }
                 for filled in (180..=look.length).step_by(4).chain([look.length]) {
