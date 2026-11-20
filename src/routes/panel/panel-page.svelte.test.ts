@@ -338,6 +338,36 @@ test('the bar mode shows its direction and its percentages', async () => {
   expect(labels).toHaveLength(2);
 });
 
+// Roadmap 1.74, the founder's wish of 2026-11-20: the direction can be found
+// by itself. Auto is the first choice, and choosing it sends `auto`, the wire
+// name of Rust's `Direction::Auto`.
+test('the bar mode offers Auto first and sends it', async () => {
+  replies.set('panel_view', {
+    ...WATCH,
+    watch: 'fills',
+    tuning: { ...WATCH.tuning, direction: 'left_to_right' },
+  });
+  render(Page);
+  await settle();
+  const row = [...document.querySelectorAll('.field')].find(
+    (field) => field.querySelector('.label')?.textContent === 'Fills from',
+  );
+  if (!row) throw new Error('no Fills from row');
+  const radios = [...row.querySelectorAll<HTMLButtonElement>('[role="radio"]')];
+  expect(radios.map((radio) => radio.textContent?.trim())).toEqual([
+    'Auto',
+    'Left',
+    'Right',
+    'Top',
+    'Bottom',
+  ]);
+  radios[0]?.click();
+  expect(lastSet()).toEqual([
+    'panel_set_tuning',
+    { tuning: { ...WATCH.tuning, direction: 'auto' } },
+  ]);
+});
+
 test('a type shows only its own rows', async () => {
   replies.set('panel_view', {
     ...WATCH,
