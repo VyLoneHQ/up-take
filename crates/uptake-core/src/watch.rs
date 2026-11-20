@@ -1008,12 +1008,14 @@ impl Detector {
 /// the empty level from already filled, one picture cannot tell that bar
 /// from an empty one in another colour, and it does not report that fill's
 /// end (review of `#178`, round 6). Its next fill, after it empties, is
-/// reported. An indeterminate bar whose block takes longer than
-/// [`MARK_CALM`] to come wholly into the track (a sweep slower than about
-/// three seconds) holds a percentage below the block's length that long, and
-/// reports it on every sweep: a fill and that block look alike until the block
-/// leaves the start end (review of `#178`, round 11; the test page's sweep is
-/// a second and a half). Placed anywhere short of that, it is read correctly; and a bar that shows a
+/// reported. An indeterminate bar reports a percentage below its block's
+/// length on every sweep when the block, its front past that percentage,
+/// stays joined to the start end for longer than [`MARK_CALM`]: a fill and
+/// that block look alike until the block leaves the start end (reviews of
+/// `#178`, rounds 11 and 12). On the test page, a block a third of the bar
+/// long and a 20% mark, that is a sweep slower than about six and a half
+/// seconds; its 1.5, 3 and 6 second sweeps report nothing
+/// (`tests/bar_fixtures.rs`). Placed anywhere short of that, it is read correctly; and a bar that shows a
 /// block of one colour at its far end then (the sweep of an indeterminate
 /// bar, caught at the wrong moment) reads as filled up to it: both are the
 /// same picture as a half-filled bar.
@@ -4006,11 +4008,12 @@ mod real_bars {
         }
     }
 
-    /// The limit of [`Bar`]'s calm, pinned (review of `#178`, round 11): a
-    /// block moving a pixel a reading, a sweep of about ten seconds, stays
-    /// joined to the start end for longer than [`MARK_CALM`], and the
-    /// percentage below its length (a third of the bar) is reported on each
-    /// sweep. Nothing above it is, and never the full bar.
+    /// The limit of [`Bar`]'s calm, pinned (reviews of `#178`, rounds 11 and
+    /// 12): a block a third of the bar long moving a pixel a reading, a sweep
+    /// of about ten seconds, stays joined to the start end with its front past
+    /// 20% for over a second, longer than [`MARK_CALM`], and 20% is reported
+    /// on each sweep. Nothing above the block's length is, and never the full
+    /// bar.
     #[test]
     fn a_marquee_slower_than_the_calm_reports_only_below_its_block() {
         let look = ROUND;

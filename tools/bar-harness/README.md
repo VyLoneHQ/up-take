@@ -32,7 +32,10 @@ prints one row per fixture and scenario:
   empties and fills again: every moment again.
 - `1.5s`, `3s`, `6s` (marquee only): the block sweeps at that pace, marks 20, 50 and 80, and must
   give nothing; the same sweep caught at other phases is counted, not judged (a block sitting at
-  the far end reads as a filled bar, the bar mode's documented limit).
+  the far end reads as a filled bar, the bar mode's documented limit). A sweep slower than about
+  6.5 s would report 20 %: its block, a third of the bar, stays joined to the start end with its
+  front past 20 % for longer than the half-second calm, another documented limit (`Bar` in
+  `crates/uptake-core/src/watch.rs`), so it is not among these paces.
 
 `BAR_FILTER=round_dark` keeps the files whose name contains it. Build with `--release`: the
 fixture runs are long in a debug build.
