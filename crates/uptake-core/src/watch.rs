@@ -2017,9 +2017,13 @@ impl Bar {
         let grown = |bar: &Self| bar.seen >= bar.first.saturating_add(AUTO_GROWTH);
         // A bar both ends read as full is full, from whichever end it
         // filled: one that jumps from empty to full in a reading leaves the
-        // two tied for good (review of `#180`, round 1). This end is kept.
+        // two tied for good (review of `#180`, round 1). Reported, and no
+        // end taken: the next fill decides (round 2, which found the first
+        // end tried kept for good).
         if self.pending == Some(Event::Filled) && rival.pending == Some(Event::Filled) {
             self.leading = (None, 0, 0, at);
+            rival.pending = None;
+            self.rival = Some(rival);
             return self.pending.take();
         }
         let lead = match (grown(self), grown(&rival)) {
@@ -4638,6 +4642,32 @@ mod real_bars {
                 events.extend(area.observe_at(render(&look, look.length, None, 0, false), at));
             }
             assert_eq!(events, vec![Event::Filled], "{direction:?}, a jump to full");
+            // Emptied, then filled the ordinary way: the end is found then
+            // (review of `#180`, round 2: the first end tried was kept).
+            area.tune(
+                Watch::Fills,
+                Tuning {
+                    marks: [50, 0, 0, 0],
+                    direction: Direction::Auto,
+                    ..Tuning::default()
+                },
+            );
+            let mut events = Vec::new();
+            for filled in [0; 20]
+                .into_iter()
+                .chain((0..=look.length).step_by(2))
+                .chain([look.length; 20])
+            {
+                for _ in 0..2 {
+                    at += Duration::from_millis(33);
+                    events.extend(area.observe_at(render(&look, filled, None, 0, false), at));
+                }
+            }
+            assert_eq!(
+                events,
+                vec![Event::Reached(50), Event::Filled],
+                "{direction:?}, the fill after the jump"
+            );
             // Marks set while undecided, then a fill from the right.
             let mut area = detector(Direction::Auto, [0; MARKS]);
             let mut at = Duration::ZERO;
