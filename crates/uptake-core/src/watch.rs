@@ -1273,11 +1273,24 @@ impl Bar {
             self.direction = tuning.direction;
             self.empty = None;
         }
-        if tuning.marks != self.marks {
+        self.set_marks(tuning.marks);
+        // Both ends of an undecided Auto keep the same percentages, or the
+        // end taken later would bring back old ones (review of `#180`,
+        // round 1).
+        if let Some(rival) = &mut self.rival {
+            rival.set_marks(tuning.marks);
+        }
+    }
+
+    /// Takes the area's percentages. New ones count from where the bar
+    /// already is: one the bar has passed is not reported late (review of
+    /// `#170`, round 4).
+    fn set_marks(&mut self, marks: [u8; MARKS]) {
+        if marks != self.marks {
             self.reported = self.reported.max(self.seen);
             self.held = [None; MARKS];
         }
-        self.marks = tuning.marks;
+        self.marks = marks;
     }
 
     /// Whether a percentage has been reached and is waiting out its calm.
@@ -2002,6 +2015,13 @@ impl Bar {
             rival.pending = theirs;
         }
         let grown = |bar: &Self| bar.seen >= bar.first.saturating_add(AUTO_GROWTH);
+        // A bar both ends read as full is full, from whichever end it
+        // filled: one that jumps from empty to full in a reading leaves the
+        // two tied for good (review of `#180`, round 1). This end is kept.
+        if self.pending == Some(Event::Filled) && rival.pending == Some(Event::Filled) {
+            self.leading = (None, 0, 0, at);
+            return self.pending.take();
+        }
         let lead = match (grown(self), grown(&rival)) {
             (true, false) => Some(true),
             (false, true) => Some(false),
@@ -4546,6 +4566,50 @@ mod real_bars {
                     );
                 }
             }
+        }
+    }
+
+    /// Review of `#180`, round 1: with [`Direction::Auto`], a bar that jumps
+    /// from empty to full in one reading is full, whichever end it filled
+    /// from; and percentages changed while Auto decides hold for the end it
+    /// takes.
+    #[test]
+    fn auto_reports_a_jump_to_full_and_keeps_new_marks() {
+        for direction in [Direction::LeftToRight, Direction::RightToLeft] {
+            let look = Look { direction, ..ROUND };
+            let mut area = detector(Direction::Auto, [0; MARKS]);
+            let mut at = Duration::ZERO;
+            area.observe_at(render(&look, 0, None, 0, false), at);
+            let mut events = Vec::new();
+            for _ in 0..40 {
+                at += Duration::from_millis(33);
+                events.extend(area.observe_at(render(&look, look.length, None, 0, false), at));
+            }
+            assert_eq!(events, vec![Event::Filled], "{direction:?}, a jump to full");
+            // Marks set while undecided, then a fill from the right.
+            let mut area = detector(Direction::Auto, [0; MARKS]);
+            let mut at = Duration::ZERO;
+            area.observe_at(render(&look, 0, None, 0, false), at);
+            area.tune(
+                Watch::Fills,
+                Tuning {
+                    marks: [50, 0, 0, 0],
+                    direction: Direction::Auto,
+                    ..Tuning::default()
+                },
+            );
+            let mut events = Vec::new();
+            for filled in (0..=look.length).step_by(2).chain([look.length; 20]) {
+                for _ in 0..2 {
+                    at += Duration::from_millis(33);
+                    events.extend(area.observe_at(render(&look, filled, None, 0, false), at));
+                }
+            }
+            assert_eq!(
+                events,
+                vec![Event::Reached(50), Event::Filled],
+                "{direction:?}, marks set while undecided"
+            );
         }
     }
 
