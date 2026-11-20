@@ -999,8 +999,8 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
         let monitors = host.monitors();
         // The mark on a monitor by the host's geometry, AND seen by the page's
         // latest confirmation for these bounds in this overlay state.
-        let shown =
-            mark_on_screen(mark(target.bounds), &monitors) && host.mark_seen(target, state.0);
+        let on_monitor = mark_on_screen(mark(target.bounds), &monitors);
+        let shown = on_monitor && host.mark_seen(target, state.0);
         let gestures = [moving, gesture_now];
         match gate(target.id, now == state, gestures, still, shown) {
             Gate::Stop => break,
@@ -1014,8 +1014,14 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
                 // learned and waits for its page to come back instead: learned
                 // again, it learned Win+Shift+S's darkened screen as the empty
                 // bar (the maintainer's rig trace of `#178`, 2026-11-20).
-                let only_unconfirmed =
-                    now == state && !gestures.contains(&Some(target.id)) && still && !shown;
+                // The mark on a monitor by the host's geometry, and only the
+                // page's word missing: a mark off every monitor is a real
+                // change and starts again (review of `#178`, round 14).
+                let only_unconfirmed = now == state
+                    && !gestures.contains(&Some(target.id))
+                    && still
+                    && on_monitor
+                    && !shown;
                 match watchers.get_mut(&target.id) {
                     Some(watcher)
                         if only_unconfirmed
@@ -1149,7 +1155,9 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
 enum Gate {
     /// The overlay state changed: end the pass.
     Stop,
-    /// Leave this area unread and start it again from a fresh baseline.
+    /// Leave this area unread and start it again from a fresh baseline; or,
+    /// for a bar that only lost the page's word on its mark, keep what it
+    /// learned and hold it ([`Detector::hold`]).
     Skip,
     /// Take the reading.
     Read,
