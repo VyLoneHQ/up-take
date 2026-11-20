@@ -1949,13 +1949,20 @@ impl Bar {
                 .iter()
                 .zip(&self.least_hidden)
                 .all(|(now, always)| !now || *always);
+            // A reading with more hidden neither starts nor keeps the wait,
+            // so the wait is timed from the first reading after it (round 5:
+            // one started on a carded reading kept its start).
             let since = match &self.still {
+                _ if !whole => {
+                    self.still = None;
+                    at
+                }
                 // The whole area, the bar too: a snipping selection dragged
                 // slowly along the bar leaves the page around it as it was,
                 // and was learned as the bar (a fill and that drag look
                 // alike). A theme switched in the middle of a fill is learned
                 // once the bar stops.
-                Some((since, from)) if whole && !from.differs_by(&reading, CELL_DELTA, 0) => *since,
+                Some((since, from)) if !from.differs_by(&reading, CELL_DELTA, 0) => *since,
                 _ => {
                     self.still = Some((at, reading.clone()));
                     at
@@ -4363,6 +4370,40 @@ mod real_bars {
             events.extend(feed(&mut area, &dark, filled, false, 66, &mut at));
         }
         assert_eq!(events, vec![Event::Reached(50), Event::Filled]);
+    }
+
+    /// Review of `#179`, round 5: a card's readings do not start the wait
+    /// either. Read seldom (the host's two-second idle), a carded reading
+    /// two seconds before the card goes is not the wait's start: five
+    /// seconds after the card went, not five after that reading.
+    #[test]
+    fn the_relearn_wait_starts_after_the_card() {
+        let dark = Look {
+            theme: DARK,
+            ..ROUND
+        };
+        let mut carded = render(&dark, 0, None, 0, false);
+        for row in 0..carded.rows {
+            for column in carded.columns / 2..carded.columns {
+                if let Some(cell) = carded
+                    .hidden
+                    .get_mut((row * carded.columns + column) as usize)
+                {
+                    *cell = true;
+                }
+            }
+        }
+        let clear = render(&dark, 0, None, 0, false);
+        let mut area = detector(ROUND.direction, [50, 0, 0, 0]);
+        let ms = Duration::from_millis;
+        area.observe_at(render(&ROUND, 0, None, 0, false), ms(0));
+        area.observe_at(carded, ms(2_000));
+        area.observe_at(clear.clone(), ms(4_000));
+        area.observe_at(clear.clone(), ms(8_500));
+        let covering = |area: &Detector| area.bar.as_ref().is_some_and(|bar| bar.covering);
+        assert!(covering(&area), "4.5 s after the card went: still waiting");
+        area.observe_at(clear, ms(9_100));
+        assert!(!covering(&area), "five seconds after: learned again");
     }
 
     /// Review of `#179`, round 3: a card already over part of the area in the
