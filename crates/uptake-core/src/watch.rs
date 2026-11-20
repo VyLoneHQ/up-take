@@ -224,9 +224,23 @@ pub struct Fingerprint {
     /// multiple of it, less where it is not. A cell's weight in the
     /// tolerance is the pixels it holds (review of `#168`, round 2).
     edge: (u32, u32),
+    /// Whether one of UP-TAKE's own windows (a notification card, the
+    /// settings panel) lay over the region when this was read, as the host
+    /// says ([`Self::under_own_window`]). The area's own border and mark are
+    /// not windows. A bar is never learned from such a reading: it would keep
+    /// the window's hole when the window goes (review of `#179`, round 6).
+    windowed: bool,
 }
 
 impl Fingerprint {
+    /// This reading, marked as read with one of UP-TAKE's own windows over
+    /// the region or not.
+    #[must_use]
+    pub const fn under_own_window(mut self, windowed: bool) -> Self {
+        self.windowed = windowed;
+        self
+    }
+
     /// Summarises `bitmap`, a region read at full size. `None` for an empty
     /// bitmap, which has nothing to summarise.
     #[must_use]
@@ -349,6 +363,7 @@ impl Fingerprint {
             cells,
             hidden: vec![false; (columns * rows) as usize],
             edge: (last(region.width, columns), last(region.height, rows)),
+            windowed: false,
         })
     }
 
@@ -845,7 +860,12 @@ impl Detector {
     pub fn rebase_at(&mut self, reading: Fingerprint, at: Duration) {
         self.clock = at;
         if let Some(bar) = &mut self.bar {
-            bar.learn(reading);
+            if reading.windowed {
+                // Learned from the next reading with no window over it.
+                bar.empty = None;
+            } else {
+                bar.learn(reading);
+            }
             return;
         }
         self.baseline = Some(reading.clone());
@@ -1112,10 +1132,6 @@ struct Bar {
     /// Whether the page around the bar was covered at a reading and has not
     /// yet come back ([`Self::page_back`]).
     covering: bool,
-    /// The cells hidden in every reading since the bar was learned: the
-    /// area's own border and mark, and nothing a card or the panel hid for a
-    /// while. A relearn hides no more (review of `#179`, round 3).
-    least_hidden: Vec<bool>,
     /// While [`Self::covering`]: the reading the area has held still since,
     /// and when. An area whose page stays changed, and that holds wholly still
     /// for [`RELEARN_AFTER`], shows a new page, and the bar is learned again
@@ -1325,7 +1341,6 @@ impl Bar {
     fn learn(&mut self, reading: Fingerprint) {
         // The reading the bar is learned from is its first clear one.
         self.clear = Some(reading.clone());
-        self.least_hidden.clone_from(&reading.hidden);
         self.covering = false;
         self.attached = None;
         self.still = None;
@@ -1910,13 +1925,19 @@ impl Bar {
     /// reporting.
     fn observe(&mut self, reading: Fingerprint, at: Duration) -> Option<Event> {
         let Some(mut empty) = self.empty.take() else {
-            self.learn(reading);
+            // Learned from a reading with none of UP-TAKE's own windows over
+            // the area; until then, nothing (review of `#179`, round 6).
+            if !reading.windowed {
+                self.learn(reading);
+            }
             return None;
         };
         if (empty.columns, empty.rows, empty.edge) != (reading.columns, reading.rows, reading.edge)
         {
             // Resized: another bar, as far as the lines go.
-            self.learn(reading);
+            if !reading.windowed {
+                self.learn(reading);
+            }
             return None;
         }
         // What lay under one of UP-TAKE's own windows at the first reading is
@@ -1936,22 +1957,13 @@ impl Bar {
         self.empty = Some(empty);
         if covered {
             // A page that stays changed and still is a new page (`I-493`).
-            // Only from a reading that hides no more than every reading since
-            // the bar was learned did (the area's own border and mark):
-            // learned with a card or the panel over part of it, the bar would
-            // keep that hole when it goes (review of `#179`, round 2; round 3
-            // found a card in the last clear reading passing a comparison
-            // with that reading alone). And a reading with more hidden starts
-            // the wait again: what the card hid has not been seen still
-            // (round 4).
-            let whole = reading
-                .hidden
-                .iter()
-                .zip(&self.least_hidden)
-                .all(|(now, always)| !now || *always);
-            // A reading with more hidden neither starts nor keeps the wait,
-            // so the wait is timed from the first reading after it (round 5:
-            // one started on a carded reading kept its start).
+            // Never from a reading with one of UP-TAKE's own windows over the
+            // area: the bar would keep that hole when it goes. Such a reading
+            // neither starts nor keeps the wait, which is timed from the first
+            // reading after it, so what the window hid is seen still too
+            // (reviews of `#179`, rounds 2 to 6; round 6 moved the rule from
+            // comparing hidden cells to the host's word on its windows).
+            let whole = !reading.windowed;
             let since = match &self.still {
                 _ if !whole => {
                     self.still = None;
@@ -1975,9 +1987,6 @@ impl Bar {
             }
         } else {
             self.still = None;
-            for (always, now) in self.least_hidden.iter_mut().zip(&reading.hidden) {
-                *always &= *now;
-            }
             self.clear = Some(reading);
         }
         // Something over the area, not a fill: nothing is taken from it, and
@@ -4228,6 +4237,9 @@ mod real_bars {
                             cells,
                             hidden,
                             edge: (number(3), number(4)),
+                            // The trace did not record the host's word on
+                            // its windows: read as none, its hidden cells kept.
+                            windowed: false,
                         },
                     )
                 })
@@ -4350,6 +4362,7 @@ mod real_bars {
                 }
             }
         }
+        carded.windowed = true;
         for _ in 0..240 {
             at += Duration::from_millis(33);
             assert_eq!(area.observe_at(carded.clone(), at), None);
@@ -4366,6 +4379,52 @@ mod real_bars {
         };
         assert!(bar.covering, "not learned again before five seconds");
         events.extend(feed(&mut area, &dark, 0, false, 500, &mut at));
+        for filled in (0..=ROUND.length).step_by(4).chain([ROUND.length]) {
+            events.extend(feed(&mut area, &dark, filled, false, 66, &mut at));
+        }
+        assert_eq!(events, vec![Event::Reached(50), Event::Filled]);
+    }
+
+    /// Review of `#179`, round 6: a card already over the area when the bar
+    /// is first learned. The bar is not learned under it, nor learned again
+    /// under it after the page changes; it is learned once the card has gone,
+    /// and read whole.
+    #[test]
+    fn a_bar_is_never_learned_under_one_of_up_takes_windows() {
+        let dark = Look {
+            theme: DARK,
+            ..ROUND
+        };
+        let card = |look: &Look| {
+            let mut print = render(look, 0, None, 0, false);
+            for row in 0..print.rows {
+                for column in print.columns / 2..print.columns {
+                    if let Some(cell) = print
+                        .hidden
+                        .get_mut((row * print.columns + column) as usize)
+                    {
+                        *cell = true;
+                    }
+                }
+            }
+            print.windowed = true;
+            print
+        };
+        let mut area = detector(ROUND.direction, [50, 0, 0, 0]);
+        let mut at = Duration::ZERO;
+        // Placed with a card over it, the page then switched under the card.
+        for print in [card(&ROUND), card(&dark)] {
+            for _ in 0..240 {
+                at += Duration::from_millis(33);
+                assert_eq!(area.observe_at(print.clone(), at), None);
+            }
+        }
+        assert!(
+            area.bar.as_ref().is_some_and(|bar| bar.empty.is_none()),
+            "not learned under the card"
+        );
+        // The card gone: learned at once from the first reading without it.
+        let mut events = feed(&mut area, &dark, 0, false, 330, &mut at);
         for filled in (0..=ROUND.length).step_by(4).chain([ROUND.length]) {
             events.extend(feed(&mut area, &dark, filled, false, 66, &mut at));
         }
@@ -4393,6 +4452,7 @@ mod real_bars {
                 }
             }
         }
+        carded.windowed = true;
         let clear = render(&dark, 0, None, 0, false);
         let mut area = detector(ROUND.direction, [50, 0, 0, 0]);
         let ms = Duration::from_millis;
@@ -4427,6 +4487,7 @@ mod real_bars {
                     }
                 }
             }
+            print.windowed = true;
             print
         };
         let mut area = detector(ROUND.direction, [50, 0, 0, 0]);
