@@ -1152,6 +1152,12 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
         if watcher.detector.is_settling() {
             soon = Some(soon.map_or(SETTLE_POLL, |wait| wait.min(SETTLE_POLL)));
         }
+        // A covered bar waiting to be learned again is read when that is due,
+        // not at the next idle look (review of `#179`, round 7).
+        if let Some(due) = watcher.detector.relearn_due_in(at) {
+            let due = due.max(SETTLE_POLL);
+            soon = Some(soon.map_or(due, |wait| wait.min(due)));
+        }
     }
     host.end_pass();
     Some(soon.unwrap_or(IDLE))
@@ -2271,6 +2277,34 @@ mod tests {
                 run(&mut fake, &mut memory, 1);
             }
             assert_eq!(fake.notified, vec![Event::Reached(50), Event::Filled]);
+        }
+
+        /// Review of `#179`, round 7: a bar area whose page changed for good
+        /// asks to be read when its relearn is due, not at the two-second idle
+        /// look, so it is learned again at five seconds, not about six.
+        #[test]
+        fn a_bar_area_waiting_to_relearn_is_read_when_it_is_due() {
+            use super::super::IDLE;
+            let bounds = Rect::new(100, 100, 216, 56);
+            let mut list = targets_for(&[bounds], Watch::Fills);
+            list[0].tuning.marks = [50, 0, 0, 0];
+            list[0].tuning.direction = uptake_core::watch::Direction::LeftToRight;
+            let mut fake = Fake::new(list);
+            fake.level = 40;
+            fake.track = Some((Rect::new(108, 108, 200, 40), 120));
+            let mut memory = Memory::default();
+            run(&mut fake, &mut memory, 2);
+            // The page changes for good, and holds still.
+            fake.level = 80;
+            let waits: Vec<_> = (0..12)
+                .filter_map(|_| pass(&mut fake, &mut memory))
+                .collect();
+            assert!(
+                waits
+                    .iter()
+                    .any(|wait| *wait < IDLE && *wait > Duration::ZERO),
+                "asked to be read when the relearn is due: {waits:?}"
+            );
         }
 
         /// The maintainer's rig pass of 2026-11-11: an area drawn with page
