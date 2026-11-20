@@ -971,7 +971,11 @@ impl Detector {
 /// A fill never changes the page; anything drawn over the whole area does.
 /// Observed once, on the maintainer's rig on 2026-11-11 and not probed
 /// since: with Win+Shift+S open, an area without this rule reported his
-/// percentages and the full bar at once.
+/// percentages and the full bar at once. **And once covered, the bar stays
+/// unread until the page looks again as it did before**
+/// ([`Bar::page_back`]): on 2026-11-20 a snipping selection dragged over part
+/// of the area brought most of the page back bright and left the rest of the
+/// bar dark, which read as a fill.
 ///
 /// # What notifies, once per fill
 ///
@@ -981,7 +985,9 @@ impl Detector {
 /// highest. A percentage is never reported early, and is reported once the
 /// bar has held it for [`MARK_CALM`] (half a second), so that the block of an
 /// indeterminate bar, which grows into the track from the start end as a fill
-/// does and then leaves it, reports nothing. The host keeps reading while one
+/// does and then leaves it, reports nothing; or at once, when every reading
+/// for [`STEADY_FILL`] (three seconds) has shown the bar filled from its start
+/// end, which the block never stays. The host keeps reading while one
 /// waits ([`Detector::is_settling`]). The full bar is not held. Nothing at or
 /// below the first reading's progress
 /// notifies: an area placed over a bar at 60% does not report 20% and 50%. A
@@ -1051,6 +1057,16 @@ struct Bar {
     /// while it is below it. A percentage is reported once it has been held
     /// for [`MARK_CALM`].
     held: [Option<Duration>; MARKS],
+    /// The last reading whose page was not covered: while [`Self::covering`],
+    /// the page must look like it again before the bar is read.
+    clear: Option<Fingerprint>,
+    /// Whether the page around the bar was covered at a reading and has not
+    /// yet come back ([`Self::page_back`]).
+    covering: bool,
+    /// Since when every reading has shown the bar filled from its start end,
+    /// with nothing over it: a fill that has done so for [`STEADY_FILL`] is
+    /// not an indeterminate bar's sweep, and its percentages need no calm.
+    attached: Option<Duration>,
 }
 
 /// How long the bar must stay at a percentage before the area reports it:
@@ -1061,6 +1077,15 @@ struct Bar {
 /// second. The full bar is not held: nothing short of a bar filled to the end
 /// reads as full.
 pub const MARK_CALM: Duration = Duration::from_millis(500);
+
+/// How long a fill must have grown from the bar's start end, seen at every
+/// reading, before a percentage it reaches is reported at once, without
+/// [`MARK_CALM`]: three seconds. The sweep of an indeterminate bar stays
+/// joined to the start end for well under a second (the test page's, about
+/// half a second), and then leaves it; a fill never does. The calm made every
+/// percentage half a second late, and at a 20-second fill 2.5% late (the
+/// founder's rig pass of `#178`, 2026-11-20: a 50% mark came at about 54%).
+pub const STEADY_FILL: Duration = Duration::from_secs(3);
 
 /// How many lines of page may lie between two stretches of a bar and still
 /// leave them one bar: the break between the blocks of a segmented bar (4
@@ -1231,6 +1256,10 @@ impl Bar {
     /// Learns the bar from `reading`, as if it were the first: the area was
     /// just made, turned, or is read by another route.
     fn learn(&mut self, reading: Fingerprint) {
+        // The reading the bar is learned from is its first clear one.
+        self.clear = Some(reading.clone());
+        self.covering = false;
+        self.attached = None;
         let direction = self.direction;
         let lines = reading.lines(direction);
         let across = reading.across(direction);
@@ -1633,6 +1662,50 @@ impl Bar {
         known > 0 && moved * 2 > known
     }
 
+    /// Whether the page around the bar of `reading` looks again as it did in
+    /// the last reading before it was covered ([`Self::clear`]): all but a
+    /// sixteenth of it, by pixels, within [`CELL_DELTA`]. A cover that goes
+    /// in parts is not gone until it is gone: Win+Shift+S darkens the whole
+    /// screen and then shows a selection dragged over it bright, and with
+    /// most of the page around the bar inside the selection, the darkened
+    /// rest of the bar read as a fill (the founder's rig pass of `#178`,
+    /// 2026-11-20). The page beside a line of the bar whose track changed
+    /// since is passed over, since the fill may have moved on under the cover
+    /// and an area drawn with less than a cell of page beside the bar has
+    /// page cells that hold the bar's edge; the page at the bar's ends, and
+    /// beside the lines that did not change, must be back.
+    fn page_back(&self, reading: &Fingerprint) -> bool {
+        let Some(clear) = &self.clear else {
+            return true;
+        };
+        let direction = self.direction;
+        let (low, high) = self.ends;
+        let (mut moved, mut known) = (0_u64, 0_u64);
+        for line in 0..clear.lines(direction) {
+            if (low..=high).contains(&line) && self.changed(clear, line, reading) == Some(true) {
+                continue;
+            }
+            for k in 0..clear.across(direction) {
+                let (column, row) = clear.line_cell(line, k, direction);
+                let at = (row * clear.columns + column) as usize;
+                if !self.page.get(at).copied().unwrap_or(false) {
+                    continue;
+                }
+                if let (Some(&a), Some(&b)) = (clear.cells.get(at), reading.cells.get(at))
+                    && !clear.hidden.get(at).copied().unwrap_or(true)
+                    && !reading.hidden.get(at).copied().unwrap_or(true)
+                {
+                    let weight = clear.weight(at);
+                    known += weight;
+                    if a.abs_diff(b) > CELL_DELTA {
+                        moved += weight;
+                    }
+                }
+            }
+        }
+        moved * 16 <= known
+    }
+
     /// How far `reading` shows the bar filled against `empty`, in percent of
     /// its length, and whether it is full; `None` when the page around it
     /// changed ([`Self::covered`]). A line with nothing known in it (under
@@ -1656,6 +1729,9 @@ impl Bar {
         let mut unfilled = 0_u32;
         let mut stopped = false;
         let mut any = false;
+        // The front line's drift as a share of the line before it, in
+        // percent, and the last filled line's drift.
+        let (mut front_share, mut behind) = (None::<u64>, None::<u64>);
         // The last line of the bar the first reading knew, and the last the
         // reading knows (review of `#170`, round 6: a card over the far end
         // must not let the bar read full early).
@@ -1694,6 +1770,16 @@ impl Bar {
                 if !stopped {
                     run += gap + length;
                     front = length;
+                    // How far the front line moved against the line before
+                    // it: the share of it the fill covers.
+                    let drift = self.drift(empty, reading, line);
+                    front_share = match (drift, behind) {
+                        (Some(now), Some(before)) if before > 0 => {
+                            Some((now * 100 / before).min(100))
+                        }
+                        _ => None,
+                    };
+                    behind = drift;
                     any = true;
                 }
                 gap = 0;
@@ -1711,9 +1797,14 @@ impl Bar {
             }
         }
         // A percentage is never reported early: the front line may be only
-        // partly filled, so it does not count (review of `#170`, round 5: at
-        // 97 of 200 pixels the front cell made 50%). At most one cell late.
-        let counted = run.saturating_sub(front);
+        // partly filled (review of `#170`, round 5: at 97 of 200 pixels the
+        // front cell made 50%), so it counts by the share of it the fill
+        // covers, rounded down to whole pixels and less one, and not at all
+        // when that share cannot be told. At most a pixel or two late on a
+        // flat fill, a cell on any other (the founder's rig pass of `#178`,
+        // 2026-11-20: a 50% mark came at about 54%).
+        let front_part = front_share.map_or(0, |share| (front * share / 100).saturating_sub(1));
+        let counted = run.saturating_sub(front) + front_part;
         let full = !stopped
             && unfilled == 0
             && any
@@ -1739,16 +1830,38 @@ impl Bar {
         // What lay under one of UP-TAKE's own windows at the first reading is
         // learned at its first sight, as the other choices do.
         empty.learn(&reading);
-        let progress = self.progress(&empty, &reading);
+        let covered = if self.covering {
+            !self.page_back(&reading)
+        } else {
+            self.covered(&empty, &reading)
+        };
+        let progress = if covered {
+            None
+        } else {
+            self.progress(&empty, &reading)
+        };
+        self.covering = covered;
+        if !covered {
+            self.clear = Some(reading);
+        }
         self.empty = Some(empty);
         // Something over the area, not a fill: nothing is taken from it, and
         // a percentage waiting out its calm starts it again, since the bar was
         // not seen holding it (review of `#178`, finding 2).
         let Some((percent, full)) = progress else {
             self.held = [None; MARKS];
+            self.attached = None;
             return None;
         };
         self.seen = percent;
+        if percent == 0 {
+            self.attached = None;
+        } else if self.attached.is_none() {
+            self.attached = Some(at);
+        }
+        let steady = self
+            .attached
+            .is_some_and(|since| at.saturating_sub(since) >= STEADY_FILL);
         if u16::from(percent) * 2 < u16::from(self.reported) {
             // The bar emptied: a new fill.
             self.reported = percent;
@@ -1770,7 +1883,9 @@ impl Bar {
                 *held = None;
             } else {
                 let since = *held.get_or_insert(at);
-                if at.saturating_sub(since) >= MARK_CALM && reach.is_none_or(|best| mark > best) {
+                if (steady || at.saturating_sub(since) >= MARK_CALM)
+                    && reach.is_none_or(|best| mark > best)
+                {
                     reach = Some(mark);
                 }
             }
@@ -3464,6 +3579,19 @@ mod real_bars {
     /// instead of a fill; `phase` moves the stripes; `dim` is the screen
     /// Windows' snipping overlay darkens.
     fn render(look: &Look, filled: u32, block: Option<i32>, phase: u32, dim: bool) -> Fingerprint {
+        render_dimmed(look, filled, block, phase, &|_, _| dim)
+    }
+
+    /// [`render`], with the snipping overlay's darkening on the pixels `dim`
+    /// takes (area pixels, before the bar is turned for its direction): a
+    /// selection dragged over part of the area shows that part bright.
+    fn render_dimmed(
+        look: &Look,
+        filled: u32,
+        block: Option<i32>,
+        phase: u32,
+        dim: &dyn Fn(u32, u32) -> bool,
+    ) -> Fingerprint {
         let label = if look.label_beside { 14 + 28 + 30 } else { 0 };
         let (w, h) = (
             look.margin.0 * 2 + look.length + label,
@@ -3556,7 +3684,7 @@ mod real_bars {
                 {
                     level = theme.track;
                 }
-                if dim {
+                if dim(x, y) {
                     level = level / 10 * 6;
                 }
                 grey[(y * w + x) as usize] = level;
@@ -3903,6 +4031,167 @@ mod real_bars {
                 }
             }
             assert_eq!(events, vec![], "the screen is dim, look {which}");
+        }
+    }
+
+    /// The founder's rig pass of `#178`, 2026-11-20: Win+Shift+S darkens the
+    /// screen, and a selection dragged over the bar shows the part inside it
+    /// bright again. With most of the page around the bar inside the
+    /// selection, the darkened rest of the bar looked like a fill from its
+    /// start end, and both the 50% mark and the full bar notified. No
+    /// selection, from either side, at any size, over a bar in either theme
+    /// and at any place in its fill, is a fill.
+    #[test]
+    fn a_snipping_selection_over_the_bar_is_not_a_fill() {
+        for look in [
+            ROUND,
+            Look {
+                theme: DARK,
+                ..ROUND
+            },
+            Look {
+                round: false,
+                border: 1,
+                ..ROUND
+            },
+        ] {
+            let (w, h) = (
+                look.margin.0 * 2 + look.length,
+                look.margin.1 * 2 + look.thickness,
+            );
+            for filled in [0, 60, 130] {
+                // Selections: from the left edge, from the right edge, and a
+                // band across the middle, each as tall as the area or only
+                // the bar and a little page.
+                for (rows, from_left) in [
+                    ((0, h), true),
+                    ((0, h), false),
+                    ((4, h - 4), true),
+                    ((4, h - 4), false),
+                ] {
+                    let mut detector = detector(look.direction, [50, 0, 0, 0]);
+                    let mut at = Duration::ZERO;
+                    detector.observe_at(render(&look, filled, None, 0, false), at);
+                    let mut events = Vec::new();
+                    for step in 0..=w / 4 {
+                        let edge = step * 4;
+                        let bright = move |x: u32, y: u32| {
+                            let across = (rows.0..rows.1).contains(&y);
+                            let along = if from_left { x < edge } else { x >= w - edge };
+                            across && along
+                        };
+                        let print = render_dimmed(&look, filled, None, 0, &|x, y| !bright(x, y));
+                        for _ in 0..20 {
+                            at += Duration::from_millis(33);
+                            events.extend(detector.observe_at(print.clone(), at));
+                        }
+                    }
+                    assert_eq!(
+                        events,
+                        vec![],
+                        "theme page {}, filled {filled}, rows {rows:?}, from the left {from_left}",
+                        look.theme.page
+                    );
+                }
+            }
+        }
+    }
+
+    /// A bar that fills on while the screen is dark reads again once the
+    /// cover goes: the page must look as it did before the cover, and a fill
+    /// that moved on under it must not leave the area waiting for good. (An
+    /// area drawn tighter than a cell around the bar has no page here, and a
+    /// darkened screen is its known limit, [`Bar`]; the real renders at a
+    /// 3-pixel margin, whose page cells hold the bar's edge, are run by
+    /// `tests/bar_fixtures.rs`.)
+    #[test]
+    fn a_bar_that_filled_on_under_a_cover_reads_again_after_it() {
+        for margin in [(11, 7), (16, 9), (24, 12)] {
+            for theme in [LIGHT, DARK] {
+                let look = Look {
+                    margin,
+                    theme,
+                    ..ROUND
+                };
+                let mut detector = detector(look.direction, [50, 0, 0, 0]);
+                let mut at = Duration::ZERO;
+                let mut events = Vec::new();
+                let mut read =
+                    |detector: &mut Detector, filled: u32, dim: bool, at: &mut Duration| {
+                        for _ in 0..20 {
+                            *at += Duration::from_millis(33);
+                            events.extend(
+                                detector.observe_at(render(&look, filled, None, 0, dim), *at),
+                            );
+                        }
+                    };
+                detector.observe_at(render(&look, 0, None, 0, false), at);
+                read(&mut detector, 60, false, &mut at);
+                // Covered from 25% to 75%, past the 50% mark.
+                for filled in (60..=180).step_by(12) {
+                    read(&mut detector, filled, true, &mut at);
+                }
+                for filled in (180..=look.length).step_by(4).chain([look.length]) {
+                    read(&mut detector, filled, false, &mut at);
+                }
+                assert_eq!(
+                    events,
+                    vec![Event::Reached(50), Event::Filled],
+                    "margin {margin:?}, page {}",
+                    theme.page
+                );
+            }
+        }
+    }
+
+    /// The founder's rig pass of `#178`, 2026-11-20: a 50% mark on a 60-second
+    /// fill came at about 54%. Measured here before the fix, on the test
+    /// page's 440-pixel bar read 30 times a second: 25% at 26.8%, 50% at
+    /// 51.3%, 75% at 76.8%, and at a 20-second fill up to 3.6% late (the
+    /// half-second calm, and the front line not counted). A steady fill's
+    /// percentages are now reported within a percent, never early, at any
+    /// speed and at a reading every half second.
+    #[test]
+    fn a_steady_fills_percentages_come_within_a_percent() {
+        for (secs, step_ms) in [(20_u64, 33_u64), (60, 33), (120, 33), (60, 500)] {
+            for style in [
+                ROUND,
+                Look {
+                    round: false,
+                    ..ROUND
+                },
+            ] {
+                let look = Look {
+                    length: 440,
+                    ..style
+                };
+                let mut detector = detector(look.direction, [25, 50, 75, 0]);
+                detector.observe_at(render(&look, 0, None, 0, false), Duration::ZERO);
+                let mut t = 0_u64;
+                let mut seen = Vec::new();
+                while t < secs * 1000 + 2000 {
+                    t += step_ms;
+                    let filled = u32::try_from((440 * t) / (secs * 1000))
+                        .unwrap_or(440)
+                        .min(440);
+                    let print = render(&look, filled, None, 0, false);
+                    if let Some(Event::Reached(mark)) =
+                        detector.observe_at(print, Duration::from_millis(t))
+                    {
+                        seen.push(mark);
+                        // In tenths of a percent.
+                        let at = filled * 1000 / 440;
+                        let mark = u32::from(mark) * 10;
+                        assert!(
+                            at >= mark && at <= mark + 10,
+                            "{secs} s, a reading every {step_ms} ms, round {}: {} at {at}",
+                            look.round,
+                            mark / 10
+                        );
+                    }
+                }
+                assert_eq!(seen, vec![25, 50, 75], "{secs} s, round {}", look.round);
+            }
         }
     }
 
