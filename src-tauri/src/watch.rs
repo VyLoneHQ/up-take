@@ -1281,6 +1281,9 @@ mod tests {
             /// Another grey drawn under [`Self::patch`]: a progress bar's
             /// empty track, so the page around it differs from the bar.
             track: Option<(Rect, u8)>,
+            /// Win+Shift+S: every pixel left of this desktop x darkened to
+            /// six tenths, the rest shown bright as a selection shows it.
+            dim_left_of: Option<i32>,
         }
 
         impl Fake {
@@ -1305,6 +1308,7 @@ mod tests {
                     picture: None,
                     patch: None,
                     track: None,
+                    dim_left_of: None,
                 }
             }
         }
@@ -1376,6 +1380,17 @@ mod tests {
                             .unwrap_or(0);
                             if let Some(pixel) = pixels.get_mut(at..at + 3) {
                                 pixel.copy_from_slice(&[grey, grey, grey]);
+                            }
+                        }
+                    }
+                }
+                if let Some(edge) = self.dim_left_of {
+                    let width = i32::try_from(rect.size.width).unwrap_or(0);
+                    for (at, pixel) in pixels.chunks_exact_mut(4).enumerate() {
+                        let x = rect.origin.x + i32::try_from(at).unwrap_or(0) % width.max(1);
+                        if x < edge {
+                            for channel in &mut pixel[..3] {
+                                *channel = *channel / 10 * 6;
                             }
                         }
                     }
@@ -2181,6 +2196,48 @@ mod tests {
                     );
                 }
             }
+        }
+
+        /// The maintainer's rig trace of `#178`, 2026-11-20, through the loop
+        /// (review of `#178`, round 15): Win+Shift+S darkens the screen, the
+        /// page stops confirming the area's mark for a pass, and a selection
+        /// is dragged from the right past the bar's start. The bar is kept and
+        /// held over the skip, so nothing is reported until the fill really
+        /// reaches 50%. Drilled: with the hold branch switched off, every skip
+        /// starts the area again, it learns the darkened screen as the bar,
+        /// and this run reports neither 50% nor the full bar.
+        #[test]
+        fn a_bar_area_keeps_its_bar_over_a_skip_during_a_snip() {
+            let bounds = Rect::new(100, 100, 216, 56);
+            let mut list = targets_for(&[bounds], Watch::Fills);
+            list[0].tuning.marks = [50, 0, 0, 0];
+            let mut fake = Fake::new(list);
+            fake.level = 40;
+            fake.track = Some((Rect::new(108, 108, 200, 40), 120));
+            let mut memory = Memory::default();
+            run(&mut fake, &mut memory, 2);
+            fake.patch = Some((Rect::new(108, 108, 40, 40), 200));
+            run(&mut fake, &mut memory, 2);
+            // The snip: the screen darkens and the mark goes unconfirmed for
+            // a pass.
+            fake.dim_left_of = Some(i32::MAX);
+            fake.seen = false;
+            run(&mut fake, &mut memory, 1);
+            fake.seen = true;
+            run(&mut fake, &mut memory, 2);
+            // A selection dragged in from the right, past the bar's start.
+            for edge in (100..=316).rev().step_by(8) {
+                fake.dim_left_of = Some(edge);
+                run(&mut fake, &mut memory, 2);
+            }
+            assert_eq!(fake.notified, Vec::<Event>::new(), "during the snip");
+            // Esc, and the fill goes on.
+            fake.dim_left_of = None;
+            for filled in [40, 40, 80, 110, 160, 160, 200, 200] {
+                fake.patch = Some((Rect::new(108, 108, filled, 40), 200));
+                run(&mut fake, &mut memory, 1);
+            }
+            assert_eq!(fake.notified, vec![Event::Reached(50), Event::Filled]);
         }
 
         /// The maintainer's rig pass of 2026-11-11: an area drawn with page
