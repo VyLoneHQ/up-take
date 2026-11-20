@@ -2125,7 +2125,18 @@ impl Bar {
                     at
                 }
             };
-            if at.saturating_sub(since) >= RELEARN_AFTER {
+            // Only from a reading that hides no more than the last clear one
+            // did (the area's own border and mark): learned with a card or
+            // the panel over part of it, the bar would keep that hole when it
+            // goes (review of `#179`, round 2).
+            let whole = self.clear.as_ref().is_none_or(|clear| {
+                reading
+                    .hidden
+                    .iter()
+                    .zip(&clear.hidden)
+                    .all(|(now, then)| !now || *then)
+            });
+            if whole && at.saturating_sub(since) >= RELEARN_AFTER {
                 self.learn(reading);
                 self.held = [None; MARKS];
                 return None;
@@ -4480,6 +4491,47 @@ mod real_bars {
             vec![Event::Reached(25), Event::Reached(50), Event::Filled],
             "the next fill"
         );
+    }
+
+    /// Review of `#179`, round 2: the page changed for good while one of
+    /// UP-TAKE's own windows lies over part of the area. The bar is not
+    /// learned again until the window has gone, or it would keep the hole;
+    /// then it is, and read whole.
+    #[test]
+    fn a_bar_is_not_learned_again_under_a_card() {
+        let dark = Look {
+            theme: DARK,
+            ..ROUND
+        };
+        let mut area = detector(ROUND.direction, [50, 0, 0, 0]);
+        let mut at = Duration::ZERO;
+        area.observe_at(render(&ROUND, 0, None, 0, false), at);
+        // A card over the right half for eight seconds, the page switched.
+        let mut carded = render(&dark, 0, None, 0, false);
+        for row in 0..carded.rows {
+            for column in carded.columns / 2..carded.columns {
+                if let Some(cell) = carded
+                    .hidden
+                    .get_mut((row * carded.columns + column) as usize)
+                {
+                    *cell = true;
+                }
+            }
+        }
+        for _ in 0..240 {
+            at += Duration::from_millis(33);
+            assert_eq!(area.observe_at(carded.clone(), at), None);
+        }
+        let Some(bar) = area.bar.as_ref() else {
+            panic!("a bar detector");
+        };
+        assert!(bar.covering, "not learned again under the card");
+        // The card gone: five seconds still, then learned whole.
+        let mut events = feed(&mut area, &dark, 0, false, 5_400, &mut at);
+        for filled in (0..=ROUND.length).step_by(4).chain([ROUND.length]) {
+            events.extend(feed(&mut area, &dark, filled, false, 66, &mut at));
+        }
+        assert_eq!(events, vec![Event::Reached(50), Event::Filled]);
     }
 
     /// The other side of [`RELEARN_AFTER`]: a darkened screen (Win+Shift+S)
