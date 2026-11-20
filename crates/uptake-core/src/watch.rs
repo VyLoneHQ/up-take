@@ -553,8 +553,9 @@ pub struct Tuning {
 pub enum Direction {
     /// Found by itself (roadmap `1.74`, the founder's wish of 2026-11-20):
     /// the default. A wider area reads a bar that fills sideways, a taller
-    /// one a bar that fills up or down, and of the two ends the one the fill
-    /// grows from first is taken ([`Bar`]'s `rival`).
+    /// one a bar that fills up or down, and a square one tries all four ends;
+    /// of the ends tried, the one the fill grows from first is taken
+    /// ([`Bar`]'s `rivals`).
     #[default]
     Auto,
     /// From the left edge to the right: most bars.
@@ -1134,7 +1135,7 @@ struct Bar {
     /// from it.
     still: Option<(Duration, Fingerprint)>,
     /// Whether the area's direction is [`Direction::Auto`]: [`Self::direction`]
-    /// is then the end taken, or the first of two while undecided.
+    /// is then the end taken, or the first of those tried while undecided.
     auto: bool,
     /// While [`Self::auto`] is undecided: the same bar read from the other
     /// ends tried (the other end of the axis, or the three others of a
