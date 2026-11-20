@@ -877,10 +877,16 @@ impl Detector {
 
     /// Whether this detector keeps what it learned over a wait the host could
     /// not read through ([`Self::hold`]): the bar mode's, once it has learned
-    /// the bar.
+    /// the bar, and only with page around the bar to tell the wait's end by.
+    /// An area drawn tightly over its bar has none: held, its first reading
+    /// would pass as the page come back, darkened or not, so it starts again
+    /// as before, with the documented limit that a darkened screen reads as a
+    /// full bar there (review of `#178`, round 16).
     #[must_use]
     pub fn holds(&self) -> bool {
-        self.bar.as_ref().is_some_and(|bar| bar.empty.is_some())
+        self.bar
+            .as_ref()
+            .is_some_and(|bar| bar.empty.is_some() && bar.page.iter().any(|page| *page))
     }
 
     /// Takes one reading [`READING_STEP`] after the last one and says whether
@@ -4299,6 +4305,23 @@ mod real_bars {
             events.extend(feed(&mut detector, &dark, filled, false, 66, &mut at));
         }
         assert_eq!(events, vec![Event::Reached(50), Event::Filled]);
+    }
+
+    /// Review of `#178`, round 16: a bar with no page around it (an area
+    /// drawn tightly over it) is not held, since nothing could tell that a
+    /// cover had gone; one with page around it is.
+    #[test]
+    fn only_a_bar_with_page_around_it_holds() {
+        let tight = Look {
+            margin: (0, 0),
+            ..ROUND
+        };
+        for (look, holds) in [(tight, false), (ROUND, true)] {
+            let mut area = detector(look.direction, [50, 0, 0, 0]);
+            assert!(!area.holds(), "nothing learned yet");
+            area.observe_at(render(&look, 0, None, 0, false), Duration::ZERO);
+            assert_eq!(area.holds(), holds, "margin {:?}", look.margin);
+        }
     }
 
     /// The founder's rig pass of `#178`, 2026-11-20: Win+Shift+S darkens the
