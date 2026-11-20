@@ -1008,7 +1008,12 @@ impl Detector {
 /// the empty level from already filled, one picture cannot tell that bar
 /// from an empty one in another colour, and it does not report that fill's
 /// end (review of `#178`, round 6). Its next fill, after it empties, is
-/// reported. Placed anywhere short of that, it is read correctly; and a bar that shows a
+/// reported. An indeterminate bar whose block takes longer than
+/// [`MARK_CALM`] to come wholly into the track (a sweep slower than about
+/// three seconds) holds a percentage below the block's length that long, and
+/// reports it on every sweep: a fill and that block look alike until the block
+/// leaves the start end (review of `#178`, round 11; the test page's sweep is
+/// a second and a half). Placed anywhere short of that, it is read correctly; and a bar that shows a
 /// block of one colour at its far end then (the sweep of an indeterminate
 /// bar, caught at the wrong moment) reads as filled up to it: both are the
 /// same picture as a half-filled bar.
@@ -3999,6 +4004,31 @@ mod real_bars {
             }
             assert_eq!(events, vec![], "a block moving {pace} pixels a reading");
         }
+    }
+
+    /// The limit of [`Bar`]'s calm, pinned (review of `#178`, round 11): a
+    /// block moving a pixel a reading, a sweep of about ten seconds, stays
+    /// joined to the start end for longer than [`MARK_CALM`], and the
+    /// percentage below its length (a third of the bar) is reported on each
+    /// sweep. Nothing above it is, and never the full bar.
+    #[test]
+    fn a_marquee_slower_than_the_calm_reports_only_below_its_block() {
+        let look = ROUND;
+        let mut detector = detector(look.direction, [20, 50, 80, 0]);
+        let mut at = Duration::ZERO;
+        detector.observe_at(render(&look, 0, None, 0, false), at);
+        let third = i32::try_from(look.length / 3).unwrap_or(0);
+        let mut events = Vec::new();
+        for _ in 0..3 {
+            let mut left = -third;
+            while left < i32::try_from(look.length).unwrap_or(0) {
+                at += Duration::from_millis(33);
+                let print = render(&look, 0, Some(left), 0, false);
+                events.extend(detector.observe_at(print, at));
+                left += 1;
+            }
+        }
+        assert_eq!(events, vec![Event::Reached(20); 3]);
     }
 
     /// Win+Shift+S darkens everything, the page round the bar too; a fill
