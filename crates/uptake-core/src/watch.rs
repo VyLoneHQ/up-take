@@ -1335,6 +1335,10 @@ impl Bar {
     /// `#170`, round 4).
     fn set_marks(&mut self, marks: [u8; MARKS]) {
         if marks != self.marks {
+            // What waited for Auto to take an end was measured against the
+            // old percentages (review of `#180`, round 6: a percentage removed
+            // while Auto decided was still reported).
+            self.drop_pending();
             self.reported = self.reported.max(self.seen);
             self.held = [None; MARKS];
         }
@@ -5125,6 +5129,41 @@ mod real_bars {
             }
         }
         assert_eq!(events, vec![Event::Reached(50), Event::Filled]);
+    }
+
+    /// Review of `#180`, round 6: a percentage removed while
+    /// [`Direction::Auto`] decides, after the bar reached it, is not
+    /// reported when an end is taken.
+    #[test]
+    fn auto_does_not_report_a_percentage_removed_while_it_decides() {
+        let look = Look {
+            direction: Direction::RightToLeft,
+            ..ROUND
+        };
+        let mut area = detector(Direction::Auto, [50, 0, 0, 0]);
+        let mut at = Duration::ZERO;
+        area.observe_at(render(&look, 0, None, 0, false), at);
+        let mut events = Vec::new();
+        // A jump to 60%, held 600 ms: 50% waits for an end.
+        for _ in 0..18 {
+            at += Duration::from_millis(33);
+            events.extend(area.observe_at(render(&look, 144, None, 0, false), at));
+        }
+        area.tune(
+            Watch::Fills,
+            Tuning {
+                marks: [0; MARKS],
+                direction: Direction::Auto,
+                ..Tuning::default()
+            },
+        );
+        for filled in (144..=look.length).step_by(2).chain([look.length; 20]) {
+            for _ in 0..2 {
+                at += Duration::from_millis(33);
+                events.extend(area.observe_at(render(&look, filled, None, 0, false), at));
+            }
+        }
+        assert_eq!(events, vec![Event::Filled]);
     }
 
     /// [`Direction::Auto`] on an indeterminate bar: the sweep reports nothing,
