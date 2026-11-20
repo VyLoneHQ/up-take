@@ -840,6 +840,19 @@ impl Detector {
         }
     }
 
+    /// How long until a covered bar that has held still would be learned
+    /// again ([`RELEARN_AFTER`], `I-493`), read at `at`: the host wakes then,
+    /// since a still screen sends no frame and its idle wait is two seconds
+    /// (review of `#179`, round 7: learned at about six seconds). `None` when
+    /// no relearn is waiting.
+    #[must_use]
+    pub fn relearn_due_in(&self, at: Duration) -> Option<Duration> {
+        let bar = self.bar.as_ref()?;
+        let (since, _) = bar.still.as_ref()?;
+        bar.covering
+            .then(|| RELEARN_AFTER.saturating_sub(at.saturating_sub(*since)))
+    }
+
     /// Whether a change is under way, so the host must keep reading while the
     /// screen is still, or the calm that ends it is never seen. A bar that has
     /// reached one of its percentages and has not yet held it for
