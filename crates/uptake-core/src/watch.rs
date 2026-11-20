@@ -1936,29 +1936,31 @@ impl Bar {
         self.empty = Some(empty);
         if covered {
             // A page that stays changed and still is a new page (`I-493`).
+            // Only from a reading that hides no more than every reading since
+            // the bar was learned did (the area's own border and mark):
+            // learned with a card or the panel over part of it, the bar would
+            // keep that hole when it goes (review of `#179`, round 2; round 3
+            // found a card in the last clear reading passing a comparison
+            // with that reading alone). And a reading with more hidden starts
+            // the wait again: what the card hid has not been seen still
+            // (round 4).
+            let whole = reading
+                .hidden
+                .iter()
+                .zip(&self.least_hidden)
+                .all(|(now, always)| !now || *always);
             let since = match &self.still {
                 // The whole area, the bar too: a snipping selection dragged
                 // slowly along the bar leaves the page around it as it was,
                 // and was learned as the bar (a fill and that drag look
                 // alike). A theme switched in the middle of a fill is learned
                 // once the bar stops.
-                Some((since, from)) if !from.differs_by(&reading, CELL_DELTA, 0) => *since,
+                Some((since, from)) if whole && !from.differs_by(&reading, CELL_DELTA, 0) => *since,
                 _ => {
                     self.still = Some((at, reading.clone()));
                     at
                 }
             };
-            // Only from a reading that hides no more than every reading since
-            // the bar was learned did (the area's own border and mark):
-            // learned with a card or the panel over part of it, the bar would
-            // keep that hole when it goes (review of `#179`, round 2; round 3
-            // found a card in the last clear reading passing a comparison
-            // with that reading alone).
-            let whole = reading
-                .hidden
-                .iter()
-                .zip(&self.least_hidden)
-                .all(|(now, always)| !now || *always);
             if whole && at.saturating_sub(since) >= RELEARN_AFTER {
                 self.learn(reading);
                 self.held = [None; MARKS];
@@ -4349,8 +4351,14 @@ mod real_bars {
             panic!("a bar detector");
         };
         assert!(bar.covering, "not learned again under the card");
-        // The card gone: five seconds still, then learned whole.
-        let mut events = feed(&mut area, &dark, 0, false, 5_400, &mut at);
+        // The card gone: not learned at once (what it hid has not been seen
+        // still, review of `#179`, round 4), then after five seconds whole.
+        let mut events = feed(&mut area, &dark, 0, false, 4_900, &mut at);
+        let Some(bar) = area.bar.as_ref() else {
+            panic!("a bar detector");
+        };
+        assert!(bar.covering, "not learned again before five seconds");
+        events.extend(feed(&mut area, &dark, 0, false, 500, &mut at));
         for filled in (0..=ROUND.length).step_by(4).chain([ROUND.length]) {
             events.extend(feed(&mut area, &dark, filled, false, 66, &mut at));
         }
