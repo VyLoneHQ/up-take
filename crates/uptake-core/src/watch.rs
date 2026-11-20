@@ -905,6 +905,9 @@ impl Detector {
             bar.covering = true;
             bar.held = [None; MARKS];
             bar.attached = None;
+            // Nothing was seen during the wait: a relearn's stillness starts
+            // again from the next reading (review of `#179`, round 8).
+            bar.still = None;
         }
     }
 
@@ -4442,6 +4445,38 @@ mod real_bars {
             events.extend(feed(&mut area, &dark, filled, false, 66, &mut at));
         }
         assert_eq!(events, vec![Event::Reached(50), Event::Filled]);
+    }
+
+    /// Review of `#179`, round 8: a skipped reading in the middle of the
+    /// relearn wait ([`Detector::hold`]) starts the wait again, since nothing
+    /// was seen still in the gap.
+    #[test]
+    fn a_skip_starts_the_relearn_wait_again() {
+        let dark = render(
+            &Look {
+                theme: DARK,
+                ..ROUND
+            },
+            0,
+            None,
+            0,
+            false,
+        );
+        let mut area = detector(ROUND.direction, [50, 0, 0, 0]);
+        let ms = Duration::from_millis;
+        let covering = |area: &Detector| area.bar.as_ref().is_some_and(|bar| bar.covering);
+        area.observe_at(render(&ROUND, 0, None, 0, false), ms(0));
+        area.observe_at(dark.clone(), ms(1_000));
+        area.hold();
+        area.observe_at(dark.clone(), ms(6_500));
+        assert!(covering(&area), "the gap is not stillness");
+        area.observe_at(dark.clone(), ms(11_000));
+        assert!(covering(&area), "4.5 s after the gap: still waiting");
+        area.observe_at(dark, ms(11_600));
+        assert!(
+            !covering(&area),
+            "five seconds after the gap: learned again"
+        );
     }
 
     /// Review of `#179`, round 5: a card's readings do not start the wait
