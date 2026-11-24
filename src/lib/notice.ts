@@ -41,7 +41,7 @@ export interface NoticePayload {
   area_type: string;
   /** What happened, as the card says it ("changed"). Never what was read. */
   event: string;
-  /** The type's colour in the legend ($lib/tones). */
+  /** The type's colour in the legend (#lib/tones). */
   tone: string;
 }
 

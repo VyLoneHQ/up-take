@@ -1,13 +1,13 @@
 <script lang="ts">
-import { coachCopy } from '$lib/coach-copy';
+import { coachCopy } from '#lib/coach-copy';
 import {
   type CoachView,
   cssRectToPhys,
   type Origin,
   type PhysRect,
   physRectToCss,
-} from '$lib/overlay-state';
-import type { Language } from '$lib/strings';
+} from '#lib/overlay-state';
+import type { Language } from '#lib/strings';
 
 // The first-run coach (roadmap 1.18, ADR-0043). Presentation only, like the
 // page that hosts it: Rust owns the tour and says which step to draw and on

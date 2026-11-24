@@ -2,7 +2,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { onMount } from 'svelte';
-import { createSaveQueue } from '$lib/save-queue';
+import { createSaveQueue } from '#lib/save-queue';
 import {
   type Facts,
   languageFor,
@@ -11,8 +11,8 @@ import {
   panes,
   type Row,
   type Settings,
-} from '$lib/settings-model';
-import { isLanguage, type Language, text } from '$lib/strings';
+} from '#lib/settings-model';
+import { isLanguage, type Language, text } from '#lib/strings';
 
 // Presentation only, the same rule the overlay page follows (architecture §1):
 // `settings-model.ts` decides which rows exist and what each one does to the

@@ -78,7 +78,7 @@ pub struct NoticePayload {
     pub area_type: String,
     /// What happened, as the card says it ("changed").
     pub event: String,
-    /// The type's colour in the legend (`$lib/tones`): `watch`, `filter`,
+    /// The type's colour in the legend (`#lib/tones`): `watch`, `filter`,
     /// `upscale`, `text` or `accent`. The card is drawn in it.
     pub tone: &'static str,
 }
