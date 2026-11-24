@@ -44,37 +44,54 @@ use crate::manifest::{Asset, AssetKind, AssetManifest, ManifestError, Sha256Dige
 /// [`VERIFIED_AGAINST_ORT`].
 pub const VERSION: &str = "1.31.0";
 
-/// Where the official Windows x64 release is published.
+/// Where Microsoft publishes the Windows x64 runtime: its NuGet package.
 ///
-/// HTTPS, and GitHub's own release host rather than a mirror. `Asset::validate`
-/// enforces the scheme; this constant is what makes the *origin* auditable.
-pub const ARCHIVE_URL: &str = "https://github.com/microsoft/onnxruntime/releases/download/v1.31.0/onnxruntime-win-x64-1.31.0.zip";
+/// HTTPS, and Microsoft's own package feed rather than a mirror.
+/// `Asset::validate` enforces the scheme; this constant is what makes the
+/// *origin* auditable.
+///
+/// **Re-pinned 2026-11-24 from the GitHub release ZIP** (UP-TAKE `I-492`, on
+/// the founder's decision that day). `github.com/microsoft/onnxruntime` began
+/// answering 404 in November 2026, release assets included, so CI could no
+/// longer fetch `onnxruntime-win-x64-1.31.0.zip`. The package
+/// `Microsoft.ML.OnnxRuntime` 1.31.0 carries the **same three files, byte for
+/// byte**: `RUNTIME_SHA256`, `LICENCE_SHA256` and `NOTICES_SHA256` below did
+/// not move, so what the installer ships is unchanged. Only the container, its
+/// digest, its size and the member paths moved.
+///
+/// The package's signatures were checked on 2026-11-24 with
+/// `dotnet nuget verify --all`: an author signature by
+/// `CN=Microsoft Corporation` and the NuGet.org repository countersignature,
+/// both valid and timestamped. That check is a record, not a CI step; what CI
+/// enforces is the SHA-256 below, the same guarantee the ZIP had.
+pub const ARCHIVE_URL: &str = "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/1.31.0/microsoft.ml.onnxruntime.1.31.0.nupkg";
 
-/// The archive's SHA-256, probed on 2026-10-27 by downloading it, and equal to
-/// the digest GitHub publishes for the release asset.
+/// The package's SHA-256, probed on 2026-11-24 by downloading it.
 ///
 /// ⚠️ **Nothing polls this URL, and that is intended behaviour rather than a
-/// fault.** `scripts/write-model-notice.py` says the same about its own
-/// upstream and it is worth saying here too: if Microsoft ever replaced this
-/// release asset in place, no probe in either repository would notice. The
-/// acquisition script would go red the next time it ran, and that red is the
-/// whole notification.
+/// fault.** If the package were ever replaced, the acquisition script would go
+/// red the next time it ran, and that red is the whole notification.
 ///
-/// **The exposure is smaller here than for the models, and the difference is
-/// the host rather than an argument.** A GitHub release asset is effectively
-/// immutable once published: replacing one requires deleting and re-uploading
-/// it under the same tag. `ADR-0034`'s PaddleOCR archives sit on
-/// `paddleocr.bj.bcebos.com`, an ordinary object store with no such property,
-/// which is why those needed a workspace probe (`CL-32`) and this does not.
-pub const ARCHIVE_SHA256: &str = "3958d8a44984160692c1b4ffd0de3cb48f8c39f9d34bb31e433db06e30b82195";
+/// **NuGet.org does not let a published version be replaced**: a package
+/// version can be unlisted but never re-uploaded with different content, which
+/// gives the same property the GitHub release asset was relied on for.
+/// `ADR-0034`'s PaddleOCR archives sit on an ordinary object store with no such
+/// property, which is why those needed a workspace probe (`CL-32`) and this
+/// does not.
+pub const ARCHIVE_SHA256: &str = "7e35fdb4f5adb62f01e60798e2e5ed05108f5fbbe1cca03fbcc37903cf7c5e3b";
 
-/// The archive's length in bytes, from the same download.
-pub const ARCHIVE_SIZE: u64 = 82_887_349;
+/// The package's length in bytes, from the same download.
+///
+/// About twice the old ZIP's 82.9 MB because the package carries every
+/// platform's runtime. Only the three pinned members are extracted, so the
+/// installer does not grow.
+pub const ARCHIVE_SIZE: u64 = 159_626_085;
 
 /// The DLL's name once installed, beside the executable.
 pub const RUNTIME_FILE_NAME: &str = "onnxruntime.dll";
 
-/// The DLL's SHA-256, as extracted from the pinned archive.
+/// The DLL's SHA-256, as extracted from the pinned package (and, before
+/// 2026-11-24, from the release ZIP: the same bytes).
 pub const RUNTIME_SHA256: &str = "0c42dc4e278f0968fdf9ebf1b1e54a74c657a9942e70803e453c91993451cf4c";
 
 /// The DLL's length in bytes.

@@ -81,13 +81,16 @@ def load_module():
 
 
 def build_archive(members: dict[str, bytes]) -> bytes:
-    """A zip shaped like the real release: one versioned root directory."""
-    root = "onnxruntime-win-x64-" + VERSION
+    """A zip shaped like the real NuGet package: the DLL under
+    `runtimes/win-x64/native/`, both notices at the root (I-492)."""
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr(root + "/lib/onnxruntime.dll", members["RUNTIME"])
-        archive.writestr(root + "/LICENSE", members["LICENCE"])
-        archive.writestr(root + "/ThirdPartyNotices.txt", members["NOTICES"])
+        archive.writestr("runtimes/win-x64/native/onnxruntime.dll", members["RUNTIME"])
+        archive.writestr("LICENSE", members["LICENCE"])
+        archive.writestr("ThirdPartyNotices.txt", members["NOTICES"])
+        # The package carries other platforms' runtimes too; this decoy proves
+        # the script reads the win-x64 member and no other.
+        archive.writestr("runtimes/win-arm64/native/onnxruntime.dll", b"not this one")
     return buffer.getvalue()
 
 
