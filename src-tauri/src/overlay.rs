@@ -770,7 +770,7 @@ const STATE_EVENT: &str = "overlay://state";
 ///
 /// **It was Placement only until 2026-11-03**, when the list fed nothing but
 /// Placement's per-monitor frames. The page's watch-mark check (`markSeen`,
-/// `$lib/mark-check`) later started requiring the dot to lie inside a monitor
+/// `#lib/mark-check`) later started requiring the dot to lie inside a monitor
 /// from this same list, so in Living it found no monitor, confirmed no mark,
 /// and no watch area read once the user handed the screen back: found at the
 /// maintainer's rig with a trace build (`monitors=0` in Living, every reading

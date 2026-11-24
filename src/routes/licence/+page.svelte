@@ -2,8 +2,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { onMount } from 'svelte';
-import { type LicenceFile, licenceFile, TITLE_KEY } from '$lib/licence-view';
-import { isLanguage, type Language, text } from '$lib/strings';
+import { type LicenceFile, licenceFile, TITLE_KEY } from '#lib/licence-view';
+import { isLanguage, type Language, text } from '#lib/strings';
 
 // A licence file, shown and never editable (I-443). The founder asked for this
 // on his rig pass of #130: the files had opened in an editor, where a stray

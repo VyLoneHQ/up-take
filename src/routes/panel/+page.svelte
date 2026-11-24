@@ -31,15 +31,15 @@ import {
   toPosition,
   track,
   WATCHES,
-} from '$lib/panel';
+} from '#lib/panel';
 import {
   fill,
   isLanguage,
   type Language,
   type TextKey,
   text,
-} from '$lib/strings';
-import { TONES, toneOf } from '$lib/tones';
+} from '#lib/strings';
+import { TONES, toneOf } from '#lib/tones';
 
 // The area settings panel (roadmap 1.60). Rust shows this window beside its
 // area; this page draws the area's settings and sets them. Esc closes it.

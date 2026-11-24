@@ -13,7 +13,7 @@
  * rectangles", and a per-element rule would have to be remembered by every
  * element added later. A clip on the root cannot be forgotten by a child.
  */
-import type { CssRect } from '$lib/regions';
+import type { CssRect } from '#lib/regions';
 
 /**
  * Far enough outside any desktop that the outer ring always contains the
