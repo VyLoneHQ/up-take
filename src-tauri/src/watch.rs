@@ -999,16 +999,41 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
         let monitors = host.monitors();
         // The mark on a monitor by the host's geometry, AND seen by the page's
         // latest confirmation for these bounds in this overlay state.
-        let shown =
-            mark_on_screen(mark(target.bounds), &monitors) && host.mark_seen(target, state.0);
-        match gate(target.id, now == state, [moving, gesture_now], still, shown) {
+        let on_monitor = mark_on_screen(mark(target.bounds), &monitors);
+        let shown = on_monitor && host.mark_seen(target, state.0);
+        let gestures = [moving, gesture_now];
+        match gate(target.id, now == state, gestures, still, shown) {
             Gate::Stop => break,
             Gate::Skip => {
                 // Not read, and read again from a fresh baseline: soon, since
                 // what it waits for (the page's word on its mark, a move
                 // ending) rings nothing reliably, and a change made in the
                 // wait would become its baseline (review of `#162`, round 1).
-                watchers.remove(&target.id);
+                // A bar that only lost the page's word on its mark (watching,
+                // nothing moving, the same overlay state) keeps the bar it
+                // learned and waits for its page to come back instead: learned
+                // again, it learned Win+Shift+S's darkened screen as the empty
+                // bar (the maintainer's rig trace of `#178`, 2026-11-20).
+                // The mark on a monitor by the host's geometry, and only the
+                // page's word missing: a mark off every monitor is a real
+                // change and starts again (review of `#178`, round 14).
+                let only_unconfirmed = now == state
+                    && !gestures.contains(&Some(target.id))
+                    && still
+                    && on_monitor
+                    && !shown;
+                match watchers.get_mut(&target.id) {
+                    Some(watcher)
+                        if only_unconfirmed
+                            && watcher.target == target
+                            && watcher.detector.holds() =>
+                    {
+                        watcher.detector.hold();
+                    }
+                    _ => {
+                        watchers.remove(&target.id);
+                    }
+                }
                 soon = Some(FRESH_WAIT);
                 continue;
             }
@@ -1130,7 +1155,9 @@ fn pass(host: &mut impl Host, memory: &mut Memory) -> Option<Duration> {
 enum Gate {
     /// The overlay state changed: end the pass.
     Stop,
-    /// Leave this area unread and start it again from a fresh baseline.
+    /// Leave this area unread and start it again from a fresh baseline; or,
+    /// for a bar that only lost the page's word on its mark, keep what it
+    /// learned and hold it ([`Detector::hold`]).
     Skip,
     /// Take the reading.
     Read,
@@ -1254,6 +1281,9 @@ mod tests {
             /// Another grey drawn under [`Self::patch`]: a progress bar's
             /// empty track, so the page around it differs from the bar.
             track: Option<(Rect, u8)>,
+            /// Win+Shift+S: every pixel left of this desktop x darkened to
+            /// six tenths, the rest shown bright as a selection shows it.
+            dim_left_of: Option<i32>,
         }
 
         impl Fake {
@@ -1278,6 +1308,7 @@ mod tests {
                     picture: None,
                     patch: None,
                     track: None,
+                    dim_left_of: None,
                 }
             }
         }
@@ -1349,6 +1380,17 @@ mod tests {
                             .unwrap_or(0);
                             if let Some(pixel) = pixels.get_mut(at..at + 3) {
                                 pixel.copy_from_slice(&[grey, grey, grey]);
+                            }
+                        }
+                    }
+                }
+                if let Some(edge) = self.dim_left_of {
+                    let width = i32::try_from(rect.size.width).unwrap_or(0);
+                    for (at, pixel) in pixels.chunks_exact_mut(4).enumerate() {
+                        let x = rect.origin.x + i32::try_from(at).unwrap_or(0) % width.max(1);
+                        if x < edge {
+                            for channel in &mut pixel[..3] {
+                                *channel = *channel / 10 * 6;
                             }
                         }
                     }
@@ -2116,11 +2158,15 @@ mod tests {
         /// event. ⚠️ **On an area drawn tightly over the bar with the setting
         /// on, the border covers the bar's last 4 pixels**, on screen as in
         /// the reading, so the bar is full when the last line UP-TAKE can
-        /// see is filled: at 196 of 200 pixels here. The next test is the
-        /// remedy the bar mode's doc gives, page around the bar.
+        /// see is filled: at 194 of 200 pixels here. The next test is the
+        /// remedy the bar mode's doc gives, page around the bar. (Without
+        /// the setting the bar is full at 198 of 200, as it said 200 until
+        /// 2026-11-19, and 194 where it said 196: a last line half covered
+        /// is as full as a bar ending in a border of its own colour can be
+        /// told from.)
         #[test]
         fn a_bar_area_notifies_once_the_bar_is_full() {
-            for (in_captures, full_at) in [(false, 200), (true, 196)] {
+            for (in_captures, full_at) in [(false, 198), (true, 194)] {
                 let bounds = Rect::new(100, 100, 200, 40);
                 let mut list = targets_for(&[bounds], Watch::Fills);
                 list[0].tuning.marks = [50, 0, 0, 0];
@@ -2129,12 +2175,17 @@ mod tests {
                 fake.level = 40;
                 let mut memory = Memory::default();
                 run(&mut fake, &mut memory, 2);
-                for filled in [40, 80, 110, 160, 195, 196, 199, 200, 200] {
+                for filled in [
+                    40, 80, 110, 160, 192, 193, 194, 196, 197, 198, 199, 200, 200,
+                ] {
                     let before = fake.notified.len();
                     fake.patch = Some((Rect::new(100, 100, filled, 40), 200));
                     run(&mut fake, &mut memory, 1);
+                    // 50% is reported once the bar has held it for half a
+                    // second ([`MARK_CALM`]): the pass after the one that
+                    // reached it, at the fake's half-second clock.
                     let expected = match filled {
-                        110 => vec![Event::Reached(50)],
+                        160 => vec![Event::Reached(50)],
                         _ if filled == full_at && before == 1 => vec![Event::Filled],
                         _ => Vec::new(),
                     };
@@ -2147,11 +2198,53 @@ mod tests {
             }
         }
 
+        /// The maintainer's rig trace of `#178`, 2026-11-20, through the loop
+        /// (review of `#178`, round 15): Win+Shift+S darkens the screen, the
+        /// page stops confirming the area's mark for a pass, and a selection
+        /// is dragged from the right past the bar's start. The bar is kept and
+        /// held over the skip, so nothing is reported until the fill really
+        /// reaches 50%. Drilled: with the hold branch switched off, every skip
+        /// starts the area again, it learns the darkened screen as the bar,
+        /// and this run reports neither 50% nor the full bar.
+        #[test]
+        fn a_bar_area_keeps_its_bar_over_a_skip_during_a_snip() {
+            let bounds = Rect::new(100, 100, 216, 56);
+            let mut list = targets_for(&[bounds], Watch::Fills);
+            list[0].tuning.marks = [50, 0, 0, 0];
+            let mut fake = Fake::new(list);
+            fake.level = 40;
+            fake.track = Some((Rect::new(108, 108, 200, 40), 120));
+            let mut memory = Memory::default();
+            run(&mut fake, &mut memory, 2);
+            fake.patch = Some((Rect::new(108, 108, 40, 40), 200));
+            run(&mut fake, &mut memory, 2);
+            // The snip: the screen darkens and the mark goes unconfirmed for
+            // a pass.
+            fake.dim_left_of = Some(i32::MAX);
+            fake.seen = false;
+            run(&mut fake, &mut memory, 1);
+            fake.seen = true;
+            run(&mut fake, &mut memory, 2);
+            // A selection dragged in from the right, past the bar's start.
+            for edge in (100..=316).rev().step_by(8) {
+                fake.dim_left_of = Some(edge);
+                run(&mut fake, &mut memory, 2);
+            }
+            assert_eq!(fake.notified, Vec::<Event>::new(), "during the snip");
+            // Esc, and the fill goes on.
+            fake.dim_left_of = None;
+            for filled in [40, 40, 80, 110, 160, 160, 200, 200] {
+                fake.patch = Some((Rect::new(108, 108, filled, 40), 200));
+                run(&mut fake, &mut memory, 1);
+            }
+            assert_eq!(fake.notified, vec![Event::Reached(50), Event::Filled]);
+        }
+
         /// The maintainer's rig pass of 2026-11-11: an area drawn with page
         /// around the bar. The border falls on the page, and the bar is full
-        /// at its last pixel whether or not UP-TAKE is in captures.
+        /// at its last line, to a pixel, whether or not UP-TAKE is in captures.
         #[test]
-        fn a_bar_area_with_page_around_it_is_full_at_its_last_pixel() {
+        fn a_bar_area_with_page_around_it_is_full_at_its_last_line() {
             for in_captures in [false, true] {
                 let bounds = Rect::new(100, 100, 216, 56);
                 let mut list = targets_for(&[bounds], Watch::Fills);
@@ -2162,13 +2255,13 @@ mod tests {
                 fake.track = Some((Rect::new(108, 108, 200, 40), 120));
                 let mut memory = Memory::default();
                 run(&mut fake, &mut memory, 2);
-                for filled in [40, 80, 110, 160, 196, 199, 200, 200] {
+                for filled in [40, 80, 110, 160, 196, 197, 198, 199, 200, 200] {
                     let before = fake.notified.len();
                     fake.patch = Some((Rect::new(108, 108, filled, 40), 200));
                     run(&mut fake, &mut memory, 1);
                     let expected = match filled {
-                        110 => vec![Event::Reached(50)],
-                        200 if before == 1 => vec![Event::Filled],
+                        160 => vec![Event::Reached(50)],
+                        198 if before == 1 => vec![Event::Filled],
                         _ => Vec::new(),
                     };
                     assert_eq!(
@@ -2178,6 +2271,32 @@ mod tests {
                     );
                 }
             }
+        }
+
+        /// A bar that has reached a percentage and not yet held it for half a
+        /// second is waiting on readings, and a still screen sends no frames:
+        /// the loop asks to be woken in [`SETTLE_POLL`], not [`IDLE`], and
+        /// the card comes without another frame (2026-11-19).
+        #[test]
+        fn a_bar_waiting_out_a_percentage_is_read_without_a_frame() {
+            use super::super::{IDLE, SETTLE_POLL};
+            let bounds = Rect::new(100, 100, 200, 40);
+            let mut list = targets_for(&[bounds], Watch::Fills);
+            list[0].tuning.marks = [50, 0, 0, 0];
+            let mut fake = Fake::new(list);
+            fake.level = 40;
+            let mut memory = Memory::default();
+            run(&mut fake, &mut memory, 2);
+            fake.patch = Some((Rect::new(100, 100, 110, 40), 200));
+            assert_eq!(
+                pass(&mut fake, &mut memory),
+                Some(SETTLE_POLL),
+                "50% reached, held for half a second first"
+            );
+            assert!(fake.notified.is_empty());
+            // No frame changed since: the same picture, the next reading.
+            assert_eq!(pass(&mut fake, &mut memory), Some(IDLE));
+            assert_eq!(fake.notified, vec![Event::Reached(50)]);
         }
 
         /// The card for each of the bar's moments: the full bar, and each
