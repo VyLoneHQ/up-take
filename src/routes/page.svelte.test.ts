@@ -88,7 +88,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { render } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
-import type { AreaKind } from '$lib/overlay-state';
+import type { AreaKind } from '#lib/overlay-state';
 import areaRs from '../../crates/uptake-core/src/area.rs?raw';
 import overlayRs from '../../src-tauri/src/overlay.rs?raw';
 
@@ -709,7 +709,7 @@ describe('an area renders the badges its state earns and no others', () => {
    * Roadmap 1.58: the page tells Rust which watching marks it can see, by id
    * and the bounds it drew them at, and Rust reads only those (watch.rs
    * `confirm`). jsdom lays nothing out, so the dot's and the badge's boxes are
-   * given here; the rule itself is $lib/mark-check's and tested there.
+   * given here; the rule itself is #lib/mark-check's and tested there.
    */
   test('the page confirms a watching mark only while its dot can be seen', async () => {
     const box = (x: number, y: number, width: number, height: number) =>

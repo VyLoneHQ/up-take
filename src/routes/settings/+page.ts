@@ -3,7 +3,7 @@
  *
  * # Why this file exists at all
  *
- * `svelte.config.js` uses `adapter-static` with `fallback: 'index.html'`, which
+ * `vite.config.js` gives `adapter-static` a `fallback: 'index.html'`, which
  * is SPA mode: **nothing is prerendered**, one `index.html` is emitted, and the
  * client router resolves every path after the page has loaded. That is right
  * for the overlay, which is the only window that existed until now and is

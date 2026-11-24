@@ -1,5 +1,5 @@
 {
-  "extends": "./.svelte-kit/tsconfig.json",
+  "extends": "$app/tsconfig",
   "compilerOptions": {
     "allowJs": true,
     "checkJs": true,
@@ -9,10 +9,16 @@
     "skipLibCheck": true,
     "sourceMap": true,
     "strict": true,
-    "moduleResolution": "bundler"
+    "moduleResolution": "bundler",
+    // `#lib` is a package.json subpath import (SvelteKit 3 removed `$lib`). Vite
+    // resolves it from package.json; TypeScript does not add file extensions
+    // to a subpath-import target, so it reads the same mapping from here.
+    "paths": {
+      "#lib/*": ["./src/lib/*"]
+    }
   }
   // Path aliases are handled by https://svelte.dev/docs/kit/configuration#alias
-  // except $lib which is handled by https://svelte.dev/docs/kit/configuration#files
+  // except #lib, which is the paths entry above and package.json's `imports`
   //
   // If you want to overwrite includes/excludes, make sure to copy over the relevant includes/excludes
   // from the referenced tsconfig.json - TypeScript does not merge them in
