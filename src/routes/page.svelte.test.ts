@@ -88,7 +88,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { render } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
-import type { AreaKind } from '$lib/overlay-state';
+import type { AreaKind } from '#lib/overlay-state';
 import areaRs from '../../crates/uptake-core/src/area.rs?raw';
 import overlayRs from '../../src-tauri/src/overlay.rs?raw';
 
@@ -138,6 +138,25 @@ const Page = (await import('./+page.svelte')).default;
 type Wire = [number, number, number, number];
 
 /** The four-monitor dev rig, which is where the frozen-badge defect lives. */
+/**
+ * A CSS value as these tests compare it, whichever jsdom serialised it.
+ *
+ * jsdom 31 writes computed-style text in CSS's canonical form: a zero length
+ * keeps its unit (`translate3d(1px, 2px, 0px)`) and the commands of a `path()`
+ * are spaced (`M 2560 0 h 1920 ...`). jsdom 30 kept what the page wrote
+ * (`0`, `M2560 0h1920...`). The page did not change, so the tests read both
+ * forms as the page's own.
+ */
+function asWritten(css: string | null | undefined): string {
+  return (css ?? '')
+    .replace(/(\(|,\s*)0px(?=[,)])/g, (_match, lead: string) => `${lead}0`)
+    .replace(
+      /path\(([^)]*)\)/g,
+      (_match, body: string) =>
+        `path(${body.replace(/\s*([MmHhVvLlZz])\s*/g, '$1')})`,
+    );
+}
+
 const PRIMARY: Wire = [0, 0, 2560, 1440];
 const SECOND: Wire = [2560, 0, 1920, 1080];
 const THIRD: Wire = [-1080, 0, 1080, 1920];
@@ -270,12 +289,25 @@ function bornMagnified(kind: AreaKind, source: string = areaRs): boolean {
     .join('\n');
 
   // One arm: its `|`-separated variants on the left, its value on the right.
-  // Written as one regex over the whole match rather than as a hand-rolled
-  // splitter, because the arms ARE `|`-grouped today (all the variants share a
-  // single `=> Zoom::NATURAL`) and a per-line reading would find no variant on
-  // the line that carries the value.
-  const arms = body.matchAll(/((?:\s*\|?\s*Self::\w+)+)\s*=>\s*([^,\n]+)/g);
-  for (const [, left, value] of arms) {
+  // The arms ARE `|`-grouped today (all the variants share a single
+  // `=> Zoom::NATURAL`), so a per-line reading would find no variant on the
+  // line that carries the value: the body is split at each `=>` instead. An
+  // arm's variants are the `Self::` names after the previous arm's comma; its
+  // value runs to the next comma or line end.
+  //
+  // No regex spans an arm, on purpose. The first form,
+  // `((?:\s*\|?\s*Self::\w+)+)\s*=>`, backtracked exponentially on a long run
+  // of variants (CodeQL js/redos, alert 1), and an anchored rewrite was still
+  // quadratic when the `=>` was missing (review of #184, round 1). A split is
+  // linear in the body whatever shape it has.
+  const pieces = body.split('=>');
+  const arms = pieces.slice(1).map((after, index) => {
+    const before = pieces[index] ?? '';
+    const left = before.slice(before.lastIndexOf(',') + 1);
+    const end = after.search(/[,\n]/);
+    return [left, end === -1 ? after : after.slice(0, end)] as const;
+  });
+  for (const [left, value] of arms) {
     const variants = (left ?? '').match(/Self::(\w+)/g) ?? [];
     for (const variant of variants) {
       if (variant.slice('Self::'.length).toLowerCase() === kind) {
@@ -709,7 +741,7 @@ describe('an area renders the badges its state earns and no others', () => {
    * Roadmap 1.58: the page tells Rust which watching marks it can see, by id
    * and the bounds it drew them at, and Rust reads only those (watch.rs
    * `confirm`). jsdom lays nothing out, so the dot's and the badge's boxes are
-   * given here; the rule itself is $lib/mark-check's and tested there.
+   * given here; the rule itself is #lib/mark-check's and tested there.
    */
   test('the page confirms a watching mark only while its dot can be seen', async () => {
     const box = (x: number, y: number, width: number, height: number) =>
@@ -1046,7 +1078,7 @@ describe('an area outside chrome appears with its hover and not otherwise', () =
 
     const bar = container.querySelector('.grab-bar') as HTMLElement;
     // dpr is 1 and the origin is [0, 0] in `state()`, so CSS px equal physical.
-    expect(bar.style.transform).toBe('translate3d(100px, 82px, 0)');
+    expect(asWritten(bar.style.transform)).toBe('translate3d(100px, 82px, 0)');
     expect(bar.style.width).toBe('400px');
     expect(bar.style.height).toBe('18px');
   });
@@ -1071,7 +1103,7 @@ describe('an area outside chrome appears with its hover and not otherwise', () =
     await hover(1);
 
     const bar = container.querySelector('.grab-bar') as HTMLElement;
-    expect(bar.style.transform).toBe('translate3d(100px, 300px, 0)');
+    expect(asWritten(bar.style.transform)).toBe('translate3d(100px, 300px, 0)');
   });
 
   test('the armed badge names the type the way the rest of the product does, not by its wire name', async () => {
@@ -1234,7 +1266,7 @@ describe('an area outside chrome appears with its hover and not otherwise', () =
     await hover(1);
 
     const placed = [...container.querySelectorAll('.outside-handle')].map(
-      (node) => (node as HTMLElement).style.transform,
+      (node) => asWritten((node as HTMLElement).style.transform),
     );
     expect(placed).toEqual([
       'translate3d(301px, 282px, 0)',
@@ -1395,7 +1427,7 @@ describe('a freeze hides the covered monitors before the page confirms', () => {
       if (command === 'overlay_freeze_hidden') {
         confirmed.push({
           token: (args as { token: unknown }).token,
-          style: main?.getAttribute('style') ?? null,
+          style: asWritten(main?.getAttribute('style')),
         });
       }
       return Promise.resolve(invokeReplies.get(command));
@@ -1537,7 +1569,7 @@ describe('a freeze hides the covered monitors before the page confirms', () => {
       configurable: true,
     });
     await emit('overlay://state', state());
-    expect(main?.getAttribute('style') ?? '').toContain(
+    expect(asWritten(main?.getAttribute('style'))).toContain(
       'M1280 0h960v540h-960Z',
     );
     frames.shift()?.(0);

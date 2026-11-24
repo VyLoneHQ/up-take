@@ -17,11 +17,11 @@ import {
   nextExpiry,
   receive,
   release,
-} from '$lib/notice';
-import { TONES } from '$lib/tones';
+} from '#lib/notice';
+import { TONES } from '#lib/tones';
 
 // UP-TAKE's notification stack (ADR-0054; the rules and their tests are in
-// $lib/notice). Rust shows this window without focus at the top centre of
+// #lib/notice). Rust shows this window without focus at the top centre of
 // its monitor; this page draws the cards and sizes the window to them.
 
 /** How long cards take to move, enter and leave. */
