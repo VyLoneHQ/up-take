@@ -88,11 +88,13 @@ REQUIRED_NUMBERS = (
     "NOTICES_SIZE",
 )
 
-#: Which member of the archive becomes which installed file. The archive's
-#: entries all sit under a single versioned directory, which is why the version
-#: is interpolated rather than hardcoded.
+#: Which member of the archive becomes which installed file, by its path in
+#: the NuGet package `Microsoft.ML.OnnxRuntime` (a ZIP). Until 2026-11-24 the
+#: pin was GitHub's `onnxruntime-win-x64-<version>.zip`, whose members sat under
+#: one versioned directory; that release host went away (UP-TAKE `I-492`), and
+#: the package carries the same three files, byte for byte, at these paths.
 MEMBERS = {
-    "RUNTIME": "lib/onnxruntime.dll",
+    "RUNTIME": "runtimes/win-x64/native/onnxruntime.dll",
     "LICENCE": "LICENSE",
     "NOTICES": "ThirdPartyNotices.txt",
 }
@@ -232,7 +234,6 @@ def main() -> int:
     # Two phases is the whole fix, and it makes the invariant structural instead
     # of a claim: staging cannot be left half-updated because nothing is written
     # until everything has passed.
-    root = "onnxruntime-win-x64-" + str(pins["VERSION"])
     verified: list[tuple[Path, bytes]] = []
     out: Path = arguments.out
 
@@ -246,7 +247,7 @@ def main() -> int:
             name = rust_consts.plain_file_name(
                 str(pins[key + "_FILE_NAME"]), key + "_FILE_NAME"
             )
-            path = root + "/" + member
+            path = member
             try:
                 extracted = archive.read(path)
             except KeyError:
