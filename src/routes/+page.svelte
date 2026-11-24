@@ -3,16 +3,16 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { onMount, tick } from 'svelte';
 import { SvelteMap } from 'svelte/reactivity';
-import { appearanceStyle } from '$lib/appearance';
-import Coach from '$lib/Coach.svelte';
+import { appearanceStyle } from '#lib/appearance';
+import Coach from '#lib/Coach.svelte';
 import {
   type FreezeHidePayload,
   type FreezeRevealPayload,
   hiddenClipPath,
   nextAnimationFrame,
-} from '$lib/freeze-mask';
-import { COVERS, markSeen } from '$lib/mark-check';
-import { overflowFade } from '$lib/overflow-fade';
+} from '#lib/freeze-mask';
+import { COVERS, markSeen } from '#lib/mark-check';
+import { overflowFade } from '#lib/overflow-fade';
 import {
   type ActiveMonitorPayload,
   type AreaFrame,
@@ -71,10 +71,10 @@ import {
   stillsFromWire,
   toggleFreeze,
   toggleHeldFocusedArea,
-} from '$lib/overlay-state';
-import { type CssRect, isDismissKey } from '$lib/regions';
-import type { Settings } from '$lib/settings-model';
-import { isLanguage, type Language, text } from '$lib/strings';
+} from '#lib/overlay-state';
+import { type CssRect, isDismissKey } from '#lib/regions';
+import type { Settings } from '#lib/settings-model';
+import { isLanguage, type Language, text } from '#lib/strings';
 
 // The two appearance settings (roadmap 1.14). Held as percentages, exactly as
 // they are stored and as the settings window shows them; `appearance.ts` turns
@@ -660,7 +660,7 @@ onMount(() => {
  * in the overlay state it is reading in (`src-tauri/src/watch.rs`).
  *
  * The page measures because only it knows where the mark is laid out, at what
- * size in this scale and language, and what is drawn over it ($lib/mark-check).
+ * size in this scale and language, and what is drawn over it (#lib/mark-check).
  * Anything drawn after a mark is drawn over it (COVERS), and a freeze's mask
  * hides whole monitors.
  */
@@ -1311,7 +1311,7 @@ $effect(() => {
 
 /* The watching mark: present exactly while the area reads its region. */
 /* Kept inside the area, clipped at its end so the dot shows first. The page
-   tells the host which marks it can see (confirmMarks, $lib/mark-check): a
+   tells the host which marks it can see (confirmMarks, #lib/mark-check): a
    dot cut off by a small area, off the desktop, or under anything the page
    draws above it (COVERS) or a freeze's mask is not seen, and the host does
    not read that area (watch.rs `confirm`, review of

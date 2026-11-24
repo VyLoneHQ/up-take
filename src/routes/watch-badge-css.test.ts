@@ -28,7 +28,7 @@ describe('the watching mark stays inside its area', () => {
 
 /**
  * The page confirms a mark only when its dot lies wholly inside the badge
- * ($lib/mark-check, `markSeen`). Since 2026-11-10 the dot is a drawn box of
+ * (#lib/mark-check, `markSeen`). Since 2026-11-10 the dot is a drawn box of
  * a fixed size, so its box is what is drawn; a glyph dot's box was the
  * font's whole glyph, taller than its badge, and no mark was ever confirmed
  * on a real screen until 2026-11-03. jsdom does no layout, so the size is
