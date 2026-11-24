@@ -50,7 +50,13 @@ fn load(path: &std::path::Path) -> Vec<Frame> {
     frames
 }
 
+/// The direction each style is read with: its own, or, with
+/// `BAR_DIRECTION=auto`, [`Direction::Auto`] for every style (roadmap `1.74`:
+/// every fixture must give the same events found by itself).
 fn direction_of(style: &str) -> Direction {
+    if std::env::var("BAR_DIRECTION").is_ok_and(|value| value == "auto") {
+        return Direction::Auto;
+    }
     match style {
         "rtl" => Direction::RightToLeft,
         "vertical" => Direction::BottomToTop,

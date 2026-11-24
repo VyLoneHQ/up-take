@@ -13,6 +13,7 @@ export const WATCHES: readonly PanelWatch[] = ['changes', 'settles', 'fills'];
 
 /** Which end a bar fills from, for "fills" (roadmap 1.61). */
 export type PanelDirection =
+  | 'auto'
   | 'left_to_right'
   | 'right_to_left'
   | 'top_to_bottom'
@@ -20,6 +21,7 @@ export type PanelDirection =
 
 /** The directions, in the order the panel shows them. */
 export const DIRECTIONS: readonly PanelDirection[] = [
+  'auto',
   'left_to_right',
   'right_to_left',
   'top_to_bottom',

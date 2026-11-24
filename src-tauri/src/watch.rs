@@ -2350,6 +2350,7 @@ mod tests {
             let bounds = Rect::new(100, 100, 200, 40);
             let mut list = targets_for(&[bounds], Watch::Fills);
             list[0].tuning.marks = [50, 0, 0, 0];
+            list[0].tuning.direction = uptake_core::watch::Direction::LeftToRight;
             let mut fake = Fake::new(list);
             fake.level = 40;
             let mut memory = Memory::default();
@@ -2382,9 +2383,32 @@ mod tests {
             assert_eq!(crate::watch::card_moment(Event::Changed).0, "changed");
         }
 
+        /// Roadmap `1.74`: with the direction found by itself, a bar that
+        /// jumps once to 55% and holds is taken after a second of leading
+        /// ([`uptake_core::watch::Direction::Auto`]), and the loop keeps
+        /// reading a still screen until it is, then the card comes.
+        #[test]
+        fn an_auto_bar_that_jumps_and_holds_is_read_without_a_frame() {
+            use super::super::SETTLE_POLL;
+            let bounds = Rect::new(100, 100, 200, 40);
+            let mut list = targets_for(&[bounds], Watch::Fills);
+            list[0].tuning.marks = [50, 0, 0, 0];
+            let mut fake = Fake::new(list);
+            fake.level = 40;
+            let mut memory = Memory::default();
+            run(&mut fake, &mut memory, 2);
+            fake.patch = Some((Rect::new(100, 100, 110, 40), 200));
+            assert_eq!(pass(&mut fake, &mut memory), Some(SETTLE_POLL));
+            for _ in 0..4 {
+                let _ = pass(&mut fake, &mut memory);
+            }
+            assert_eq!(fake.notified, vec![Event::Reached(50)]);
+        }
+
         /// The bar mode and its settings are kept as the store keeps the rest:
         /// they read back as themselves, and a tuning saved before them reads
-        /// with their defaults.
+        /// with their defaults: since roadmap `1.74` the direction found by
+        /// itself.
         #[test]
         fn the_bar_mode_and_its_tuning_round_trip() {
             use uptake_core::watch::{Direction, MARKS, Tuning};
@@ -2401,7 +2425,7 @@ mod tests {
             let old: Result<Tuning, _> = serde_json::from_str(r#"{"notify":"each","calm_ms":200}"#);
             assert_eq!(
                 old.ok().map(|tuning| (tuning.direction, tuning.marks)),
-                Some((Direction::LeftToRight, [0; MARKS]))
+                Some((Direction::Auto, [0; MARKS]))
             );
         }
 
