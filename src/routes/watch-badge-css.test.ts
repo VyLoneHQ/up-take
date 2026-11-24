@@ -59,7 +59,7 @@ describe('the watching dot fits inside its badge', () => {
 /**
  * The maintainer, 2026-11-10: the dot animates while it watches, subtly,
  * and the two states stay easy to tell apart. Pinned in the source, since
- * jsdom runs no animation: the watching dot breathes by opacity only (its
+ * jsdom runs no animation: the watching dot breathes by its fill's alpha only (its
  * box, which markSeen measures, never moves), the paused ring has no
  * animation, and reduced motion stops the breathing.
  */
@@ -72,19 +72,50 @@ describe('the status dot', () => {
   const breathe =
     page.match(/@keyframes watch-breathe \{([\s\S]*?)\n\}/)?.[1] ?? '';
 
-  it('pulses once per redraw while it watches, by opacity alone', () => {
+  it('pulses once per redraw while it watches, by its alpha alone', () => {
     expect(watching).toContain('animation: watch-breathe');
     // One-shot: an infinite animation woke its own watch area about 12
     // times a second on a still screen (measured 2026-11-10).
     expect(watching).not.toContain('infinite');
     expect(watching).toMatch(/watch-breathe [\d.]+s ease-in-out 1;/);
-    expect(breathe).toContain('opacity');
-    expect(breathe).not.toMatch(/width|height|transform|top|left|margin/);
+    // The dot's own alpha, repainted in place: an opacity animation lifts the
+    // dot onto a layer rasterised at its own fractional offset, and the dot
+    // then looked different breathing than resting (2026-11-19).
+    expect(breathe).toContain('--dot-alpha');
+    expect(breathe).not.toMatch(
+      /opacity|width|height|transform|top|left|margin/,
+    );
+  });
+
+  it('is a gradient in its box, not a rounded box with a shadow', () => {
+    // A rounded clip and an inset shadow rasterise differently at each
+    // fractional scale, which left stray light pixels at the dot's top and
+    // left (2026-11-19, tools/bar-harness/dot-check.mjs).
+    const shared =
+      page.match(/\.watch-dot,\s*\.held-dot \{([^}]*)\}/)?.[1] ?? '';
+    for (const rule of [shared, watching, paused]) {
+      expect(rule).not.toMatch(/border-radius|box-shadow|will-change/);
+    }
+    expect(watching).toContain('radial-gradient');
+    expect(paused).toContain('radial-gradient');
   });
 
   it('holds still while paused, and looks different without colour', () => {
     expect(paused).not.toContain('animation');
-    expect(paused).toContain('inset 0 0 0 1.5px');
+    expect(paused).toContain('radial-gradient');
+    // Not the watching dot without its breath (review of #178, round 4): the
+    // paused ring has none of the watching green, and its light grey band sits
+    // around a dark centre, so it is hollow where the watching dot is filled.
+    expect(paused).not.toMatch(/110 230 160/);
+    expect(paused).toMatch(/rgb\(190, 190, 190\)/);
+    const stops = [...paused.matchAll(/(rgba?\([^)]*\))\s+([\d.]+)px/g)];
+    const firstGrey = stops.findIndex(([, colour]) =>
+      colour.includes('190, 190, 190'),
+    );
+    expect(firstGrey).toBeGreaterThan(0);
+    expect(
+      stops.slice(0, firstGrey).every(([, colour]) => !colour.includes('190')),
+    ).toBe(true);
   });
 
   it('stops breathing when Windows asks for less motion', () => {
