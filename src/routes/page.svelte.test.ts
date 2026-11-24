@@ -138,6 +138,25 @@ const Page = (await import('./+page.svelte')).default;
 type Wire = [number, number, number, number];
 
 /** The four-monitor dev rig, which is where the frozen-badge defect lives. */
+/**
+ * A CSS value as these tests compare it, whichever jsdom serialised it.
+ *
+ * jsdom 31 writes computed-style text in CSS's canonical form: a zero length
+ * keeps its unit (`translate3d(1px, 2px, 0px)`) and the commands of a `path()`
+ * are spaced (`M 2560 0 h 1920 ...`). jsdom 30 kept what the page wrote
+ * (`0`, `M2560 0h1920...`). The page did not change, so the tests read both
+ * forms as the page's own.
+ */
+function asWritten(css: string | null | undefined): string {
+  return (css ?? '')
+    .replace(/(\(|,\s*)0px(?=[,)])/g, (_match, lead: string) => `${lead}0`)
+    .replace(
+      /path\(([^)]*)\)/g,
+      (_match, body: string) =>
+        `path(${body.replace(/\s*([MmHhVvLlZz])\s*/g, '$1')})`,
+    );
+}
+
 const PRIMARY: Wire = [0, 0, 2560, 1440];
 const SECOND: Wire = [2560, 0, 1920, 1080];
 const THIRD: Wire = [-1080, 0, 1080, 1920];
@@ -1059,7 +1078,7 @@ describe('an area outside chrome appears with its hover and not otherwise', () =
 
     const bar = container.querySelector('.grab-bar') as HTMLElement;
     // dpr is 1 and the origin is [0, 0] in `state()`, so CSS px equal physical.
-    expect(bar.style.transform).toBe('translate3d(100px, 82px, 0)');
+    expect(asWritten(bar.style.transform)).toBe('translate3d(100px, 82px, 0)');
     expect(bar.style.width).toBe('400px');
     expect(bar.style.height).toBe('18px');
   });
@@ -1084,7 +1103,7 @@ describe('an area outside chrome appears with its hover and not otherwise', () =
     await hover(1);
 
     const bar = container.querySelector('.grab-bar') as HTMLElement;
-    expect(bar.style.transform).toBe('translate3d(100px, 300px, 0)');
+    expect(asWritten(bar.style.transform)).toBe('translate3d(100px, 300px, 0)');
   });
 
   test('the armed badge names the type the way the rest of the product does, not by its wire name', async () => {
@@ -1247,7 +1266,7 @@ describe('an area outside chrome appears with its hover and not otherwise', () =
     await hover(1);
 
     const placed = [...container.querySelectorAll('.outside-handle')].map(
-      (node) => (node as HTMLElement).style.transform,
+      (node) => asWritten((node as HTMLElement).style.transform),
     );
     expect(placed).toEqual([
       'translate3d(301px, 282px, 0)',
@@ -1408,7 +1427,7 @@ describe('a freeze hides the covered monitors before the page confirms', () => {
       if (command === 'overlay_freeze_hidden') {
         confirmed.push({
           token: (args as { token: unknown }).token,
-          style: main?.getAttribute('style') ?? null,
+          style: asWritten(main?.getAttribute('style')),
         });
       }
       return Promise.resolve(invokeReplies.get(command));
@@ -1550,7 +1569,7 @@ describe('a freeze hides the covered monitors before the page confirms', () => {
       configurable: true,
     });
     await emit('overlay://state', state());
-    expect(main?.getAttribute('style') ?? '').toContain(
+    expect(asWritten(main?.getAttribute('style'))).toContain(
       'M1280 0h960v540h-960Z',
     );
     frames.shift()?.(0);
