@@ -566,8 +566,14 @@ pub struct Tuning {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Direction {
-    /// From the left edge to the right: most bars, so the default.
+    /// Found by itself (roadmap `1.74`, the founder's wish of 2026-11-20):
+    /// the default. A wider area reads a bar that fills sideways, a taller
+    /// one a bar that fills up or down, and a square one tries all four ends;
+    /// of the ends tried, the one the fill grows from first is taken
+    /// ([`Bar`]'s `rivals`).
     #[default]
+    Auto,
+    /// From the left edge to the right: most bars.
     LeftToRight,
     /// From the right edge to the left.
     RightToLeft,
@@ -595,7 +601,7 @@ impl Default for Tuning {
             sample_ms: 0,
             share_permille: 0,
             settle_ms: 1_000,
-            direction: Direction::LeftToRight,
+            direction: Direction::Auto,
             marks: [0; MARKS],
         }
     }
@@ -874,9 +880,14 @@ impl Detector {
         self.clock = at;
         if let Some(bar) = &mut self.bar {
             if reading.windowed {
-                // Learned from the next reading with no window over it.
+                // Learned from the next reading with no window over it, and
+                // an undecided Auto tries its ends again then.
                 bar.empty = None;
+                bar.rivals.clear();
             } else {
+                for rival in &mut bar.rivals {
+                    rival.learn(reading.clone());
+                }
                 bar.learn(reading);
             }
             return;
@@ -908,6 +919,15 @@ impl Detector {
             // Nothing was seen during the wait: a relearn's stillness starts
             // again from the next reading (review of `#179`, round 8).
             bar.still = None;
+            for rival in &mut bar.rivals {
+                rival.covering = true;
+                rival.held = [None; MARKS];
+                rival.attached = None;
+                rival.still = None;
+                rival.drop_pending();
+            }
+            bar.drop_pending();
+            bar.leading = (None, 0, 0, Duration::ZERO);
         }
     }
 
@@ -1153,6 +1173,27 @@ struct Bar {
     /// for [`RELEARN_AFTER`], shows a new page, and the bar is learned again
     /// from it.
     still: Option<(Duration, Fingerprint)>,
+    /// Whether the area's direction is [`Direction::Auto`]: [`Self::direction`]
+    /// is then the end taken, or the first of those tried while undecided.
+    auto: bool,
+    /// While [`Self::auto`] is undecided: the same bar read from the other
+    /// ends tried (the other end of the axis, or the three others of a
+    /// square area). The first end whose fill grows past what it showed at
+    /// its first reading, while no other's does, is taken.
+    rivals: Vec<Bar>,
+    /// The progress the first reading showed, against which growth is told.
+    first: u8,
+    /// Which end alone has grown (0 this one, then the rivals), how many
+    /// times its progress has risen since ([`AUTO_RISES`] decide), the
+    /// progress it last showed, and since when it has led without falling
+    /// back ([`AUTO_LEAD`] decides too).
+    leading: (Option<usize>, u8, u8, Duration),
+    /// While [`Self::auto`] is undecided: the moment this end would have
+    /// reported, kept for the moment it is taken.
+    pending: Option<Event>,
+    /// What this end had reported before [`Self::pending`]: restored when a
+    /// pending moment is dropped, so it is reported again once seen again.
+    pending_from: u8,
     /// Since when every reading has shown the bar filled from its start end,
     /// with nothing over it: a fill that has done so for [`STEADY_FILL`] is
     /// not an indeterminate bar's sweep, and its percentages need no calm.
@@ -1185,6 +1226,24 @@ pub const STEADY_FILL: Duration = Duration::from_secs(3);
 /// long is learned as the bar, and dragging it on can report one false full
 /// bar.
 pub const RELEARN_AFTER: Duration = Duration::from_secs(5);
+
+/// How far, in percent, one end's fill must grow past what it showed at the
+/// first reading before [`Direction::Auto`] takes that end: enough that a
+/// striped or shimmering bar's movement read from the wrong end is not taken
+/// for growth.
+const AUTO_GROWTH: u8 = 3;
+
+/// How many times one end's progress must rise, while it alone has grown,
+/// before [`Direction::Auto`] takes it: three. Not readings in a row: read
+/// from the wrong end, a striped bar placed part full looked filled to 97%
+/// for two frames, read many times each, and fell back; a fill keeps rising.
+const AUTO_RISES: u8 = 3;
+
+/// How long one end may lead without falling back, while the other end has
+/// not moved at all, before [`Direction::Auto`] takes it, however few times it
+/// rose: a second. A bar that jumps once and then holds (one updated in large
+/// steps, or read seldom) rises once.
+const AUTO_LEAD: Duration = Duration::from_secs(1);
 
 /// How many lines of page may lie between two stretches of a bar and still
 /// leave them one bar: the break between the blocks of a segmented bar (4
@@ -1249,20 +1308,49 @@ impl Bar {
     /// passed is not reported late (review of `#170`, round 4).
     fn tune(&mut self, tuning: Tuning) {
         let tuning = tuning.clamped();
-        if tuning.direction != self.direction {
+        if tuning.direction == Direction::Auto {
+            if !self.auto {
+                // Found again from the next reading.
+                self.auto = true;
+                self.rivals.clear();
+                self.empty = None;
+            }
+        } else if self.auto || tuning.direction != self.direction {
+            self.auto = false;
+            self.rivals.clear();
             self.direction = tuning.direction;
             self.empty = None;
         }
-        if tuning.marks != self.marks {
+        self.set_marks(tuning.marks);
+        // Both ends of an undecided Auto keep the same percentages, or the
+        // end taken later would bring back old ones (review of `#180`,
+        // round 1).
+        for rival in &mut self.rivals {
+            rival.set_marks(tuning.marks);
+        }
+    }
+
+    /// Takes the area's percentages. New ones count from where the bar
+    /// already is: one the bar has passed is not reported late (review of
+    /// `#170`, round 4).
+    fn set_marks(&mut self, marks: [u8; MARKS]) {
+        if marks != self.marks {
+            // What waited for Auto to take an end was measured against the
+            // old percentages (review of `#180`, round 6: a percentage removed
+            // while Auto decided was still reported).
+            self.drop_pending();
             self.reported = self.reported.max(self.seen);
             self.held = [None; MARKS];
         }
-        self.marks = tuning.marks;
+        self.marks = marks;
     }
 
     /// Whether a percentage has been reached and is waiting out its calm.
     fn is_waiting(&self) -> bool {
+        // An undecided [`Direction::Auto`] with one end leading waits out
+        // [`AUTO_LEAD`] too, and a still screen sends no frame to end it.
         self.held.iter().any(Option::is_some)
+            || (!self.rivals.is_empty() && self.leading.0.is_some())
     }
 
     /// Whether cell `at` is on the bar's track.
@@ -1359,6 +1447,11 @@ impl Bar {
         self.clear = Some(reading.clone());
         self.covering = false;
         self.attached = None;
+        // Learned again (a route switch, a resize, a page changed for good):
+        // what waited to be reported is gone with what it was measured
+        // against (review of `#180`, round 4).
+        self.pending = None;
+        self.leading = (None, 0, 0, Duration::ZERO);
         self.still = None;
         let direction = self.direction;
         let lines = reading.lines(direction);
@@ -1520,6 +1613,7 @@ impl Bar {
         self.start = start;
         let (percent, _) = self.progress(&reading, &reading).unwrap_or((0, false));
         self.reported = percent;
+        self.first = percent;
         self.seen = percent;
         self.held = [None; MARKS];
         self.empty = Some(reading);
@@ -1940,6 +2034,180 @@ impl Bar {
     /// Takes one reading, made at `at`, and says whether it is a moment worth
     /// reporting.
     fn observe(&mut self, reading: Fingerprint, at: Duration) -> Option<Event> {
+        if !self.auto {
+            return self.observe_one(reading, at);
+        }
+        let resized = self.empty.as_ref().is_some_and(|empty| {
+            (empty.columns, empty.rows, empty.edge) != (reading.columns, reading.rows, reading.edge)
+        });
+        if self.empty.is_none() || resized {
+            // Never learned under one of UP-TAKE's own windows (review of
+            // `#179`, round 6): the ends are tried from the next clear reading.
+            if reading.windowed {
+                self.rivals.clear();
+                return None;
+            }
+            // The axis from the area's shape, and its ends learned: a square
+            // area tries all four (review of `#180`, round 4).
+            let ends: &[Direction] = if reading.columns > reading.rows {
+                &[Direction::LeftToRight, Direction::RightToLeft]
+            } else if reading.rows > reading.columns {
+                &[Direction::TopToBottom, Direction::BottomToTop]
+            } else {
+                &[
+                    Direction::LeftToRight,
+                    Direction::RightToLeft,
+                    Direction::TopToBottom,
+                    Direction::BottomToTop,
+                ]
+            };
+            self.direction = ends[0];
+            self.rivals = ends[1..]
+                .iter()
+                .map(|&direction| {
+                    let mut rival = Self {
+                        direction,
+                        marks: self.marks,
+                        ..Self::default()
+                    };
+                    rival.learn(reading.clone());
+                    rival
+                })
+                .collect();
+            self.learn(reading);
+            self.leading = (None, 0, 0, at);
+            return None;
+        }
+        if self.rivals.is_empty() {
+            return self.observe_one(reading, at);
+        }
+        let mut rivals = std::mem::take(&mut self.rivals);
+        let before: Vec<u8> = std::iter::once(self.reported)
+            .chain(rivals.iter().map(|rival| rival.reported))
+            .collect();
+        let mut events = vec![self.observe_one(reading.clone(), at)];
+        for rival in &mut rivals {
+            events.push(rival.observe_one(reading.clone(), at));
+        }
+        let count = events.len();
+        // Nothing is taken from a covered reading, the choice of end
+        // included: the lead and what any end waits to report start again
+        // (review of `#180`, round 3: a lead run out under Win+Shift+S
+        // released a waiting percentage).
+        if (0..count).any(|end| Self::end(self, &mut rivals, end).covering) {
+            self.leading = (None, 0, 0, at);
+            for end in 0..count {
+                Self::end(self, &mut rivals, end).drop_pending();
+            }
+            self.rivals = rivals;
+            return None;
+        }
+        // A moment an end reports while undecided waits for it to be taken.
+        for (end, (event, from)) in events.into_iter().zip(before).enumerate() {
+            let bar = Self::end(self, &mut rivals, end);
+            if event.is_some() {
+                if bar.pending.is_none() {
+                    bar.pending_from = from;
+                }
+                bar.pending = event;
+            }
+        }
+        // A bar every end reads as full is full, from whichever end it
+        // filled: one that jumps from empty to full in a reading leaves the
+        // ends tied for good (review of `#180`, round 1). Reported, and no
+        // end taken: the next fill decides (round 2, which found the first
+        // end tried kept for good).
+        if (0..count).all(|end| Self::end(self, &mut rivals, end).pending == Some(Event::Filled)) {
+            self.leading = (None, 0, 0, at);
+            for rival in &mut rivals {
+                rival.pending = None;
+            }
+            self.rivals = rivals;
+            return self.pending.take();
+        }
+        let grown: Vec<bool> = (0..count)
+            .map(|end| {
+                let bar = Self::end(self, &mut rivals, end);
+                bar.seen >= bar.first.saturating_add(AUTO_GROWTH)
+            })
+            .collect();
+        let lead = match grown.iter().filter(|grew| **grew).count() {
+            1 => grown.iter().position(|grew| *grew),
+            _ => None,
+        };
+        self.leading = match (lead, self.leading) {
+            (Some(now), (Some(was), rises, last, since)) if now == was => {
+                let seen = Self::end(self, &mut rivals, now).seen;
+                if seen > last {
+                    (lead, rises.saturating_add(1), seen, since)
+                } else if seen < last {
+                    // A fill does not fall back: start counting again.
+                    (lead, 0, seen, at)
+                } else {
+                    (lead, rises, last, since)
+                }
+            }
+            (Some(now), _) => (lead, 0, Self::end(self, &mut rivals, now).seen, at),
+            (None, _) => (None, 0, 0, at),
+        };
+        // Every other end exactly where it began: a lead held that long is a
+        // fill. Not when another end moved at all: read from the wrong end, a
+        // striped or shimmering bar placed part full holds a steady false lead
+        // while the right end creeps up (`tests/bar_fixtures.rs` with
+        // `BAR_DIRECTION=auto` fails on those styles' `again` runs without
+        // this condition).
+        let taken = match self.leading {
+            (Some(leader), rises, _, since) => {
+                let others_still = (0..count).filter(|end| *end != leader).all(|end| {
+                    let bar = Self::end(self, &mut rivals, end);
+                    bar.seen == bar.first
+                });
+                (rises >= AUTO_RISES || (at.saturating_sub(since) >= AUTO_LEAD && others_still))
+                    .then_some(leader)
+            }
+            _ => None,
+        };
+        match taken {
+            Some(0) => {
+                // This end: taken, and what it reports from now on counts.
+                self.leading = (None, 0, 0, at);
+                self.pending.take()
+            }
+            Some(end) => {
+                // Another end takes over.
+                let mut winner = rivals.swap_remove(end - 1);
+                winner.auto = true;
+                winner.leading = (None, 0, 0, at);
+                let pending = winner.pending.take();
+                *self = winner;
+                pending
+            }
+            None => {
+                self.rivals = rivals;
+                None
+            }
+        }
+    }
+
+    /// End `end` of an undecided [`Direction::Auto`]: 0 is this one, the
+    /// rest its rivals, taken out of it while it reads.
+    fn end<'a>(me: &'a mut Self, rivals: &'a mut [Self], end: usize) -> &'a mut Self {
+        match end.checked_sub(1).and_then(|at| rivals.get_mut(at)) {
+            Some(rival) => rival,
+            None => me,
+        }
+    }
+
+    /// Drops the moment this end waits to report while [`Direction::Auto`]
+    /// decides, and what it had reported goes back to before it.
+    fn drop_pending(&mut self) {
+        if self.pending.take().is_some() {
+            self.reported = self.pending_from;
+        }
+    }
+
+    /// [`Self::observe`] for one end.
+    fn observe_one(&mut self, reading: Fingerprint, at: Duration) -> Option<Event> {
         let Some(mut empty) = self.empty.take() else {
             // Learned from a reading with none of UP-TAKE's own windows over
             // the area; until then, nothing (review of `#179`, round 6).
@@ -2068,7 +2336,7 @@ impl Fingerprint {
     /// one that fills sideways, rows for one that fills up or down.
     const fn lines(&self, direction: Direction) -> u32 {
         match direction {
-            Direction::LeftToRight | Direction::RightToLeft => self.columns,
+            Direction::Auto | Direction::LeftToRight | Direction::RightToLeft => self.columns,
             Direction::TopToBottom | Direction::BottomToTop => self.rows,
         }
     }
@@ -2076,7 +2344,7 @@ impl Fingerprint {
     /// How many cells across one line.
     const fn across(&self, direction: Direction) -> u32 {
         match direction {
-            Direction::LeftToRight | Direction::RightToLeft => self.rows,
+            Direction::Auto | Direction::LeftToRight | Direction::RightToLeft => self.rows,
             Direction::TopToBottom | Direction::BottomToTop => self.columns,
         }
     }
@@ -2085,7 +2353,7 @@ impl Fingerprint {
     /// counted from the end the bar fills from.
     const fn line_cell(&self, line: u32, k: u32, direction: Direction) -> (u32, u32) {
         match direction {
-            Direction::LeftToRight => (line, k),
+            Direction::Auto | Direction::LeftToRight => (line, k),
             Direction::RightToLeft => (self.columns - 1 - line, k),
             Direction::TopToBottom => (k, line),
             Direction::BottomToTop => (k, self.rows - 1 - line),
@@ -2097,7 +2365,9 @@ impl Fingerprint {
     fn length(&self, line: u32, direction: Direction) -> u64 {
         let (column, row) = self.line_cell(line, 0, direction);
         let length = match direction {
-            Direction::LeftToRight | Direction::RightToLeft if column + 1 == self.columns => {
+            Direction::Auto | Direction::LeftToRight | Direction::RightToLeft
+                if column + 1 == self.columns =>
+            {
                 self.edge.0
             }
             Direction::TopToBottom | Direction::BottomToTop if row + 1 == self.rows => self.edge.1,
@@ -3089,7 +3359,7 @@ mod bar_tests {
         for y in 0..height {
             for x in 0..width {
                 let inside = match direction {
-                    Direction::LeftToRight => x < filled,
+                    Direction::Auto | Direction::LeftToRight => x < filled,
                     Direction::RightToLeft => x >= width.saturating_sub(filled),
                     Direction::TopToBottom => y < filled,
                     Direction::BottomToTop => y >= height.saturating_sub(filled),
@@ -3161,6 +3431,7 @@ mod bar_tests {
             Watch::Fills,
             Tuning {
                 marks: [50, 90, 0, 0],
+                direction: Direction::LeftToRight,
                 ..Tuning::default()
             },
         );
@@ -3453,7 +3724,7 @@ mod bar_tests {
             Direction::BottomToTop,
         ] {
             let opposite = match direction {
-                Direction::LeftToRight => Direction::RightToLeft,
+                Direction::Auto | Direction::LeftToRight => Direction::RightToLeft,
                 Direction::RightToLeft => Direction::LeftToRight,
                 Direction::TopToBottom => Direction::BottomToTop,
                 Direction::BottomToTop => Direction::TopToBottom,
@@ -3852,11 +4123,11 @@ mod real_bars {
         }
         // The bar was drawn left to right; turned for the others.
         let (cols, rows) = match look.direction {
-            Direction::LeftToRight | Direction::RightToLeft => (w, h),
+            Direction::Auto | Direction::LeftToRight | Direction::RightToLeft => (w, h),
             Direction::TopToBottom | Direction::BottomToTop => (h, w),
         };
         let at = |x: u32, y: u32| match look.direction {
-            Direction::LeftToRight => (y * w + x) as usize,
+            Direction::Auto | Direction::LeftToRight => (y * w + x) as usize,
             Direction::RightToLeft => (y * w + (w - 1 - x)) as usize,
             Direction::TopToBottom => (x * w + y) as usize,
             Direction::BottomToTop => (x * w + (w - 1 - y)) as usize,
@@ -4591,6 +4862,370 @@ mod real_bars {
         let mut events = feed(&mut detector, &dark, 0, false, 5_400, &mut at);
         for filled in (0..=ROUND.length).step_by(4).chain([ROUND.length]) {
             events.extend(feed(&mut detector, &dark, filled, false, 66, &mut at));
+        }
+        assert_eq!(events, vec![Event::Reached(50), Event::Filled]);
+    }
+
+    /// Roadmap `1.74`, the founder's wish of 2026-11-20 (*"have the area work
+    /// automatically with every fill direction"*): with [`Direction::Auto`],
+    /// a bar filling from any of its four ends, in any style, is read as it
+    /// is with its own direction set by hand, and so is one placed part full.
+    #[test]
+    fn auto_finds_every_direction() {
+        for direction in [
+            Direction::LeftToRight,
+            Direction::RightToLeft,
+            Direction::TopToBottom,
+            Direction::BottomToTop,
+        ] {
+            for fill in [Fill::Flat, Fill::Gradient, Fill::Stripes, Fill::Segments] {
+                for placed in [0, 72] {
+                    let look = Look {
+                        direction,
+                        fill,
+                        round: false,
+                        ..ROUND
+                    };
+                    let mut area = detector(Direction::Auto, [50, 0, 0, 0]);
+                    let mut at = Duration::ZERO;
+                    area.observe_at(render(&look, placed, None, 0, false), at);
+                    let mut events = Vec::new();
+                    for (frame, filled) in (placed..=look.length)
+                        .step_by(2)
+                        .chain([look.length])
+                        .enumerate()
+                    {
+                        for _ in 0..4 {
+                            at += Duration::from_millis(33);
+                            let print = render(&look, filled, None, frame as u32, false);
+                            events.extend(area.observe_at(print, at));
+                        }
+                    }
+                    for _ in 0..20 {
+                        at += Duration::from_millis(33);
+                        let print = render(&look, look.length, None, 0, false);
+                        events.extend(area.observe_at(print, at));
+                    }
+                    assert_eq!(
+                        events,
+                        vec![Event::Reached(50), Event::Filled],
+                        "{direction:?}, fill {}, placed at {placed}",
+                        fill as u8
+                    );
+                }
+            }
+        }
+    }
+
+    /// Review of `#180`, round 1: with [`Direction::Auto`], a bar that jumps
+    /// from empty to full in one reading is full, whichever end it filled
+    /// from; and percentages changed while Auto decides hold for the end it
+    /// takes.
+    #[test]
+    fn auto_reports_a_jump_to_full_and_keeps_new_marks() {
+        for direction in [Direction::LeftToRight, Direction::RightToLeft] {
+            let look = Look { direction, ..ROUND };
+            let mut area = detector(Direction::Auto, [0; MARKS]);
+            let mut at = Duration::ZERO;
+            area.observe_at(render(&look, 0, None, 0, false), at);
+            let mut events = Vec::new();
+            for _ in 0..40 {
+                at += Duration::from_millis(33);
+                events.extend(area.observe_at(render(&look, look.length, None, 0, false), at));
+            }
+            assert_eq!(events, vec![Event::Filled], "{direction:?}, a jump to full");
+            // Emptied, then filled the ordinary way: the end is found then
+            // (review of `#180`, round 2: the first end tried was kept).
+            area.tune(
+                Watch::Fills,
+                Tuning {
+                    marks: [50, 0, 0, 0],
+                    direction: Direction::Auto,
+                    ..Tuning::default()
+                },
+            );
+            let mut events = Vec::new();
+            for filled in [0; 20]
+                .into_iter()
+                .chain((0..=look.length).step_by(2))
+                .chain([look.length; 20])
+            {
+                for _ in 0..2 {
+                    at += Duration::from_millis(33);
+                    events.extend(area.observe_at(render(&look, filled, None, 0, false), at));
+                }
+            }
+            assert_eq!(
+                events,
+                vec![Event::Reached(50), Event::Filled],
+                "{direction:?}, the fill after the jump"
+            );
+            // Marks set while undecided, then a fill from the right.
+            let mut area = detector(Direction::Auto, [0; MARKS]);
+            let mut at = Duration::ZERO;
+            area.observe_at(render(&look, 0, None, 0, false), at);
+            area.tune(
+                Watch::Fills,
+                Tuning {
+                    marks: [50, 0, 0, 0],
+                    direction: Direction::Auto,
+                    ..Tuning::default()
+                },
+            );
+            let mut events = Vec::new();
+            for filled in (0..=look.length).step_by(2).chain([look.length; 20]) {
+                for _ in 0..2 {
+                    at += Duration::from_millis(33);
+                    events.extend(area.observe_at(render(&look, filled, None, 0, false), at));
+                }
+            }
+            assert_eq!(
+                events,
+                vec![Event::Reached(50), Event::Filled],
+                "{direction:?}, marks set while undecided"
+            );
+        }
+    }
+
+    /// Review of `#180`, round 3: while [`Direction::Auto`] decides, a
+    /// covered reading takes nothing, a waiting percentage included, however
+    /// long the lead ran. A bar that jumped past 50% and was then darkened
+    /// (Win+Shift+S) reports nothing under the cover; once the cover goes, it
+    /// is read again and reported.
+    #[test]
+    fn auto_takes_nothing_from_a_covered_reading() {
+        let look = Look {
+            direction: Direction::RightToLeft,
+            ..ROUND
+        };
+        let mut area = detector(Direction::Auto, [50, 0, 0, 0]);
+        let mut at = Duration::ZERO;
+        area.observe_at(render(&look, 0, None, 0, false), at);
+        let read = |area: &mut Detector, filled: u32, dim: bool, ms: u64, at: &mut Duration| {
+            let mut events = Vec::new();
+            for _ in 0..ms / 33 {
+                *at += Duration::from_millis(33);
+                events.extend(area.observe_at(render(&look, filled, None, 0, dim), *at));
+            }
+            events
+        };
+        // A jump to 60%, held 600 ms: 50% waits for an end to be taken.
+        let mut events = read(&mut area, 144, false, 600, &mut at);
+        // Darkened past the second's lead.
+        events.extend(read(&mut area, 144, true, 1_500, &mut at));
+        assert_eq!(events, vec![], "nothing under the cover");
+        events.extend(read(&mut area, 144, false, 2_000, &mut at));
+        for filled in (144..=look.length).step_by(4).chain([look.length; 10]) {
+            events.extend(read(&mut area, filled, false, 66, &mut at));
+        }
+        assert_eq!(events, vec![Event::Reached(50), Event::Filled]);
+    }
+
+    /// Review of `#180`, round 4: a square area tries all four ends, so a
+    /// bar filling up or down in one is found, as is one filling sideways.
+    #[test]
+    fn auto_in_a_square_area_finds_every_direction() {
+        for direction in [
+            Direction::LeftToRight,
+            Direction::RightToLeft,
+            Direction::TopToBottom,
+            Direction::BottomToTop,
+        ] {
+            // A short, thick bar with page around it: an area as tall as it
+            // is wide, either way round.
+            let look = Look {
+                direction,
+                length: 120,
+                thickness: 96,
+                margin: (12, 24),
+                round: false,
+                ..ROUND
+            };
+            let mut area = detector(Direction::Auto, [50, 0, 0, 0]);
+            let mut at = Duration::ZERO;
+            let first = render(&look, 0, None, 0, false);
+            assert_eq!(first.columns, first.rows, "a square area");
+            area.observe_at(first, at);
+            let mut events = Vec::new();
+            for filled in (0..=look.length).step_by(2).chain([look.length; 20]) {
+                for _ in 0..2 {
+                    at += Duration::from_millis(33);
+                    events.extend(area.observe_at(render(&look, filled, None, 0, false), at));
+                }
+            }
+            assert_eq!(
+                events,
+                vec![Event::Reached(50), Event::Filled],
+                "{direction:?}"
+            );
+        }
+    }
+
+    /// Review of `#180`, round 4: a capture route switch learns the bar again
+    /// ([`Detector::rebase_at`]); a percentage that waited for Auto to take an
+    /// end before it is not reported after it.
+    #[test]
+    fn auto_drops_what_waited_across_a_rebase() {
+        let look = Look {
+            direction: Direction::RightToLeft,
+            ..ROUND
+        };
+        let mut area = detector(Direction::Auto, [50, 0, 0, 0]);
+        let mut at = Duration::ZERO;
+        area.observe_at(render(&look, 0, None, 0, false), at);
+        let mut events = Vec::new();
+        // A jump to 60%, held 600 ms: 50% waits.
+        for _ in 0..18 {
+            at += Duration::from_millis(33);
+            events.extend(area.observe_at(render(&look, 144, None, 0, false), at));
+        }
+        at += Duration::from_millis(33);
+        area.rebase_at(render(&look, 160, None, 0, false), at);
+        for filled in (160..=look.length).step_by(2).chain([look.length; 20]) {
+            for _ in 0..2 {
+                at += Duration::from_millis(33);
+                events.extend(area.observe_at(render(&look, filled, None, 0, false), at));
+            }
+        }
+        assert_eq!(
+            events,
+            vec![Event::Filled],
+            "50% was passed before the rebase"
+        );
+    }
+
+    /// [`Direction::Auto`] under one of UP-TAKE's own windows (review of
+    /// `#179`, round 6): no end is tried, and none learned, until the window
+    /// has gone; then the fill is found and read.
+    #[test]
+    fn auto_is_not_learned_under_one_of_up_takes_windows() {
+        let look = Look {
+            direction: Direction::RightToLeft,
+            ..ROUND
+        };
+        let mut carded = render(&look, 0, None, 0, false);
+        carded.windowed = true;
+        let mut area = detector(Direction::Auto, [50, 0, 0, 0]);
+        let mut at = Duration::ZERO;
+        for _ in 0..60 {
+            at += Duration::from_millis(33);
+            assert_eq!(area.observe_at(carded.clone(), at), None);
+        }
+        assert!(
+            area.bar
+                .as_ref()
+                .is_some_and(|bar| bar.empty.is_none() && bar.rivals.is_empty()),
+            "nothing learned under the window"
+        );
+        let mut events = Vec::new();
+        for filled in [0; 10]
+            .into_iter()
+            .chain((0..=look.length).step_by(2))
+            .chain([look.length; 20])
+        {
+            for _ in 0..2 {
+                at += Duration::from_millis(33);
+                events.extend(area.observe_at(render(&look, filled, None, 0, false), at));
+            }
+        }
+        assert_eq!(events, vec![Event::Reached(50), Event::Filled]);
+    }
+
+    /// Review of `#180`, round 6: a percentage removed while
+    /// [`Direction::Auto`] decides, after the bar reached it, is not
+    /// reported when an end is taken.
+    #[test]
+    fn auto_does_not_report_a_percentage_removed_while_it_decides() {
+        let look = Look {
+            direction: Direction::RightToLeft,
+            ..ROUND
+        };
+        let mut area = detector(Direction::Auto, [50, 0, 0, 0]);
+        let mut at = Duration::ZERO;
+        area.observe_at(render(&look, 0, None, 0, false), at);
+        let mut events = Vec::new();
+        // A jump to 60%, held 600 ms: 50% waits for an end.
+        for _ in 0..18 {
+            at += Duration::from_millis(33);
+            events.extend(area.observe_at(render(&look, 144, None, 0, false), at));
+        }
+        area.tune(
+            Watch::Fills,
+            Tuning {
+                marks: [0; MARKS],
+                direction: Direction::Auto,
+                ..Tuning::default()
+            },
+        );
+        for filled in (144..=look.length).step_by(2).chain([look.length; 20]) {
+            for _ in 0..2 {
+                at += Duration::from_millis(33);
+                events.extend(area.observe_at(render(&look, filled, None, 0, false), at));
+            }
+        }
+        assert_eq!(events, vec![Event::Filled]);
+    }
+
+    /// [`Direction::Auto`] on an indeterminate bar: the sweep reports nothing,
+    /// as with the direction set by hand.
+    #[test]
+    fn auto_on_a_marquee_notifies_nothing() {
+        for pace in [3_i32, 6, 12] {
+            let look = ROUND;
+            let mut area = detector(Direction::Auto, [20, 50, 80, 0]);
+            let mut at = Duration::ZERO;
+            area.observe_at(render(&look, 0, None, 0, false), at);
+            let third = i32::try_from(look.length / 3).unwrap_or(0);
+            let mut events = Vec::new();
+            for _ in 0..3 {
+                let mut left = -third;
+                while left < i32::try_from(look.length).unwrap_or(0) {
+                    at += Duration::from_millis(33);
+                    events.extend(area.observe_at(render(&look, 0, Some(left), 0, false), at));
+                    left += pace;
+                }
+            }
+            assert_eq!(events, vec![], "a block moving {pace} pixels a reading");
+        }
+    }
+
+    /// Choosing a direction by hand after [`Direction::Auto`], and Auto again,
+    /// each learns the bar again from the next reading.
+    #[test]
+    fn auto_and_a_hand_set_direction_switch_cleanly() {
+        let look = Look {
+            direction: Direction::RightToLeft,
+            ..ROUND
+        };
+        let mut area = detector(Direction::Auto, [50, 0, 0, 0]);
+        let mut at = Duration::ZERO;
+        let mut events = Vec::new();
+        let mut read = |area: &mut Detector, filled: u32, at: &mut Duration| {
+            for _ in 0..4 {
+                *at += Duration::from_millis(33);
+                events.extend(area.observe_at(render(&look, filled, None, 0, false), *at));
+            }
+        };
+        read(&mut area, 0, &mut at);
+        area.tune(
+            Watch::Fills,
+            Tuning {
+                marks: [50, 0, 0, 0],
+                direction: Direction::RightToLeft,
+                ..Tuning::default()
+            },
+        );
+        read(&mut area, 0, &mut at);
+        area.tune(
+            Watch::Fills,
+            Tuning {
+                marks: [50, 0, 0, 0],
+                direction: Direction::Auto,
+                ..Tuning::default()
+            },
+        );
+        for filled in (0..=look.length).step_by(4).chain([look.length; 5]) {
+            read(&mut area, filled, &mut at);
         }
         assert_eq!(events, vec![Event::Reached(50), Event::Filled]);
     }

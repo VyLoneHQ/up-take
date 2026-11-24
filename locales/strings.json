@@ -165,6 +165,11 @@
       "de": "Füllt sich von",
       "de_from": "c0dccc0f"
     },
+    "panel.watch.direction.auto": {
+      "en": "Auto",
+      "de": "Automatisch",
+      "de_from": "126befb6"
+    },
     "panel.watch.direction.left_to_right": {
       "en": "Left",
       "de": "links",
