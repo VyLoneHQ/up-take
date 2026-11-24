@@ -270,19 +270,25 @@ function bornMagnified(kind: AreaKind, source: string = areaRs): boolean {
     .join('\n');
 
   // One arm: its `|`-separated variants on the left, its value on the right.
-  // Written as one regex over the whole match rather than as a hand-rolled
-  // splitter, because the arms ARE `|`-grouped today (all the variants share a
-  // single `=> Zoom::NATURAL`) and a per-line reading would find no variant on
-  // the line that carries the value.
+  // The arms ARE `|`-grouped today (all the variants share a single
+  // `=> Zoom::NATURAL`), so a per-line reading would find no variant on the
+  // line that carries the value: the body is split at each `=>` instead. An
+  // arm's variants are the `Self::` names after the previous arm's comma; its
+  // value runs to the next comma or line end.
   //
-  // Each variant is separated from the next by exactly one `|`, so a run of
-  // variants can be split only one way. The first form, `(\s*\|?\s*Self::\w+)+`,
-  // let the spaces between two variants belong to either side and backtracked
-  // exponentially on a long run (CodeQL js/redos, alert 1).
-  const arms = body.matchAll(
-    /((?:\|\s*)?Self::\w+(?:\s*\|\s*Self::\w+)*)\s*=>\s*([^,\n]+)/g,
-  );
-  for (const [, left, value] of arms) {
+  // No regex spans an arm, on purpose. The first form,
+  // `((?:\s*\|?\s*Self::\w+)+)\s*=>`, backtracked exponentially on a long run
+  // of variants (CodeQL js/redos, alert 1), and an anchored rewrite was still
+  // quadratic when the `=>` was missing (review of #184, round 1). A split is
+  // linear in the body whatever shape it has.
+  const pieces = body.split('=>');
+  const arms = pieces.slice(1).map((after, index) => {
+    const before = pieces[index] ?? '';
+    const left = before.slice(before.lastIndexOf(',') + 1);
+    const end = after.search(/[,\n]/);
+    return [left, end === -1 ? after : after.slice(0, end)] as const;
+  });
+  for (const [left, value] of arms) {
     const variants = (left ?? '').match(/Self::(\w+)/g) ?? [];
     for (const variant of variants) {
       if (variant.slice('Self::'.length).toLowerCase() === kind) {
