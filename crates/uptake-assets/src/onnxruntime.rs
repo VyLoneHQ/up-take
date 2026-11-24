@@ -72,12 +72,12 @@ pub const ARCHIVE_URL: &str = "https://api.nuget.org/v3-flatcontainer/microsoft.
 /// fault.** If the package were ever replaced, the acquisition script would go
 /// red the next time it ran, and that red is the whole notification.
 ///
-/// **NuGet.org does not let a published version be replaced**: a package
-/// version can be unlisted but never re-uploaded with different content, which
-/// gives the same property the GitHub release asset was relied on for.
-/// `ADR-0034`'s PaddleOCR archives sit on an ordinary object store with no such
-/// property, which is why those needed a workspace probe (`CL-32`) and this
-/// does not.
+/// **What keeps this safe is the digest, not the host.** NuGet.org's stated
+/// policy is that a published version can be unlisted but not re-uploaded
+/// with different content; that is the host's claim, and nothing here probes
+/// it. If it ever stopped holding, the pinned SHA-256 would refuse the new
+/// bytes and the build would go red, so a replaced package can stop a build
+/// but cannot reach an installer.
 pub const ARCHIVE_SHA256: &str = "7e35fdb4f5adb62f01e60798e2e5ed05108f5fbbe1cca03fbcc37903cf7c5e3b";
 
 /// The package's length in bytes, from the same download.
