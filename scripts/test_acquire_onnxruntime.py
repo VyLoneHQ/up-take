@@ -15,7 +15,7 @@ The fix was two phases. These tests are what stop it regressing, and
 `test_a_failing_member_leaves_nothing_behind` is the review's own drill turned
 into a control.
 
-**No 80 MB download.** Every test builds a tiny synthetic archive and a matching
+**No 160 MB download.** Every test builds a tiny synthetic archive and a matching
 synthetic pins file, then points the module's `PINS_SOURCE` at it. That is what
 lets these run in CI on every push, and it also means they test the script's
 LOGIC rather than one particular release's bytes.
