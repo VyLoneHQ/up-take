@@ -181,6 +181,7 @@ const watchLabel: Record<PanelWatch, TextKey> = {
 };
 
 const directionLabel: Record<PanelDirection, TextKey> = {
+  auto: 'panel.watch.direction.auto',
   left_to_right: 'panel.watch.direction.left_to_right',
   right_to_left: 'panel.watch.direction.right_to_left',
   top_to_bottom: 'panel.watch.direction.top_to_bottom',
