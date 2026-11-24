@@ -274,7 +274,14 @@ function bornMagnified(kind: AreaKind, source: string = areaRs): boolean {
   // splitter, because the arms ARE `|`-grouped today (all the variants share a
   // single `=> Zoom::NATURAL`) and a per-line reading would find no variant on
   // the line that carries the value.
-  const arms = body.matchAll(/((?:\s*\|?\s*Self::\w+)+)\s*=>\s*([^,\n]+)/g);
+  //
+  // Each variant is separated from the next by exactly one `|`, so a run of
+  // variants can be split only one way. The first form, `(\s*\|?\s*Self::\w+)+`,
+  // let the spaces between two variants belong to either side and backtracked
+  // exponentially on a long run (CodeQL js/redos, alert 1).
+  const arms = body.matchAll(
+    /((?:\|\s*)?Self::\w+(?:\s*\|\s*Self::\w+)*)\s*=>\s*([^,\n]+)/g,
+  );
   for (const [, left, value] of arms) {
     const variants = (left ?? '').match(/Self::(\w+)/g) ?? [];
     for (const variant of variants) {
