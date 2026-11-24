@@ -1,5 +1,10 @@
 {
   "extends": "$app/tsconfig",
+  // Kit 3's base config lists no files, so without these TypeScript and
+  // svelte-check would also read `build/` after a build. The lists are the ones
+  // SvelteKit's own `tsconfig_extends_missing` message recommends.
+  "include": ["src", "test", "*"],
+  "exclude": ["src/service-worker"],
   "compilerOptions": {
     "allowJs": true,
     "checkJs": true,
