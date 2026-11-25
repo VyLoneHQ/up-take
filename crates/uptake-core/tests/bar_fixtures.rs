@@ -239,6 +239,48 @@ fn the_bar_mode_reads_real_renders() {
             judge_scenarios(&refs, direction)
                 .map(|()| String::from("placed at 30 %, then emptied and filled again")),
         );
+        // `I-496`: the page's theme switched at 30 % while the bar fills, to
+        // the same bar's render in the other theme. The bar is learned again
+        // once the new page has held still five seconds, and the rest of the
+        // fill is read.
+        let other = if name.contains("_light_") {
+            name.replace("_light_", "_dark_")
+        } else {
+            name.replace("_dark_", "_light_")
+        };
+        let other_path = path.with_file_name(format!("{other}.bar"));
+        if other_path.exists() {
+            let switched = load(&other_path);
+            if switched.len() == frames.len()
+                && switched[0].bitmap.width() == frames[0].bitmap.width()
+                && switched[0].bitmap.height() == frames[0].bitmap.height()
+            {
+                let cut = frames
+                    .iter()
+                    .position(|f| f.value >= 30.0)
+                    .expect("a frame at 30 %");
+                let mut run: Vec<&Frame> = frames[..cut].iter().collect();
+                run.extend(switched[cut..].iter());
+                for (label, seconds) in [("sw60s", 60.0), ("sw120s", 120.0)] {
+                    let repeat = ((step / 100.0 * seconds * 30.0).round() as usize).max(1);
+                    let per_frame = Duration::from_secs_f64(step / 100.0 * seconds);
+                    let events = feed(&run, direction, repeat, [50, 0, 0, 0], per_frame);
+                    report(label, judge_fill(&events).map(|()| format!("{events:?}")));
+                }
+            } else {
+                report("sw", Err(format!("{other} does not match in size")));
+            }
+        } else {
+            // Not passed over in silence (review of `#186`, round 3): a set
+            // captured in one theme only (`capture.mjs --themes light`) would
+            // finish green without a single switch.
+            report(
+                "sw",
+                Err(format!(
+                    "no {other}.bar: the theme switch needs both themes (capture.mjs's default)"
+                )),
+            );
+        }
     }
     assert_eq!(failures, 0, "{failures} fixture runs failed");
 }

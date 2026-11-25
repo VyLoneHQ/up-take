@@ -177,12 +177,14 @@ Six of eight area types are built.
   "coarse summaries, a grid of brightness averages" was no longer true and was replaced; the new
   wording waits for the founder's P-9 with the rest of this bullet. (2) "Nothing else" must also allow for the capture sessions, which hold each watched
   monitor's newest frame in graphics memory while an area watches (#154 round 12). (3) The bar
-  mode's public quirk, the founder's rule of 2026-11-20 (backlog I-493), to go into the bullet with
-  his P-9: "Over a progress bar: if the page around the bar changes for good, such as a switch
-  between light and dark mode, the area learns the bar again once the screen has been still for
-  five seconds, and a percentage passed in that time is not reported. A screenshot selection held
-  still that long over the bar can be learned the same way and give one wrong card. Press P twice
-  to make the area learn the bar again." Source: RELEARN_AFTER in crates/uptake-core/src/watch.rs.
+  mode's public quirk, the founder's rule of 2026-11-20 (backlog I-493), widened 2026-11-25 to a
+  bar that is filling (backlog I-496), to go into the bullet with his P-9: "Over a progress bar: if
+  the page around the bar changes for good, such as a switch between light and dark mode, the area
+  learns the bar again once the page has been still for five seconds, even while the bar fills, and
+  the highest percentage passed in that time is reported a few seconds late. A screenshot selection held
+  still that long over a bar that is not moving can be learned the same way and give one wrong
+  card. Press P twice to make the area learn the bar again." The I-496 wording is not yet approved
+  by him either. Source: RELEARN_AFTER and Bar::moving_relearn in crates/uptake-core/src/watch.rs.
   This block is one HTML comment and must contain no other comment marker: an inner one closes it
   early and publishes what follows (#154 round 14).
   Source: ROADMAP.md task 1.58 and ADR-0048 (an area may read its own region repeatedly: the
