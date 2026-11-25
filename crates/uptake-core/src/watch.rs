@@ -919,11 +919,13 @@ impl Detector {
             // Nothing was seen during the wait: a relearn's stillness starts
             // again from the next reading (review of `#179`, round 8).
             bar.still = None;
+            bar.moving = None;
             for rival in &mut bar.rivals {
                 rival.covering = true;
                 rival.held = [None; MARKS];
                 rival.attached = None;
                 rival.still = None;
+                rival.moving = None;
                 rival.drop_pending();
             }
             bar.drop_pending();
@@ -1173,6 +1175,19 @@ struct Bar {
     /// for [`RELEARN_AFTER`], shows a new page, and the bar is learned again
     /// from it.
     still: Option<(Duration, Fingerprint)>,
+    /// While [`Self::covering`]: a page changed for good while the bar
+    /// fills (`I-496`). The page has held still in its new look since the
+    /// wait began, and the bar has only grown from where it was then; held
+    /// for [`RELEARN_AFTER`], the bar is learned again mid-fill.
+    moving: Option<Moving>,
+    /// While [`Self::covering`]: the first reading of the cover, against
+    /// which Win+Shift+S is told from a new page ([`Self::darkened`]): what
+    /// the bar filled under the cover has changed since, and drops out.
+    cover_from: Option<Fingerprint>,
+    /// How many times the bar was learned again mid-fill (`I-496`): the
+    /// tests tell a relearn that reported nothing false from none at all.
+    #[cfg(test)]
+    relearned_mid_fill: u32,
     /// Whether the area's direction is [`Direction::Auto`]: [`Self::direction`]
     /// is then the end taken, or the first of those tried while undecided.
     auto: bool,
@@ -1217,6 +1232,20 @@ pub const MARK_CALM: Duration = Duration::from_millis(500);
 /// percentage half a second late, and at a 20-second fill 2.5% late (the
 /// founder's rig pass of `#178`, 2026-11-20: a 50% mark came at about 54%).
 pub const STEADY_FILL: Duration = Duration::from_secs(3);
+
+/// A wait for a bar to be learned again while it fills ([`Bar::moving`],
+/// `I-496`).
+#[derive(Debug, Clone)]
+struct Moving {
+    /// When the wait began.
+    since: Duration,
+    /// The reading it began at: the page must hold still against it, and
+    /// only the bar's lines from where it then stood may change.
+    from: Fingerprint,
+    /// The furthest line, in fill order, that has changed since `from`: a
+    /// fill never goes back.
+    front: Option<u32>,
+}
 
 /// How long the page around a bar must stay changed and still before the bar
 /// is learned again from it: five seconds, the founder's choice of
@@ -1453,6 +1482,8 @@ impl Bar {
         self.pending = None;
         self.leading = (None, 0, 0, Duration::ZERO);
         self.still = None;
+        self.moving = None;
+        self.cover_from = None;
         let direction = self.direction;
         let lines = reading.lines(direction);
         let across = reading.across(direction);
@@ -1904,6 +1935,211 @@ impl Bar {
 
     /// Whether any page lies on a line beyond the bar's ends, which
     /// [`Self::page_back`] always compares.
+    /// Whether a covered bar is due to be learned again while it fills
+    /// (`I-496`), and the wait for it kept up: the page around the bar has
+    /// held still in its new look for [`RELEARN_AFTER`], in that time the
+    /// bar changed with a front that never went back, and the new look is not the old one under
+    /// Win+Shift+S ([`Self::darkened`]). A theme switched in the middle of a
+    /// fill does all three.
+    fn moving_relearn(&mut self, reading: &Fingerprint, at: Duration) -> bool {
+        let Some(moving) = self.moving.take() else {
+            self.moving = Some(Moving {
+                since: at,
+                from: reading.clone(),
+                front: None,
+            });
+            return false;
+        };
+        let restart = || Moving {
+            since: at,
+            from: reading.clone(),
+            front: None,
+        };
+        // The page holds still in its new look: all but a sixteenth of it,
+        // by pixels, within [`CELL_DELTA`] of the wait's first reading. A
+        // selection dragged over the page around the bar changes it.
+        if !self.page_still(&moving.from, reading) {
+            self.moving = Some(restart());
+            return false;
+        }
+        let Some(clear) = self.clear.clone() else {
+            self.moving = Some(restart());
+            return false;
+        };
+        let (low, high) = self.ends;
+        // The furthest of the bar's lines (in fill order) that changed since
+        // the wait began: a fill's front never goes back, and an
+        // indeterminate bar's block returns to the start end at every sweep.
+        let last = (low..=high)
+            .rev()
+            .find(|&line| self.changed(&moving.from, line, reading) == Some(true));
+        if last.is_some_and(|line| moving.front.is_some_and(|front| line < front)) {
+            self.moving = Some(restart());
+            return false;
+        }
+        let front = last.or(moving.front);
+        let due = front.is_some()
+            && at.saturating_sub(moving.since) >= RELEARN_AFTER
+            // Win+Shift+S darkens everything by one factor (the rig trace of
+            // 2026-11-20: page, track, fill and border all to about 0.4); a
+            // theme turns the track another colour. Under the overlay, a bar
+            // filling on would be learned dark, and a selection dragged over
+            // it afterwards read as a fill.
+            && !self.darkened(&clear, reading);
+        self.moving = Some(Moving { front, ..moving });
+        due
+    }
+
+    /// Whether `reading` is `clear` under Win+Shift+S rather than a new page,
+    /// judged on the cells that held still since the cover began
+    /// ([`Self::cover_from`]): what the bar filled under the cover has
+    /// changed since, and drops out. The page around the bar is darkened by
+    /// one factor below nine tenths (its median, by pixels, over the cells
+    /// bright enough to tell one), each of its cells either so darkened
+    /// (within [`CELL_DELTA`] and a twentieth) or
+    /// shown as it was (inside a selection), all but a sixteenth of it; and
+    /// the bar's track is darkened by that same factor more than it is
+    /// turned any other colour. The rig trace of 2026-11-20 darkened page,
+    /// track, fill and border alike to about 0.4. A theme turns the track
+    /// another colour, and leaves the fill as it was or turns it another
+    /// colour too; a selection shows what it covers as it was, which counts
+    /// for neither. A page that got brighter is never darkened. With less
+    /// than an eighth of the bar's track to judge by, or no first reading of
+    /// the cover, it is taken as darkened: unknown is not a new page.
+    fn darkened(&self, clear: &Fingerprint, reading: &Fingerprint) -> bool {
+        let Some(from) = self.cover_from.as_ref() else {
+            return true;
+        };
+        let delta = u64::from(CELL_DELTA);
+        let still = |at: usize| {
+            let known = |print: &Fingerprint| !print.hidden.get(at).copied().unwrap_or(true);
+            match (
+                clear.cells.get(at),
+                from.cells.get(at),
+                reading.cells.get(at),
+            ) {
+                (Some(&c), Some(&f), Some(&r))
+                    if known(clear)
+                        && known(from)
+                        && known(reading)
+                        && f.abs_diff(r) <= CELL_DELTA =>
+                {
+                    Some((u64::from(c), u64::from(r), reading.weight(at)))
+                }
+                _ => None,
+            }
+        };
+        let page: Vec<(u64, u64, u64)> = (0..reading.cells.len())
+            .filter(|&at| self.page.get(at).copied().unwrap_or(false))
+            .filter_map(still)
+            .collect();
+        // An overlay only darkens: a page that is brighter now is a new one
+        // (a dark page switched to light, whose page is too dark below to
+        // tell a factor by).
+        let (mut was, mut now, mut weight) = (0_u64, 0_u64, 0_u64);
+        for &(c, r, w) in &page {
+            was += w * c;
+            now += w * r;
+            weight += w;
+        }
+        if weight > 0 && now > was + weight * delta {
+            return false;
+        }
+        let mut ratios: Vec<(u64, u64)> = page
+            .iter()
+            .filter(|&&(c, _, _)| c >= 32)
+            .map(|&(c, r, w)| (r * 1000 / c, w))
+            .collect();
+        ratios.sort_unstable();
+        let half = ratios.iter().map(|&(_, w)| w).sum::<u64>() / 2;
+        let mut seen = 0;
+        let Some(factor) = ratios.iter().find_map(|&(ratio, w)| {
+            seen += w;
+            (seen > half).then_some(ratio)
+        }) else {
+            return true;
+        };
+        if factor >= 900 {
+            return false;
+        }
+        // Within [`CELL_DELTA`] and a twentieth of the darkened level: a
+        // cell that mixes two colours darkens a few levels off one factor.
+        let dim = |c: u64, r: u64| {
+            let darkened = c * factor / 1000;
+            darkened.abs_diff(r) <= delta + darkened / 20
+        };
+        let (mut off, mut known) = (0_u64, 0_u64);
+        for &(c, r, w) in &page {
+            known += w;
+            if !dim(c, r) && c.abs_diff(r) > delta {
+                off += w;
+            }
+        }
+        if off * 16 > known {
+            return false;
+        }
+        // The evidence: the bar's track where it held still since the cover
+        // began (the old fill and the track the fill has not reached), bright
+        // enough that darkening shows. Darkened by the page's factor counts
+        // for the overlay; any other colour, for a new page; as it was, for
+        // neither (a selection shows it so, and a theme may keep its fill's
+        // colour).
+        let (low, high) = self.ends;
+        let direction = self.direction;
+        let (mut darker, mut other, mut track) = (0_u64, 0_u64, 0_u64);
+        for line in low..=high {
+            for k in 0..reading.across(direction) {
+                let (column, row) = reading.line_cell(line, k, direction);
+                let at = (row * reading.columns + column) as usize;
+                if self.on_track(at)
+                    && !self.page.get(at).copied().unwrap_or(false)
+                    && !reading.hidden.get(at).copied().unwrap_or(true)
+                {
+                    track += reading.weight(at);
+                }
+            }
+            for k in 0..reading.across(direction) {
+                let (column, row) = reading.line_cell(line, k, direction);
+                let at = (row * reading.columns + column) as usize;
+                if !self.on_track(at) || self.page.get(at).copied().unwrap_or(false) {
+                    continue;
+                }
+                if let Some((c, r, w)) = still(at)
+                    && c >= 32
+                    && c.abs_diff(r) > delta
+                {
+                    if dim(c, r) {
+                        darker += w;
+                    } else {
+                        other += w;
+                    }
+                }
+            }
+        }
+        // Too little to judge by (a bar nearly full, its old fill and the
+        // track beyond both a sliver): unknown, so not a new page.
+        (darker + other) * 8 < track || darker > other
+    }
+
+    /// Whether the page around the bar of `reading` looks as it did in
+    /// `from`: all but a sixteenth of it, by pixels, within [`CELL_DELTA`].
+    fn page_still(&self, from: &Fingerprint, reading: &Fingerprint) -> bool {
+        let (mut moved, mut known) = (0_u64, 0_u64);
+        for (at, _) in self.page.iter().enumerate().filter(|(_, page)| **page) {
+            if let (Some(&a), Some(&b)) = (from.cells.get(at), reading.cells.get(at))
+                && !from.hidden.get(at).copied().unwrap_or(true)
+                && !reading.hidden.get(at).copied().unwrap_or(true)
+            {
+                let weight = from.weight(at);
+                known += weight;
+                if a.abs_diff(b) > CELL_DELTA {
+                    moved += weight;
+                }
+            }
+        }
+        known > 0 && moved * 16 <= known
+    }
+
     fn has_end_page(&self) -> bool {
         let Some(empty) = &self.empty else {
             return false;
@@ -2237,6 +2473,13 @@ impl Bar {
         } else {
             self.progress(&empty, &reading)
         };
+        if covered {
+            if !self.covering || self.cover_from.is_none() {
+                self.cover_from = Some(reading.clone());
+            }
+        } else {
+            self.cover_from = None;
+        }
         self.covering = covered;
         self.empty = Some(empty);
         if covered {
@@ -2269,8 +2512,27 @@ impl Bar {
                 self.held = [None; MARKS];
                 return None;
             }
+            // The same page, changed for good while the bar fills (`I-496`):
+            // the bar is never still, so the wait above never ends.
+            if whole && self.moving_relearn(&reading, at) {
+                let reported = self.reported;
+                self.learn(reading);
+                // What the fill reported before the page changed stays
+                // reported, and a percentage it passed during the wait is
+                // reported now, a little late, rather than lost.
+                self.reported = self.reported.min(reported);
+                #[cfg(test)]
+                {
+                    self.relearned_mid_fill += 1;
+                }
+                return None;
+            }
+            if !whole {
+                self.moving = None;
+            }
         } else {
             self.still = None;
+            self.moving = None;
             self.clear = Some(reading);
         }
         // Something over the area, not a fill: nothing is taken from it, and
@@ -4157,6 +4419,14 @@ mod real_bars {
         detector
     }
 
+    /// How many times `detector`'s bar was learned again mid-fill (`I-496`).
+    fn relearned_mid_fill(detector: &Detector) -> u32 {
+        detector
+            .bar
+            .as_ref()
+            .map_or(0, |bar| bar.relearned_mid_fill)
+    }
+
     /// The events of a fill, one pixel a frame, `repeat` readings of each
     /// frame 33 ms apart (about 30 a second), with the pixels filled when each
     /// came. The area is placed over the empty bar.
@@ -4580,6 +4850,9 @@ mod real_bars {
     /// reading looked covered. A page that stays changed and still for
     /// [`RELEARN_AFTER`] is a new page: the bar is learned again from it and
     /// read, an idle bar and one switched in the middle of its fill alike.
+    /// Switched mid-fill, it was lost until `I-496` (the founder's rig pass
+    /// of `main`, 2026-11-25): *"if the bar is already filling the relearn
+    /// doesn't work"*.
     #[test]
     fn a_bar_reads_again_after_its_page_changes_for_good() {
         let dark = Look {
@@ -4599,11 +4872,14 @@ mod real_bars {
             vec![Event::Reached(50), Event::Filled],
             "switched while idle"
         );
-        // Switched at 10% while it fills: that fill is lost (the bar moves,
-        // so the area is never still); the bar empties for the next file and
-        // waits, is learned after five seconds, and the next fill is read
-        // whole. (A full bar held still that long is learned full: a bar
-        // already full at the first reading, a limit of [`Bar`].)
+        // Switched at 10% while it fills (`I-496`): the page holds still in
+        // its new look and the bar only grows, so after five seconds the bar
+        // is learned again mid-fill. The two percentages it passed during
+        // the wait come late, the highest only, as any reading that passes
+        // two does; the full bar comes on time. The bar empties for the next
+        // file and that fill is read whole. (A full bar held still that long
+        // is learned full: a bar already full at the first reading, a limit
+        // of [`Bar`].)
         let mut area = detector(ROUND.direction, [25, 50, 0, 0]);
         let mut at = Duration::ZERO;
         area.observe_at(render(&ROUND, 0, None, 0, false), at);
@@ -4613,7 +4889,32 @@ mod real_bars {
         }
         events.extend(feed(&mut area, &dark, ROUND.length, false, 1_000, &mut at));
         events.extend(feed(&mut area, &dark, 0, false, 5_400, &mut at));
-        assert_eq!(events, vec![], "the fill switched under it is lost");
+        assert_eq!(
+            events,
+            vec![Event::Reached(50), Event::Filled],
+            "the fill switched under it is read"
+        );
+        assert_eq!(relearned_mid_fill(&area), 1, "learned again once, mid-fill");
+        // And from dark to light: a page that got brighter is never the
+        // snipping overlay, whose page is too dark to take a factor from.
+        let mut back = detector(ROUND.direction, [25, 50, 0, 0]);
+        let mut at_back = Duration::ZERO;
+        back.observe_at(render(&dark, 0, None, 0, false), at_back);
+        let mut switched = feed(&mut back, &dark, 24, false, 330, &mut at_back);
+        for filled in (24..=ROUND.length).step_by(2) {
+            switched.extend(feed(&mut back, &ROUND, filled, false, 66, &mut at_back));
+        }
+        assert_eq!(
+            switched,
+            vec![Event::Reached(50), Event::Filled],
+            "switched from dark to light"
+        );
+        assert_eq!(
+            relearned_mid_fill(&back),
+            1,
+            "dark to light, learned again once"
+        );
+        events.clear();
         for filled in (0..=ROUND.length).step_by(4).chain([ROUND.length]) {
             events.extend(feed(&mut area, &dark, filled, false, 66, &mut at));
         }
@@ -5348,6 +5649,187 @@ mod real_bars {
                         "theme page {}, filled {filled}, rows {rows:?}, from the left {from_left}",
                         look.theme.page
                     );
+                }
+            }
+        }
+    }
+
+    /// `I-496`: Win+Shift+S open while the bar fills, its selection held
+    /// over just the part the bar had filled before the screen darkened, for
+    /// longer than [`RELEARN_AFTER`], then dragged on along the bar. What it
+    /// shows of the old fill is as it was, which a theme with a fill of the
+    /// same colour shows too; the track beyond the fill is darkened by the
+    /// page's factor, which no theme does. Nothing is reported that the bar
+    /// does not show.
+    #[test]
+    fn a_selection_held_over_the_old_fill_is_not_learned() {
+        for look in [
+            ROUND,
+            Look {
+                theme: DARK,
+                ..ROUND
+            },
+        ] {
+            let h = look.margin.1 * 2 + look.thickness;
+            let (top, bottom) = (look.margin.1, look.margin.1 + look.thickness);
+            for rows in [(0, h), (top - 1, bottom + 1)] {
+                let mut detector = detector(look.direction, [25, 50, 75, 0]);
+                let mut at = Duration::ZERO;
+                let mut filled = 40;
+                detector.observe_at(render(&look, filled, None, 0, false), at);
+                let mut events = Vec::new();
+                for reading in 0..400_u32 {
+                    // Held for eight seconds over the old fill, then dragged.
+                    let edge = look.margin.0 + 40 + reading.saturating_sub(240) * 2;
+                    filled = (filled + 1).min(look.length);
+                    let bright = move |x: u32, y: u32| (rows.0..rows.1).contains(&y) && x < edge;
+                    let print = render_dimmed(&look, filled, None, 0, &|x, y| !bright(x, y));
+                    at += Duration::from_millis(33);
+                    if let Some(event) = detector.observe_at(print, at) {
+                        events.push((event, filled * 100 / look.length));
+                    }
+                }
+                let false_events: Vec<_> = events
+                    .iter()
+                    .filter(|(event, percent)| match event {
+                        Event::Filled => *percent < 100,
+                        Event::Reached(mark) => u32::from(*mark) > *percent,
+                        _ => true,
+                    })
+                    .collect();
+                assert_eq!(
+                    false_events,
+                    Vec::<&(Event, u32)>::new(),
+                    "theme page {}, rows {rows:?}",
+                    look.theme.page
+                );
+                assert_eq!(
+                    relearned_mid_fill(&detector),
+                    0,
+                    "learned the overlay, theme page {}, rows {rows:?}",
+                    look.theme.page
+                );
+            }
+        }
+    }
+
+    /// `I-496`: the page switched to dark while an indeterminate bar sweeps.
+    /// Its block goes back to the start end at every sweep, which a fill never
+    /// does, so it is not learned again as one, and nothing is reported.
+    #[test]
+    fn a_marquee_under_a_switched_page_notifies_nothing() {
+        let dark = Look {
+            theme: DARK,
+            ..ROUND
+        };
+        for pace in [3_i32, 6, 12] {
+            let mut detector = detector(ROUND.direction, [20, 50, 80, 0]);
+            let mut at = Duration::ZERO;
+            detector.observe_at(render(&ROUND, 0, None, 0, false), at);
+            let third = i32::try_from(ROUND.length / 3).unwrap_or(0);
+            let mut events = Vec::new();
+            for sweep in 0..12 {
+                let look = if sweep == 0 { ROUND } else { dark };
+                let mut left = -third;
+                while left < i32::try_from(ROUND.length).unwrap_or(0) {
+                    at += Duration::from_millis(33);
+                    events.extend(detector.observe_at(render(&look, 0, Some(left), 0, false), at));
+                    left += pace;
+                }
+            }
+            assert_eq!(events, vec![], "a block moving {pace} pixels a reading");
+            assert_eq!(
+                relearned_mid_fill(&detector),
+                0,
+                "a block moving {pace} pixels a reading"
+            );
+        }
+    }
+
+    /// `I-496`: a bar learned again while it fills must not learn Win+Shift+S.
+    /// The screen darkens while the bar fills on under it, and a selection is
+    /// dragged slowly along the bar from either end, as tall as the area,
+    /// only the bar and a pixel of page, or inside the bar, at several paces
+    /// against the fill, after the screen has been dark a second or, the bar
+    /// filling on under it, longer than [`RELEARN_AFTER`]. Nothing is reported
+    /// that the bar does not show: a
+    /// selection that has passed over the whole area shows the real screen,
+    /// and the bar under it may truly have filled meanwhile.
+    #[test]
+    fn a_selection_dragged_over_a_filling_bar_is_not_learned() {
+        for look in [
+            ROUND,
+            Look {
+                theme: DARK,
+                ..ROUND
+            },
+            Look {
+                round: false,
+                border: 1,
+                ..ROUND
+            },
+            Look {
+                fill: Fill::Stripes,
+                ..ROUND
+            },
+        ] {
+            let (w, h) = (
+                look.margin.0 * 2 + look.length,
+                look.margin.1 * 2 + look.thickness,
+            );
+            let (top, bottom) = (look.margin.1, look.margin.1 + look.thickness);
+            for rows in [(0, h), (top - 1, bottom + 1), (top + 2, bottom - 2)] {
+                for from_left in [true, false] {
+                    // Pixels the selection moves per reading, and per reading
+                    // of the bar's fill: slower than the fill, as fast, faster.
+                    // Not a bar standing still under the dark screen that
+                    // long: that is [`RELEARN_AFTER`]'s known risk, the
+                    // founder's trade of 2026-11-20.
+                    for (drag, fill, dark) in [(1, 2, 30), (2, 2, 30), (4, 1, 30), (2, 1, 200)] {
+                        let mut detector = detector(look.direction, [25, 50, 75, 0]);
+                        let mut at = Duration::ZERO;
+                        detector.observe_at(render(&look, 20, None, 0, false), at);
+                        let mut events = Vec::new();
+                        let mut filled = 20;
+                        let mut edge = 0;
+                        // The screen dark for a while first (a second, or
+                        // longer than RELEARN_AFTER while the bar fills on).
+                        for reading in 0..(dark + w / drag) {
+                            if reading >= dark {
+                                edge += drag;
+                            }
+                            filled = (filled + fill).min(look.length);
+                            let bright = move |x: u32, y: u32| {
+                                let across = (rows.0..rows.1).contains(&y);
+                                let along = if from_left { x < edge } else { x >= w - edge };
+                                across && along
+                            };
+                            let print =
+                                render_dimmed(&look, filled, None, 0, &|x, y| !bright(x, y));
+                            at += Duration::from_millis(33);
+                            if let Some(event) = detector.observe_at(print, at) {
+                                events.push((event, filled * 100 / look.length));
+                            }
+                        }
+                        let false_events: Vec<_> = events
+                            .iter()
+                            .filter(|(event, percent)| match event {
+                                Event::Filled => *percent < 100,
+                                Event::Reached(mark) => u32::from(*mark) > *percent,
+                                _ => true,
+                            })
+                            .collect();
+                        let case = format!(
+                            "theme page {}, rows {rows:?}, from the left {from_left}, drag {drag}, fill {fill}, dark {dark}",
+                            look.theme.page
+                        );
+                        assert_eq!(false_events, Vec::<&(Event, u32)>::new(), "{case}");
+                        assert_eq!(
+                            relearned_mid_fill(&detector),
+                            0,
+                            "learned the overlay, {case}"
+                        );
+                    }
                 }
             }
         }
