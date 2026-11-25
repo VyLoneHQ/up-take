@@ -1,0 +1,228 @@
+#!/usr/bin/env python3
+"""Tests for `scripts/soak-record.py` (backlog `I-489`).
+
+1. **The trend is arithmetic that can be checked by hand.** The slope, the
+   first and last hour and the CPU figure are tested on synthetic records
+   whose answers are known exactly.
+2. **A limit can fail.** A record that leaks fails the limit it is given and
+   the exit code is 1; a flat one passes with 0. Without a limit nothing is
+   judged (`M-20` names no number yet).
+3. **What cannot be read is refused**, exit 2, never a quiet pass: one sample,
+   a file that is not a soak record, a missing file.
+4. **The recorder sees a real leak** (Windows only, since it reads Windows'
+   own counters): a child process that allocates memory on purpose shows a
+   steep rise in private bytes, and an idle child next to none. The children
+   run without a console window.
+
+Off Windows, (4) is skipped and says so; the rest run anywhere.
+
+Run: `python scripts/test_soak_record.py`
+"""
+
+from __future__ import annotations
+
+import csv
+import importlib.util
+import io
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+spec = importlib.util.spec_from_file_location("soak_record", HERE / "soak-record.py")
+soak = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules["soak_record"] = soak
+spec.loader.exec_module(soak)
+
+MB = 1024 * 1024
+
+
+def samples(hours: float, every: float, private_per_hour: float, cpu_percent: float, cpu_rise: float = 0.0):
+    """A synthetic record: private bytes growing linearly, CPU at a steady rate."""
+    out, cpu = [], 0.0
+    steps = int(hours * 3600 / every)
+    for i in range(steps + 1):
+        t = i * every
+        if i:
+            rate = cpu_percent + cpu_rise * (t / (hours * 3600))
+            cpu += rate / 100 * every
+        out.append(
+            soak.Sample(
+                seconds=t,
+                private_bytes=int(100 * MB + private_per_hour * MB * t / 3600),
+                working_set=150 * MB,
+                handles=400,
+                gdi=60,
+                user=40,
+                cpu_seconds=cpu,
+            )
+        )
+    return out
+
+
+def write(path: Path, rows) -> None:
+    with path.open("w", newline="", encoding="utf-8") as file:
+        writer = csv.writer(file)
+        writer.writerow(soak.FIELDS)
+        for s in rows:
+            writer.writerow([getattr(s, f) for f in soak.FIELDS])
+
+
+def run(*argv: str) -> tuple[int, str, str]:
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        code = soak.main(list(argv))
+    return code, out.getvalue(), err.getvalue()
+
+
+class Trend(unittest.TestCase):
+    def test_slope_is_exact_on_a_line(self):
+        points = [(t, 5.0 + 2.0 * t / 3600) for t in range(0, 7200, 60)]
+        self.assertAlmostEqual(soak.slope_per_hour(points), 2.0, places=9)
+
+    def test_flat_record_has_no_slope(self):
+        lines, passed = soak.summarise(samples(3, 60, 0.0, 1.0), {})
+        self.assertTrue(passed)
+        self.assertIn("slope +0.000MB/h", lines[1])
+
+    def test_cpu_percent_of_one_core(self):
+        lines, _ = soak.summarise(samples(3, 60, 0.0, 2.5), {})
+        self.assertIn("first hour      2.50%", lines[-1])
+        self.assertIn("rise +0.00 points", lines[-1])
+
+    def test_windows_are_the_first_and_last_hour(self):
+        record = samples(8, 30, 4.0, 1.0)
+        first, last = soak.window(record, True), soak.window(record, False)
+        self.assertEqual(first[-1].seconds, 3600)
+        self.assertEqual(last[0].seconds, 8 * 3600 - 3600)
+
+
+class Limits(unittest.TestCase):
+    def test_a_leak_fails_its_limit_and_exits_one(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "leak.csv"
+            write(path, samples(8, 60, 5.0, 1.0))
+            code, out, _ = run("summarise", str(path), "--max-private-mb-per-hour", "1")
+        self.assertEqual(code, 1, out)
+        self.assertIn("FAIL (limit +1MB/h)", out)
+
+    def test_a_flat_record_passes_and_exits_zero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "flat.csv"
+            write(path, samples(8, 60, 0.0, 1.0))
+            code, out, _ = run("summarise", str(path), "--max-private-mb-per-hour", "1", "--max-cpu-rise", "0.5")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.count("PASS"), 2, out)
+
+    def test_creeping_cpu_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cpu.csv"
+            write(path, samples(8, 60, 0.0, 1.0, cpu_rise=3.0))
+            code, out, _ = run("summarise", str(path), "--max-cpu-rise", "0.5")
+        self.assertEqual(code, 1, out)
+        self.assertIn("FAIL (limit +0.5 points)", out)
+
+    def test_no_limit_judges_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "leak.csv"
+            write(path, samples(8, 60, 50.0, 1.0, cpu_rise=10.0))
+            code, out, _ = run("summarise", str(path))
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("PASS", out)
+        self.assertNotIn("FAIL", out)
+
+
+class Refusals(unittest.TestCase):
+    def test_one_sample_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "one.csv"
+            write(path, samples(0, 60, 0.0, 1.0))
+            code, _, err = run("summarise", str(path))
+        self.assertEqual(code, 2)
+        self.assertIn("at least two samples", err)
+
+    def test_not_a_record_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "other.csv"
+            path.write_text("a,b\n1,2\n", encoding="utf-8")
+            code, _, err = run("summarise", str(path))
+        self.assertEqual(code, 2)
+        self.assertIn("not a soak record", err)
+
+    def test_a_missing_file_is_refused(self):
+        code, _, err = run("summarise", "no-such-record.csv")
+        self.assertEqual(code, 2)
+        self.assertIn("cannot read", err)
+
+    def test_record_off_windows_is_refused(self):
+        if sys.platform == "win32":
+            self.skipTest("this is the refusal off Windows")
+        with tempfile.TemporaryDirectory() as tmp:
+            code, _, err = run("record", "--pid", "1", "--hours", "0.001", "--out", str(Path(tmp) / "x.csv"))
+        self.assertEqual(code, 2)
+        self.assertIn("run it on Windows", err)
+
+
+LEAKER = """
+import time
+held = []
+for _ in range(60):
+    held.append(bytearray(4 * 1024 * 1024))
+    time.sleep(0.1)
+time.sleep(30)
+"""
+
+IDLE = "import time\ntime.sleep(30)\n"
+
+
+@unittest.skipUnless(sys.platform == "win32", "the recorder reads Windows' own counters")
+class RealProcess(unittest.TestCase):
+    def child(self, code: str) -> subprocess.Popen:
+        proc = subprocess.Popen(
+            [sys.executable, "-I", "-c", code],
+            stdin=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        # Cleanups run last first: killed, then waited for, so none is left.
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        time.sleep(0.5)
+        return proc
+
+    def slope(self, code: str) -> float:
+        proc = self.child(code)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.csv"
+            reason = soak.record(proc.pid, 0.2, 4 / 3600, path)
+            rows = soak.load(path)
+        self.assertIn("ran the full", reason)
+        self.assertGreater(len(rows), 10)
+        return soak.slope_per_hour([(s.seconds, s.private_bytes / MB) for s in rows])
+
+    def test_a_real_leak_rises_and_an_idle_process_does_not(self):
+        leak = self.slope(LEAKER)
+        idle = self.slope(IDLE)
+        # 4 MB every 0.1 s is about 144,000 MB an hour while it runs.
+        self.assertGreater(leak, 10_000, f"leaking child: {leak:+.0f} MB/h")
+        self.assertLess(abs(idle), leak / 100, f"idle child: {idle:+.0f} MB/h against {leak:+.0f}")
+
+    def test_it_stops_when_the_process_exits(self):
+        proc = self.child("import time\ntime.sleep(1)\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            # Five seconds at most: without the exit check this reads
+            # "ran the full" instead of hanging the suite for an hour.
+            reason = soak.record(proc.pid, 0.2, 5 / 3600, Path(tmp) / "exit.csv")
+        self.assertIn("exited", reason)
+
+    def test_no_such_process_is_refused(self):
+        with self.assertRaises(soak.CannotRun):
+            soak.Process(4_000_000_000 % 2**32 - 3)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
