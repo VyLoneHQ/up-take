@@ -127,9 +127,11 @@ class Process:
 
     def alive(self) -> bool:
         code = self.wintypes.DWORD()
-        return bool(self.kernel32.GetExitCodeProcess(self.handle, self.ctypes.byref(code))) and (
-            code.value == STILL_ACTIVE
-        )
+        if not self.kernel32.GetExitCodeProcess(self.handle, self.ctypes.byref(code)):
+            # Not "it exited": a query that failed says nothing about the
+            # process (review of `#188`, round 3).
+            raise CannotRun(f"cannot ask whether process {self.pid} runs (error {self.ctypes.get_last_error()})")
+        return code.value == STILL_ACTIVE
 
     def read(self, seconds: float) -> Sample:
         ct, wt = self.ctypes, self.wintypes

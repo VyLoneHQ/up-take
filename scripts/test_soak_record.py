@@ -286,6 +286,33 @@ class RealProcess(unittest.TestCase):
             soak.subprocess.run = real
         self.assertIn("tasklist failed", str(caught.exception))
 
+    def test_a_failed_liveness_query_is_not_an_exit(self):
+        # Review of `#188`, round 3: GetExitCodeProcess failing read as
+        # "the process exited", a normal end, exit 0.
+        proc = self.child(IDLE)
+        real = soak._windows
+
+        def failing():
+            ctypes, wintypes, kernel32, user32, counters = real()
+
+            class Kernel:
+                def __getattr__(self, name):
+                    return getattr(kernel32, name)
+
+                def GetExitCodeProcess(self, *args):  # noqa: N802, the Win32 name
+                    return 0
+
+            return ctypes, wintypes, Kernel(), user32, counters
+
+        soak._windows = failing
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                code, _, err = run("record", "--pid", str(proc.pid), "--hours", "0.001", "--out", str(Path(tmp) / "x.csv"))
+        finally:
+            soak._windows = real
+        self.assertEqual(code, 2, err)
+        self.assertIn("cannot ask whether", err)
+
     def test_a_name_nothing_runs_under_is_refused(self):
         with self.assertRaises(soak.CannotRun) as caught:
             soak.find_pid("no-such-soak-process.exe")
