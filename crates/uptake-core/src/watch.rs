@@ -2122,26 +2122,25 @@ impl Bar {
     }
 
     /// Whether the fill reached the bar's end under the cover (review of
-    /// `#186`, round 1): its last line that is not a cap or a border has
-    /// changed since the cover began ([`Self::cover_from`]), when it was
-    /// still empty track, and the new look is not the old one under
-    /// Win+Shift+S ([`Self::darkened`]). Such a bar is not learned again, by
-    /// either wait:
-    /// learned full, it reads as empty and its end never comes (the
-    /// founder's checks of 2026-11-25, a bar left full after a theme
-    /// switch). It is learned once it empties again and holds still.
+    /// `#186`, rounds 1 and 2): its last line that is not a cap or a border
+    /// has changed since the cover began ([`Self::cover_from`]) and looks
+    /// unlike it did before the cover ([`Self::clear`]), when it was still
+    /// empty track. A Win+Shift+S selection held over the bar's end shows it
+    /// as it was before the cover, so it is not finished; a fill that reached
+    /// the end, in a new theme or under the overlay, is, and either way the
+    /// bar is full. Such a bar is not learned again, by either wait: learned
+    /// full, it reads as empty and its end never comes (the founder's checks
+    /// of 2026-11-25, a bar left full after a theme switch). It is learned
+    /// once it empties again and holds still.
     fn finished_under_cover(&self, reading: &Fingerprint) -> bool {
         self.finish.last().is_some_and(|&line| {
-            self.cover_from
-                .as_ref()
-                .is_some_and(|from| self.changed(from, line, reading) == Some(true))
+            let since = |print: &Option<Fingerprint>| {
+                print
+                    .as_ref()
+                    .is_some_and(|print| self.changed(print, line, reading) == Some(true))
+            };
+            since(&self.cover_from) && since(&self.clear)
         })
-            // Not a Win+Shift+S selection held over the bar's end, which
-            // shows that end as it was.
-            && self
-                .clear
-                .as_ref()
-                .is_some_and(|clear| !self.darkened(clear, reading))
     }
 
     /// The full bar of [`Self::finished_under_cover`]: reported once, when
@@ -5003,6 +5002,37 @@ mod real_bars {
             vec![Event::Reached(25), Event::Reached(50), Event::Filled],
             "the fill after it"
         );
+        // Switched at 10 %, the fill done 3.6 seconds later (review of
+        // `#186`, round 2): too little of the bar held still to tell the
+        // overlay from a theme, and the full bar must still come, either way
+        // round. The percentages it passed inside the wait are below the
+        // full bar, the highest moment, so only that is reported.
+        for (before, after) in [(&ROUND, &dark), (&dark, &ROUND)] {
+            let mut early = detector(ROUND.direction, [25, 50, 0, 0]);
+            let mut at_early = Duration::ZERO;
+            early.observe_at(render(before, 0, None, 0, false), at_early);
+            let mut fast = Vec::new();
+            for filled in (0..=24).step_by(4) {
+                fast.extend(feed(&mut early, before, filled, false, 66, &mut at_early));
+            }
+            for filled in (24..=ROUND.length).step_by(4) {
+                fast.extend(feed(&mut early, after, filled, false, 66, &mut at_early));
+            }
+            fast.extend(feed(
+                &mut early,
+                after,
+                ROUND.length,
+                false,
+                6_000,
+                &mut at_early,
+            ));
+            assert_eq!(
+                fast,
+                vec![Event::Filled],
+                "switched at 10 % from page {}",
+                before.theme.page
+            );
+        }
         events.clear();
         for filled in (0..=ROUND.length).step_by(4).chain([ROUND.length]) {
             events.extend(feed(&mut area, &dark, filled, false, 66, &mut at));
