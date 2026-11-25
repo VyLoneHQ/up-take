@@ -2121,6 +2121,40 @@ impl Bar {
         (darker + other) * 8 < track || darker > other
     }
 
+    /// Whether the fill reached the bar's end under the cover (review of
+    /// `#186`, round 1): its last line that is not a cap or a border has
+    /// changed since the cover began ([`Self::cover_from`]), when it was
+    /// still empty track, and the new look is not the old one under
+    /// Win+Shift+S ([`Self::darkened`]). Such a bar is not learned again, by
+    /// either wait:
+    /// learned full, it reads as empty and its end never comes (the
+    /// founder's checks of 2026-11-25, a bar left full after a theme
+    /// switch). It is learned once it empties again and holds still.
+    fn finished_under_cover(&self, reading: &Fingerprint) -> bool {
+        self.finish.last().is_some_and(|&line| {
+            self.cover_from
+                .as_ref()
+                .is_some_and(|from| self.changed(from, line, reading) == Some(true))
+        })
+            // Not a Win+Shift+S selection held over the bar's end, which
+            // shows that end as it was.
+            && self
+                .clear
+                .as_ref()
+                .is_some_and(|clear| !self.darkened(clear, reading))
+    }
+
+    /// The full bar of [`Self::finished_under_cover`]: reported once, when
+    /// this fill has not reported it yet.
+    fn report_full(&mut self) -> Option<Event> {
+        self.held = [None; MARKS];
+        if self.reported < 100 {
+            self.reported = 100;
+            return Some(Event::Filled);
+        }
+        None
+    }
+
     /// Whether the page around the bar of `reading` looks as it did in
     /// `from`: all but a sixteenth of it, by pixels, within [`CELL_DELTA`].
     fn page_still(&self, from: &Fingerprint, reading: &Fingerprint) -> bool {
@@ -2508,6 +2542,9 @@ impl Bar {
                 }
             };
             if whole && at.saturating_sub(since) >= RELEARN_AFTER {
+                if self.finished_under_cover(&reading) {
+                    return self.report_full();
+                }
                 self.learn(reading);
                 self.held = [None; MARKS];
                 return None;
@@ -2515,6 +2552,9 @@ impl Bar {
             // The same page, changed for good while the bar fills (`I-496`):
             // the bar is never still, so the wait above never ends.
             if whole && self.moving_relearn(&reading, at) {
+                if self.finished_under_cover(&reading) {
+                    return self.report_full();
+                }
                 let reported = self.reported;
                 self.learn(reading);
                 // What the fill reported before the page changed stays
@@ -4285,6 +4325,21 @@ mod real_bars {
         phase: u32,
         dim: &dyn Fn(u32, u32) -> bool,
     ) -> Fingerprint {
+        render_painted(look, filled, block, phase, &|x, y, level| {
+            if dim(x, y) { level / 10 * 6 } else { level }
+        })
+    }
+
+    /// [`render`], each pixel's level then passed through `paint` (area
+    /// pixels, before the bar is turned for its direction): a page that
+    /// changes around the bar.
+    fn render_painted(
+        look: &Look,
+        filled: u32,
+        block: Option<i32>,
+        phase: u32,
+        paint: &dyn Fn(u32, u32, u8) -> u8,
+    ) -> Fingerprint {
         let label = if look.label_beside { 14 + 28 + 30 } else { 0 };
         let (w, h) = (
             look.margin.0 * 2 + look.length + label,
@@ -4377,10 +4432,7 @@ mod real_bars {
                 {
                     level = theme.track;
                 }
-                if dim(x, y) {
-                    level = level / 10 * 6;
-                }
-                grey[(y * w + x) as usize] = level;
+                grey[(y * w + x) as usize] = paint(x, y, level);
             }
         }
         // The bar was drawn left to right; turned for the others.
@@ -4913,6 +4965,43 @@ mod real_bars {
             relearned_mid_fill(&back),
             1,
             "dark to light, learned again once"
+        );
+        // Switched at 70 %, the fill done 2.4 seconds later, inside the wait
+        // (review of `#186`, round 1): the full bar is reported, not learned
+        // as the new empty one; once it empties and holds still it is
+        // learned, and the next fill is read whole.
+        let mut late = detector(ROUND.direction, [25, 50, 0, 0]);
+        let mut at_late = Duration::ZERO;
+        late.observe_at(render(&ROUND, 0, None, 0, false), at_late);
+        let mut finished = Vec::new();
+        for filled in (0..=168).step_by(4) {
+            finished.extend(feed(&mut late, &ROUND, filled, false, 66, &mut at_late));
+        }
+        for filled in (168..=ROUND.length).step_by(2) {
+            finished.extend(feed(&mut late, &dark, filled, false, 66, &mut at_late));
+        }
+        finished.extend(feed(
+            &mut late,
+            &dark,
+            ROUND.length,
+            false,
+            6_000,
+            &mut at_late,
+        ));
+        assert_eq!(
+            finished,
+            vec![Event::Reached(25), Event::Reached(50), Event::Filled],
+            "a fill done inside the wait"
+        );
+        finished.clear();
+        finished.extend(feed(&mut late, &dark, 0, false, 5_400, &mut at_late));
+        for filled in (0..=ROUND.length).step_by(4).chain([ROUND.length]) {
+            finished.extend(feed(&mut late, &dark, filled, false, 66, &mut at_late));
+        }
+        assert_eq!(
+            finished,
+            vec![Event::Reached(25), Event::Reached(50), Event::Filled],
+            "the fill after it"
         );
         events.clear();
         for filled in (0..=ROUND.length).step_by(4).chain([ROUND.length]) {
@@ -5711,6 +5800,92 @@ mod real_bars {
                 );
             }
         }
+    }
+
+    /// Review of `#186`, round 1: a full bar is reported when the fill
+    /// reached the bar's end under the cover. A Win+Shift+S selection held
+    /// still over the far end of an idle bar shows that end bright again,
+    /// which is not a fill: nothing is reported, from either end.
+    #[test]
+    fn a_selection_held_over_the_bar_end_is_not_a_full_bar() {
+        for look in [
+            ROUND,
+            Look {
+                theme: DARK,
+                ..ROUND
+            },
+        ] {
+            let w = look.margin.0 * 2 + look.length;
+            let h = look.margin.1 * 2 + look.thickness;
+            for (from_left, tall) in [(false, true), (false, false), (true, true)] {
+                let mut detector = detector(look.direction, [25, 50, 75, 0]);
+                let mut at = Duration::ZERO;
+                detector.observe_at(render(&look, 60, None, 0, false), at);
+                let rows = if tall {
+                    (0, h)
+                } else {
+                    (look.margin.1 - 1, h - look.margin.1 + 1)
+                };
+                let mut events = Vec::new();
+                // Dark a second, then a selection a fifth of the area wide at
+                // one end, held still for twelve seconds.
+                for reading in 0..400_u32 {
+                    let shown = reading >= 30;
+                    let bright = move |x: u32, y: u32| {
+                        let along = if from_left { x < w / 5 } else { x >= w - w / 5 };
+                        shown && along && (rows.0..rows.1).contains(&y)
+                    };
+                    let print = render_dimmed(&look, 60, None, 0, &|x, y| !bright(x, y));
+                    at += Duration::from_millis(33);
+                    events.extend(detector.observe_at(print, at));
+                }
+                assert_eq!(
+                    events,
+                    vec![],
+                    "theme page {}, from the left {from_left}, tall {tall}",
+                    look.theme.page
+                );
+            }
+        }
+    }
+
+    /// `I-496`: the page switched to dark, and the page around the bar then
+    /// keeps changing (a banner blinking beside it) while the bar fills. The
+    /// page never holds still in its new look, so the bar is not learned
+    /// from it mid-fill, and nothing is reported.
+    #[test]
+    fn a_page_that_keeps_changing_is_not_learned_mid_fill() {
+        let dark = Look {
+            theme: DARK,
+            ..ROUND
+        };
+        let mut detector = detector(ROUND.direction, [25, 50, 75, 0]);
+        let mut at = Duration::ZERO;
+        detector.observe_at(render(&ROUND, 20, None, 0, false), at);
+        let mut events = Vec::new();
+        for reading in 0..300_u32 {
+            let filled = (20 + reading / 2).min(ROUND.length);
+            // The page's left half alternates between two greys every
+            // reading; the bar and the rest of the page are the dark theme.
+            let blink = if reading % 2 == 0 { 60 } else { 90 };
+            let margin = dark.margin;
+            let print = render_painted(&dark, filled, None, 0, &|x, y, level| {
+                let on_bar = y >= margin.1 && y < margin.1 + dark.thickness;
+                if !on_bar && x < margin.0 + dark.length / 2 {
+                    blink
+                } else {
+                    level
+                }
+            });
+            at += Duration::from_millis(33);
+            events.extend(detector.observe_at(print, at));
+        }
+        assert_eq!(events, vec![]);
+        assert_eq!(
+            relearned_mid_fill(&detector),
+            0,
+            "learned a page that never held still"
+        );
     }
 
     /// `I-496`: the page switched to dark while an indeterminate bar sweeps.
