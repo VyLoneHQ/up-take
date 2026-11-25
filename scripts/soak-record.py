@@ -11,7 +11,7 @@ watches the process from outside.
     python scripts/soak-record.py summarise soak.csv
     python scripts/soak-record.py summarise soak.csv --max-private-mb-per-hour 1 --max-cpu-rise 0.5
 
-`record` writes one CSV row per sample: seconds since the start, private bytes,
+`record` writes a NEW file, never over an existing one, one CSV row per sample: seconds since the start, private bytes,
 working set, kernel handles, GDI objects, USER objects and CPU seconds (user
 plus kernel). It stops at `--hours`, or when the process exits, and says which.
 A row is flushed as it is written, so a run cut short keeps what it read.
@@ -168,6 +168,10 @@ def find_pid(name: str) -> int:
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         check=False,
     )
+    if out.returncode != 0:
+        # Not "no such process": a lookup that failed found nothing either
+        # (review of `#188`, round 2).
+        raise CannotRun(f"tasklist failed ({out.returncode}): {out.stderr.strip() or out.stdout.strip()}")
     rows = [row for row in csv.reader(out.stdout.splitlines()) if len(row) > 1 and row[0].lower() == name.lower()]
     if not rows:
         raise CannotRun(f"no running process is named {name}")
@@ -179,12 +183,17 @@ def find_pid(name: str) -> int:
 
 def record(pid: int, every: float, hours: float, out: Path, now=time.monotonic, sleep=time.sleep) -> str:
     """Samples `pid` every `every` seconds for `hours`; returns why it stopped."""
-    try:
-        file = out.open("w", newline="", encoding="utf-8")
-    except OSError as e:
-        raise CannotRun(f"cannot write {out}: {e}") from e
+    # The process first, so that a wrong --pid or the wrong platform touches
+    # no file; then a NEW file only: a record is evidence, and a run never
+    # writes over an earlier one (review of `#188`, round 2).
     process = Process(pid)
     try:
+        try:
+            file = out.open("x", newline="", encoding="utf-8")
+        except FileExistsError as e:
+            raise CannotRun(f"{out} already exists; a record is never written over, choose another --out") from e
+        except OSError as e:
+            raise CannotRun(f"cannot write {out}: {e}") from e
         start = now()
         with file:
             writer = csv.writer(file)

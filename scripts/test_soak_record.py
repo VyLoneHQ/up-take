@@ -172,10 +172,40 @@ class Refusals(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("not a soak record", err)
 
+    def test_an_existing_record_is_never_written_over(self):
+        # Review of `#188`, round 2: a wrong --pid emptied an earlier record.
+        if sys.platform != "win32":
+            self.skipTest("record reaches the file only on Windows")
+        proc = subprocess.Popen(
+            [sys.executable, "-I", "-c", IDLE],
+            stdin=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "earlier.csv"
+            out.write_text("earlier evidence\n", encoding="utf-8")
+            for pid in (proc.pid, 4_294_967_293):
+                code, _, err = run("record", "--pid", str(pid), "--hours", "0.001", "--out", str(out))
+                self.assertEqual(code, 2, err)
+            self.assertEqual(out.read_text(encoding="utf-8"), "earlier evidence\n")
+
     def test_an_output_folder_that_is_not_there_is_refused(self):
+        pid = 1
+        if sys.platform == "win32":
+            # A process it can open, so that the refusal is the folder's.
+            proc = subprocess.Popen(
+                [sys.executable, "-I", "-c", IDLE],
+                stdin=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            self.addCleanup(proc.wait)
+            self.addCleanup(proc.kill)
+            pid = proc.pid
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "no-such-folder" / "x.csv"
-            code, _, err = run("record", "--pid", "4", "--hours", "0.001", "--out", str(out))
+            code, _, err = run("record", "--pid", str(pid), "--hours", "0.001", "--out", str(out))
         self.assertEqual(code, 2)
         self.assertIn("cannot write" if sys.platform == "win32" else "run it on Windows", err)
 
@@ -243,6 +273,18 @@ class RealProcess(unittest.TestCase):
             # "ran the full" instead of hanging the suite for an hour.
             reason = soak.record(proc.pid, 0.2, 5 / 3600, Path(tmp) / "exit.csv")
         self.assertIn("exited", reason)
+
+    def test_a_failed_lookup_is_not_no_such_process(self):
+        # Review of `#188`, round 2: tasklist failing read as "no process".
+        failed = subprocess.CompletedProcess(["tasklist"], 1, "", "ERROR: access denied")
+        real = soak.subprocess.run
+        soak.subprocess.run = lambda *a, **k: failed
+        try:
+            with self.assertRaises(soak.CannotRun) as caught:
+                soak.find_pid("up-take.exe")
+        finally:
+            soak.subprocess.run = real
+        self.assertIn("tasklist failed", str(caught.exception))
 
     def test_a_name_nothing_runs_under_is_refused(self):
         with self.assertRaises(soak.CannotRun) as caught:
