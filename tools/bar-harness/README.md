@@ -30,6 +30,11 @@ prints one row per fixture and scenario:
   `Reached(50)` once, never before the bar is half full, then `Filled` once, never early.
 - `again`: the area is placed over the bar at 30 %, it fills (20 % was passed and is not reported),
   empties and fills again: every moment again.
+- `sw60s`, `sw120s` (backlog `I-496`): the page's theme switches at 30 %, to the same render in the
+  other theme, and the bar fills on at that speed: it must give `Reached(50)` and `Filled`, as a fill
+  does. Needs both themes of each fixture: a set captured with `--themes light` (or `dark`) alone
+  fails with an `sw` row naming the missing file, rather than skipping the switch in silence. Tight
+  (`0`) and 3-pixel (`3`) areas report a false full bar at the switch, on `main` too (`I-497`).
 - `1.5s`, `3s`, `6s` (marquee only): the block sweeps at that pace, marks 20, 50 and 80, and must
   give nothing; the same sweep caught at other phases is counted, not judged (a block sitting at
   the far end reads as a filled bar, the bar mode's documented limit). A sweep slower than about

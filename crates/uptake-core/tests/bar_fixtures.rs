@@ -270,6 +270,16 @@ fn the_bar_mode_reads_real_renders() {
             } else {
                 report("sw", Err(format!("{other} does not match in size")));
             }
+        } else {
+            // Not passed over in silence (review of `#186`, round 3): a set
+            // captured in one theme only (`capture.mjs --themes light`) would
+            // finish green without a single switch.
+            report(
+                "sw",
+                Err(format!(
+                    "no {other}.bar: the theme switch needs both themes (capture.mjs's default)"
+                )),
+            );
         }
     }
     assert_eq!(failures, 0, "{failures} fixture runs failed");

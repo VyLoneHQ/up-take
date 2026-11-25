@@ -1933,8 +1933,6 @@ impl Bar {
         known > 0 && moved * 16 <= known
     }
 
-    /// Whether any page lies on a line beyond the bar's ends, which
-    /// [`Self::page_back`] always compares.
     /// Whether a covered bar is due to be learned again while it fills
     /// (`I-496`), and the wait for it kept up: the page around the bar has
     /// held still in its new look for [`RELEARN_AFTER`], in that time the
@@ -2173,6 +2171,8 @@ impl Bar {
         known > 0 && moved * 16 <= known
     }
 
+    /// Whether any page lies on a line beyond the bar's ends, which
+    /// [`Self::page_back`] always compares.
     fn has_end_page(&self) -> bool {
         let Some(empty) = &self.empty else {
             return false;
