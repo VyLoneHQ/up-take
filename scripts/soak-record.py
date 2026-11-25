@@ -28,8 +28,8 @@ more than 0.5 points of one core above the first hour's.
 
 Windows only for `record` (the counters are Windows' own, read through
 `ctypes`, so nothing is installed). `summarise` runs anywhere. Every child
-process this script starts runs without a console window: on 2026-11-25 a
-background job's children took the founder's keyboard focus every second.
+process this script starts runs without a console window, so a soak left
+running never raises a window over the desktop it is measuring.
 
 Exit codes: 0 done (or every limit passed); 1 a limit failed; 2 it could not
 run (no such process, not Windows, an unreadable file, too few samples).
@@ -179,10 +179,14 @@ def find_pid(name: str) -> int:
 
 def record(pid: int, every: float, hours: float, out: Path, now=time.monotonic, sleep=time.sleep) -> str:
     """Samples `pid` every `every` seconds for `hours`; returns why it stopped."""
+    try:
+        file = out.open("w", newline="", encoding="utf-8")
+    except OSError as e:
+        raise CannotRun(f"cannot write {out}: {e}") from e
     process = Process(pid)
     try:
         start = now()
-        with out.open("w", newline="", encoding="utf-8") as file:
+        with file:
             writer = csv.writer(file)
             writer.writerow(FIELDS)
             while True:
@@ -226,7 +230,8 @@ def load(path: Path) -> list[Sample]:
             )
             for row in rows
         ]
-    except (KeyError, ValueError) as e:
+    except (KeyError, ValueError, TypeError) as e:
+        # TypeError: a short row, whose missing fields read as None.
         raise CannotRun(f"{path} is not a soak record: {e}") from e
 
 
@@ -271,8 +276,11 @@ MEASURES = (
 
 def summarise(samples: list[Sample], limits: dict[str, float]) -> tuple[list[str], bool]:
     """The report's lines, and whether every limit given passed."""
-    # Fewer than two samples is refused by `slope_per_hour`, below.
-    span = samples[-1].seconds - samples[0].seconds if samples else 0.0
+    # Refused here, before anything indexes the list: an empty record (a
+    # header only) has no first or last sample (review of `#188`, round 1).
+    if len(samples) < 2:
+        raise CannotRun("a trend needs at least two samples")
+    span = samples[-1].seconds - samples[0].seconds
     lines = [f"{len(samples)} samples over {span / HOUR:.2f} h"]
     passed = True
     first, last = window(samples, True), window(samples, False)

@@ -154,6 +154,31 @@ class Refusals(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("not a soak record", err)
 
+    def test_a_header_only_record_is_refused(self):
+        # Review of `#188`, round 1: it raised IndexError, exit 1, which reads
+        # as a failed limit.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "empty.csv"
+            write(path, [])
+            code, _, err = run("summarise", str(path), "--max-cpu-rise", "1")
+        self.assertEqual(code, 2)
+        self.assertIn("at least two samples", err)
+
+    def test_a_short_row_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "short.csv"
+            path.write_text(",".join(soak.FIELDS) + "\n0,1,2\n", encoding="utf-8")
+            code, _, err = run("summarise", str(path))
+        self.assertEqual(code, 2)
+        self.assertIn("not a soak record", err)
+
+    def test_an_output_folder_that_is_not_there_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "no-such-folder" / "x.csv"
+            code, _, err = run("record", "--pid", "4", "--hours", "0.001", "--out", str(out))
+        self.assertEqual(code, 2)
+        self.assertIn("cannot write" if sys.platform == "win32" else "run it on Windows", err)
+
     def test_a_missing_file_is_refused(self):
         code, _, err = run("summarise", "no-such-record.csv")
         self.assertEqual(code, 2)
@@ -218,6 +243,19 @@ class RealProcess(unittest.TestCase):
             # "ran the full" instead of hanging the suite for an hour.
             reason = soak.record(proc.pid, 0.2, 5 / 3600, Path(tmp) / "exit.csv")
         self.assertIn("exited", reason)
+
+    def test_a_name_nothing_runs_under_is_refused(self):
+        with self.assertRaises(soak.CannotRun) as caught:
+            soak.find_pid("no-such-soak-process.exe")
+        self.assertIn("no running process", str(caught.exception))
+
+    def test_a_name_several_run_under_is_refused(self):
+        first, second = self.child(IDLE), self.child(IDLE)
+        name = Path(sys.executable).name
+        with self.assertRaises(soak.CannotRun) as caught:
+            soak.find_pid(name)
+        self.assertIn("pass --pid", str(caught.exception))
+        self.assertTrue(first.pid and second.pid)
 
     def test_no_such_process_is_refused(self):
         with self.assertRaises(soak.CannotRun):
