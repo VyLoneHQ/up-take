@@ -172,6 +172,15 @@ class Refusals(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("not a soak record", err)
 
+    def test_a_record_that_is_not_utf8_is_refused(self):
+        # Review of `#188`, round 5: UnicodeDecodeError, a traceback, exit 1.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "binary.csv"
+            path.write_bytes(",".join(soak.FIELDS).encode() + bytes([10, 0xFF, 0xFE, 44, 49, 10]))
+            code, _, err = run("summarise", str(path), "--max-cpu-rise", "1")
+        self.assertEqual(code, 2, err)
+        self.assertIn("not a soak record", err)
+
     def test_a_nan_timestamp_is_refused(self):
         # Review of `#188`, round 4: it reached a ZeroDivisionError, exit 1.
         with tempfile.TemporaryDirectory() as tmp:

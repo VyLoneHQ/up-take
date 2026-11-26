@@ -248,6 +248,10 @@ def load(path: Path) -> list[Sample]:
             rows = list(csv.DictReader(file))
     except OSError as e:
         raise CannotRun(f"cannot read {path}: {e}") from e
+    except (UnicodeDecodeError, csv.Error) as e:
+        # Review of `#188`, round 5: a record that is not UTF-8 text escaped
+        # as a traceback, exit 1, which reads as a failed limit.
+        raise CannotRun(f"{path} is not a soak record: {e}") from e
     try:
         return [
             Sample(
