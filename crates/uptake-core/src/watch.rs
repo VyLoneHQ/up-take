@@ -1104,7 +1104,11 @@ impl Detector {
 /// `tests/bar_fixtures.rs` (switch at 30 %, margins 0 and 3 pixels): of 246
 /// runs that read the switch as a full bar, 210 now report the full bar once,
 /// at its end, without the percentages; 36, segmented bars and a shimmering
-/// one with no margin, still read it as a full bar; and with *Show UP-TAKE in screen recordings*
+/// one with no margin, still read it as a full bar. The other side of that
+/// rule, the trade the founder accepted: on such an area, a light bar with
+/// text inside that jumps from 60 % to its end in one reading is refused,
+/// and its full bar is lost (`a_fill_that_jumps_to_the_end_on_a_tight_area_is_full`);
+/// and with *Show UP-TAKE in screen recordings*
 /// on, the area's own border covers the bar's last 4 pixels, so the bar is
 /// full once the last line UP-TAKE can see is filled (review of `#170`,
 /// round 3). A label beside the bar is left out only when at least
@@ -2176,8 +2180,12 @@ impl Bar {
     /// average over the track, so a striped fill's stripes do not count.
     /// True whenever it cannot be judged: no old front (a bar placed empty),
     /// the old front at the bar's finish already, or a line with nothing
-    /// known. Known limit: a fill whose label or text changes at the front
-    /// in the same reading can be refused, and is then read as a cover.
+    /// known. Known limit, the trade the founder accepted with option (a):
+    /// a fill whose text changes at the old front in the same reading can be
+    /// refused and is then read as a cover; measured, a light bar with text
+    /// inside jumping from 60 % to its end in one reading on a tight area,
+    /// whose full bar is then lost, since the picture it settles on cannot be
+    /// told from a theme switch on a paused bar.
     fn joins_the_fill(&self, reading: &Fingerprint) -> bool {
         let Some(old) = self.front_line else {
             return true;
@@ -4886,7 +4894,7 @@ mod real_bars {
     fn a_fill_that_jumps_to_the_end_on_a_tight_area_is_full() {
         let labels = [(false, false), (true, false), (false, true)];
         for margin in [(0, 0), (3, 3)] {
-            for (theme, (text_inside, label_beside)) in [LIGHT, DARK]
+            for ((theme, light), (text_inside, label_beside)) in [(LIGHT, true), (DARK, false)]
                 .into_iter()
                 .flat_map(|theme| labels.map(|label| (theme, label)))
             {
@@ -4904,20 +4912,46 @@ mod real_bars {
                     label_beside,
                     ..ROUND
                 };
-                let mut detector = detector(look.direction, [0; MARKS]);
-                let mut at = Duration::ZERO;
-                let mut events = Vec::new();
-                for filled in (0..=72).step_by(4) {
+                // From 30 % to 60 %: at 40 % to 60 % the old front lies in
+                // the text drawn in the middle of the bar (review of `#189`,
+                // round 2).
+                for from in [72_u32, 96, 120, 144] {
+                    let mut detector = detector(look.direction, [0; MARKS]);
+                    let mut at = Duration::ZERO;
+                    let mut events = Vec::new();
+                    for filled in (0..=from).step_by(4) {
+                        at += Duration::from_millis(100);
+                        events
+                            .extend(detector.observe_at(render(&look, filled, None, 0, false), at));
+                    }
                     at += Duration::from_millis(100);
-                    events.extend(detector.observe_at(render(&look, filled, None, 0, false), at));
+                    events.extend(
+                        detector.observe_at(render(&look, look.length, None, 0, false), at),
+                    );
+                    let at_once = events.clone();
+                    // The full bar held, as a finished job's bar stays.
+                    for _ in 0..70 {
+                        at += Duration::from_millis(100);
+                        events.extend(
+                            detector.observe_at(render(&look, look.length, None, 0, false), at),
+                        );
+                    }
+                    let case = format!(
+                        "margin {margin:?}, text inside {text_inside}, label beside {label_beside}, from {from}"
+                    );
+                    // The accepted trade of the founder's option (a): text
+                    // that changes at the old front can make a jump look
+                    // unlike the fill. Measured: on a light bar with text
+                    // inside, a jump from 60 % to the end in one reading is
+                    // refused, and since the picture it settles on cannot be
+                    // told from a theme switch on a paused bar, its full bar
+                    // is lost (pinned here, so that a fix or a worsening
+                    // shows). Every other case is a full bar at once.
+                    let lost = text_inside && light && from == 144;
+                    let expected = if lost { vec![] } else { vec![Event::Filled] };
+                    assert_eq!(at_once, expected, "{case}");
+                    assert_eq!(events, expected, "{case}");
                 }
-                at += Duration::from_millis(100);
-                events.extend(detector.observe_at(render(&look, look.length, None, 0, false), at));
-                assert_eq!(
-                    events,
-                    vec![Event::Filled],
-                    "margin {margin:?}, text inside {text_inside}, label beside {label_beside}"
-                );
             }
         }
     }
