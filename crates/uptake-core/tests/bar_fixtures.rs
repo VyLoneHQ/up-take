@@ -264,7 +264,15 @@ fn the_bar_mode_reads_real_renders() {
                 for (label, seconds) in [("sw60s", 60.0), ("sw120s", 120.0)] {
                     let repeat = ((step / 100.0 * seconds * 30.0).round() as usize).max(1);
                     let per_frame = Duration::from_secs_f64(step / 100.0 * seconds);
-                    let events = feed(&run, direction, repeat, [50, 0, 0, 0], per_frame);
+                    // The full bar held seven seconds after the fill ends, as
+                    // a finished job's bar stays (`I-497`): a switch taken as
+                    // a cover on an area with too little page can only report
+                    // the full bar once the page holds still (`RELEARN_AFTER`).
+                    let hold = (7.0 / per_frame.as_secs_f64()).ceil() as usize;
+                    let last = *run.last().expect("a frame");
+                    let mut held = run.clone();
+                    held.extend(std::iter::repeat_n(last, hold));
+                    let events = feed(&held, direction, repeat, [50, 0, 0, 0], per_frame);
                     report(label, judge_fill(&events).map(|()| format!("{events:?}")));
                 }
             } else {

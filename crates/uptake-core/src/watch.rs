@@ -1096,7 +1096,15 @@ impl Detector {
 /// or with page above and below it and none before and after, so that no
 /// page lies beyond the bar's ends: reviews of `#178`, rounds 16 and 17),
 /// a window moved over the bar or a darkened screen changes every line,
-/// which reads as a full bar; and with *Show UP-TAKE in screen recordings*
+/// which reads as a full bar. **An area needs at least 4 pixels (one cell)
+/// of page round the bar to tell a cover from a fill** (`I-497`): with less,
+/// no cell of page is learned, so a page changed in one reading (a theme
+/// switch) is told from a fill only by [`Bar::joins_the_fill`], and only
+/// once some of the bar is filled. Measured on the real renders of
+/// `tests/bar_fixtures.rs` (switch at 30 %, margins 0 and 3 pixels): of 246
+/// runs that read the switch as a full bar, 210 now report the full bar once,
+/// at its end, without the percentages; 36, segmented bars and a shimmering
+/// one with no margin, still read it as a full bar; and with *Show UP-TAKE in screen recordings*
 /// on, the area's own border covers the bar's last 4 pixels, so the bar is
 /// full once the last line UP-TAKE can see is filled (review of `#170`,
 /// round 3). A label beside the bar is left out only when at least
@@ -1156,6 +1164,11 @@ struct Bar {
     reported: u8,
     /// The progress the last reading showed.
     seen: u8,
+    /// The line the fill's run reached at the last reading that was read and
+    /// not full: the old front a jump to a full bar is judged from
+    /// ([`Self::joins_the_fill`], `I-497`). `None` before the first such
+    /// reading, or when nothing was filled.
+    front_line: Option<u32>,
     /// Which end the bar fills from.
     direction: Direction,
     /// The area's percentages ([`Tuning::marks`]).
@@ -1312,6 +1325,12 @@ const TRACK_DELTA: u8 = 2 * CELL_DELTA;
 /// track's difference from the page off it, and a fill is further than that
 /// from the track (the maintainer's two themes: 89 and 114).
 const EMPTY_DELTA: u32 = 3 * CELL_DELTA as u32;
+
+/// How many whole lines on each side of a fill's old front
+/// [`Bar::joins_the_fill`] compares (`I-497`): four, enough that the break
+/// between a segmented bar's blocks (one line or two) is outvoted, few
+/// enough that a gradient changes little across them.
+const JOIN_LINES: usize = 4;
 
 /// How far from the middle cell of a line, in levels, a cell may be for it to
 /// count as the same flat colour, as a border's are.
@@ -1642,7 +1661,10 @@ impl Bar {
         self.finish = finish;
         self.empty_level = empty_level;
         self.start = start;
-        let (percent, _) = self.progress(&reading, &reading).unwrap_or((0, false));
+        let (percent, _, front_line) = self
+            .progress(&reading, &reading)
+            .unwrap_or((0, false, None));
+        self.front_line = front_line;
         self.reported = percent;
         self.first = percent;
         self.seen = percent;
@@ -2141,6 +2163,60 @@ impl Bar {
         })
     }
 
+    /// Whether `reading`, which reads as a full bar, shows the fill going on
+    /// from where it stood at the last reading (`I-497`, the founder's option
+    /// (c) of 2026-11-26): the first line past the old front
+    /// ([`Self::front_line`]) look like the fill behind it: at least a quarter
+    /// of up to [`JOIN_LINES`] whole lines past the front are within
+    /// [`EMPTY_DELTA`] by level of the median of as many lines behind it,
+    /// and more than [`GAP_LINES`] lines past it are there to judge by, so
+    /// that the break between a segmented bar's blocks does not count. A real fill, gradients included, is
+    /// continuous there; a theme switch shows the new empty track past the
+    /// old front, unlike the new fill behind it. A line's level is its
+    /// average over the track, so a striped fill's stripes do not count.
+    /// True whenever it cannot be judged: no old front (a bar placed empty),
+    /// the old front at the bar's finish already, or a line with nothing
+    /// known. Known limit: a fill whose label or text changes at the front
+    /// in the same reading can be refused, and is then read as a cover.
+    fn joins_the_fill(&self, reading: &Fingerprint) -> bool {
+        let Some(old) = self.front_line else {
+            return true;
+        };
+        let (low, high) = self.ends;
+        // Past the old front only up to the bar's finish: its last lines may
+        // be caps or a border, unlike the lines inside.
+        let end = self
+            .finish
+            .first()
+            .map_or(high, |&first| first.saturating_sub(1));
+        let whole = |line: &u32| self.is_live(*line) && !self.is_odd(*line);
+        let levels = |lines: Vec<u32>| -> Vec<i32> {
+            lines
+                .into_iter()
+                .filter_map(|line| self.level(reading, line))
+                .collect()
+        };
+        let mut behind = levels((low..old).rev().filter(whole).take(JOIN_LINES).collect());
+        let ahead = levels((old + 1..=end).filter(whole).take(JOIN_LINES).collect());
+        behind.sort_unstable();
+        let Some(&fill) = behind.get(behind.len() / 2) else {
+            return true;
+        };
+        // No more lines past the front than a segmented bar's break between
+        // blocks: they may all be that break, which says nothing.
+        if ahead.len() <= GAP_LINES as usize {
+            return true;
+        }
+        // Refused only when under a quarter of them look like the fill: a
+        // theme switch shows the new empty track on every one, a segmented
+        // bar's break is at most two of four.
+        let like = ahead
+            .iter()
+            .filter(|&&level| level.abs_diff(fill) <= EMPTY_DELTA)
+            .count();
+        like * 4 >= ahead.len()
+    }
+
     /// The full bar of [`Self::finished_under_cover`]: reported once, when
     /// this fill has not reported it yet.
     fn report_full(&mut self) -> Option<Event> {
@@ -2198,7 +2274,11 @@ impl Bar {
     /// the area's own border or mark, with *Show UP-TAKE in screen
     /// recordings* on, or under one of UP-TAKE's windows) is passed over: it
     /// neither stops the run nor counts in the length.
-    fn progress(&self, empty: &Fingerprint, reading: &Fingerprint) -> Option<(u8, bool)> {
+    fn progress(
+        &self,
+        empty: &Fingerprint,
+        reading: &Fingerprint,
+    ) -> Option<(u8, bool, Option<u32>)> {
         if self.covered(empty, reading) {
             return None;
         }
@@ -2208,6 +2288,8 @@ impl Bar {
         // The last line the run took: the fill's front, which a cell counts
         // as filled once part of it moved.
         let mut front = 0_u64;
+        // The line the run last took: the fill's front line (`I-497`).
+        let mut front_line = None;
         // How many lines in a row since the last filled one have not moved:
         // a few are a gap in the bar the first reading could not show (the
         // break between blocks, when there was no margin to tell it from),
@@ -2256,6 +2338,7 @@ impl Bar {
                 if !stopped {
                     run += gap + length;
                     front = length;
+                    front_line = Some(line);
                     // How far the front line moved against the line before
                     // it: the share of it the fill covers.
                     let drift = self.drift(empty, reading, line);
@@ -2297,7 +2380,7 @@ impl Bar {
             && last_empty == last_now
             && self.reaches_the_end(empty, reading);
         let percent = u8::try_from((counted * 100 / total.max(1)).min(100)).unwrap_or(100);
-        Some((if full { 100 } else { percent.min(99) }, full))
+        Some((if full { 100 } else { percent.min(99) }, full, front_line))
     }
 
     /// Takes one reading, made at `at`, and says whether it is a moment worth
@@ -2496,16 +2579,29 @@ impl Bar {
         // What lay under one of UP-TAKE's own windows at the first reading is
         // learned at its first sight, as the other choices do.
         empty.learn(&reading);
-        let covered = if self.covering {
+        let mut covered = if self.covering {
             !self.page_back(&reading)
         } else {
             self.covered(&empty, &reading)
         };
-        let progress = if covered {
+        let mut progress = if covered {
             None
         } else {
             self.progress(&empty, &reading)
         };
+        // A jump to a full bar whose new lines do not look like the fill
+        // behind the old front is something over the bar, not a fill
+        // (`I-497`): with less than a cell of page round the bar,
+        // [`Self::covered`] has nothing to compare, and a theme switch, which
+        // changes every line in one reading, read as the fill reaching the
+        // end. It is taken as a cover, so the waits for a new page apply.
+        if matches!(progress, Some((_, true, _)))
+            && self.reported < 100
+            && !self.joins_the_fill(&reading)
+        {
+            covered = true;
+            progress = None;
+        }
         if covered {
             if !self.covering || self.cover_from.is_none() {
                 self.cover_from = Some(reading.clone());
@@ -2577,12 +2673,13 @@ impl Bar {
         // Something over the area, not a fill: nothing is taken from it, and
         // a percentage waiting out its calm starts it again, since the bar was
         // not seen holding it (review of `#178`, finding 2).
-        let Some((percent, full)) = progress else {
+        let Some((percent, full, front_line)) = progress else {
             self.held = [None; MARKS];
             self.attached = None;
             return None;
         };
         self.seen = percent;
+        self.front_line = if full { None } else { front_line };
         if percent == 0 {
             self.attached = None;
         } else if self.attached.is_none() {
@@ -4723,6 +4820,84 @@ mod real_bars {
                 margin: (0, 0),
                 ..ROUND
             });
+        }
+    }
+
+    /// `I-497`: on an area with less than a cell of page round the bar
+    /// (none, or 3 pixels), a theme switched in the middle of a fill changes
+    /// every line in one reading, and read as the fill reaching the end. The
+    /// line past the old front looks like the new empty track, not like the
+    /// fill behind it, so it is not a full bar; the one full bar comes when
+    /// the fill really ends.
+    #[test]
+    fn a_theme_switch_on_a_tight_area_is_not_a_full_bar() {
+        for margin in [(0, 0), (3, 3)] {
+            for (from, to) in [(LIGHT, DARK), (DARK, LIGHT)] {
+                let look = Look {
+                    margin,
+                    theme: from,
+                    ..ROUND
+                };
+                let mut detector = detector(look.direction, [50, 0, 0, 0]);
+                let mut at = Duration::ZERO;
+                let mut events = Vec::new();
+                for filled in (0..=72).step_by(4) {
+                    at += Duration::from_millis(100);
+                    events.extend(detector.observe_at(render(&look, filled, None, 0, false), at));
+                }
+                let switched = Look { theme: to, ..look };
+                for _ in 0..10 {
+                    at += Duration::from_millis(100);
+                    events.extend(detector.observe_at(render(&switched, 72, None, 0, false), at));
+                }
+                assert_eq!(events, vec![], "margin {margin:?}");
+                // The fill goes on in the new theme: no full bar before its
+                // end, and one once it ends and the page holds still, read as
+                // a fill finished under a cover (the waits of `I-493`).
+                for filled in (76..switched.length).step_by(4) {
+                    at += Duration::from_millis(100);
+                    let event = detector.observe_at(render(&switched, filled, None, 0, false), at);
+                    assert_ne!(event, Some(Event::Filled), "margin {margin:?}, at {filled}");
+                }
+                for _ in 0..70 {
+                    at += Duration::from_millis(100);
+                    events.extend(
+                        detector.observe_at(render(&switched, switched.length, None, 0, false), at),
+                    );
+                }
+                assert_eq!(
+                    events.iter().filter(|&&e| e == Event::Filled).count(),
+                    1,
+                    "margin {margin:?}: {events:?}"
+                );
+            }
+        }
+    }
+
+    /// The other side of `I-497`'s rule: on the same tight areas, a fill that
+    /// jumps from 30% to the end between two readings (a bar read seldom, or
+    /// a job that finished at once) is still a full bar, since the lines past
+    /// the old front look like the fill behind it.
+    #[test]
+    fn a_fill_that_jumps_to_the_end_on_a_tight_area_is_full() {
+        for margin in [(0, 0), (3, 3)] {
+            for theme in [LIGHT, DARK] {
+                let look = Look {
+                    margin,
+                    theme,
+                    ..ROUND
+                };
+                let mut detector = detector(look.direction, [0; MARKS]);
+                let mut at = Duration::ZERO;
+                let mut events = Vec::new();
+                for filled in (0..=72).step_by(4) {
+                    at += Duration::from_millis(100);
+                    events.extend(detector.observe_at(render(&look, filled, None, 0, false), at));
+                }
+                at += Duration::from_millis(100);
+                events.extend(detector.observe_at(render(&look, look.length, None, 0, false), at));
+                assert_eq!(events, vec![Event::Filled], "margin {margin:?}");
+            }
         }
     }
 

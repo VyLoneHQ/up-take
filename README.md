@@ -185,6 +185,11 @@ Six of eight area types are built.
   still that long over a bar that is not moving can be learned the same way and give one wrong
   card. Press P twice to make the area learn the bar again." The I-496 wording is not yet approved
   by him either. Source: RELEARN_AFTER and Bar::moving_relearn in crates/uptake-core/src/watch.rs.
+  (4) Backlog I-497, the founder's option (c) of 2026-11-26, a sentence to go into the bullet with
+  his P-9, not yet approved: "Draw the area with a few pixels of page around the bar, at least 4:
+  with less, UP-TAKE cannot tell a page that changes from the bar filling, so after a switch between
+  light and dark mode it may only tell you when the bar is full, a few seconds late." Source:
+  Bar::joins_the_fill and the Known limits note in crates/uptake-core/src/watch.rs.
   This block is one HTML comment and must contain no other comment marker: an inner one closes it
   early and publishes what follows (#154 round 14).
   Source: ROADMAP.md task 1.58 and ADR-0048 (an area may read its own region repeatedly: the
