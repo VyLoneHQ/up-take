@@ -2603,8 +2603,13 @@ impl Bar {
         // [`Self::covered`] has nothing to compare, and a theme switch, which
         // changes every line in one reading, read as the fill reaching the
         // end. It is taken as a cover, so the waits for a new page apply.
+        // Only where no page was learned: with page round the bar,
+        // [`Self::covered`] already tells a page that changed from a fill,
+        // and the rule's accepted trade must not reach such an area (review
+        // of `#189`, round 3).
         if matches!(progress, Some((_, true, _)))
             && self.reported < 100
+            && !self.page.iter().any(|&page| page)
             && !self.joins_the_fill(&reading)
         {
             covered = true;
@@ -4893,7 +4898,7 @@ mod real_bars {
     #[test]
     fn a_fill_that_jumps_to_the_end_on_a_tight_area_is_full() {
         let labels = [(false, false), (true, false), (false, true)];
-        for margin in [(0, 0), (3, 3)] {
+        for margin in [(0, 0), (3, 3), (8, 8)] {
             for ((theme, light), (text_inside, label_beside)) in [(LIGHT, true), (DARK, false)]
                 .into_iter()
                 .flat_map(|theme| labels.map(|label| (theme, label)))
@@ -4947,7 +4952,9 @@ mod real_bars {
                     // told from a theme switch on a paused bar, its full bar
                     // is lost (pinned here, so that a fix or a worsening
                     // shows). Every other case is a full bar at once.
-                    let lost = text_inside && light && from == 144;
+                    // Only on a tight area: with page round the bar the rule
+                    // does not apply (review of `#189`, round 3).
+                    let lost = text_inside && light && from == 144 && margin != (8, 8);
                     let expected = if lost { vec![] } else { vec![Event::Filled] };
                     assert_eq!(at_once, expected, "{case}");
                     assert_eq!(events, expected, "{case}");
