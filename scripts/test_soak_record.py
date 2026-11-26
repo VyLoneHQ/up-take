@@ -172,6 +172,33 @@ class Refusals(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("not a soak record", err)
 
+    def test_a_nan_timestamp_is_refused(self):
+        # Review of `#188`, round 4: it reached a ZeroDivisionError, exit 1.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "nan.csv"
+            write(path, samples(2, 60, 0.0, 1.0))
+            lines = path.read_text(encoding="utf-8").splitlines()
+            lines[1] = "nan," + lines[1].split(",", 1)[1]
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            code, _, err = run("summarise", str(path), "--max-cpu-rise", "1")
+        self.assertEqual(code, 2, err)
+        self.assertIn("not a soak record", err)
+
+    def test_non_finite_numbers_on_the_command_line_are_refused(self):
+        # Review of `#188`, round 4: `--every nan` passed `<= 0` and sampled
+        # in a tight loop.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = str(Path(tmp) / "x.csv")
+            for flag, value in [("--every", "nan"), ("--hours", "inf"), ("--every", "-inf")]:
+                code, _, err = run("record", "--pid", "1", f"{flag}={value}", "--out", out)
+                self.assertEqual(code, 2, (flag, value, err))
+                self.assertIn("finite and above zero", err)
+            path = Path(tmp) / "ok.csv"
+            write(path, samples(2, 60, 0.0, 1.0))
+            code, _, err = run("summarise", str(path), "--max-cpu-rise", "nan")
+        self.assertEqual(code, 2, err)
+        self.assertIn("finite number: cpu_rise", err)
+
     def test_an_existing_record_is_never_written_over(self):
         # Review of `#188`, round 2: a wrong --pid emptied an earlier record.
         if sys.platform != "win32":
@@ -312,6 +339,45 @@ class RealProcess(unittest.TestCase):
             soak._windows = real
         self.assertEqual(code, 2, err)
         self.assertIn("cannot ask whether", err)
+
+    def test_a_failed_gui_count_is_not_zero_objects(self):
+        # Review of `#188`, round 4: GetGuiResources answers 0 both for no
+        # objects and for a failure, and a failure was recorded as no leak.
+        proc = self.child(IDLE)
+        real = soak._windows
+
+        def failing():
+            ctypes, wintypes, kernel32, user32, counters = real()
+
+            class User:
+                def GetGuiResources(self, *args):  # noqa: N802, the Win32 name
+                    ctypes.set_last_error(5)
+                    return 0
+
+            return ctypes, wintypes, kernel32, User(), counters
+
+        soak._windows = failing
+        try:
+            process = soak.Process(proc.pid)
+            try:
+                with self.assertRaises(soak.CannotRun) as caught:
+                    process.read(0.0)
+            finally:
+                process.close()
+        finally:
+            soak._windows = real
+        self.assertIn("cannot count the GDI objects", str(caught.exception))
+
+    def test_a_real_zero_gui_count_is_kept(self):
+        # The other side: a process with no GUI objects really has 0, and no
+        # last error, so it is recorded, not refused.
+        proc = self.child(IDLE)
+        process = soak.Process(proc.pid)
+        try:
+            sample = process.read(0.0)
+        finally:
+            process.close()
+        self.assertGreaterEqual(sample.gdi, 0)
 
     def test_a_name_nothing_runs_under_is_refused(self):
         with self.assertRaises(soak.CannotRun) as caught:

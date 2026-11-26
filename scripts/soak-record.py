@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 import subprocess
 import sys
 import time
@@ -149,13 +150,23 @@ class Process:
         def ticks(t) -> int:  # 100-nanosecond units
             return (t.dwHighDateTime << 32) | t.dwLowDateTime
 
+        def gui(kind: int, what: str) -> int:
+            # Zero is both a count and the failure answer; only the last error
+            # tells them apart (review of `#188`, round 4: a failed query was
+            # recorded as zero objects, which reads as no leak).
+            ct.set_last_error(0)
+            count = int(self.user32.GetGuiResources(self.handle, kind))
+            if count == 0 and ct.get_last_error() != 0:
+                raise CannotRun(f"cannot count the {what} objects of process {self.pid} (error {ct.get_last_error()})")
+            return count
+
         return Sample(
             seconds=seconds,
             private_bytes=int(counters.PrivateUsage),
             working_set=int(counters.WorkingSetSize),
             handles=int(handles.value),
-            gdi=int(self.user32.GetGuiResources(self.handle, 0)),
-            user=int(self.user32.GetGuiResources(self.handle, 1)),
+            gdi=gui(0, "GDI"),
+            user=gui(1, "USER"),
             cpu_seconds=(ticks(times[2]) + ticks(times[3])) / 1e7,
         )
 
@@ -222,6 +233,15 @@ def record(pid: int, every: float, hours: float, out: Path, now=time.monotonic, 
 # --- the trend (anywhere) -------------------------------------------------------
 
 
+def finite(text) -> float:
+    """`text` as a number, refusing nan and infinity (review of `#188`, round 4:
+    a nan timestamp reached a ZeroDivisionError)."""
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError(f"not a finite number: {text}")
+    return value
+
+
 def load(path: Path) -> list[Sample]:
     try:
         with path.open(newline="", encoding="utf-8") as file:
@@ -231,13 +251,13 @@ def load(path: Path) -> list[Sample]:
     try:
         return [
             Sample(
-                seconds=float(row["seconds"]),
+                seconds=finite(row["seconds"]),
                 private_bytes=int(row["private_bytes"]),
                 working_set=int(row["working_set"]),
                 handles=int(row["handles"]),
                 gdi=int(row["gdi"]),
                 user=int(row["user"]),
-                cpu_seconds=float(row["cpu_seconds"]),
+                cpu_seconds=finite(row["cpu_seconds"]),
             )
             for row in rows
         ]
@@ -338,8 +358,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "record":
-            if args.every <= 0 or args.hours <= 0:
-                raise CannotRun("--every and --hours must be above zero")
+            # `not x > 0` refuses nan too, which `x <= 0` lets through (review
+            # of `#188`, round 4: `--every nan` sampled in a tight loop).
+            if not (math.isfinite(args.every) and args.every > 0 and math.isfinite(args.hours) and args.hours > 0):
+                raise CannotRun("--every and --hours must be finite and above zero")
             pid = args.pid if args.pid is not None else find_pid(args.name)
             print(f"soak-record: recording process {pid} every {args.every:g} s for {args.hours:g} h into {args.out}")
             print(f"soak-record: {record(pid, args.every, args.hours, args.out)}")
@@ -352,6 +374,9 @@ def main(argv: list[str] | None = None) -> int:
             "user": args.max_user_per_hour,
             "cpu_rise": args.max_cpu_rise,
         }
+        bad = [name for name, value in limits.items() if value is not None and not math.isfinite(value)]
+        if bad:
+            raise CannotRun(f"a limit must be a finite number: {', '.join(bad)}")
         lines, passed = summarise(load(args.record), {k: v for k, v in limits.items() if v is not None})
         print("\n".join(lines))
         return 0 if passed else 1
