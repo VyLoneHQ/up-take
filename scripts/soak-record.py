@@ -225,7 +225,11 @@ def record(pid: int, every: float, hours: float, out: Path, now=time.monotonic, 
                 file.flush()
                 if elapsed >= hours * HOUR:
                     return f"ran the full {hours:g} h"
-                sleep(max(0.0, every - (now() - start - elapsed)))
+                # Never past the deadline (review of `#188`, round 6: a long
+                # --every overran --hours by almost an interval): the last
+                # wait ends at it, and the sample taken then is the last.
+                taken = now() - start
+                sleep(max(0.0, min(elapsed + every, hours * HOUR) - taken))
     finally:
         process.close()
 
@@ -245,13 +249,20 @@ def finite(text) -> float:
 def load(path: Path) -> list[Sample]:
     try:
         with path.open(newline="", encoding="utf-8") as file:
-            rows = list(csv.DictReader(file))
+            # strict: a malformed field is an error, not a guess (review of
+            # `#188`, round 6).
+            rows = list(csv.DictReader(file, strict=True))
     except OSError as e:
         raise CannotRun(f"cannot read {path}: {e}") from e
     except (UnicodeDecodeError, csv.Error) as e:
         # Review of `#188`, round 5: a record that is not UTF-8 text escaped
         # as a traceback, exit 1, which reads as a failed limit.
         raise CannotRun(f"{path} is not a soak record: {e}") from e
+    for number, row in enumerate(rows, start=2):
+        # A row with more fields than the header (DictReader files them under
+        # None) is not a soak record either (review of `#188`, round 6).
+        if None in row:
+            raise CannotRun(f"{path} is not a soak record: line {number} has more fields than the header")
     try:
         return [
             Sample(

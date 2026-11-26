@@ -181,6 +181,33 @@ class Refusals(unittest.TestCase):
         self.assertEqual(code, 2, err)
         self.assertIn("not a soak record", err)
 
+    def test_a_malformed_field_is_refused(self):
+        # Review of `#188`, round 6: `"x"junk` and a surplus field were
+        # accepted and summarised, exit 0.
+        for extra in ['"x"junk', "7"]:
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "bad.csv"
+                write(path, samples(2, 60, 0.0, 1.0))
+                lines = path.read_text(encoding="utf-8").splitlines()
+                lines[1] = lines[1] + "," + extra
+                path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                code, _, err = run("summarise", str(path))
+            self.assertEqual(code, 2, (extra, err))
+            self.assertIn("not a soak record", err)
+
+    def test_an_unterminated_quote_is_refused(self):
+        # Only strict parsing catches this one: without it, `"0.5` at the end
+        # of the file reads as the number 0.5 and the record is summarised.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "quote.csv"
+            write(path, samples(2, 60, 0.0, 1.0))
+            text = path.read_text(encoding="utf-8").rstrip("\n")
+            head, last = text.rsplit(",", 1)
+            path.write_text(head + ',"' + last, encoding="utf-8")
+            code, _, err = run("summarise", str(path))
+        self.assertEqual(code, 2, err)
+        self.assertIn("not a soak record", err)
+
     def test_a_nan_timestamp_is_refused(self):
         # Review of `#188`, round 4: it reached a ZeroDivisionError, exit 1.
         with tempfile.TemporaryDirectory() as tmp:
@@ -302,6 +329,26 @@ class RealProcess(unittest.TestCase):
         self.assertGreater(leak, 10_000, f"leaking child: {leak:+.0f} MB/h")
         self.assertLess(abs(idle), leak / 100, f"idle child: {idle:+.0f} MB/h against {leak:+.0f}")
 
+    def test_a_long_interval_never_runs_past_the_deadline(self):
+        # Review of `#188`, round 6: `--every 2 --hours 0.0001` asked for
+        # 0.36 s and ran 2.13 s. On a fake clock, an interval of 100 s and a
+        # run of 36 s: the last wait ends at 36 s, and that sample is the last.
+        proc = self.child(IDLE)
+        clock = [0.0]
+
+        def now():
+            return clock[0]
+
+        def sleep(seconds):
+            clock[0] += seconds
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "x.csv"
+            soak.record(proc.pid, 100.0, 0.01, out, now=now, sleep=sleep)
+            seconds = [s.seconds for s in soak.load(out)]
+        self.assertEqual(seconds, [0.0, 36.0])
+        self.assertEqual(clock[0], 36.0)
+
     def test_it_stops_when_the_process_exits(self):
         proc = self.child("import time\ntime.sleep(1)\n")
         with tempfile.TemporaryDirectory() as tmp:
@@ -386,7 +433,10 @@ class RealProcess(unittest.TestCase):
             sample = process.read(0.0)
         finally:
             process.close()
-        self.assertGreaterEqual(sample.gdi, 0)
+        # A windowless Python child owns no GDI or USER objects: exactly 0,
+        # so a guard that turned a real 0 into anything else fails here
+        # (review of `#188`, round 6: `>= 0` could not tell).
+        self.assertEqual((sample.gdi, sample.user), (0, 0))
 
     def test_a_name_nothing_runs_under_is_refused(self):
         with self.assertRaises(soak.CannotRun) as caught:
