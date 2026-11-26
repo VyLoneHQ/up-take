@@ -4874,17 +4874,34 @@ mod real_bars {
         }
     }
 
-    /// The other side of `I-497`'s rule: on the same tight areas, a fill that
-    /// jumps from 30% to the end between two readings (a bar read seldom, or
-    /// a job that finished at once) is still a full bar, since the lines past
-    /// the old front look like the fill behind it.
+    /// The other side of `I-497`'s rule, guarding it against refusing real
+    /// fills (so it fails when the rule refuses too much, not when the rule
+    /// is removed): on the same tight areas, a fill that jumps from 30% to
+    /// the end between two readings (a bar read seldom, or a job that
+    /// finished at once) is still a full bar, since the lines past the old
+    /// front look like the fill behind it; with text inside the bar or a
+    /// percentage beside it that changes with the fill too (review of `#189`,
+    /// round 1).
     #[test]
     fn a_fill_that_jumps_to_the_end_on_a_tight_area_is_full() {
+        let labels = [(false, false), (true, false), (false, true)];
         for margin in [(0, 0), (3, 3)] {
-            for theme in [LIGHT, DARK] {
+            for (theme, (text_inside, label_beside)) in [LIGHT, DARK]
+                .into_iter()
+                .flat_map(|theme| labels.map(|label| (theme, label)))
+            {
+                // A percentage beside a bar with no page between them is the
+                // documented limit of the bar mode (a label is left out only
+                // past `GAP_LINES` + 1 lines of page): the jump is not a full
+                // bar there with or without this rule.
+                if label_beside && margin == (0, 0) {
+                    continue;
+                }
                 let look = Look {
                     margin,
                     theme,
+                    text_inside,
+                    label_beside,
                     ..ROUND
                 };
                 let mut detector = detector(look.direction, [0; MARKS]);
@@ -4896,7 +4913,11 @@ mod real_bars {
                 }
                 at += Duration::from_millis(100);
                 events.extend(detector.observe_at(render(&look, look.length, None, 0, false), at));
-                assert_eq!(events, vec![Event::Filled], "margin {margin:?}");
+                assert_eq!(
+                    events,
+                    vec![Event::Filled],
+                    "margin {margin:?}, text inside {text_inside}, label beside {label_beside}"
+                );
             }
         }
     }
