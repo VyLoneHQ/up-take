@@ -424,6 +424,55 @@ class RealProcess(unittest.TestCase):
             soak._windows = real
         self.assertIn("cannot count the GDI objects", str(caught.exception))
 
+    def test_every_failed_counter_query_is_refused(self):
+        # Review of `#188`, round 7: the GDI case stopped before USER, and no
+        # test made the memory, times or handle-count query fail, so ignoring
+        # any of those four failures left the suite green. Each fails alone
+        # here, every other query real.
+        proc = self.child(IDLE)
+        real = soak._windows
+        cases = [
+            ("K32GetProcessMemoryInfo", None, "cannot read the memory"),
+            ("GetProcessTimes", None, "cannot read the times"),
+            ("GetProcessHandleCount", None, "cannot count the handles"),
+            ("GetGuiResources", 1, "cannot count the USER objects"),
+        ]
+        for name, kind, message in cases:
+
+            def failing(name=name, kind=kind):
+                ctypes, wintypes, kernel32, user32, counters = real()
+
+                class Wrap:
+                    def __init__(self, inner):
+                        self.inner = inner
+
+                    def __getattr__(self, attr):
+                        target = getattr(self.inner, attr)
+                        if attr != name:
+                            return target
+
+                        def fail(*args):
+                            if kind is not None and args[1] != kind:
+                                return target(*args)
+                            ctypes.set_last_error(5)
+                            return 0
+
+                        return fail
+
+                return ctypes, wintypes, Wrap(kernel32), Wrap(user32), counters
+
+            soak._windows = failing
+            try:
+                process = soak.Process(proc.pid)
+                try:
+                    with self.assertRaises(soak.CannotRun, msg=name) as caught:
+                        process.read(0.0)
+                finally:
+                    process.close()
+            finally:
+                soak._windows = real
+            self.assertIn(message, str(caught.exception), name)
+
     def test_a_real_zero_gui_count_is_kept(self):
         # The other side: a process with no GUI objects really has 0, and no
         # last error, so it is recorded, not refused.
